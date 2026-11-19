@@ -110,6 +110,13 @@ profile. Each compiled unit must resolve to the same features in both, and each 
 byte-identical to its solo build (`cmp`). A shared crate or feature added to a shipped program goes in
 `service/shipped-features/Cargo.toml`.
 
+The workspace tests build each crate with every feature any member asks of it, test features included,
+so they never build the set a crate ships with when that set is smaller. `scripts/check-features.sh`,
+run by the gate, finds each workspace crate whose shipped set differs from its tested set and runs its
+library tests in exactly the shipped set (failing if a dev-dependency would pull a feature back in),
+then lints and builds every crate's `--no-default-features` and `--all-features` forms. `LIST=1`
+prints the sets without running them.
+
 ## No C in the shipped programs
 
 `scripts/check-shipped.sh` (run by the gate) takes each program's normal and build dependency tree.

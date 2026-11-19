@@ -75,8 +75,10 @@ const LONGEST_JOB: usize = 4096;
 #[cfg(feature = "alloc")]
 struct Scratch(alloc::boxed::Box<[u8]>);
 
+/// The driver's memory for one transfer, inside the driver. Without a data stream none of it is
+/// in use: the second field is how much is, all of it or nothing.
 #[cfg(not(feature = "alloc"))]
-struct Scratch([u8; TRANSFER_BYTES]);
+struct Scratch([u8; TRANSFER_BYTES], usize);
 
 impl Scratch {
     /// Memory for a transfer when `wanted`, none otherwise: without a data stream nothing is
@@ -88,8 +90,30 @@ impl Scratch {
     }
 
     #[cfg(not(feature = "alloc"))]
-    fn new(_wanted: bool) -> Self {
-        Self([0; TRANSFER_BYTES])
+    fn new(wanted: bool) -> Self {
+        Self([0; TRANSFER_BYTES], if wanted { TRANSFER_BYTES } else { 0 })
+    }
+
+    /// The memory a transfer may use: empty without a data stream.
+    #[cfg(feature = "alloc")]
+    fn bytes(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    fn bytes(&mut self) -> &mut [u8] {
+        &mut self.0[..self.1]
+    }
+
+    /// How many bytes a transfer may use.
+    #[cfg(feature = "alloc")]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    fn len(&self) -> usize {
+        self.1
     }
 }
 
@@ -184,7 +208,7 @@ impl Serve {
 
     /// The most bytes one send or receive carries.
     pub(crate) fn max_transfer(&self) -> usize {
-        self.scratch.0.len()
+        self.scratch.len()
     }
 
     fn holds(&self, buffer: u32) -> bool {
@@ -487,7 +511,7 @@ impl Serve {
         // Checked at intake to be within the scratch.
         let Some(rest) = (job.length as usize)
             .checked_sub(done)
-            .and_then(|rest| self.scratch.0.get_mut(..rest))
+            .and_then(|rest| self.scratch.bytes().get_mut(..rest))
         else {
             return Step::Over(Completion {
                 status: JobStatus::Refused,
@@ -543,7 +567,7 @@ impl Serve {
     {
         let job = waiting.job;
         // Checked at intake to be within the scratch.
-        let Some(into) = self.scratch.0.get_mut(..job.length as usize) else {
+        let Some(into) = self.scratch.bytes().get_mut(..job.length as usize) else {
             return Step::Over(Completion {
                 status: JobStatus::Refused,
                 count: 0,

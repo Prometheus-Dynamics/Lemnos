@@ -10,9 +10,6 @@
 //! back is written through an [`Out`]. A function the host does not serve answers
 //! [`Status::NOT_SUPPORTED`].
 
-#[cfg(test)]
-use core::mem::offset_of;
-
 use super::{Out, PackageHealth, Slice, SliceMut};
 use crate::{Handle, Status};
 
@@ -382,10 +379,11 @@ macro_rules! table {
             /// Size, alignment and the offset of every function, for the layout hash.
             pub(super) const SHAPE: &'static [u64] = shape!($table $(, $name)*);
 
-            /// Every function's name and offset, to check a C header against.
-            #[cfg(test)]
+            /// Every function's name and offset, to check a C header against (the header test
+            /// needs std).
+            #[cfg(all(test, feature = "std"))]
             pub(crate) const FIELDS: &'static [(&'static str, usize)] =
-                &[$((stringify!($name), offset_of!($table, $name))),*];
+                &[$((stringify!($name), core::mem::offset_of!($table, $name))),*];
         }
 
         #[doc = concat!("The host's side of [`", stringify!($table), "`], in Rust. A function left out answers")]

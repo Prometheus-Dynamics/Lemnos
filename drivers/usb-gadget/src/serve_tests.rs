@@ -120,7 +120,12 @@ impl Rig {
 
     /// Up, with a host that has configured the device.
     fn configured() -> Self {
-        let mut rig = Self::with(BYTES, &[]);
+        Self::configured_with(BYTES)
+    }
+
+    /// Up with buffers of `bytes`, with a host that has configured the device.
+    fn configured_with(bytes: usize) -> Self {
+        let mut rig = Self::with(bytes, &[]);
         rig.host.event(UsbFunctionEvent::Configured);
         rig.tick();
         assert!(rig.driver.configured());
@@ -426,7 +431,14 @@ fn a_caller_answers_a_request_and_echoes_bytes_on_an_endpoint_pair() {
 
 #[test]
 fn a_job_that_asks_for_what_it_may_not_is_refused_and_nothing_moves() {
-    let mut rig = Rig::configured();
+    // Buffers no bigger than the driver's own memory, so that the longest job a buffer holds is
+    // one the driver carries and "one past the buffer" is refused for the buffer, in every build.
+    const HELD: usize = if BYTES < TRANSFER_BYTES {
+        BYTES
+    } else {
+        TRANSFER_BYTES
+    };
+    let mut rig = Rig::configured_with(HELD);
     let record_of = |rig: &Rig, identity| rig.failed(identity);
 
     // No endpoint of that address, one of the other direction, the control endpoint.
@@ -446,13 +458,13 @@ fn a_job_that_asks_for_what_it_may_not_is_refused_and_nothing_moves() {
 
     // A length the driver's own memory can't hold, one past the buffer, a receive of nothing.
     rig.receive(5, OUT, 0, TRANSFER_BYTES as u32 + 1);
-    rig.receive(6, OUT, 1, (BYTES - DATA_OFFSET) as u32 + 1);
+    rig.receive(6, OUT, 1, (HELD - DATA_OFFSET) as u32 + 1);
     rig.post(&Job {
         identity: 7,
         kind: JobKind::Send,
         endpoint: IN,
         buffer: 2,
-        length: (BYTES - DATA_OFFSET) as u32 + 1,
+        length: (HELD - DATA_OFFSET) as u32 + 1,
     });
     rig.receive(8, OUT, 3, 0);
     rig.receive(9, OUT, 4, u32::MAX);
@@ -461,7 +473,7 @@ fn a_job_that_asks_for_what_it_may_not_is_refused_and_nothing_moves() {
         assert_eq!(record_of(&rig, identity), JobStatus::Refused);
     }
     // The longest that fits is taken.
-    rig.receive(10, OUT, 5, (BYTES - DATA_OFFSET) as u32);
+    rig.receive(10, OUT, 5, (HELD - DATA_OFFSET) as u32);
     rig.tick();
     assert!(rig.completion().is_none());
     assert_eq!(rig.driver.serve.waiting(), 1);
