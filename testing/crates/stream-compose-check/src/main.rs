@@ -434,15 +434,41 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
     }
     stall_stop.store(true, Ordering::Release);
     firing.join().map_err(|_| "the fire thread panicked")??;
+    // The fire thread has returned: every frame start it made is stamped at or before this
+    // (the fake delivers each one to the receiver's handler inside its fire call).
+    let stopped_ns = step("read the clock", monotonic_ns())?;
     let starts_before = step("frame_starts", camera.frame_starts())?.map(|s| s.count);
-    let last_before = through
+    let mut last_before = through
         .as_ref()
         .map(|(frame, _, _)| frame.sequence())
         .or(before.last().map(|f| f.sequence))
         .unwrap_or(0);
-    // The reader waits through the stall: no frame comes, and the stream tells it why.
+    // The reader waits through the stall: no frame comes, and the stream tells it why. A frame
+    // that started before the fire thread stopped may still be on its way through the relay; it
+    // is a leftover from before the silence, not a frame in it, so it is released and the reader
+    // waits on until the silence has lasted STALL. A report that comes while leftovers are read
+    // is counted: the snapshot is taken first.
     let before_stall = (stalling.reasons.len(), stalling.resumed);
-    let silent = next(&mut stalled, &client, &mut stalling, STALL)?;
+    let silence_ends = Instant::now() + STALL;
+    let mut left_over = 0usize;
+    let silent = loop {
+        let wait = silence_ends.saturating_duration_since(Instant::now());
+        match next(&mut stalled, &client, &mut stalling, wait)? {
+            Some(frame) if started_before_the_stop(frame.timestamp_ns(), stopped_ns) => {
+                last_before = last_before.max(frame.sequence());
+                left_over += 1;
+                step(
+                    "release a frame left over from before the stall",
+                    stalled.release(frame),
+                )?;
+            }
+            Some(frame) => {
+                step("release the frame in the silence", stalled.release(frame))?;
+                break true;
+            }
+            None => break false,
+        }
+    };
     let reported: Vec<String> = stalling.reasons[before_stall.0..].to_vec();
     let resumed = stalling.resumed - before_stall.1;
     let starts_after = step("frame_starts", camera.frame_starts())?.map(|s| s.count);
@@ -478,14 +504,15 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
         ),
     );
     report.check(
-        silent.is_none()
+        !silent
             && reported.len() == 1
             && reported[0].starts_with(FRAME_STOP)
             && resumed == 1,
         format_args!(
             "the stream reported the stall to its reader, and the receiver back, before any frame after it \
-             ({} frames in the silence, {} stalls reported {reported:?}, {resumed} resumed)",
-            usize::from(silent.is_some()),
+             ({} frames in the silence, {left_over} left over from before it, {} stalls reported \
+             {reported:?}, {resumed} resumed)",
+            usize::from(silent),
             reported.len()
         ),
     );
@@ -729,6 +756,15 @@ fn pattern_follows_sequence(frames: &[(u32, u64, u8)]) -> Result<Vec<(u32, u8)>,
     Ok(bases)
 }
 
+/// Whether a frame the reader gets after the fake stopped firing started before the stop: its
+/// capture time (the frame start, CLOCK_MONOTONIC) is at or before the instant read once the fire
+/// thread returned. Such a frame was still in the relay when the silence began; it is a leftover
+/// from before the stall, not a frame in it. A frame stamped after the stop started in the
+/// silence, which the stall phase must not see.
+fn started_before_the_stop(timestamp_ns: u64, stopped_ns: u64) -> bool {
+    timestamp_ns <= stopped_ns
+}
+
 /// The bases as the report prints them: one base, or one per run of frames.
 fn describe_bases(bases: &[(u32, u8)]) -> String {
     match bases {
@@ -858,6 +894,17 @@ mod tests {
             .reasons
             .push("the receiver stopped while streaming: restarting it".to_owned());
         assert!(!watch.only_frame_stops(), "the frame path failed");
+    }
+
+    #[test]
+    fn a_frame_started_at_or_before_the_stop_is_a_leftover_and_one_after_it_is_in_the_silence() {
+        let stopped = 5_000_000_000;
+        // Fired before the stop and relayed late: a leftover, however late it is read.
+        assert!(started_before_the_stop(stopped - 1_200_000, stopped));
+        // Stamped at the very instant the clock was read after the join: still before the silence.
+        assert!(started_before_the_stop(stopped, stopped));
+        // Started after the stop: the receiver produced a frame in the silence.
+        assert!(!started_before_the_stop(stopped + 1, stopped));
     }
 
     #[test]
