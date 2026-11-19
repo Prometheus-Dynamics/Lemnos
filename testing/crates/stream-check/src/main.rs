@@ -33,7 +33,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::poll::{POLLHUP, POLLIN, poll_one};
@@ -615,16 +615,23 @@ fn pop_frame(s: &mut Stream<'_>, f: &mut Frame) -> bool {
     true
 }
 
-/// `wait_frame`: waits for a frame, on the doorbell when the stream has one (drained as it is read),
-/// else in 10 ms steps. True with `f` filled, or false on timeout.
+/// `wait_frame`: waits for a frame, on the doorbell when the stream has one (drained as it is read).
+/// A stream with no doorbell has nothing that wakes its consumer for a frame (the stream's own
+/// descriptor is readable only at its end), so it looks again every millisecond: the test source's
+/// next frame is at least one kernel tick (1 ms) away. True with `f` filled, or false once
+/// `timeout_ms` have gone by.
 fn wait_frame(s: &mut Stream<'_>, f: &mut Frame, timeout_ms: u32) -> bool {
-    for _ in (0..timeout_ms).step_by(10) {
+    let until = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
+    while Instant::now() < until {
         if pop_frame(s, f) {
             return true;
         }
         let ready = {
-            let fd = s.bell.unwrap_or(s.fd.as_fd());
-            poll_one(fd, POLLIN, Some(Duration::from_millis(10))).unwrap_or(0)
+            let (fd, step) = match s.bell {
+                Some(bell) => (bell, 10),
+                None => (s.fd.as_fd(), 1),
+            };
+            poll_one(fd, POLLIN, Some(Duration::from_millis(step))).unwrap_or(0)
         };
         if ready != 0
             && let Some(bell) = s.bell
