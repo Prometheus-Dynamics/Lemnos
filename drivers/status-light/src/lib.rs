@@ -25,6 +25,12 @@
 //! show without them. Another caller's layers are not touched. A layer the host shows itself (no
 //! client) is never ended by a caller going.
 //!
+//! # Read-back
+//!
+//! `current` returns the composed ring: a generation that goes up with each change, and for each LED
+//! its colour, and the owner and priority that set it (see `lemnos_contract_light`). It needs no
+//! ownership. A subscription to it is the change feed, granted at most once per 20 ms by the daemon.
+//!
 //! # Frames and looks
 //!
 //! A look covers the whole ring and is animated, and fades from what it replaces. A frame is sent as
@@ -88,7 +94,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use animator::{Animator, Transition};
-use layers::{LAYERS, Layers};
+use layers::{LAYERS, Layers, Led};
 use lemnos_contract_light::{FRAME_ENTRY, Layout, Light as LightContract};
 use lemnos_contract_pixels::{MAX_LOCAL_LEDS, Pixels};
 use lemnos_core::{
@@ -117,12 +123,16 @@ pub struct StatusLight {
     animator: Animator,
     /// The look the animator shows, so an unchanged base does not restart its time.
     shown: Option<Spec>,
-    /// The base look's `(priority, layer)`: `None` for the default look.
+    /// The base look's `(priority, layer)` and owner: `None` for the default look, which has neither.
     base_key: Option<(u8, usize)>,
+    base_owner: Option<CallerId>,
     /// The runtime brightness of everything shown, 0..=255.
     brightness: u8,
-    /// What the ring shows: each LED's colour. Sized at start.
+    /// What the ring shows: each LED's colour, and who set it. Sized at start.
     frame: Vec<Rgbw>,
+    leds: Vec<Led>,
+    /// Goes up with each change of `frame` or `leds`; 0 before the first composition.
+    generation: u64,
     /// A method changed the layers or the runtime brightness since the last tick.
     changed: bool,
     /// Who the method about to run is for (see [`Lifecycle::caller`]). A look shown now is theirs.
@@ -154,17 +164,23 @@ impl StatusLight {
         write_frame(&mut self.pixels, &self.frame)
     }
 
-    /// Composes the ring from the base look and the frames, and queues a write when it changed.
+    /// Composes the ring from the base look and the frames. A change goes up the generation and queues
+    /// a write.
     fn compose(&mut self, now_ns: u64) {
         let changed = self.layers.compose(
             self.animator.frame(),
             self.base_key,
+            self.base_owner,
             self.brightness,
             &mut self.frame,
+            &mut self.leds,
         );
-        if changed && !self.unsent {
-            self.unsent = true;
-            self.retry_at = now_ns;
+        if changed {
+            self.generation += 1;
+            if !self.unsent {
+                self.unsent = true;
+                self.retry_at = now_ns;
+            }
         }
     }
 }
@@ -183,6 +199,11 @@ fn write_frame(pixels: &mut Dev<dyn Pixels>, frame: &[look::Rgbw]) -> Result<()>
     }
     pixels.show()
 }
+
+/// `current` is laid out as a header (the generation, a `u64`, then the LED count, a `u16`) and 14
+/// bytes an LED: its colour, whether an owner set it, its priority, and the owner's id.
+const CURRENT_HEADER: usize = 10;
+const CURRENT_LED: usize = 14;
 
 /// Every setting the driver reads (see `settings`). `count` is required; the rest have defaults.
 const KEYS: &[Key] = &[
@@ -230,8 +251,11 @@ impl Lifecycle for StatusLight {
             settings,
             shown: None,
             base_key: None,
+            base_owner: None,
             brightness: 255,
             frame: vec![Rgbw::OFF; count],
+            leds: vec![Led::default(); count],
+            generation: 0,
             // The first tick shows the default look, so the ring is never dark at start.
             changed: true,
             calling: CallerId::LOCAL,
@@ -272,11 +296,12 @@ impl Lifecycle for StatusLight {
         let mut due = false;
         if self.changed {
             self.changed = false;
-            let (spec, key) = match self.layers.top() {
-                Some(top) => (top.spec, Some((top.priority, top.layer))),
-                None => (Spec::Status(self.settings.default_look), None),
+            let (spec, key, owner) = match self.layers.top() {
+                Some(top) => (top.spec, Some((top.priority, top.layer)), Some(top.owner)),
+                None => (Spec::Status(self.settings.default_look), None, None),
             };
             self.base_key = key;
+            self.base_owner = owner;
             if self.shown != Some(spec) {
                 let look = wire::resolve(&spec, &self.settings);
                 let transition = Transition::new(self.settings.fade_ms, self.settings.easing);
@@ -373,5 +398,23 @@ impl LightContract for StatusLight {
             .set_frame(layer, priority, entries, self.calling);
         self.changed = true;
         Ok(())
+    }
+
+    fn current(&mut self, into: &mut [u8]) -> Result<usize> {
+        let count = self.frame.len();
+        let need = CURRENT_HEADER + CURRENT_LED * count;
+        let out = into.get_mut(..need).ok_or(Status::BUFFER_TOO_SMALL)?;
+        out[..8].copy_from_slice(&self.generation.to_le_bytes());
+        out[8..10].copy_from_slice(&(count as u16).to_le_bytes());
+        for (i, (colour, led)) in self.frame.iter().zip(&self.leds).enumerate() {
+            let at = CURRENT_HEADER + CURRENT_LED * i;
+            let slot = &mut out[at..at + CURRENT_LED];
+            slot[..4].copy_from_slice(&[colour.r, colour.g, colour.b, colour.w]);
+            slot[4] = u8::from(led.owner.is_some());
+            slot[5] = led.priority;
+            let owner = led.owner.map_or(0, |owner| owner.0);
+            slot[6..14].copy_from_slice(&owner.to_le_bytes());
+        }
+        Ok(need)
     }
 }

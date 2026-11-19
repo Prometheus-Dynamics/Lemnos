@@ -38,12 +38,20 @@ struct Intent {
     owner: CallerId,
 }
 
-/// The highest look on the ring: its priority, its layer and the look.
+/// The highest look on the ring: its priority, its layer, the look and its owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Top {
     pub priority: u8,
     pub layer: usize,
     pub spec: Spec,
+    pub owner: CallerId,
+}
+
+/// Who set an LED: its owner (`None` when the default look shows it) and the priority it won at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Led {
+    pub owner: Option<CallerId>,
+    pub priority: u8,
 }
 
 /// The slots of a ring of `count` LEDs.
@@ -137,6 +145,7 @@ impl Layers {
                         priority: intent.priority,
                         layer,
                         spec,
+                        owner: intent.owner,
                     }),
                     Content::Frame => None,
                 }
@@ -144,21 +153,24 @@ impl Layers {
             .max_by_key(|top| (top.priority, top.layer))
     }
 
-    /// Composes the ring into `out`. The base is `base`, the look the animator renders, with its
-    /// key `(priority, layer)`; `None` for the default look. Each LED takes the highest frame that
-    /// sets it, when that frame's key beats the base's. Frame colours are scaled by `brightness`.
-    /// Returns whether anything changed.
+    /// Composes the ring into `out`, and who set each LED into `leds`. The base is `base`, the look
+    /// the animator renders, with its key `(priority, layer)` and owner; the key and owner are `None`
+    /// for the default look. Each LED takes the highest frame that sets it, when that frame's key
+    /// beats the base's. Frame colours are scaled by `brightness`. Returns whether anything changed.
     pub fn compose(
         &self,
         base: &[Rgbw],
         base_key: Option<(u8, usize)>,
+        base_owner: Option<CallerId>,
         brightness: u8,
         out: &mut [Rgbw],
+        leds: &mut [Led],
     ) -> bool {
         let mut changed = false;
-        for (i, value_out) in out.iter_mut().enumerate() {
+        for (i, (value_out, led_out)) in out.iter_mut().zip(leds.iter_mut()).enumerate() {
             let mut key = base_key;
             let mut value = base[i];
+            let mut owner = base_owner;
             for layer in 0..LAYERS {
                 let Some(intent) = self.slots[layer] else {
                     continue;
@@ -173,10 +185,16 @@ impl Layers {
                 if beats > key {
                     key = beats;
                     value = scale_rgbw(colour, brightness);
+                    owner = Some(intent.owner);
                 }
             }
-            if *value_out != value {
+            let led = Led {
+                owner,
+                priority: key.map_or(0, |(priority, _)| priority),
+            };
+            if *value_out != value || *led_out != led {
                 *value_out = value;
+                *led_out = led;
                 changed = true;
             }
         }

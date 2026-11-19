@@ -456,16 +456,19 @@ impl Client {
         period_us: u64,
         only_changes: bool,
     ) -> Keep {
-        let readable = self
+        // A method with no arguments can be subscribed to. So can one that fills an out buffer, when
+        // it declares a reading (its value is the buffer): the others may do work a read would repeat.
+        let found = self
             .core
             .host
             .manifest(device)
             .and_then(|m| m.provides.get(contract as usize).copied())
-            .and_then(|c| c.methods.iter().find(|m| m.id == method))
-            .is_some_and(|m| m.params.is_empty() && !m.has_out_buffer);
-        if !readable {
+            .and_then(|c| c.methods.iter().find(|m| m.id == method).copied());
+        let Some(found) =
+            found.filter(|m| m.params.is_empty() && (!m.has_out_buffer || m.reading.is_some()))
+        else {
             return self.refuse(id, Status::INVALID_ARGUMENT, "not a readable method");
-        }
+        };
         let target = MethodId { contract, method };
         let now = self.core.clock.now_us();
         let subscribed = self.core.readers.subscribe(
@@ -477,6 +480,7 @@ impl Client {
             period_us,
             only_changes,
             now,
+            crate::readers::pace_for(found.reading),
             |subscription, period_us| {
                 crate::lock(&self.conn.subscriptions).push(subscription);
                 self.conn.answer(&Frame::Subscribed {

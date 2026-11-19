@@ -516,8 +516,11 @@ transfer with a length too large for the reply is never started. `lemnos-ctl`, o
 socket, carries a 1 MiB frame, so the same calls go through there up to that size.
 
 **Watch.** `lemnos-ctl watch` takes a method with no arguments and no out buffer. The daemon serves a
-subscription only to such a method, so `watch` on a method with arguments or an out buffer is refused
-by name before it is asked: the method takes arguments or an out buffer, so call it instead.
+subscription only to a method with no arguments, and to a method with an out buffer when it declares a
+reading: the buffer is then the value (a colour array, such as a light's `current`). `watch` on a method
+with arguments, or with an out buffer and no reading, is refused by name before it is asked: the method
+takes arguments or an out buffer, so call it instead. A colour array is read at most once per 20 ms
+(`FRAME_PERIOD_US`): a faster period is granted as 20 ms.
 
  A reply is printed as text when its bytes are valid UTF-8 (JSON, as `system.slots` writes
 it, prints as JSON), and as hex otherwise. The rule is the same for `lemnos-ctl` and the Orion
