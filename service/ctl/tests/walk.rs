@@ -2,6 +2,9 @@
 //! (`testing/crates/sim-walk`). Every built-in driver is either walked or named, with the reason,
 //! in `NOT_SIMULATED`; a walked device must bind and print its panel.
 
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -19,16 +22,17 @@ const BIND_WAIT: Duration = Duration::from_secs(2);
 struct Running {
     _service: Service,
     socket: PathBuf,
+    _dir: Scratch,
 }
 
-fn scratch(tag: &str) -> PathBuf {
+fn scratch(tag: &str) -> Scratch {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = Scratch(std::env::temp_dir().join(format!(
         "lemnos-walk-{tag}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    )));
+    std::fs::create_dir_all(&*dir).unwrap();
     dir
 }
 
@@ -52,6 +56,7 @@ fn start(devices: &str, board: SimBoard) -> Running {
     };
     let service = Service::start(config).unwrap();
     Running {
+        _dir: dir,
         _service: service,
         socket,
     }
@@ -134,7 +139,7 @@ fn every_built_in_driver_is_walked_or_named_with_its_reason() {
         assert!(!reason.is_empty(), "{name} has no reason");
     }
     host.shutdown();
-    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(&*dir);
 }
 
 /// Every walked device binds, and its panel says so.
@@ -155,5 +160,5 @@ fn every_walked_device_prints_its_panel_running() {
         assert!(panel.contains("\n  kind     "), "{id}: {panel}");
         assert!(panel.contains("\n  state    running"), "{id}: {panel}");
     }
-    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(&*dir);
 }

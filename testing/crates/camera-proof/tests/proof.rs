@@ -3,7 +3,6 @@
 mod sim;
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use lemnos_camera_proof::{Bus, DirSink, Error, FrameSink, Frames, Options, assemble, capture};
@@ -11,8 +10,39 @@ use lemnos_contract_camera_receiver::{CameraReceiver, MAX_EMBEDDED_STREAM_NAME};
 use lemnos_contract_camera_sensor::{Controls, FrameValues, frame_length_for_fps_milli};
 use lemnos_wire::ring::FrameSlot;
 
-fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("camera-proof-{}-{name}", std::process::id()))
+/// A scratch directory under TMPDIR, removed when the guard drops, pass or panic. It derefs to
+/// `path`, a file or directory inside `dir`, so the guard must stay bound while `path` is used.
+struct Scratch {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+
+impl Scratch {
+    fn of_dir(dir: std::path::PathBuf) -> Self {
+        Self {
+            path: dir.clone(),
+            dir,
+        }
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
+    Scratch::of_dir(
+        std::env::temp_dir().join(format!("camera-proof-{}-{name}", std::process::id())),
+    )
 }
 
 #[test]
@@ -128,7 +158,7 @@ fn streams_600_frames_at_120_fps_with_no_drops_and_saves_each() {
     let mut camera = assemble(&bus, &Options::default()).unwrap();
     camera.start().unwrap();
     let dir = scratch("120fps");
-    let mut sink = DirSink::new(&dir).unwrap();
+    let mut sink = DirSink::new(&*dir).unwrap();
     let report = capture(&mut camera, 600, &mut sink).unwrap();
     assert_eq!(report.frames, 600);
     assert_eq!(report.saved, 600);
@@ -142,7 +172,7 @@ fn streams_600_frames_at_120_fps_with_no_drops_and_saves_each() {
         "measured {fps} milli-fps"
     );
     let mut files = 0;
-    for entry in std::fs::read_dir(&dir).unwrap() {
+    for entry in std::fs::read_dir(&*dir).unwrap() {
         let entry = entry.unwrap();
         assert_eq!(entry.metadata().unwrap().len(), 16_000);
         files += 1;
@@ -150,7 +180,7 @@ fn streams_600_frames_at_120_fps_with_no_drops_and_saves_each() {
     assert_eq!(files, 600);
     assert!(dir.join("frame-00000000.raw").exists());
     assert!(dir.join("frame-00000599.raw").exists());
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&*dir);
 }
 
 #[test]
@@ -185,7 +215,8 @@ fn refuses_to_capture_before_it_starts() {
     let _serial = sim::serial();
     let bus = sim::bus(&sim::board(Some("csi0")));
     let mut camera = assemble(&bus, &Options::default()).unwrap();
-    let mut sink = DirSink::new(scratch("unstarted")).unwrap();
+    let unstarted = scratch("unstarted");
+    let mut sink = DirSink::new(unstarted.to_path_buf()).unwrap();
     assert_eq!(capture(&mut camera, 1, &mut sink), Err(Error::NotStarted));
 }
 

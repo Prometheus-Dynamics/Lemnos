@@ -1,14 +1,19 @@
 //! `lemnos-ctl tree BOARD --udev FILE` writes the udev rules of the board, and only that file.
 
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 use std::path::PathBuf;
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lemnos-ctl-udev-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch directory");
+fn scratch(name: &str) -> Scratch {
+    let dir = Scratch(
+        std::env::temp_dir().join(format!("lemnos-ctl-udev-{name}-{}", std::process::id())),
+    );
+    std::fs::create_dir_all(&*dir).expect("scratch directory");
     dir
 }
 

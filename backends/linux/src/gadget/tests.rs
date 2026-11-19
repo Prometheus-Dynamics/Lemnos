@@ -198,12 +198,42 @@ impl Mounts for Recorder {
     }
 }
 
+/// A scratch directory under TMPDIR, removed when the guard drops, pass or panic. It derefs to
+/// `path`, a file or directory inside `dir`, so the guard must stay bound while `path` is used.
+struct Scratch {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Scratch {
+    fn of_dir(dir: PathBuf) -> Self {
+        Self {
+            path: dir.clone(),
+            dir,
+        }
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// The owner the tree's own files have, so `chown` can be checked without root.
 fn own() -> Owner {
     // A directory this test makes, so its owner is the test's own user, whatever owns the
     // system's temporary directory (root, in CI).
     let dir = std::env::temp_dir().join(format!("lemnos-gadget-owner-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
+    let _scratch = Scratch::of_dir(dir.clone());
     let meta = fs::metadata(&dir).unwrap();
     Owner {
         uid: meta.uid(),

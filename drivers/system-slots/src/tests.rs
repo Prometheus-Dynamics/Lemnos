@@ -971,7 +971,12 @@ fn a_board_that_requires_signing_and_trusts_no_key_installs_nothing() {
     assert_eq!(slots.install(10, false, false), Err(Status::NOT_PERMITTED));
     // Off, the default: it installs, and the slot shows as unverified.
     security::set_view_for_thread(Some(view_file(&dir.0, false)));
-    assert!(slots.install(10, false, false).is_ok());
+    let installed = slots.install(10, false, false);
+    assert!(
+        installed.is_ok(),
+        "install(10) was refused: {installed:?}: {}",
+        slots.state().error
+    );
 }
 
 /// Signing off (the default): a bundle signed by another key, or not signed, installs, and
@@ -4210,7 +4215,12 @@ fn a_malformed_view_reads_on_on_a_board_with_no_trust_root_and_info_says_so() {
     let len = slots.info(&mut out).unwrap();
     let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
     assert_eq!(json.get("require_signed"), Some(&Json::Bool(false)));
-    assert!(slots.install(10, false, false).is_ok());
+    let installed = slots.install(10, false, false);
+    assert!(
+        installed.is_ok(),
+        "install(10) was refused: {installed:?}: {}",
+        slots.state().error
+    );
 }
 
 /// The Pi firmware's record over a real boot partition image: os-1 in bay 0, as the image builder

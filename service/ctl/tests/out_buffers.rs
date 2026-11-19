@@ -1,6 +1,9 @@
 //! Out-buffer methods through the text path: `lemnos-ctl call` on the simulated board, and every
 //! out-buffer method of every contract in `contracts/`, encoded the way the tool sends it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -302,16 +305,17 @@ fn a_method_without_an_out_buffer_takes_no_size_word() {
 struct Running {
     _service: Service,
     socket: PathBuf,
+    _dir: Scratch,
 }
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 fn start_slots() -> Running {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = Scratch(std::env::temp_dir().join(format!(
         "lemnos-ctl-out-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
     let (data, boot) = (dir.join("data"), dir.join("boot"));
     std::fs::create_dir_all(data.join("slots")).unwrap();
     std::fs::create_dir_all(boot.join("slots")).unwrap();
@@ -334,6 +338,7 @@ fn start_slots() -> Running {
     })
     .unwrap();
     let running = Running {
+        _dir: dir,
         _service: service,
         socket,
     };

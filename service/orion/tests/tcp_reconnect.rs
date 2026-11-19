@@ -54,7 +54,7 @@ mod tcp_relay;
 #[path = "support/tracked.rs"]
 mod tracked;
 
-use kit::{BOARD, Bridge, Logic, dashboard, dir, resource, run, start_bridge, wait_for};
+use kit::{BOARD, Bridge, Logic, Scratch, dashboard, dir, resource, run, start_bridge, wait_for};
 use tcp_relay::TcpRelay;
 use tracked::TrackedDevice;
 
@@ -105,6 +105,7 @@ struct Up {
     _service: Service,
     _logic: Logic,
     _board: Board,
+    _dir: Scratch,
 }
 
 fn up(test: &str) -> Up {
@@ -120,6 +121,7 @@ fn up(test: &str) -> Up {
         resource(&dash, "lemnos.tracked").filter(|found| found.state == ResourceState::Ready)
     });
     Up {
+        _dir: dir,
         dash,
         _bridge: bridge,
         relay,

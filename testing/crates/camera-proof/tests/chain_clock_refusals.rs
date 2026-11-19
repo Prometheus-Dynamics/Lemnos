@@ -4,17 +4,45 @@
 //! against a clock no board has. The first case runs the proof as a process, as a board run does;
 //! the second reads the clock object the proof installs (`FileClock`) as the proof reads it.
 
-use std::path::PathBuf;
 use std::process::Command;
 
 use lemnos_sim_clock::{Clock, FileClock};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
 
-fn scratch(name: &str) -> PathBuf {
+/// A scratch directory under TMPDIR, removed when the guard drops, pass or panic. It derefs to
+/// `path`, a file or directory inside `dir`, so the guard must stay bound while `path` is used.
+struct Scratch {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+
+impl Scratch {
+    fn of_dir(dir: std::path::PathBuf) -> Self {
+        Self {
+            path: dir.clone(),
+            dir,
+        }
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("chain-clock-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch::of_dir(dir)
 }
 
 /// The clock file's layout: the sequence word at 0, the time at 8 (`sim-clock`'s `write_raw`).
@@ -27,7 +55,8 @@ fn clock_bytes(seq: u64, ns: u64) -> [u8; 16] {
 
 #[test]
 fn a_short_clock_file_refuses_the_chain_proof_by_name() {
-    let clock = scratch("short").join("sim-clock");
+    let dir = scratch("short");
+    let clock = dir.join("sim-clock");
     std::fs::write(&clock, [0u8; 8]).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_lemnos-chain-proof"))
         .arg("--clock-file")
@@ -52,7 +81,8 @@ fn a_short_clock_file_refuses_the_chain_proof_by_name() {
 
 #[test]
 fn a_clock_that_goes_backwards_is_refused_when_the_proof_reads_it() {
-    let clock = scratch("backwards").join("sim-clock");
+    let dir = scratch("backwards");
+    let clock = dir.join("sim-clock");
     std::fs::write(&clock, clock_bytes(2, 1_000)).unwrap();
     let reader = FileClock::open(&clock).unwrap();
     assert_eq!(reader.now_ns().unwrap(), 1_000);
@@ -138,7 +168,7 @@ fn a_clock_moved_backwards_mid_run_refuses_the_chain_proof() {
     let output = child.wait_with_output().unwrap();
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     service.stop();
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&*dir);
     if std::env::var_os("CHAIN_SHOW").is_some() {
         let _ = std::io::Write::write_fmt(
             &mut std::io::stdout(),
