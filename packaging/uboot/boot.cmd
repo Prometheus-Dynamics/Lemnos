@@ -155,7 +155,7 @@ while test "${lemnos_go}" = "1"; do
 	setenv lemnos_why
 	setenv lemnos_dflt
 	# At 8 the board is rescued: no slot starts, and download mode is offered at once (the host
-	# flasher is the exit). At 4 to 7 (the Pi's [boot_count&4]) the previous starts before the default.
+	# flasher is the exit). At 4 to 7 (the Pi's [boot_count>3]) the previous starts before the default.
 	setenv lemnos_rescue
 	if test "${lemnos_restarts}" -ge 8; then
 		setenv lemnos_rescue 1

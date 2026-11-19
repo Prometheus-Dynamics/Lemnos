@@ -19,7 +19,8 @@ The first number is how many checks are written. The second is how many no longe
 
 ## The first board run
 
-On 2026-11-11, on the reference board (a Raspberry Pi Compute Module 5, kernel `7.2.9-v8-16k`),
+On 2026-11-11, on the reference board (a Raspberry Pi Compute Module 5, kernel `7.2.9-v8-16k` then;
+its kernel is now `rpi-7.3.y` `b005af66` with 4 KiB pages, and these checks have not been run again on it),
 with the board's own software stopped only for each test and put back afterwards:
 
 | Check | Result |

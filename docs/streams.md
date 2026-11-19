@@ -905,7 +905,7 @@ Read and import are separate rights, and read-only does not stop a device write.
 | GPU | Imports a read-only heap dma-buf | A device write is seen through the host's read-only mapping |
 |---|---|---|
 | RADV (desktop) | yes | yes |
-| V3D on the reference board (7.1.10.2, kernel 7.2.9-v8-16k, as root) | yes, bytes read back correctly | yes |
+| V3D on the reference board (7.1.10.2, kernel 7.2.9-v8-16k, as root; not rerun on its 4 KiB-page 7.3.5 kernel) | yes, bytes read back correctly | yes |
 | NVIDIA | refused for any heap dma-buf (writable too) | not applicable |
 | llvmpipe | refuses a read-only fd; imports a writable one | a software renderer must copy |
 

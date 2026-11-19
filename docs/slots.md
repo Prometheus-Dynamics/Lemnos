@@ -1436,7 +1436,7 @@ moment the default's files fail to load.
 
 | | U-Boot form (`packaging/uboot/boot.cmd`) | Pi firmware form (generated `config.txt`) |
 |---|---|---|
-| Order | in each pass: the trial (while it has an attempt), the default, the previous slot; three passes with a 2 s pause, then download mode (`fastboot usb`), and after each return the slots are tried once more before it is offered again | `config.txt`: `include default.txt`, then `[boot_count&4]` / `include previous.txt`, then `[all]` and the slot lines; `tryboot.txt` includes `trial.txt` and has no count filter |
+| Order | in each pass: the trial (while it has an attempt), the default, the previous slot; three passes with a 2 s pause, then download mode (`fastboot usb`), and after each return the slots are tried once more before it is offered again | `config.txt`: `include default.txt`, then `[boot_count>3]` / `include previous.txt`, then `[all]` and the slot lines; `tryboot.txt` includes `trial.txt` and has no count filter |
 | What picks the previous | the script, in the same pass, when the default's files did not load or did not start | the firmware's boot count: bit 2 set (counts 4 to 7, 12 to 15, and so on) reads `previous.txt` |
 | What the previous is started as | a trial (see below) | a trial too: the previous slot is not the default, so slot-init writes `trial-init` for it and lemnosd judges it as a trial. It is not confirmed until it proves healthy, so if it also fails the count keeps rising to the rescue at 8. A boot that lands on it by the count is reported by lemnosd as described under "Boot count" |
 | Flashing mode | download mode, after three passes that started nothing | RPIBOOT, requested by slot-init after 8 restarts without a good boot, and only from a refusal slot-init itself reaches (see "Boot count"); a firmware that cannot read the default's files never runs slot-init, so Lemnos asks for nothing there and the firmware's own `BOOT_ORDER` applies |
@@ -1594,7 +1594,7 @@ last good boot, this one included, and it saturates at 8. `packaging/uboot/boot.
 run, with one `saveenv`, before any slot starts. lemnosd clears it at a good boot and before its own intended
 restart, with a write only when it is not already 0 (so a healthy boot writes nothing).
 
-- **The rung.** `lemnos_restarts & 4` (the Pi's `[boot_count&4]`): at 0 to 3 the default starts, at 4 to 7 the
+- **The rung.** `lemnos_restarts & 4` (the U-Boot counterpart of the Pi's `[boot_count>3]`): at 0 to 3 the default starts, at 4 to 7 the
   previous starts first (the default is skipped in the first pass only, and taken on the next pass if the
   previous does not start), at 8 no slot starts and download mode is offered at once (the Pi's RPIBOOT
   equivalent; the host flasher is the exit). The previous at 4 is `lemnos,default-failed = "restarts"` on
@@ -2075,8 +2075,8 @@ is taken, so an absent piece never uses up trial attempts.
 
 Then, per boot:
 
-- **Default boot, nothing else pending:** the boot keeps the kernel log (`slot-init.log` on the
-  boot partition), prints `no slot can start: the kernel lacks CONFIG_...` and waits 30 s, then
+- **Default boot, nothing else pending:** the boot keeps the kernel log (`board/slots/last-failure.log` on
+  the data partition when it is mounted writable; the boot partition is never written), prints `no slot can start: the kernel lacks CONFIG_...` and waits 30 s, then
   restarts. That is the last resort the boot had before, when no slot can be opened, with the
   reason named. It starts no slot and switches no root, so the board stays here until the kernel
   is fixed.
@@ -2107,8 +2107,8 @@ into the default for a trial). A test pins the text and the fallback
 
 The failure is kept and recorded before anything else happens:
 
-- The kernel log goes to `board/slots/last-failure.log` on the data partition and to
-  `slot-init.log` on the boot partition.
+- The kernel log goes to `board/slots/last-failure.log` on the data partition, when it is mounted
+  writable. Nothing is written to the boot partition.
 - The slot's `.meta` gets `FAILED=yes`, `FAILURES` plus one and `FAIL_REASON`. A refusal by
   dm-verity reads `dm-verity refused the image: ...`.
 

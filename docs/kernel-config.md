@@ -468,7 +468,8 @@ eventfds.
 Per SoC, the driver behind each generic symbol, for the SoCs the tree has maps for
 (`socs/*.toml`). "Verified" means the row was found in the Kconfig or Makefile of the named tree, or
 (for mainline) in the driver's source. The rows for K230, RK3566, RK3588 and sun60i-a733 were
-resolved against mainline v7.3.3 (`gregkh/linux`, tag `v7.3.3`, commit `d50d994b`), with the
+resolved against mainline v7.3.3 (`gregkh/linux`, tag `v7.3.3`, commit `d50d994b`; not recomputed
+against 7.3.5, which the harness pins now), with the
 arm64 defconfig for the Rockchip and Allwinner rows and the riscv defconfig for K230, not against
 the reference tree: their dependency closures are the Dependencies rows, recomputed there (the
 same as the reference's for every symbol of these rows except two: `CONFIG_SPI_DW_MMIO`, which needs
@@ -521,7 +522,9 @@ Tree these rows were resolved against: the reference board's kernel, raspberrypi
 `53679a5788f7912272b412fd78029bccae6f2b1a` (the commit in the board build's buildroot configuration,
 `BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION`; the build tree has no git metadata, so the commit is the
 buildroot record, not a git check). Its `kernelversion` is 7.2.9 with local version `-v8-16k`. Its
-`bcm2712_defconfig` is the file the rows were computed from. Rows for other SoCs were resolved against
+`bcm2712_defconfig` is the file the rows were computed from. That was the board's kernel when these rows
+were resolved; the reference board's kernel is now raspberrypi/linux `rpi-7.3.y` at `b005af66` with 4 KiB
+pages (`7.3.5-v8`), and the rows have not been recomputed against it. Rows for other SoCs were resolved against
 this same tree's Kconfig, not against their own trees: they are not resolved against mainline here.
 
 The earlier statement that this chain "drops out" on the board was wrong: on this tree `PCI_MSI`
