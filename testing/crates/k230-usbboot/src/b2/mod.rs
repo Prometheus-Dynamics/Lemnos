@@ -10,8 +10,11 @@
 //!    bound passes with the stage only elsewhere the run is refused (wrong port).
 //! 2. **Refuse** before claiming, from what the kernel read at enumeration (sysfs, no open): the product
 //!    string must be the stage's and the interface string the wire's. Either differing refuses.
-//! 3. **Access**: whether this user may open the node, checked without opening it. Denied stops the run and
-//!    says so; nothing is changed on the host to get access.
+//! 3. **Access**: first wait, bounded ([`Bounds::udev`]), for udev to finish the device: its database
+//!    entry exists and this user may read and write the node. The uaccess ACL is applied late in udev's
+//!    rules, after the kernel has published the device, so an open right away is denied (B2 run 3, 0.649 s
+//!    after the load). Still denied at the bound stops the run and says so. Nothing is opened before that,
+//!    and nothing is changed on the host to get access.
 //! 4. **Endpoint 0**: the descriptors as the device sends them, GET_STATUS, GET_CONFIGURATION, a request the
 //!    device must stall, and a request after the stall.
 //! 5. **Bulk**: identify (the check build's id, not the card build's), writes and reads in the RAM window at
@@ -60,6 +63,9 @@ pub struct Bounds {
     pub bulk: Duration,
     /// From the end (or the stop) to the boot ROM back at the port.
     pub back: Duration,
+    /// From the stage seen at the port (and its checks made) to udev having finished it: its database
+    /// entry written and this user's access to the node granted.
+    pub udev: Duration,
     /// Between two looks at the bus.
     pub poll: Duration,
 }
@@ -74,6 +80,7 @@ impl Bounds {
         control: Duration::from_secs(1),
         bulk: Duration::from_secs(5),
         back: Duration::from_secs(200),
+        udev: Duration::from_secs(5),
         poll: Duration::from_millis(100),
     };
 }
@@ -181,6 +188,8 @@ pub trait Board {
     fn scan(&mut self) -> Vec<Seen>;
     /// Whether this user may open `seen`'s node. Opens nothing.
     fn access(&mut self, seen: &Seen) -> Access;
+    /// Whether udev has finished `seen`: its database entry exists. Opens nothing.
+    fn udev_done(&mut self, seen: &Seen) -> bool;
     /// Opens `seen` and claims its interface 0. Called only after every refusal and the access check.
     fn open(&mut self, seen: &Seen) -> Result<Box<dyn Link>, String>;
 }
@@ -389,8 +398,30 @@ fn claim_and_check(
             seen.configuration, CONFIGURATION_VALUE
         ));
     }
-    match board.access(seen) {
-        Access::Granted => log(&format!("access to {}: granted", seen.devnode())),
+    let asked = Instant::now();
+    let access = loop {
+        let done = board.udev_done(seen);
+        let access = board.access(seen);
+        if done && access == Access::Granted {
+            break access;
+        }
+        if asked.elapsed() >= plan.bounds.udev {
+            break match access {
+                Access::Granted => Access::Denied(format!(
+                    "udev has not finished the device (no database entry) within {:.1} s",
+                    plan.bounds.udev.as_secs_f64()
+                )),
+                denied => denied,
+            };
+        }
+        std::thread::sleep(plan.bounds.poll);
+    };
+    match access {
+        Access::Granted => log(&format!(
+            "access to {}: granted, udev done, {:.3} s after the checks",
+            seen.devnode(),
+            asked.elapsed().as_secs_f64()
+        )),
         Access::Denied(why) => {
             return Verdict::Stopped(format!(
                 "this user may not open {} ({why}); nothing on the host was changed to get access (no udev rule, \
