@@ -2,16 +2,23 @@
 # Stand-in comm core command line.
 . "$(dirname "$0")/../world.sh"
 calls "orion $*"
-[ "$(state comm-core)" = active ] || { echo "orion: cannot reach the comm core" >&2; exit 1; }
+[ "$(state orion-comm)" = active ] || { echo "orion: cannot reach the comm core" >&2; exit 1; }
 lup() { p=$(cat "$W/units/lemnosd.main" 2>/dev/null) && kill -0 "$p" 2>/dev/null && [ -e "$W/units/lemnosd.ready" ]; }
-[ "${1:-}" = --address ] && shift 2
+# The pinned command line's global options, taken from anywhere (crates/client/ctl/src/args.rs).
+words=()
+while [ $# -gt 0 ]; do
+  case $1 in --address | --timeout | --name) shift ;; *) words+=("$1") ;; esac
+  shift
+done
+set -- "${words[@]}"
 case "${1:-} ${2:-}" in
 "resource list")
   # The bridge republishes about 1 s after the comm core started.
   st=$(cat "$W/comm.started" 2>/dev/null || echo 0)
   awk -v a="$(awk '{print $1}' /proc/uptime)" -v b="$st" 'BEGIN{exit !(a-b>=1)}' || exit 0
-  if lup; then awk '{ print "lemnos." $1 "  lemnos.device  Ready" }' "$W/list"; fi ;;
+  if lup; then awk '{ print "lemnos." $1 "  lemnos.device  Ready  on bench" }' "$W/list"; fi ;;
 "topic read")
-  if lup; then echo "state = running"; else printf 'state = gone\nreason = lemnosd is not there\n'; fi ;;
+  # Withdrawn with its resource when lemnosd goes (service/orion/src/publish.rs).
+  if lup; then printf 'state = running\nhealth = ok\nreason =\nrefusal = 0\n'; else echo "nobody has declared $3"; exit 1; fi ;;
 *) echo "stand-in orion: '$*' not modelled" >&2; exit 1 ;;
 esac

@@ -83,12 +83,13 @@ kill_helper() {
   t0=$(mono)
   kill -KILL "$hp"
   log c5 "kill $k: SIGKILL to helper pid $hp (parent $gp, cmdline '$cmd')"
+  # Polled on the recorded parent only (no unit lookup per sample): the wait is measured to ~0.1 s.
   n=0
   while [ "$n" -lt 150 ]; do
-    newp=$(helper_pid)
+    newp=$(children "$gp" lemnosd-gadget | head -n1)
     [ -n "$newp" ] && [ "$newp" != "$hp" ] && break
     newp=""
-    sleep 0.1
+    sleep 0.05
     n=$((n + 1))
   done
   if [ -n "$newp" ]; then

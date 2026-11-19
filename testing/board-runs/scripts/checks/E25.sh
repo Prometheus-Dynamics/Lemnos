@@ -99,5 +99,5 @@ check_steps() {
     *) log run "unknown step '$s'" ;;
     esac
   done
-  result 4.7 NOT-RUN "superseded: the gadget helper mounts FunctionFS at every setup; see V1g check 3"
+  result 4.7 SUPERSEDED "no such state any more: the gadget helper mounts FunctionFS at every setup; see V1g check 3"
 }

@@ -10,7 +10,7 @@
 #   lemnos-check.sh run ID RUNDIR               inside the check's own unit (start does this)
 #   lemnos-check.sh restore ID RUNDIR NAME S    inside a timed restore's unit (the check does this)
 #
-# Settings for start (NAME=VALUE): COMM_UNIT, CHECK_LOCKS, STEPS, ALT_BOARD, ECHO_BIN, WINDOW_S,
+# Settings for start (NAME=VALUE): COMM_UNIT (default orion-comm.service), CHECK_LOCKS, STEPS, ALT_BOARD, ECHO_BIN, WINDOW_S,
 # PLUG_WAIT_S, HOLD_S, H4A_MODE, ORION_CLI, ORION_ADDRESS, DOWN_BOUND_S, LINK_IF. Each check file
 # under checks/ says which it reads.
 set -u
@@ -69,6 +69,7 @@ collect)
   [ -d "$RUNDIR" ] || die "no run $RUNDIR"
   RUNDIR=$(cd "$RUNDIR" && pwd -P)
   load_settings
+  echo "== RUN $(verdict)"
   echo "== run $RUNDIR"
   echo "== settings"
   cat "$RUNDIR/settings"
@@ -105,6 +106,7 @@ collect)
   echo "lemnosd: $(unit_state "$LEMNOSD_UNIT"); watchdog row: $(watchdog_row)"
   [ -n "$COMM_UNIT" ] && echo "comm core $COMM_UNIT: $(unit_state "$COMM_UNIT")"
   echo "drop-ins of ours: $(ls "$DROPIN_DIR"/90-lemnos-check-* 2>/dev/null || echo none)"
+  echo "== RUN $(verdict)"
   ;;
 
 release)
@@ -145,7 +147,7 @@ run)
   baseline
   unit_active "$LEMNOSD_UNIT" || refuse "lemnosd is not active at the start"
   # A restore waits for every unit it brings back: one that was not active before would hold it.
-  [ -z "$COMM_UNIT" ] || unit_active "$COMM_UNIT" || refuse "COMM_UNIT $COMM_UNIT is not active at the start"
+  [ -z "$COMM_UNIT" ] || unit_active "$COMM_UNIT" || refuse "COMM_UNIT $COMM_UNIT is not active at the start (default orion-comm.service; COMM_UNIT= to name another, COMM_UNIT= empty for none)"
   watchdog_ok || refuse "the hw-watchdog device is not 'running ok' at the start"
   WD_PERIOD=$(down_budget) || refuse "DOWN_BOUND_S $DOWN_BOUND_S + $START_ALLOW_S s for a start is not below half the watchdog period ('$WD_PERIOD' s from $WATCHDOG_SYS/timeout)"
   log run "watchdog period $WD_PERIOD s: lemnosd down windows are bounded by $DOWN_BOUND_S s (+ $START_ALLOW_S s start) < $WD_PERIOD/2 s"

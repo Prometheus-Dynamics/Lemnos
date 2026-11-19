@@ -34,7 +34,7 @@ show)
   esac ;;
 cat)
   case $u in
-  lemnosd | comm-core | lemnos-orion)
+  lemnosd | orion-comm | lemnos-orion)
     echo "# /usr/lib/systemd/system/$u.service (stand-in)"
     for f in "$W/loaded-dropins/$u"/*.conf; do [ -e "$f" ] && { echo "# $f"; cat "$f"; }; done
     exit 0 ;;
@@ -45,7 +45,7 @@ daemon-reload)
   cp "$CR/run/systemd/system/lemnosd.service.d/"*.conf "$W/loaded-dropins/lemnosd/" 2>/dev/null
   exit 0 ;;
 start)
-  case $u in lemnosd | comm-core | lemnos-orion) ;; *) echo "Unit $u.service not found." >&2; exit 5 ;; esac
+  case $u in lemnosd | orion-comm | lemnos-orion) ;; *) echo "Unit $u.service not found." >&2; exit 5 ;; esac
   f=$W/fail/$u
   if [ -s "$f" ] && [ "$(cat "$f")" -gt 0 ]; then
     echo $(($(cat "$f") - 1)) >"$f"
@@ -75,6 +75,19 @@ stop)
   sp=$(cat "$W/units/$u.sup" 2>/dev/null)
   if [ "$noblock" = 0 ]; then
     for _ in $(seq 300); do [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done
+  fi
+  # Rehearsal hook: freeze the caller's process group (the check) right after the Nth stop of
+  # lemnosd, so a kill lands exactly while lemnosd is down (world/freeze-after-stop holds N).
+  if [ "$u" = lemnosd ] && [ -s "$W/freeze-after-stop" ]; then
+    n=$(cat "$W/freeze-after-stop")
+    if [ "$n" -le 1 ]; then
+      rm -f "$W/freeze-after-stop"
+      g=$(ps -o pgid= -p $$ | tr -d ' ')
+      echo "$g" >"$W/frozen"
+      kill -STOP -- "-$g"
+    else
+      echo $((n - 1)) >"$W/freeze-after-stop"
+    fi
   fi
   exit 0 ;;
 restart)

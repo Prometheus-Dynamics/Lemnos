@@ -108,15 +108,20 @@ Running it (shared by every detached form; `scripts/lemnos-check.sh`'s header ha
    boot) to `log` in the run directory, verdicts to `result`. Before each stop it arms a timed
    restore in its own transient unit (`lemnos-restore-V1g-NAME`) and sees it running; at the bound,
    uncancelled, the restore kills the check's unit, undoes what the check changed, starts lemnosd
-   and the comm core with backoff 1, 2, 4, 8, 8 ... s, never giving up, and checks the end state.
+   and the comm core (`COMM_UNIT`, default `orion-comm.service`) with backoff 1, 2, 4, 8, 8 ... s, never giving up, and checks the end state.
    The end state, checked by the check or the restore: lemnosd active, the `hw-watchdog` device
    `running ok`, the comm core and the bridge as before, the gadget bound to the same controller, no
-   drop-in of ours, the link's addresses back (one still missing after 30 s is added back as it was,
-   and recorded as a finding), the same boot id. Nothing touches config.txt, the default slot,
+   drop-in of ours, the link's addresses back, the same boot id. The address on `lemnos0` is
+   systemd-networkd's (a runtime `.network` file written at boot, applied again when the interface
+   comes back): the end check waits 30 s for it. One still missing then is added back by hand so
+   the board stays reachable, and the run is FAILED: a recovery never lets a run pass. Nothing touches config.txt, the default slot,
    `mem=`, `.reboot-ok` or the watchdog.
 5. Reconnect after 3 min and run `bash /data/board/checks/bin/lemnos-check.sh collect V1g`: the
    log, the restore logs, the results, whether each restore was cancelled or fired, and whether the
-   board reset since the baseline (`THE BOARD RESET`, from the boot id). Paste it here.
+   board reset since the baseline (`THE BOARD RESET`, from the boot id). Its first and last lines
+   are the run's verdict: `RUN PASSED`; `RUN INCOMPLETE` when a step was not run; `RUN FAILED` with
+   the reasons when a step failed, the board was not as found (an address re-added by hand
+   included), the board reset, or a restore had to finish the check. Paste it here.
 
 The watchdog: once slot-init has exec'd away, lemnosd's `hw-watchdog` driver is the only feeder of
 `/dev/watchdog`. It feeds every half period and never writes the magic close. When lemnosd stops or
@@ -132,7 +137,9 @@ inside the period (the backoff running past it) resets the board: expected, reco
 Status of the detached form: untested on board. Rehearsed on the PC against the stand-in board
 (`scripts/rehearse/rehearse.sh ID CASE`: fake systemd with `Restart=always` and starts that fail
 like a failed start job, the kernel's close ping, a 15 s watchdog that resets the stand-in): the
-normal run; the check killed right after it stops or restarts lemnosd; the check frozen there; two
-failed starts (the restore retries 1 and 2 s apart and the board stays up); five failed starts (the
-backoff passes the period and the stand-in resets, which `collect` reports). Three failed starts are
-the most a restore survives inside one period.
+normal run; the check killed right after it stops lemnosd (the stand-in's `systemctl stop` freezes
+the check at that exact point); the check frozen there; two failed starts (the restore retries 1
+and 2 s apart and the board stays up); five failed starts (the backoff passes the period and the
+stand-in resets, which `collect` reports as RUN FAILED); the link's address put back by networkd
+(RUN PASSED) and not put back (re-added by hand, RUN FAILED). Three failed starts are the most a
+restore survives inside one period.

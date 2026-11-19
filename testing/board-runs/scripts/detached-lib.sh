@@ -28,7 +28,8 @@ CHECKS_DIR=${CHECKS_DIR:-$CHECK_ROOT/data/board/checks}
 CHECK_LOCKS=${CHECK_LOCKS:-"$CHECK_ROOT/run/lock/raze-gpu.lock $CHECK_ROOT/run/lock/board-gpu.lock"}
 LEMNOSD_UNIT=${LEMNOSD_UNIT:-lemnosd.service}
 BRIDGE_UNIT=${BRIDGE_UNIT:-lemnos-orion.service}
-COMM_UNIT=${COMM_UNIT:-}
+# The comm core's unit as the image installs it (Orion's packaging/systemd at the pinned rev).
+COMM_UNIT=${COMM_UNIT-orion-comm.service}
 LEMNOSD_BIN=${LEMNOSD_BIN:-/usr/bin/lemnosd}
 LEMNOSD_SOCKET=${LEMNOSD_SOCKET:-$CHECK_ROOT/run/lemnos/lemnosd.sock}
 SYSFS=${SYSFS:-$CHECK_ROOT/sys}
@@ -102,7 +103,8 @@ logout() {
   return $rc
 }
 
-# result STEP VERDICT TEXT: VERDICT is PASS, FAIL, MEASURED (a number, no verdict asked) or NOT-RUN.
+# result STEP VERDICT TEXT: VERDICT is PASS, FAIL, MEASURED (a number, no verdict asked), NOT-RUN
+# (a skip: the run is INCOMPLETE) or SUPERSEDED (a step the current code has no state for).
 result() {
   local step=$1 verdict=$2
   shift 2
@@ -454,8 +456,10 @@ end_check() {
     ok=0
   fi
   [ -n "$(ls "$RUNDIR/undo" 2>/dev/null)" ] && { log "$who" "end: undo journal not empty: $(ls "$RUNDIR/undo")"; ok=0; }
-  # The link's addresses: whatever configures the interface must put them back when the gadget
-  # returns. Waited for 30 s; an address still missing is put back as it was (the only way back in).
+  # The link's addresses belong to systemd-networkd: a runtime .network file written at boot,
+  # applied again by networkd when the interface comes back. Waited for 30 s. An address still
+  # missing is put back as it was, so the board stays reachable, and the RUN FAILS: a recovery
+  # never lets a run pass.
   local want
   want=$(awk '$1 == "link" { $1 = ""; print }' "$RUNDIR/baseline")
   for a in $want; do
@@ -467,9 +471,10 @@ end_check() {
     if link_addrs | grep -qx "$a"; then
       log "$who" "end: $LINK_IF has $a"
     else
-      log "$who" "end: $LINK_IF LACKS $a after 30 s: adding it back as it was (finding for the image)"
+      log "$who" "end: $LINK_IF LACKS $a 30 s after the gadget came back: networkd did not apply it again; adding it back by hand so the board stays reachable"
       bounded 5 ip addr add "$a" dev "$LINK_IF"
       log "$who" "end: ip addr add exit $?; now [$(link_addrs | tr '\n' ' ')]"
+      result link FAIL "$LINK_IF lacked $a after 30 s; re-added by hand (the board is reachable only because of that)"
       ok=0
     fi
   done
@@ -482,5 +487,30 @@ end_check() {
   else
     log "$who" "BOARD AS FOUND: NO (see the lines above)"
     printf 'as-found no\n' >"$RUNDIR/end"
+  fi
+}
+
+# verdict: the run's one word. FAILED for any FAIL, a board not as found, a reset, or a check that
+# did not finish; INCOMPLETE for a NOT-RUN (a skip is never a pass); PASSED otherwise.
+verdict() {
+  local why=""
+  grep -q ' FAIL ' "$RUNDIR/result" 2>/dev/null && why="$why; a step FAILED: $(awk '$3 == "FAIL" { printf "%s ", $2 }' "$RUNDIR/result")"
+  grep -q 'as-found no' "$RUNDIR/end" 2>/dev/null && why="$why; the board was not as found"
+  [ -f "$RUNDIR/end" ] || why="$why; no end check recorded"
+  local boot
+  boot=$(awk '$1 == "boot_id" { print $2 }' "$RUNDIR/baseline" 2>/dev/null)
+  [ -n "$boot" ] && [ "$boot" != "$(cat "$BOOT_ID_FILE" 2>/dev/null)" ] && why="$why; the board reset"
+  case $(cat "$RUNDIR/done" 2>/dev/null) in
+  "steps done"*) ;;
+  refused*) why="$why; refused" ;;
+  "") why="$why; the check did not finish" ;;
+  *) why="$why; the check was killed by its restore" ;;
+  esac
+  if [ -n "$why" ]; then
+    printf 'FAILED%s\n' "$why"
+  elif grep -q ' NOT-RUN ' "$RUNDIR/result" 2>/dev/null; then
+    printf 'INCOMPLETE; not run: %s\n' "$(awk '$3 == "NOT-RUN" { printf "%s ", $2 }' "$RUNDIR/result")"
+  else
+    printf 'PASSED\n'
   fi
 }

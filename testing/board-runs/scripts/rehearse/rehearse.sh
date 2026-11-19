@@ -13,7 +13,12 @@
 #                       retries 1, 2 s apart and the board stays up
 #   restore-fails-long  as restore-fails with 5 failed starts: the backoff (1, 2, 4, 8 s) runs past
 #                       the watchdog period and the stand-in resets the board, as the board would
-# REHEARSE_AT=REGEX moves the point to the first log line matching REGEX.
+# The point is exact: the stand-in systemctl freezes the check right after its Nth stop of lemnosd
+# (REHEARSE_STOP_N, default 1; a restart counts). REHEARSE_AT=REGEX uses the first log line
+# matching REGEX instead.
+#   link-back           the normal run, judged on the link: networkd puts the address back
+#   link-missing        after the first stop networkd no longer puts the address back: the end
+#                       check re-adds it and the run must be FAILED
 #   comm-fails          (B20 step 8) killed after the comm core restart, its next 6 starts fail:
 #                       the restore's backoff reaches the 8 s cap and keeps going
 set -u
@@ -64,13 +69,21 @@ hw_pid=$!
 ) &
 drv_pid=$!
 
-for u in lemnosd comm-core lemnos-orion; do systemctl start "$u" >/dev/null || { echo "stand-in $u did not start"; exit 1; }; done
+for u in lemnosd orion-comm lemnos-orion; do systemctl start "$u" >/dev/null || { echo "stand-in $u did not start"; exit 1; }; done
 for _ in $(seq 50); do [ -s "$GADGET_DIR/UDC" ] && break; sleep 0.1; done
+# As a runner would: start only once the bridge has published (B20's precheck refuses otherwise).
+for _ in $(seq 100); do [ -n "$(orion resource list lemnos. 2>/dev/null)" ] && break; sleep 0.1; done
+# The point the faults are injected at: right after the Nth stop of lemnosd (REHEARSE_STOP_N).
+case $case in killed | hang | restore-fails | restore-fails-long)
+  [ -z "${REHEARSE_AT:-}" ] && echo "${REHEARSE_STOP_N:-1}" >"$W/freeze-after-stop" ;;
+esac
 
-settings=(COMM_UNIT=comm-core)
+# COMM_UNIT is left to its default (orion-comm.service), which the stand-in installs.
+settings=()
 case $id in
-B20) if [ "$case" = comm-fails ]; then settings+=(STEPS=8); elif [ "$case" != normal ]; then settings+=(STEPS=9); fi ;;
-E25) [ "$case" != normal ] && settings+=(STEPS=stop) ;;
+B20) settings+=(ORION_CLI=orion)
+  if [ "$case" = comm-fails ]; then settings+=(STEPS=8); elif [ "$case" != normal ]; then settings+=(STEPS=9); fi ;;
+E25) [ "$case" != normal ] && [ "$case" != link-back ] && settings+=(STEPS=stop) ;;
 E36)
   printf '[[devices]]\nid = "watchdog"\ndriver = "hw-watchdog"\n[[devices]]\nid = "gadget"\ndriver = "usb-gadget"\nconfig = { serial = "E36-0001" }\n' >"$CR/data/board/checks/e36-board.toml"
   settings+=(ALT_BOARD="$CR/data/board/checks/e36-board.toml" ECHO_BIN="$here/bin/lemnos-usb-echo" WINDOW_S=30) ;;
@@ -96,17 +109,27 @@ rundir=$(readlink -f "$CR/data/board/checks/$id/latest")
 pid=$(cat "$rundir/check.pid")
 
 case $case in
+link-missing)
+  for _ in $(seq 1200); do grep -Eq 'stop exit|restart: exit|stop queued|SIGKILL to' "$rundir/log" 2>/dev/null && break; sleep 0.05; done
+  : >"$W/networkd.broken"
+  echo "== rehearsal: networkd will not apply the address again (after: $(grep -E 'stop exit|restart: exit|stop queued|SIGKILL to' "$rundir/log" | head -n1))" >>"$out"
+  ;;
 killed | hang | restore-fails | restore-fails-long | comm-fails)
   pat='stop exit|restart: exit|restart onto the run.s board file: exit|stop queued|SIGKILL to'
   [ "$case" = comm-fails ] && pat='restart exit'
   # REHEARSE_AT picks another point (E36's 4.5: 'stop queued').
   [ -n "${REHEARSE_AT:-}" ] && pat=$REHEARSE_AT
-  for _ in $(seq 1200); do grep -Eq "$pat" "$rundir/log" 2>/dev/null && break; sleep 0.05; done
-  line=$(grep -E "$pat" "$rundir/log" | head -n1)
+  if [ -e "$W/freeze-after-stop" ] || [ -e "$W/frozen" ]; then
+    for _ in $(seq 1200); do [ -s "$W/frozen" ] && break; sleep 0.05; done
+    line="the stand-in froze the check inside its systemctl stop of lemnosd (stop number ${REHEARSE_STOP_N:-1})"
+  else
+    for _ in $(seq 1200); do grep -Eq "$pat" "$rundir/log" 2>/dev/null && break; sleep 0.05; done
+    line=$(grep -E "$pat" "$rundir/log" | head -n1)
+  fi
   case $case in
   restore-fails) echo 2 >"$W/fail/lemnosd" ;;
   restore-fails-long) echo 5 >"$W/fail/lemnosd" ;;
-  comm-fails) echo 6 >"$W/fail/comm-core"; systemctl stop comm-core >/dev/null ;;
+  comm-fails) echo 6 >"$W/fail/orion-comm"; systemctl stop orion-comm >/dev/null ;;
   esac
   if [ "$case" = hang ]; then
     kill -STOP -- "-$pid"
