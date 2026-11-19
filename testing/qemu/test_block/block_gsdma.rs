@@ -135,7 +135,7 @@ unsafe fn tgd_at(bus: u64) -> *mut u8 {
         return ptr::null_mut();
     }
     // SAFETY: the page number is valid (checked above): its count is read.
-    if unsafe { fixture::lemnos_test_page_refcount(pfn as c_ulong) } == 0 {
+    if unsafe { fixture::page_ref_count(pfn as c_ulong) } == 0 {
         pr_err!(
             "lemnos-test-block: gsdma descriptor reads a freed page at {:x}\n",
             bus

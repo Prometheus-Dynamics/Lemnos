@@ -9,7 +9,7 @@
 //! <unbind> <heap>`.
 //!
 //! Port of `kernel/test/lemnos_rp1_csi2_check.c` (CZ-GUEST-5), in the shared-memory ring form of
-//! `kernel/test/shm_ring.h` (I2b2-6). Every ok and FAIL line keeps the C's text and order, including
+//! `kernel/rs/stream_ring.rs` (I2b2-6). Every ok and FAIL line keeps the C's text and order, including
 //! the nested INFO lines the C prints when a message's arguments call `info()`.
 //!
 //! Departures from the C, each on purpose:
@@ -74,7 +74,7 @@ const EMBEDDED_MAX: u32 = 65520;
 const RING_STATE_OPEN: u64 = 0;
 const RING_STATE_CLOSED: u64 = 1;
 
-// kernel/test/shm_ring.h (layout 2): the word numbers of the frame ring, the pool page and the job block.
+// kernel/rs/stream_ring.rs (layout 2): the word numbers of the frame ring, the pool page and the job block.
 const SHM_W_HEAD: usize = 8;
 const SHM_W_END: usize = 10;
 const SHM_INDEX: usize = 17;

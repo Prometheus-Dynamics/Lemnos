@@ -514,7 +514,7 @@ unsafe extern "C" fn page_refs_show(
     // SAFETY: pfn_valid is any number's question.
     let refs = if unsafe { fixture::lemnos_test_pfn_valid(pfn as c_ulong) } != 0 {
         // SAFETY: the page number is valid (checked above): its count is read.
-        unsafe { fixture::lemnos_test_page_refcount(pfn as c_ulong) }
+        unsafe { fixture::page_ref_count(pfn as c_ulong) }
     } else {
         -1
     };

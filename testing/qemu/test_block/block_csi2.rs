@@ -21,7 +21,7 @@ use core::{
 };
 
 use super::fixture::{
-    self, lb, property_end, property_string, res_irq, res_mem, this_module, Fixed, Shared,
+    lb, property_end, property_string, res_irq, res_mem, this_module, Fixed, Shared,
 };
 use super::{
     copy_in, copy_out, fill_phys, init_delayed_work, jiffies_of, rd, schedule_on, wr, SZ_4K,
@@ -384,12 +384,12 @@ unsafe fn tcsi_deliver(status_bits: u32, ints_bits: u32) {
     let saved = unsafe { rd(cfg, R_INTS) };
     // SAFETY: as above.
     unsafe { wr(cfg, R_INTS, ints_bits) };
-    // SAFETY: local_irq_save: the flags it saves are restored below, as the C does.
-    let flags = unsafe { fixture::lemnos_test_local_irq_save() };
+    // Local interrupts are off while the handler runs and back as they were after (the C's
+    // local_irq_save and local_irq_restore; the kernel crate's guard saves and restores the flags).
+    let irqs_off = kernel::interrupt::local_interrupt_disable();
     // SAFETY: the receiver's interrupt is mapped by setup; the handler runs with local interrupts off.
     unsafe { bindings::generic_handle_irq(TCSI_IRQ.load(Ordering::Relaxed)) };
-    // SAFETY: restores the flags saved above.
-    unsafe { fixture::lemnos_test_local_irq_restore(flags) };
+    drop(irqs_off);
     // SAFETY: as above: the DMA window is mapped.
     unsafe { wr(dma, R_STATUS, 0) };
     // SAFETY: as above.

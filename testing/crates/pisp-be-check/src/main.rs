@@ -19,8 +19,8 @@
 //! `lemnos_info` (32), and `lemnos_pisp_be.h`'s `lemnos_pisp_be_status` (24) and
 //! `lemnos_pisp_be_job` (120). The configuration is `struct pisp_be_tiles_config` from the kernel's
 //! `pisp_be_config.h` (16720 bytes). Its offsets, and the enum values used, were counted with the C
-//! compiler against the kernel tree's headers. The fixture is the table `fixture_words` of
-//! `kernel/test/lemnos_pisp_be_fixture.h`, which `drivers/pisp` regenerates and checks.
+//! compiler against the kernel tree's headers. The fixture is `fixture.rs`, which `drivers/pisp`
+//! generates from the configuration library and checks.
 
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
@@ -32,6 +32,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod fixture;
+
+use fixture::{FIXTURE, OUTPUT_CHROMA, OUTPUT_LUMA};
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::{dma_heap, guest, ioc, ior, iow, iowr, module};
 
@@ -69,7 +72,7 @@ const JOB_WORDS: usize = 16;
 const W: u16 = 64;
 const H: u16 = 32;
 
-// kernel/test/shm_ring.h (layout 2): the word numbers of the shared-memory ring, as word indices
+// kernel/rs/stream_ring.rs (layout 2): the word numbers of the shared-memory ring, as word indices
 // into the ring (the module's ring is read as 64-bit words). The frame index holds, for each frame
 // slot, the lane slot the frame was published in (from bit 16). A lane slot is SHM_SLOT_WORDS
 // words: the stamp, the time, the meta, then the 48-byte entry from SHM_ENTRY on (the buffer in the
@@ -118,7 +121,7 @@ struct ShmFrame {
     end_ns: u64,
 }
 
-/// Frame `seq` through the index, as `shm_frame_read` reads it (`kernel/test/shm_ring.h`). The
+/// Frame `seq` through the index, as a consumer reads the ring (`kernel/rs/stream_ring.rs`). The
 /// time, pair, identity and end words are read between two reads of the stamp.
 fn shm_frame_read(ring: &[AtomicU64], frame_slots: usize, seq: u64) -> FrameRead {
     if ring[SHM_W_HEAD].load(Ordering::Acquire) <= seq {
@@ -1577,144 +1580,6 @@ fn refuse_ring(env: &Env) {
     check(get32(&info, 16) == 0, "info.irqs == 0");
 }
 
-/// The library's own config for a Bayer-to-NV12 job, as the non-zero words of the config
-/// (`kernel/test/lemnos_pisp_be_fixture.h`, which `drivers/pisp` generates and checks): the byte
-/// offset and the 32-bit value.
-#[rustfmt::skip]
-const FIXTURE: &[(usize, u32)] = &[
-    (112, 0x00410401),
-    (116, 0x00040202),
-    (120, 0x00000002),
-    (124, 0x03200500),
-    (128, 0x00000003),
-    (132, 0x00000a00),
-    (176, 0x00001000),
-    (208, 0x00001000),
-    (220, 0x10001000),
-    (224, 0x10001000),
-    (4640, 0x04000600),
-    (4644, 0x00000733),
-    (4980, 0xfb2369f9),
-    (4984, 0x00000101),
-    (5252, 0x00000108),
-    (5256, 0x00000400),
-    (5264, 0x00000400),
-    (5272, 0x00000400),
-    (5324, 0xfefefefe),
-    (5328, 0xfffffffe),
-    (5332, 0x0606ffff),
-    (5336, 0xff060606),
-    (5340, 0xffffffff),
-    (5344, 0xfefefefe),
-    (5348, 0x000000fe),
-    (5352, 0xff06fffe),
-    (5356, 0x06fffefe),
-    (5360, 0xfffefeff),
-    (5364, 0xfefeff06),
-    (5368, 0xfeff06ff),
-    (5372, 0xff06fffe),
-    (5376, 0x000000fe),
-    (5380, 0x00feff02),
-    (5384, 0xff05ff00),
-    (5388, 0xfffe00fe),
-    (5392, 0x00feff06),
-    (5396, 0xff05fffe),
-    (5400, 0xfffe0000),
-    (5404, 0x00000002),
-    (5408, 0xfffe0000),
-    (5412, 0xfffe0002),
-    (5416, 0xfffeff05),
-    (5420, 0xfffeff06),
-    (5424, 0x00feff05),
-    (5428, 0x00feff02),
-    (5436, 0xfefefeff),
-    (5440, 0x0202feff),
-    (5444, 0x02fefe02),
-    (5448, 0xfefe020c),
-    (5452, 0xfe020202),
-    (5456, 0xfefefeff),
-    (5460, 0x000000ff),
-    (5464, 0x02660064),
-    (5468, 0x00000200),
-    (5472, 0x02660064),
-    (5476, 0x00000200),
-    (5480, 0x02660064),
-    (5484, 0x00000399),
-    (5488, 0x02660064),
-    (5492, 0x00000399),
-    (5496, 0x022800c8),
-    (5500, 0x00000200),
-    (5504, 0x07d0004c),
-    (5508, 0x04000200),
-    (5512, 0x08000600),
-    (5516, 0x10000c00),
-    (5520, 0x1a001400),
-    (5524, 0x0fa02000),
-    (5528, 0x07d00066),
-    (5532, 0x02cc0200),
-    (5536, 0x08000600),
-    (5540, 0x10000c00),
-    (5544, 0x1a001400),
-    (5548, 0x0fa02000),
-    (5552, 0x3200001f),
-    (5556, 0x00000002),
-    (5560, 0x000000c0),
-    (5852, 0x02590132),
-    (5856, 0xff530075),
-    (5860, 0x0200fead),
-    (5864, 0xfe530200),
-    (5868, 0x0000ffad),
-    (5876, 0x02000000),
-    (5880, 0x02000000),
-    (6324, 0x03200500),
-    (6328, 0x40000210),
-    (6332, 0x00000500),
-    (6336, 0x00000500),
-    (6344, 0xffff0000),
-    (6348, 0xffff0000),
-    (6476, 0x0000000d),
-    (6492, 0x03200250),
-    (6532, 0x00000010),
-    (6568, 0x00000240),
-    (6572, 0x00000320),
-    (6608, 0x00000240),
-    (6612, 0x00000320),
-    (6636, 0x0000000c),
-    (6640, 0x00000460),
-    (6648, 0x00000230),
-    (6652, 0x03200260),
-    (6656, 0x00000230),
-    (6660, 0x00000230),
-    (6664, 0x00000230),
-    (6668, 0x00000230),
-    (6688, 0x00000010),
-    (6692, 0x00000010),
-    (6728, 0x00000240),
-    (6732, 0x00000320),
-    (6760, 0x00000240),
-    (6768, 0x00000240),
-    (6772, 0x00000320),
-    (6776, 0x00000240),
-    (6784, 0x00000240),
-    (6796, 0x0000000e),
-    (6800, 0x000008e0),
-    (6808, 0x00000470),
-    (6812, 0x03200090),
-    (6816, 0x00000470),
-    (6820, 0x00000470),
-    (6824, 0x00000470),
-    (6828, 0x00000470),
-    (6848, 0x00000010),
-    (6888, 0x00000080),
-    (6892, 0x00000320),
-    (6920, 0x00000480),
-    (6928, 0x00000080),
-    (6932, 0x00000320),
-    (6936, 0x00000480),
-    (6944, 0x00000480),
-    (16716, 0x00000003),
-];
-
 fn fixture_fill(c: &mut Config, addr: &mut Addrs, region: u64) {
     *c = Config::zeroed();
     *addr = [0; ADDRS];
@@ -1722,8 +1587,8 @@ fn fixture_fill(c: &mut Config, addr: &mut Addrs, region: u64) {
         c.set32(at, value);
     }
     addr[0] = region;
-    addr[out_addr(0, 0)] = region + 2_097_152;
-    addr[out_addr(0, 1)] = region + 3_121_152;
+    addr[out_addr(0, 0)] = region + OUTPUT_LUMA;
+    addr[out_addr(0, 1)] = region + OUTPUT_CHROMA;
 }
 
 /// A job that runs: the registers say what was given, and the frame comes out with the job's

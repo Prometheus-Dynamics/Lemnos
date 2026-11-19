@@ -13,7 +13,7 @@
 //!
 //! Usage: `lemnos-lend-check /dev/lemnos <device> <bind> <unbind> <cma heap> <system heap>` (init
 //! runs it as `/lemnos_lend_check`). Port of `testing/qemu/lemnos_lend_check.c` (CZ-GUEST-2), in the
-//! shared-memory ring form of `kernel/test/shm_ring.h` (I2b2-6): frames are read through the index,
+//! shared-memory ring form of `kernel/rs/stream_ring.rs` (I2b2-6): frames are read through the index,
 //! and no buffer is given back by a ring word.
 //!
 //! The uAPI structures are laid out in bytes, sized as the C structures are: `lemnos.h`'s
@@ -59,7 +59,7 @@ const _: () = assert!(
 const RING_STATE_OPEN: u32 = 0;
 const RING_STATE_FAULT: u32 = 2;
 
-// kernel/test/shm_ring.h (layout 2): the word numbers of the frame ring and the job block. The
+// kernel/rs/stream_ring.rs (layout 2): the word numbers of the frame ring and the job block. The
 // frame index holds, for each frame slot, the lane slot the frame was published in (from bit 16).
 // A lane slot is SHM_SLOT_WORDS words: the stamp, the time, the meta, then the 48-byte entry from
 // SHM_ENTRY on (the buffer in the pair word, the identity at SHM_ENTRY + 3).
@@ -494,7 +494,7 @@ enum FrameRead {
     Frame { buffer: u32, identity: u64 },
 }
 
-/// Frame `seq` through the index, as `shm_frame_read` reads it (`kernel/test/shm_ring.h`).
+/// Frame `seq` through the index, as a consumer reads the ring (`kernel/rs/stream_ring.rs`).
 fn shm_frame_read(ring: &[AtomicU64], frame_slots: usize, seq: u64) -> FrameRead {
     if ring[SHM_W_HEAD].load(Ordering::Acquire) <= seq {
         return FrameRead::NotYet;
