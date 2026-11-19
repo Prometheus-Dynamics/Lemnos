@@ -262,6 +262,17 @@ fn main() -> ExitCode {
             "no tree is made while the controller is away",
         );
         let status = |comm: &str| processes(comm).into_iter().next();
+        // The helper is forked by the root parent a moment after the parent starts, and it takes its
+        // name and drops to its capabilities after the fork. The retry above is the first event this
+        // check waits for, so it can come before the helper has done either. Wait, bounded, until the
+        // helper is in the state asserted below, then assert that state (no looser one).
+        let helper_as_asserted = || {
+            let (helper, parent) = (status("lemnosd-gadget"), status("lemnosd-gsuper"));
+            helper.is_some_and(|(_, uid, caps, ppid)| {
+                uid == 0 && caps == 1u64 << CAP_SYS_ADMIN && Some(ppid) == parent.map(|p| p.0)
+            })
+        };
+        daemon::wait_until(Duration::from_secs(10), helper_as_asserted);
         let (helper, parent) = (status("lemnosd-gadget"), status("lemnosd-gsuper"));
         say!("     helper {helper:?}, parent {parent:?}");
         check(
