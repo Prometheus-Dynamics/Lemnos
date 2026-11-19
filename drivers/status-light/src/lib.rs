@@ -6,6 +6,24 @@
 //! [`MAX_LOCAL_LEDS`] LEDs, then shown. Nothing is shown from a catalogue of named looks, except the
 //! built-in `status.*` ([`builtin`]).
 //!
+//! # Precedence
+//!
+//! Among the layers with a look, the highest priority is shown. On equal priorities the higher layer
+//! is shown. With no look on any layer, the board's default look (`default_look`, `status.ok` unless
+//! the board says otherwise) is shown. `clear(layer)` and `clear_all` empty layers whoever showed
+//! them, as they always have. Clearing a layer reveals the next look by the same rule.
+//!
+//! # Callers
+//!
+//! The driver is told who calls (`TRACKS_CALLERS`). A look is owned by the caller that showed it,
+//! and a `show` on a layer replaces the layer's owner too. When a caller goes (its connection
+//! closes, or it dies), the looks it showed end, and the light shows what it would show without
+//! them: the next live look by the rule above, or the default. Another caller's looks are not
+//! touched. A look the host shows itself (no client) is never ended by a caller going.
+//!
+//! The owner rule is per layer, not per LED: the light holds one look per layer, so the owner is the
+//! one who showed that look. Lemnos never blends looks; that is the caller's to decide.
+//!
 //! # Time
 //!
 //! The driver has no clock of its own. It is ticked (`Lifecycle::tick`) once after it starts, after
@@ -23,7 +41,8 @@
 //! # State
 //!
 //! Nothing is kept across a restart. A brightness set at runtime, or a look sent before, is
-//! forgotten; the board's settings ([`settings`]) are read again.
+//! forgotten; the board's settings ([`settings`]) are read again. The looks a caller holds are kept
+//! only while it is connected: they end with it (see "Callers").
 //!
 //! # `no_std`
 //!
@@ -60,8 +79,8 @@ use layers::{LAYERS, Layers};
 use lemnos_contract_light::{Layout, Light as LightContract};
 use lemnos_contract_pixels::{MAX_LOCAL_LEDS, Pixels};
 use lemnos_core::{
-    Config, ConfigError, Description, Dev, Health, Item, Key, Kind, Lifecycle, MethodId, Result,
-    Status, Unit, driver,
+    CallerId, Config, ConfigError, Description, Dev, Health, Item, Key, Kind, Lifecycle, MethodId,
+    Result, Status, Unit, driver,
 };
 
 const NS_PER_MS: u64 = 1_000_000;
@@ -87,6 +106,8 @@ pub struct StatusLight {
     shown: Option<Spec>,
     /// A method changed the layers or the runtime brightness since the last tick.
     changed: bool,
+    /// Who the method about to run is for (see [`Lifecycle::caller`]). A look shown now is theirs.
+    calling: CallerId,
     /// When the animator next renders, in nanoseconds (`None` while steady).
     render_at: Option<u64>,
     /// The frame in the animator has not reached the device.
@@ -176,12 +197,26 @@ impl Lifecycle for StatusLight {
             shown: None,
             // The first tick shows the default look, so the ring is never dark at start.
             changed: true,
+            calling: CallerId::LOCAL,
             render_at: None,
             unsent: false,
             retry_at: 0,
             backoff: 0,
             failed: false,
         })
+    }
+
+    /// The driver is told who calls, so a look is ended when its caller goes (`caller_gone`).
+    const TRACKS_CALLERS: bool = true;
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        if self.layers.drop_owner(caller) {
+            self.changed = true;
+        }
     }
 
     fn describe(&self, out: &mut Description) {
@@ -257,7 +292,7 @@ impl LightContract for StatusLight {
     fn show(&mut self, layer: u8, priority: u8, look: &[u8]) -> Result<()> {
         let layer = Self::layer(layer)?;
         let spec = Spec::decode(look)?;
-        self.layers.set(layer, priority, spec);
+        self.layers.set(layer, priority, spec, self.calling);
         self.changed = true;
         Ok(())
     }
