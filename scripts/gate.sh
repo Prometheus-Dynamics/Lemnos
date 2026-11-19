@@ -71,33 +71,44 @@ case "$part" in
   *) echo "GATE_PART=$part: expected all, checks or tests:K/N" >&2; exit 1 ;;
 esac
 
-# The steps run in two lanes at once. The cargo lane holds every step that builds or tests through
-# cargo: cargo holds the target directory's lock for the whole of each command, so those steps cannot
-# overlap, and they run in the order below. The side lane holds the steps that do not build: the
-# U-Boot check (QEMU), the packaging and kernel checks, and the cargo queries that read only the
-# lock file. Each step's output is kept whole and printed under its "==> label" line when it finishes,
-# with its "label: N s" line after it. A failing step's output is shown, the other lane is stopped,
-# and the gate fails.
+# The steps run in three lanes at once. The cargo lane holds the lint, the workspace tests, and the
+# steps after them that build the programs the tests start (lemnosd, lemnos-ctl): cargo holds the
+# target directory's lock for the whole of each build, so those steps cannot overlap, and they run in
+# the order below. The side lane holds the steps that do not build: the U-Boot check (QEMU), the
+# packaging and kernel checks, and the cargo queries that read only the lock file. The tail lane
+# holds the cargo steps that touch nothing the workspace tests start or read: the doc tests, the
+# builds for other targets, the shipped programs (their own profile) and the library crates. It
+# starts once the workspace tests are built and running, when cargo's lock is free, and runs beside
+# them. Each step's output is kept whole and printed under its "==> label" line when it finishes,
+# with its "label: N s" line after it. A failing step's output is shown, the other lanes are
+# stopped, and the gate fails.
 gate_out="$(mktemp -d "${TMPDIR:-/tmp}/gate-out.XXXXXX")"
-lane_c=0 lane_s=0
+declare -A lane_pid=([c]=0 [s]=0 [t]=0)
 stop_lanes() {
-  # Only the two lanes this shell started, and their children: each lane is its own process group.
-  [ "$lane_c" = 0 ] || kill -TERM -- "-$lane_c" 2>/dev/null || true
-  [ "$lane_s" = 0 ] || kill -TERM -- "-$lane_s" 2>/dev/null || true
+  # Only the lanes this shell started, and their children: each lane is its own process group.
+  local lane
+  for lane in c s t; do
+    [ "${lane_pid[$lane]}" = 0 ] || kill -TERM -- "-${lane_pid[$lane]}" 2>/dev/null || true
+  done
 }
 trap 'stop_lanes; rm -rf -- "$gate_out"' EXIT
 
-# unit <key> <label> <command...>: runs one step, its output into $gate_out/<key>.out. The .rc
-# file is written last: a step is finished when it exists.
+# unit <key> <label> <command...>: runs one step, its output into $gate_out/<key>.out (the step
+# can read its own output file as $unit_out). The .rc file is written last: a step is finished when
+# it exists.
 unit() {
   local key="$1" label="$2" start=$SECONDS rc=0
   shift 2
   echo "$label" >"$gate_out/$key.label"
-  "$@" >"$gate_out/$key.out" 2>&1 || rc=$?
+  unit_out="$gate_out/$key.out"
+  "$@" >"$unit_out" 2>&1 || rc=$?
   echo "$((SECONDS - start))" >"$gate_out/$key.secs"
   echo "$rc" >"$gate_out/$key.rc"
   return "$rc"
 }
+
+use_nextest=0
+if [ "${GATE_TESTS:-nextest}" = nextest ] && cargo nextest --version >/dev/null 2>&1; then use_nextest=1; fi
 
 cargo_lane() {
   local n=0
@@ -108,18 +119,66 @@ cargo_lane() {
   # tests, so those follow. Without cargo-nextest (or with GATE_TESTS=cargo) the plain form runs: the
   # same tests, slower. GATE_TEST_JOBS caps how many tests run at once (default: every core this
   # process may use).
+  # The tail lane waits for the tests to be built and running: nextest says "Starting N tests"
+  # when its build is over and cargo's lock is free. tests.over is there once the step has ended,
+  # whichever way, so the tail lane never waits on a build that failed.
   workspace_tests() {
-    if [ "${GATE_TESTS:-nextest}" = nextest ] && cargo nextest --version >/dev/null 2>&1; then
-      # Both run whatever the other reports: the step fails if either does (a function's status is its last command's).
-      local nt=0 dt=0
-      cargo nextest run --workspace --no-fail-fast --test-threads "${GATE_TEST_JOBS:-$(nproc)}" || nt=$?
-      cargo test --workspace --doc || dt=$?
-      [ "$nt" = 0 ] && [ "$dt" = 0 ]
+    local rc=0 watcher
+    if [ "$use_nextest" = 1 ]; then
+      (until grep -qE '^ *Starting [0-9]+ tests' "$unit_out" 2>/dev/null; do sleep 0.2; done
+        touch "$gate_out/tests.running") &
+      watcher=$!
+      cargo nextest run --workspace --no-fail-fast --test-threads "${GATE_TEST_JOBS:-$(nproc)}" || rc=$?
+      kill "$watcher" 2>/dev/null || true
     else
-      cargo test --workspace
+      cargo test --workspace || rc=$?
     fi
+    touch "$gate_out/tests.over"
+    return "$rc"
   }
   [ "$part" = checks ] || lane_step tests workspace_tests
+
+  lane_step "counters on" cargo test -q -p lemnos-measure --features perf,alloc-count
+  # A setting's meaning never depends on a feature: the same board text runs the same tests with and
+  # without `std` (the generic sensors' `description_file`, the gadget's `interfaces_file`).
+  lane_step "generic sensor, no std" cargo test -q -p lemnos-driver-generic-sensor
+  lane_step "generic sensor, std" cargo test -q -p lemnos-driver-generic-sensor --features std
+  lane_step "usb gadget, no std" cargo test -q -p lemnos-driver-usb-gadget
+  lane_step "usb gadget, std" cargo test -q -p lemnos-driver-usb-gadget --features std
+  lane_step "client on tokio" cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
+  lane_step "client on tokio" cargo test -q -p lemnos-client --features tokio
+  lane_step "C surface, shared form" cargo test -q -p lemnos-capi --features shared
+  # The vendor-header layouts: with no header given, the tool says per variant which header it needs and
+  # compares nothing (the drivers' own layout assertions are compiled and tested above).
+  lane_step "layout headers, not run in the gate" cargo run -q -p lemnos-layout-check
+
+  # The generated overlays compile with the dtc the contract names (built from its pinned release) with
+  # every warning class an error, and apply to a base built from their SoC map (testing/devtree/check.sh).
+  lane_step devtree testing/devtree/check.sh
+  # Every command in the documents runs against the simulated board, and every link leads somewhere.
+  lane_step documents scripts/check-docs.py
+  # The mdev.conf that `lemnos-ctl tree --mdev` writes is run by BusyBox 1.37.0 and 1.38.0 (their
+  # mdev, built from the pinned release tarballs), in a namespace, and each node's owner, group and mode
+  # are checked against the udev rule for the same device. CI builds them first (BUSYBOX_DIR, cached).
+  lane_step mdev testing/mdev/check.sh
+}
+
+# The cargo steps that can run beside the workspace tests. None builds a program the tests start,
+# and none writes where the tests' programs are: the doc tests build nothing new, the checks for other
+# targets and the shipped programs have their own directories under the target, and the library
+# crates have no programs. A step that builds lemnosd or lemnos-ctl for this machine is not one of
+# them (the tests start those, and a build with other features would swap them mid-run): those stay
+# in the cargo lane, after the tests.
+tail_lane() {
+  local n=0
+  lane_step() { n=$((n + 1)); unit "t$(printf %03d "$n")" "$@"; }
+  if [ "$part" != checks ]; then
+    until [ -f "$gate_out/tests.running" ] || [ -f "$gate_out/tests.over" ]; do sleep 0.2; done
+  fi
+  # cargo-nextest does not run doc tests, so they run here. (The plain form runs them with the tests.)
+  if [ "$part" != checks ] && [ "$use_nextest" = 1 ]; then
+    lane_step "doc tests" cargo test --workspace --doc
+  fi
 
   # What must still build without std, on the targets a microcontroller host uses.
   no_std_crates=(lemnos-abi lemnos-hal lemnos-core lemnos-contract-accelerometer lemnos-contract-gyroscope lemnos-contract-magnetometer lemnos-contract-orientation lemnos-driver-orientation lemnos-host-static lemnos-mcu lemnos-driver-usb-gadget lemnos-driver-generic-sensor shm-sample-time)
@@ -139,33 +198,10 @@ cargo_lane() {
     done
   done
 
-  lane_step "counters on" cargo test -q -p lemnos-measure --features perf,alloc-count
-  # A setting's meaning never depends on a feature: the same board text runs the same tests with and
-  # without `std` (the generic sensors' `description_file`, the gadget's `interfaces_file`).
-  lane_step "generic sensor, no std" cargo test -q -p lemnos-driver-generic-sensor
-  lane_step "generic sensor, std" cargo test -q -p lemnos-driver-generic-sensor --features std
-  lane_step "usb gadget, no std" cargo test -q -p lemnos-driver-usb-gadget
-  lane_step "usb gadget, std" cargo test -q -p lemnos-driver-usb-gadget --features std
-  lane_step "client on tokio" cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
-  lane_step "client on tokio" cargo test -q -p lemnos-client --features tokio
-  lane_step "C surface, shared form" cargo test -q -p lemnos-capi --features shared
-  # The vendor-header layouts: with no header given, the tool says per variant which header it needs and
-  # compares nothing (the drivers' own layout assertions are compiled and tested above).
-  lane_step "layout headers, not run in the gate" cargo run -q -p lemnos-layout-check
-
   # The crates used as plain libraries, alone and without their driver halves.
   lane_step libraries scripts/check-libraries.sh
   # The shipped programs (packaging/shipped.txt) agree: see scripts/check-products.sh.
   lane_step products scripts/check-products.sh
-  # The generated overlays compile with the dtc the contract names (built from its pinned release) with
-  # every warning class an error, and apply to a base built from their SoC map (testing/devtree/check.sh).
-  lane_step devtree testing/devtree/check.sh
-  # Every command in the documents runs against the simulated board, and every link leads somewhere.
-  lane_step documents scripts/check-docs.py
-  # The mdev.conf that `lemnos-ctl tree --mdev` writes is run by BusyBox 1.37.0 and 1.38.0 (their
-  # mdev, built from the pinned release tarballs), in a namespace, and each node's owner, group and mode
-  # are checked against the udev rule for the same device. CI builds them first (BUSYBOX_DIR, cached).
-  lane_step mdev testing/mdev/check.sh
 }
 
 side_lane() {
@@ -194,13 +230,14 @@ side_lane() {
   lane_step uboot testing/uboot/check.sh
 }
 
-# Both lanes start; the main shell prints each finished step, in its lane's order, as it finishes.
+# The lanes start; the main shell prints each finished step, in its lane's order, as it finishes.
 # set -m gives each lane its own process group, so a failure can stop exactly the groups started here.
 set -m
-cargo_lane & lane_c=$!
-side_lane & lane_s=$!
+cargo_lane & lane_pid[c]=$!
+side_lane & lane_pid[s]=$!
+tail_lane & lane_pid[t]=$!
 set +m
-declare -A next=([c]=1 [s]=1)
+declare -A next=([c]=1 [s]=1 [t]=1) lane_name=([c]=cargo [s]=side [t]=tail)
 show() { # prints the finished steps of lane $1 that are next in its order; a failing one stops the gate
   local lane="$1" key label rc
   while :; do
@@ -219,23 +256,19 @@ show() { # prints the finished steps of lane $1 that are next in its order; a fa
     next[$lane]=$(( next[$lane] + 1 ))
   done
 }
-done_c=0 done_s=0
-while [ "$done_c" = 0 ] || [ "$done_s" = 0 ]; do
-  show c
-  show s
-  if [ "$done_c" = 0 ] && ! kill -0 "$lane_c" 2>/dev/null; then
-    rc=0; wait "$lane_c" || rc=$?
-    show c
-    [ "$rc" = 0 ] || { echo "gate: the cargo lane stopped (exit $rc) before its step finished" >&2; stop_lanes; exit 1; }
-    done_c=1 lane_c=0
-  fi
-  if [ "$done_s" = 0 ] && ! kill -0 "$lane_s" 2>/dev/null; then
-    rc=0; wait "$lane_s" || rc=$?
-    show s
-    [ "$rc" = 0 ] || { echo "gate: the side lane stopped (exit $rc) before its step finished" >&2; stop_lanes; exit 1; }
-    done_s=1 lane_s=0
-  fi
-  if [ "$done_c" = 0 ] || [ "$done_s" = 0 ]; then sleep 0.2; fi
+running=3
+while [ "$running" -gt 0 ]; do
+  for lane in c s t; do
+    show "$lane"
+    if [ "${lane_pid[$lane]}" != 0 ] && ! kill -0 "${lane_pid[$lane]}" 2>/dev/null; then
+      rc=0; wait "${lane_pid[$lane]}" || rc=$?
+      show "$lane"
+      [ "$rc" = 0 ] || { echo "gate: the ${lane_name[$lane]} lane stopped (exit $rc) before its step finished" >&2; stop_lanes; exit 1; }
+      lane_pid[$lane]=0
+      running=$((running - 1))
+    fi
+  done
+  if [ "$running" -gt 0 ]; then sleep 0.2; fi
 done
 
 echo "gate passed${GATE_PART:+ (part $GATE_PART)}"
