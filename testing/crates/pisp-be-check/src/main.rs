@@ -113,6 +113,21 @@ enum FrameRead {
     Frame(ShmFrame),
 }
 
+/// How long a job's frame may take to appear once its completion is posted, on the clock. The
+/// module finishes a job the block never reported on its own watchdog (`LPB_TIMEOUT_MS`, 1 s), so
+/// the wait covers that recovery with room left over on a loaded host.
+const FRAME_WAIT: Duration = Duration::from_secs(5);
+
+/// What a frame wait got: the frame's buffer and identity (buffer -1 when none came in time), the
+/// frames of other jobs passed over first, and the time the wait took.
+#[derive(Debug, Clone, Copy)]
+struct Got {
+    buffer: i64,
+    identity: u64,
+    stale: u32,
+    elapsed: Duration,
+}
+
 /// The fields of a published frame that the check uses.
 struct ShmFrame {
     buffer: u32,
@@ -764,18 +779,46 @@ impl Stream {
     /// The next frame: its buffer (-1 if none arrives in time) and its identity. A buffer needs no
     /// giving back: with no reader marking it, the module takes it back when it needs it.
     fn wait_frame(&self) -> (i64, u64) {
-        for _ in 0..1000 {
+        let got = self.wait_frame_for(None);
+        (got.buffer, got.identity)
+    }
+
+    /// The next frame whose identity is `want` (any frame when None), on the clock. Frames of other
+    /// jobs that come first are passed over and counted; the wait ends after `FRAME_WAIT`, however
+    /// many times it woke up in between.
+    fn wait_frame_for(&self, want: Option<u64>) -> Got {
+        let t0 = Instant::now();
+        let mut stale = 0;
+        loop {
             match shm_frame_read(self.words(), FRAME_SLOTS, self.frames_tail.get()) {
                 FrameRead::Frame(f) => {
                     self.last_start.set(f.timestamp_ns);
                     self.last_end.set(f.end_ns);
                     self.frames_tail.set(self.frames_tail.get() + 1);
-                    return (i64::from(f.buffer), f.identity);
+                    if want.is_none_or(|w| w == f.identity) {
+                        return Got {
+                            buffer: i64::from(f.buffer),
+                            identity: f.identity,
+                            stale,
+                            elapsed: t0.elapsed(),
+                        };
+                    }
+                    stale += 1;
                 }
-                FrameRead::NotYet | FrameRead::Reused => thread::sleep(Duration::from_millis(2)),
+                FrameRead::NotYet | FrameRead::Reused => {
+                    let elapsed = t0.elapsed();
+                    if elapsed >= FRAME_WAIT {
+                        return Got {
+                            buffer: -1,
+                            identity: 0,
+                            stale,
+                            elapsed,
+                        };
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
         }
-        (-1, 0)
     }
 }
 
@@ -1853,7 +1896,16 @@ fn race_epoch(st: &Stream, addr: &Addrs, next: &mut u64, ran: &mut u32, refused:
             }
             *ran += 1;
             st.complete_job(1, 1);
-            check(st.wait_frame().0 == 0, "wait_frame(&st, NULL) == 0");
+            let got = st.wait_frame_for(Some(*next));
+            if got.buffer != 0 || got.identity != *next {
+                fail(&format!(
+                    "job {next}: wait_frame got buffer {} identity {:#x} after {} ms, {} stale frames passed (wanted buffer 0, identity {next})",
+                    got.buffer,
+                    got.identity,
+                    got.elapsed.as_millis(),
+                    got.stale
+                ));
+            }
             *next += 1;
         };
         stop.store(true, Ordering::Relaxed);
