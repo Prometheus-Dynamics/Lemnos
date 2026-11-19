@@ -50,6 +50,13 @@ pub const PIECE: u32 = 1 << 5;
 /// linked in) runs it; any other image refuses the flag by its SoC reset.
 pub const CHECK: u32 = 1 << 6;
 
+/// Mode flag: the B2 scratch build ([`crate::fl1::scratch`]): the FL1 stage's own USB device path over the card,
+/// reachable only inside the scratch range, fed per verified round. It is always sent with [`CHECK`] (mode
+/// `scratch`), so an image that is not the scratch build never touches a card on it: the card image refuses
+/// [`CHECK`] by its SoC reset, and the check build runs its RAM window and identifies as the check build, which
+/// the host refuses before it sends a write. Only the scratch build runs it, and only with both flags.
+pub const SCRATCH: u32 = 1 << 7;
+
 /// The mode word of a named run: the five probe runs and the stage.
 pub fn mode_word(name: &str) -> Option<u32> {
     match name {
@@ -62,6 +69,7 @@ pub fn mode_word(name: &str) -> Option<u32> {
         "report" => Some(REPORT | WDT0),
         "piece" => Some(PIECE | WDT0),
         "check" => Some(CHECK | STAGE | WDT0 | WDT1),
+        "scratch" => Some(SCRATCH | CHECK | STAGE | WDT0 | WDT1),
         _ => None,
     }
 }
@@ -158,6 +166,11 @@ mod tests {
         assert_eq!(mode_word("soc"), Some(SOC_AT_ONCE));
         assert_eq!(mode_word("stage"), Some(STAGE | WDT0 | WDT1));
         assert_eq!(mode_word("check"), Some(CHECK | STAGE | WDT0 | WDT1));
+        // The scratch mode carries the check flag too: the card image resets on it, never reaching its card code.
+        let scratch = mode_word("scratch").unwrap();
+        assert_eq!(scratch, SCRATCH | CHECK | STAGE | WDT0 | WDT1);
+        assert_ne!(scratch & CHECK, 0);
+        assert_eq!(mode_word("check").unwrap() & SCRATCH, 0);
         assert_eq!(mode_word("five"), None);
     }
 

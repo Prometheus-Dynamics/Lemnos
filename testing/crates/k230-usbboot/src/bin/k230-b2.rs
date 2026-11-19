@@ -1,13 +1,19 @@
 //! The B2 run (`testing/board-runs/K230-USB.md`, "B2"): the FL1 stage's own USB device path, first run.
 //!
 //! ```text
-//! k230-b2 run --image B2.bin --record FILE [--console TTY]... [--port P] [--dry]
+//! k230-b2 run --image B2.bin [--image-sha SHA] --record FILE [--console TTY]... [--port P] [--dry]
+//! k230-b2 write --image SCRATCH.bin --image-sha SHA --record FILE [--console TTY]... [--port P] [--dry]
 //! k230-b2 rehearse CASE --record FILE
 //! ```
 //!
 //! `run` holds the board's lock, loads the check build (`--b2` image, patched to `check` mode) through
 //! the boot ROM at the port, reads the consoles read-only, and runs the host check (`lemnos_k230_usbboot::b2`).
 //! `--dry` reads sysfs and the image and prints what would be done; it takes no lock and opens nothing.
+//!
+//! `write` is the card write run (`testing/board-runs/K230-USB.md`, "B2 card writes"): the same, with the scratch
+//! build (`--b2-card` image, patched to `scratch` mode with the SD controller `sdhci1`, the piece path's) and the
+//! host's scratch steps (`lemnos_k230_usbboot::b2::scratch`). The image's SHA-256 (before the patch) must be the one
+//! given, or nothing is loaded. It writes the card, only inside the scratch range.
 //!
 //! `rehearse` runs the same host check against the rehearsal's board (`lemnos_k230_usbboot::b2sim`): the
 //! check build's own code over a register model. The cases: `good`, `no-access`, `wrong-product`,
@@ -17,6 +23,14 @@
 //! finishes the stage's node 400 ms after the kernel publishes it, B2 run 3), `time-stopped`
 //! (the ROM's state: `time` at 0 until the stage enables it; every case's default), `time-dead`, `time-running`.
 //!
+//! The card write cases (the scratch build's own code over the same models, with the SD controller and a card of
+//! the card of record's size in its slot, `lemnos_k230_usbboot::sdcard`; the plan's hashes taken from the model
+//! card before and after): `scratch-good`, `scratch-wrong-card` (another card: the stage must not start),
+//! `scratch-drops-writes` (the card keeps its old content: the first write must fail its compare and the run stop),
+//! `scratch-crc-retry` (one sector's data fails its CRC twice: tried again and counted), `scratch-no-sd` (no
+//! controller named), `scratch-pads-off` (an SD pad on another function), `scratch-on-check-image` (the check
+//! build answers the scratch mode: the host must send it no write).
+//!
 //! Exit 0 only when the check passed (or the rehearsal's case ended as it must) and the boot ROM came back.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -25,10 +39,12 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use lemnos_driver_k230_usbboot_sys::scratch;
 use lemnos_k230_usbboot::b2::{self, Board, Plan, Verdict, usb::Sysfs};
-use lemnos_k230_usbboot::b2sim::{CoreRev, Faults, Reset, SimBoard, TimeCsr};
+use lemnos_k230_usbboot::b2sim::{Build, CoreRev, Faults, Reset, SimBoard, TimeCsr, card_run};
 use lemnos_k230_usbboot::bootrom::{CPU_INFO_LEN, PAGE, PROG_START, SET_DATA_ADDRESS};
 use lemnos_k230_usbboot::console::Console;
+use lemnos_k230_usbboot::sdcard::SimCard;
 use lemnos_k230_usbboot::transport::UsbIo;
 use lemnos_k230_usbboot::usb::RusbIo;
 use lemnos_k230_usbboot_stage::image::{LOAD_ADDRESS, SD_NONE, mode_word, patch};
@@ -100,9 +116,11 @@ fn main() {
             .unwrap_or_else(|| die("--record is required")),
     );
     let ok = match (command.as_str(), case) {
+        ("rehearse", Some(case)) if case.starts_with("scratch-") => rehearse_card(&case, &record),
         ("rehearse", Some(case)) => rehearse(&case, &record),
-        ("run", None) => board_run(&opt, &consoles, dry, &record),
-        _ => die("run or rehearse"),
+        ("run", None) => board_run(&opt, &consoles, dry, &record, false),
+        ("write", None) => board_run(&opt, &consoles, dry, &record, true),
+        _ => die("run, write or rehearse"),
     };
     std::process::exit(if ok { 0 } else { 1 });
 }
@@ -215,6 +233,114 @@ fn rehearse(case: &str, record: &Record) -> bool {
     ok
 }
 
+/// What a card write case sets, and the verdict it must end with.
+fn card_case(case: &str) -> (Faults, SimCard, fn(&Verdict) -> bool) {
+    let mut f = Faults {
+        build: Build::Scratch,
+        ..Faults::default()
+    };
+    let mut card = SimCard::of_record();
+    let want: fn(&Verdict) -> bool = match case {
+        "scratch-good" | "scratch-crc-retry" => |v| *v == Verdict::Passed,
+        "scratch-wrong-card" | "scratch-no-sd" | "scratch-pads-off" => {
+            |v| matches!(v, Verdict::GaveUp(_))
+        }
+        "scratch-drops-writes" => {
+            |v| matches!(v, Verdict::Failed(f) if f.iter().any(|t| t.contains("status 3")))
+        }
+        "scratch-on-check-image" => {
+            |v| matches!(v, Verdict::Failed(f) if f.iter().any(|t| t.contains("not the scratch build")))
+        }
+        other => die(&format!("unknown case {other}")),
+    };
+    match case {
+        "scratch-wrong-card" => card = SimCard::another(),
+        "scratch-drops-writes" => card.drops_writes = true,
+        "scratch-crc-retry" => {
+            card.crc_fails = Some((u64::from(b2::scratch::RANGE_SECTORS) / 2 + 1_048_576, 2))
+        }
+        "scratch-no-sd" => f.no_sd_parameter = true,
+        "scratch-pads-off" => f.sd_pads_off = true,
+        "scratch-on-check-image" => f.build = Build::Check,
+        _ => {}
+    }
+    (f, card, want)
+}
+
+fn rehearse_card(case: &str, record: &Record) -> bool {
+    let (faults, card, want) = card_case(case);
+    record.note(&format!("rehearsal {case}: faults {faults:?}; the card: CID {}, {} blocks, drops writes {}, CRC fails {:?}",
+        lemnos_k230_usbboot::hex(&card.cid), card.blocks, card.drops_writes, card.crc_fails));
+    record.note("the board: the scratch build's code (lemnos_driver_k230_usbboot_sys::scratch::scratch and end: the dwc2 driver, the FL1 device and session, the SD host, Scratch over Sectors over Retried) over the register models, the SD controller with the card in its slot; the host: lemnos_k230_usbboot::b2::run in scratch mode, the code the write run uses; the hashes: the plan's regions, read from the model card where the board run uses the piece path");
+    let plan = Plan::scratch();
+    record.note(&format!("plan: {plan:?}"));
+    let run = card_run(faults, card, &plan, &mut |t| {
+        record.note(&format!("host: {t}"))
+    });
+    for (at, line) in &run.console {
+        record.note(&format!("console {at:.3}: {line}"));
+    }
+    for (at, reset) in &run.resets {
+        record.note(&format!("board reset at {at:.3} s: {reset:?}"));
+    }
+    let (inside, outside) = run
+        .writes
+        .iter()
+        .partition::<Vec<u64>, _>(|lba| (1_048_576..=1_050_623).contains(*lba));
+    record.note(&format!(
+        "card writes: {} in all, {} inside the scratch range, {} outside",
+        run.writes.len(),
+        inside.len(),
+        outside.len()
+    ));
+    let problems = run.problems();
+    for text in &problems {
+        record.note(&format!("PROBLEM: {text}"));
+    }
+    if problems.is_empty() {
+        record.note("every plan region hashes as before (the range too, zeroed at the end), and no card write fell outside the range");
+    }
+    let mut ok = want(&run.outcome.verdict) && run.outcome.back.is_some() && problems.is_empty();
+    ok &= !run.resets.is_empty() && run.resets.iter().all(|(_, r)| *r == Reset::Soc);
+    let console: Vec<&str> = run.console.iter().map(|(_, l)| l.as_str()).collect();
+    let needs: &[&str] = match case {
+        "scratch-good" => &["b2 card: the card of record", "b2 card-retries 00000000"],
+        "scratch-crc-retry" => &["b2 card-retries 00000002"],
+        "scratch-wrong-card" => &[scratch::NOT_THE_CARD_LINE],
+        "scratch-no-sd" => &[scratch::NO_CONTROLLER_LINE],
+        "scratch-pads-off" => &[scratch::PADS_LINE],
+        _ => &[],
+    };
+    for need in needs {
+        let found = console.iter().any(|l| l.starts_with(need));
+        record.note(&format!(
+            "console {} {need:?}",
+            if found { "has" } else { "LACKS" }
+        ));
+        ok &= found;
+    }
+    let writes_ok = match case {
+        "scratch-good" | "scratch-crc-retry" => inside.len() == 2 + 2 * 2048,
+        "scratch-drops-writes" => run.writes.len() == 1,
+        _ => run.writes.is_empty(),
+    };
+    record.note(&format!(
+        "card writes as the case must have them: {writes_ok}"
+    ));
+    ok &= writes_ok;
+    record.note(&format!(
+        "rehearsal {case}: {} (verdict {:?}; resets {:?}; back {:?})",
+        if ok { "AS IT MUST" } else { "NOT AS IT MUST" },
+        run.outcome.verdict,
+        run.resets,
+        run.outcome
+            .back
+            .as_ref()
+            .map(|(s, after)| (s.devnum, *after))
+    ));
+    ok
+}
+
 fn sha(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -251,6 +377,7 @@ fn board_run(
     console_paths: &[String],
     dry: bool,
     record: &Record,
+    write: bool,
 ) -> bool {
     let port = opt
         .get("port")
@@ -261,14 +388,39 @@ fn board_run(
             .unwrap_or_else(|| die("--image is required")),
     )
     .unwrap_or_else(|e| die(&format!("the image: {e}")));
-    let mode = mode_word("check").unwrap_or_else(|| die("no check mode"));
-    patch(&mut image, mode, SD_NONE).unwrap_or_else(|e| die(e));
+    let built = sha(&image);
+    match opt.get("image-sha") {
+        Some(want) if *want == built => {}
+        Some(want) => {
+            record.note(&format!(
+                "STOP: the image's sha256 is {built}, not {want}: nothing loaded"
+            ));
+            return false;
+        }
+        None if write => {
+            die("write needs --image-sha: the card write run loads only the image it names")
+        }
+        None => {}
+    }
+    // The write run names the slot's controller, sdhci1, as the piece path does; the check run names none.
+    let (name, sd) = if write {
+        ("scratch", 1)
+    } else {
+        ("check", SD_NONE)
+    };
+    let mode = mode_word(name).unwrap_or_else(|| die("no such mode"));
+    patch(&mut image, mode, sd).unwrap_or_else(|e| die(e));
     let plan = Plan {
         port: port.clone(),
-        ..Plan::board()
+        ..if write {
+            Plan::scratch()
+        } else {
+            Plan::board()
+        }
     };
     record.note(&format!(
-        "b2 run: image {} bytes sha256 {} (patched: mode check {mode:#x}) at {LOAD_ADDRESS:#010x}; plan {plan:?}",
+        "b2 {}: image sha256 {built} as built; {} bytes sha256 {} patched (mode {name} {mode:#x}, sd {sd}) at {LOAD_ADDRESS:#010x}; plan {plan:?}",
+        if write { "write" } else { "run" },
         image.len(),
         sha(&image)
     ));

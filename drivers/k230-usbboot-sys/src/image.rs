@@ -15,11 +15,24 @@
 //! ([`run_check`]: the FL1 stage's USB device path over a RAM window, `fl1::check`), and nothing reaches the
 //! SD host, so the linker drops its code (`check.sh --b2` checks the image for it).
 //!
+//! Built with the `b2-card` feature, the image is the B2 scratch build: [`lemnos_image_run`] runs only the scratch
+//! run (`run_scratch`: the same USB device path over the card, reachable only inside the scratch range,
+//! `crate::scratch`), and only on the `scratch` mode (both its flag and the check flag). The card image's own runs
+//! (the piece, the report, the stage) are not reached, so the linker drops them (`check.sh --b2-card` checks).
+//!
 //! The image is linked at `LOAD_ADDRESS` (`drivers/k230-usbboot-image/image.ld`), so it is not
 //! position-independent: the host loads it there and only there.
 
 // The check build reaches only its own run: the rest of this file is not called, and the linker drops it.
-#![cfg_attr(feature = "b2", allow(dead_code, unused_imports))]
+#![cfg_attr(
+    any(feature = "b2", feature = "b2-card"),
+    allow(dead_code, unused_imports)
+)]
+
+#[cfg(all(feature = "b2", feature = "b2-card"))]
+compile_error!(
+    "the check build (b2) and the scratch build (b2-card) are two images: build one at a time"
+);
 
 use lemnos_k230_usbboot_stage::bounds::CARD_DECLARED;
 use lemnos_k230_usbboot_stage::image::{
@@ -274,7 +287,7 @@ pub unsafe extern "C" fn lemnos_image_entry() -> ! {
 /// The run the entry calls once the watchdogs the mode names are armed and read back: the stage (its
 /// medium, its device path and its state machine) or a probe (telemetry and the deadline). This image is
 /// not the check build: the check mode is refused by the SoC reset.
-#[cfg(not(feature = "b2"))]
+#[cfg(not(any(feature = "b2", feature = "b2-card")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn lemnos_image_run(flags: u32) -> ! {
     if flags & CHECK != 0 {
@@ -882,5 +895,84 @@ mod b2 {
             &mut known,
         );
         end(&mut regs, &STATS, &known, read_time(), cause)
+    }
+}
+
+/// The scratch build's run: the mode must be the scratch mode (its flag and the check flag), or the SoC reset.
+#[cfg(feature = "b2-card")]
+#[unsafe(no_mangle)]
+pub extern "C" fn lemnos_image_run(flags: u32) -> ! {
+    use lemnos_k230_usbboot_stage::image::SCRATCH;
+    if flags & SCRATCH != 0 && flags & CHECK != 0 {
+        scratch_run::run_scratch()
+    }
+    soc_reset()
+}
+
+/// The B2 scratch run (`crate::scratch`).
+#[cfg(feature = "b2-card")]
+mod scratch_run {
+    use super::{read_sd_parameter, read_time};
+    use crate::Mmio;
+    use crate::b2::{Known, RX_LEN};
+    use crate::dwc2::{Stats, Trace, Window};
+    use crate::scratch::{Buffers, CardSeen, end, scratch};
+    use crate::sdhci;
+    use lemnos_flash_stage::serve::BUFFER_LEN;
+    use lemnos_flash_stage::wait::Clock;
+    use lemnos_k230_usbboot_stage::fl1::check::TIMEBASE_HZ;
+    use lemnos_k230_usbboot_stage::pads::PadGuard;
+    use lemnos_k230_usbboot_stage::sd::controller_from_parameter;
+
+    // The run's buffers, in .bss (the entry zeroes it). Each is borrowed once, in `run_scratch`.
+    static mut BUF: [u8; BUFFER_LEN] = [0; BUFFER_LEN];
+    static mut SCRATCH: [u8; BUFFER_LEN] = [0; BUFFER_LEN];
+    static mut RX: [u8; RX_LEN] = [0; RX_LEN];
+
+    /// The driver's counts, read by the end.
+    static TRACE: Trace = Trace::new();
+    static STATS: Stats = Stats::traced(&TRACE);
+
+    /// The session's clock: the `time` CSR at [`TIMEBASE_HZ`], in microseconds.
+    #[derive(Clone, Copy)]
+    struct Micros;
+
+    impl Clock for Micros {
+        fn now_us(&mut self) -> u64 {
+            read_time() / (TIMEBASE_HZ / 1_000_000)
+        }
+    }
+
+    /// The run on the board's buses (`crate::scratch`), then its end: the card's lines, the record, the cause,
+    /// the SoC reset. The SD controller is the one the host named in the mode block, or none (the run then
+    /// refuses before the card).
+    pub(super) fn run_scratch() -> ! {
+        let mut regs = PadGuard::new(Mmio);
+        let mut known = Known::new(read_time());
+        let card = CardSeen::new();
+        let sd = read_sd_parameter()
+            .and_then(|v| controller_from_parameter(v).ok())
+            .map(sdhci::Window::of);
+        // SAFETY: each static is borrowed exactly once, here, for the rest of the run (it never returns).
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
+        // SAFETY: as above, for the scratch buffer.
+        let scratch_buf = unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) };
+        // SAFETY: as above, for the bulk OUT buffer.
+        let rx = unsafe { &mut *core::ptr::addr_of_mut!(RX) };
+        let cause = scratch(
+            &mut regs,
+            Window,
+            sd,
+            &mut Micros,
+            Buffers {
+                buf,
+                scratch: scratch_buf,
+                rx,
+            },
+            &STATS,
+            &mut known,
+            &card,
+        );
+        end(&mut regs, &STATS, &known, &card, read_time(), cause)
     }
 }

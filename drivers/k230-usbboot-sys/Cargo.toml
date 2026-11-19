@@ -33,5 +33,10 @@ lemnos-flash-wire = { path = "../flash-wire" }
 # The B2 check build: the image runs only the check (fl1::check), and the SD host code is not reached, so
 # the linker drops it. drivers/k230-usbboot-image/check.sh --b2 builds it and checks the image for it.
 b2 = ["ep0-trace"]
-# The endpoint 0 trace (dwc2::Trace): kept by the B2 build and the PC rehearsal, not by the card build.
+# The B2 scratch build: the image runs only the scratch run (crate::scratch: the B2 USB device path over the card,
+# reachable only inside the scratch range). The card image's piece, report and stage runs are not reached, so the
+# linker drops them. drivers/k230-usbboot-image/check.sh --b2-card builds it and checks the image for it. It keeps
+# the endpoint 0 trace, so its USB driver is the code the check build ran on the board.
+b2-card = ["ep0-trace"]
+# The endpoint 0 trace (dwc2::Trace): kept by the B2 builds and the PC rehearsal, not by the card image.
 ep0-trace = []

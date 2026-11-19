@@ -23,9 +23,13 @@
 //!    record read back and checked (speed, SET_ADDRESS order, the bulk OUT re-arm after each frame); END.
 //!    No request addresses a sector outside the window and the record unless [`Plan::outside_window`] is set
 //!    (the rehearsal sets it; the board run does not).
+//!    With [`Mode::Scratch`] step 5 is the card writes instead ([`scratch`]: the scratch build's identity, the
+//!    range read before, written and read back, the deliberate writes outside it refused, the range zeroed and read
+//!    back; END).
 //! 6. **The way back**: the boot ROM at the port again, under a new device number, bounded ([`Bounds::back`]).
 //!    Waited for after every outcome, refusals included: the board returns by itself.
 
+pub mod scratch;
 pub mod usb;
 
 use std::time::{Duration, Instant};
@@ -194,14 +198,27 @@ pub trait Board {
     fn open(&mut self, seen: &Seen) -> Result<Box<dyn Link>, String>;
 }
 
+/// Which build the run is for, and so which bulk checks it makes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// The check build: the RAM window and the record (step 5 above).
+    #[default]
+    Check,
+    /// The scratch build: the card writes inside the scratch range ([`scratch`]).
+    Scratch,
+}
+
 /// What the run does.
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub port: String,
     pub bounds: Bounds,
     /// Also send the requests that address sectors outside the window (each must be refused with status
-    /// 2). The rehearsal sets it; the board's first run does not (no request outside the window).
+    /// 2). The rehearsal sets it; the board's first run does not (no request outside the window). The check
+    /// build's only.
     pub outside_window: bool,
+    /// The build the run is for.
+    pub mode: Mode,
 }
 
 impl Plan {
@@ -211,6 +228,15 @@ impl Plan {
             port: PORT.to_string(),
             bounds: Bounds::BOARD,
             outside_window: false,
+            mode: Mode::Check,
+        }
+    }
+
+    /// The card write run: the scratch build at the board's port, with the board's bounds.
+    pub fn scratch() -> Self {
+        Self {
+            mode: Mode::Scratch,
+            ..Self::board()
         }
     }
 }
@@ -441,7 +467,10 @@ fn claim_and_check(
     };
     log("claimed interface 0");
     ep0_checks(&mut *link, &plan.bounds, &mut failures, log);
-    let ended = bulk_checks(&mut *link, plan, seen, outcome, &mut failures, log);
+    let ended = match plan.mode {
+        Mode::Check => bulk_checks(&mut *link, plan, seen, outcome, &mut failures, log),
+        Mode::Scratch => scratch::checks(&mut *link, &plan.bounds, &mut failures, log),
+    };
     if !ended {
         // Ask for the end anyway: the stage resets on it. If it cannot be sent, the stage's idle limit and its
         // watchdog are the way back.
@@ -592,7 +621,7 @@ pub fn pattern(sectors: usize, seed: u8) -> Vec<u8> {
 }
 
 /// The largest reply: a read of the most sectors (status, payload, CRC).
-const REPLY_MAX: usize = 1 + MAX_CHUNK;
+pub(crate) const REPLY_MAX: usize = 1 + MAX_CHUNK;
 
 /// Sends a write request and its chunk (`payload`, its CRC, then `extra` bytes; `corrupt` flips one payload
 /// bit after the CRC is computed). Returns the status byte.
@@ -612,6 +641,24 @@ fn write_frames(
     }
     chunk.extend(std::iter::repeat_n(0x5a, extra));
     link.bulk_out(&Request::write(lba, count, false).encode(), bounds.bulk)
+        .map_err(|e| format!("the write request: {e}"))?;
+    link.bulk_out(&chunk, bounds.bulk)
+        .map_err(|e| format!("the chunk ({} bytes): {e}", chunk.len()))?;
+    status(link, bounds)
+}
+
+/// Sends a write request with the compared mark as given, and its chunk. Returns the status byte.
+fn write_marked(
+    link: &mut dyn Link,
+    bounds: &Bounds,
+    lba: u32,
+    payload: &[u8],
+    compared: bool,
+) -> Result<u8, String> {
+    let count = (payload.len() / SECTOR) as u16;
+    let mut chunk = payload.to_vec();
+    chunk.extend_from_slice(&payload_crc(payload));
+    link.bulk_out(&Request::write(lba, count, compared).encode(), bounds.bulk)
         .map_err(|e| format!("the write request: {e}"))?;
     link.bulk_out(&chunk, bounds.bulk)
         .map_err(|e| format!("the chunk ({} bytes): {e}", chunk.len()))?;

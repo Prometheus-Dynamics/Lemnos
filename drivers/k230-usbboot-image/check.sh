@@ -10,12 +10,21 @@
 # window, testing/board-runs/K230-USB.md "B2") into its own directory, and checks two more things: the image
 # reaches no SD host (no symbol of the SD code, and no instruction that forms an SD controller's base
 # address), and it carries the check build's identity. The piece job's address does not apply to it.
+#
+# With --b2-card it builds the B2 scratch build instead (feature `b2-card`: the same USB device path over the card,
+# reachable only inside the scratch range, testing/board-runs/K230-USB.md "B2 card writes") into its own directory,
+# and checks: no other storage path and no other run is linked (no symbol of the piece, the report, the pre-FL1
+# stage and its media, the legacy USB driver, the probe or the check build's RAM window), the scratch storage and
+# the SD host are linked, the image carries the scratch build's identity and not the check build's. The piece job's
+# address does not apply to it either: no piece job is loaded beside it.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 target=riscv64imac-unknown-none-elf
 out="${CARGO_TARGET_DIR:-$repo/target}"
 b2=0
+card=0
 [ "${1:-}" = "--b2" ] && b2=1
+[ "${1:-}" = "--b2-card" ] && card=1
 cd "$repo"
 # One codegen unit: with the default sixteen, how LLVM splits the driver crate decides what is inlined where,
 # so a change to code the card build never calls (the B2 build's endpoint 0 trace) moved the card image by
@@ -26,6 +35,9 @@ if [ "$b2" = 1 ]; then
   # Its own target subdirectory, so the two builds' libraries never overwrite each other.
   out="$out/b2"
   CARGO_TARGET_DIR="$out" cargo build -p lemnos-k230-usbboot-image --target "$target" --release --features b2
+elif [ "$card" = 1 ]; then
+  out="$out/b2-card"
+  CARGO_TARGET_DIR="$out" cargo build -p lemnos-k230-usbboot-image --target "$target" --release --features b2-card
 else
   cargo build -p lemnos-k230-usbboot-image --target "$target" --release
 fi
@@ -34,6 +46,7 @@ sysroot="$(rustc --print sysroot)"
 lld="$(ls "$sysroot"/lib/rustlib/*/bin/rust-lld | head -1)"
 work="${TMPDIR:-/tmp}/k230-usbboot-image"
 [ "$b2" = 1 ] && work="$work-b2"
+[ "$card" = 1 ] && work="$work-b2-card"
 mkdir -p "$work"
 "$lld" -flavor gnu -T "$repo/drivers/k230-usbboot-image/image.ld" --gc-sections -o "$work/image.elf" "$lib"
 rust-objcopy -O binary "$work/image.elf" "$work/image.bin"
@@ -72,8 +85,32 @@ fail=0
 [ $((load_start)) -eq $((0x80360000)) ] || { echo "FAIL: the load segment is not at the load address"; fail=1; }
 [ $((end)) -le $((0x80400000)) ] || { echo "FAIL: the image runs past 0x80400000"; fail=1; }
 [ "$footprint" -le $((0xA0000)) ] || { echo "FAIL: the footprint is over 0xA0000"; fail=1; }
-if [ "$b2" = 0 ]; then
+if [ "$card" = 1 ]; then
+  # Nothing but the scratch run: no piece, report, pre-FL1 stage or its media, legacy USB driver, probe, or check
+  # build's RAM window. Symbols are matched as the linker names them (mangled).
+  others=$(grep -oE '^[0-9a-f]+ <[^>]*(run_piece|piece_job|run_report|run_stage|run_probe|run_check|stage_medium|read_card|ImageMedium|SdMedium|5piece|6report|stage5Stage|5probe|9telemetry|11dwc2_legacy|8Loopback)[^>]*>:' "$work/image.dis" || true)
+  scratch_syms=$(grep -cE '<[^>]*7scratch[^>]*>:' "$work/image.dis" || true)
+  sd_host=$(grep -cE '<[^>]*SdhciHost[^>]*>:' "$work/image.dis" || true)
+  echo "b2-card: other runs or storage paths $(printf '%s' "$others" | grep -c . || true), scratch symbols $scratch_syms, SD host symbols $sd_host"
+  [ -z "$others" ] || { echo "FAIL: the scratch build links another run or storage path:"; echo "$others" | head -20; fail=1; }
+  [ "$scratch_syms" -gt 0 ] || { echo "FAIL: no scratch run in the scratch build"; fail=1; }
+  [ "$sd_host" -gt 0 ] || { echo "FAIL: no SD host in the scratch build"; fail=1; }
+  grep -q '<lemnos_image_run>:' "$work/image.dis" || { echo "FAIL: no run entry in the scratch build"; fail=1; }
+  # The identities, by their build ids as the record carries them (little-endian): the scratch build's present, the
+  # check build's absent.
+  python3 -I - "$work/image.bin" <<'PY' || fail=1
+import sys
+image = open(sys.argv[1], "rb").read()
+scratch = (0x4b32_3330_4232_0002).to_bytes(8, "little")
+check = (0x4b32_3330_4232_0001).to_bytes(8, "little")
+print(f"b2-card: scratch build id {image.count(scratch)} time(s), check build id {image.count(check)} time(s)")
+if image.count(scratch) != 1 or image.count(check) != 0:
+    print("FAIL: the scratch build must carry its own identity once and not the check build's")
+    sys.exit(1)
+PY
+elif [ "$b2" = 0 ]; then
   [ $((end)) -le $((0x80380000)) ] || { echo "FAIL: the image runs into the piece job's address 0x80380000"; fail=1; }
+  echo "card image: $((0x80380000 - end)) bytes spare below the piece job's address 0x80380000"
 else
   # No SD host in the check build: no symbol of the SD code, and no lui that forms 0x91580000 or 0x91581000
   # (the two SDHCI bases, k230.dtsi:154-176) or 0x91585000 and up.
