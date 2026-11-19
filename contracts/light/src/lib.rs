@@ -10,6 +10,12 @@
 //! The bytes of a look are defined by the driver that draws it. A frame's bytes are one entry per
 //! LED: its index as a `u16`, then red, green, blue and white.
 //!
+//! What `current` returns, all little-endian: the generation as a `u64`, which goes up by one with
+//! each change of what the ring shows (0 before the first); the LED count as a `u16`; then for each
+//! LED four bytes of colour (red, green, blue, white), one byte that is 1 when an owner set the LED
+//! and 0 when none did, one byte of priority (0 when none did), and the owner's id as a `u64` (0
+//! when none did). That is 10 bytes, then 14 for each LED.
+//!
 #![no_std]
 
 use lemnos_core::{Decode, Encode, Result, contract};
@@ -49,4 +55,11 @@ pub trait Light {
     #[method(6)]
     #[added]
     fn show_frame(&mut self, layer: u8, priority: u8, leds: &[u8]) -> Result<()>;
+    /// What the ring shows now, in the layout the module's docs give. Returns its length, and
+    /// `BUFFER_TOO_SMALL` when `into` is shorter. Reading needs no ownership and makes the reader no
+    /// owner. A subscription to it is the change feed: its values come at most once per 20 ms
+    /// (the daemon's cap for a colour array). Marked `#[added]`.
+    #[method(7, reading = colour_array)]
+    #[added]
+    fn current(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }

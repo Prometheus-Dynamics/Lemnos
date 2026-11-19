@@ -4,13 +4,30 @@ use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use lemnos_core::{MethodId, Status};
+use lemnos_core::{MethodId, Reading, Status};
 use lemnos_host::Host;
 use lemnos_host::schedule::{Action, DevicePace, Refusal, Scheduler};
 use lemnos_wire::Frame;
 
 use crate::clock::MonotonicClock;
 use crate::conn::Conn;
+
+/// The fastest a colour array (a frame of LEDs, such as a light's `current`) is read: a frame
+/// changes at most this often, so the daemon never reads it faster. 20 ms is 50 values a second.
+const FRAME_PERIOD_US: u64 = 20_000;
+
+/// How a subscribed method's values come: a colour array is capped at [`FRAME_PERIOD_US`], and any
+/// other reading has no cap.
+pub(crate) fn pace_for(reading: Option<Reading>) -> DevicePace {
+    let sample_period_us = match reading {
+        Some(Reading::ColourArray) => FRAME_PERIOD_US,
+        _ => 0,
+    };
+    DevicePace {
+        sample_period_us,
+        buffered_samples: 0,
+    }
+}
 
 /// One method of one device, read on behalf of however many subscribers.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -59,6 +76,7 @@ impl Readers {
     /// readers are still locked, so the reply that names the subscription is sent before any
     /// value for it can be: a client drops a value for a subscription it has not been told of,
     /// and with `only_changes` the value it lost would not come again.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn subscribe(
         &self,
         owner: &Arc<Conn>,
@@ -66,6 +84,7 @@ impl Readers {
         period_us: u64,
         only_changes: bool,
         now_us: u64,
+        pace: DevicePace,
         announce: impl FnOnce(u64, u64),
     ) -> Result<(), Status> {
         let mut state = self.lock();
@@ -74,13 +93,7 @@ impl Readers {
             None => {
                 let point = state.points.len() as u32;
                 state.points.push(wanted);
-                state.scheduler.add_device(
-                    point,
-                    DevicePace {
-                        sample_period_us: 0,
-                        buffered_samples: 0,
-                    },
-                );
+                state.scheduler.add_device(point, pace);
                 point
             }
         };
@@ -163,5 +176,36 @@ impl Readers {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_colour_array_is_granted_no_faster_than_the_frame_period_and_other_readings_are_not_capped()
+    {
+        assert_eq!(
+            pace_for(Some(Reading::ColourArray)).sample_period_us,
+            FRAME_PERIOD_US
+        );
+        assert_eq!(pace_for(Some(Reading::Number)).sample_period_us, 0);
+        assert_eq!(pace_for(None).sample_period_us, 0);
+
+        let mut capped = Scheduler::new();
+        capped.add_device(0, pace_for(Some(Reading::ColourArray)));
+        let grant = capped.subscribe(0, 1, 1_000, true, 0).unwrap();
+        assert_eq!(
+            grant.period_us, 20_000,
+            "a request for 1 ms is granted 20 ms"
+        );
+
+        let mut free = Scheduler::new();
+        free.add_device(0, pace_for(Some(Reading::Number)));
+        assert_eq!(
+            free.subscribe(0, 1, 1_000, true, 0).unwrap().period_us,
+            1_000
+        );
     }
 }

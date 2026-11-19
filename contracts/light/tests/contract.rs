@@ -15,6 +15,7 @@ fn the_tag_and_numbers_are_stable() {
             ("clear_all", 4),
             ("set_brightness", 5),
             ("show_frame", 6),
+            ("current", 7),
         ]
     );
 }
