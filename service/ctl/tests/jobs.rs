@@ -36,6 +36,7 @@ fn start() -> Running {
         board: parse(text).unwrap(),
         drivers: vec![entry::<FakeProbe>()],
         backend: Box::new(SimBoard::new()),
+        log: None,
         options: Options::default(),
     })
     .unwrap();

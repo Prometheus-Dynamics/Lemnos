@@ -88,6 +88,7 @@ fn start() -> (Service, Dir, std::path::PathBuf) {
         board: parse(text).unwrap(),
         drivers: vec![entry::<Holder>()],
         backend: Box::new(SimBoard::new()),
+        log: None,
         options: Options::default(),
     })
     .unwrap();

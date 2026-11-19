@@ -1,10 +1,9 @@
 //! Keeps devices retrying and tells clients when one changes state, reason or health.
 
-use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{Figures, Health, HostClock, Retry, Tail};
+use lemnos_core::{Figures, Health, HostClock, NOTE_SLOTS, Note, Retry, Tail};
 use lemnos_host::{DeviceInfo, DeviceState, JobEvent, JobUpdate};
 use lemnos_wire::{Frame, health, state};
 
@@ -131,7 +130,53 @@ fn running_line(id: &str, bound_ns: u64, ok_ns: u64) -> String {
     format!("lemnosd: {id}: running ok {ms} ms after bind")
 }
 
+/// The line for one note a driver reported: its device, its text, and its number after a colon.
+pub(crate) fn note_line(id: &str, note: Note) -> String {
+    match note.value {
+        Some(value) => format!("lemnosd: {id}: {}: {value}", note.text),
+        None => format!("lemnosd: {id}: {}", note.text),
+    }
+}
+
+/// The line for the notes a driver dropped because its ring was full when they were reported.
+pub(crate) fn dropped_line(id: &str, dropped: u32) -> String {
+    format!("lemnosd: {id}: {dropped} notes dropped before they were logged")
+}
+
+/// Logs the notes each device's driver has reported since the last look, in the order they were
+/// reported, and how many were dropped. A driver in a call keeps its notes for the next look.
+fn log_notes(core: &Core) {
+    for index in 0..core.host.device_count() as u32 {
+        // The notes are taken into a local array while the driver is locked, and the device's id is
+        // looked up only once there is something to log.
+        let mut held = [None; NOTE_SLOTS];
+        let mut count = 0;
+        let Some(dropped) = core.host.take_notes(index, &mut |note| {
+            if let Some(slot) = held.get_mut(count) {
+                *slot = Some(note);
+                count += 1;
+            }
+        }) else {
+            continue;
+        };
+        if count == 0 && dropped == 0 {
+            continue;
+        }
+        let devices = core.host.devices();
+        let Some(info) = devices.iter().find(|info| info.index == index) else {
+            continue;
+        };
+        for note in held.iter().take(count).flatten() {
+            core.log_line(&note_line(&info.id, *note));
+        }
+        if dropped > 0 {
+            core.log_line(&dropped_line(&info.id, dropped));
+        }
+    }
+}
+
 fn send_changes(core: &Core, told: &mut Vec<Option<Told>>, announced: &mut Vec<Option<u64>>) {
+    log_notes(core);
     told.resize(core.host.device_count(), None);
     announced.resize(core.host.device_count(), None);
     for (index, told) in told.iter_mut().enumerate() {
@@ -155,7 +200,7 @@ fn send_changes(core: &Core, told: &mut Vec<Option<Told>>, announced: &mut Vec<O
         {
             announced[index] = Some(bound);
             let line = running_line(&info.id, bound, ok);
-            let _ = writeln!(std::io::stderr(), "{line}");
+            core.log_line(&line);
         }
         let (state, health, reason) = wire_of(
             &info.state,

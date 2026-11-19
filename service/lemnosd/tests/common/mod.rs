@@ -105,6 +105,17 @@ pub fn start_board(
     sim: SimBoard,
     buffers: Option<Arc<dyn BufferSource>>,
 ) -> Running {
+    start_board_logged(devices, drivers, sim, buffers, None)
+}
+
+/// [`start_board`], with the daemon's log lines going to `log` instead of stderr.
+pub fn start_board_logged(
+    devices: &str,
+    drivers: Vec<lemnos_host::DriverEntry>,
+    sim: SimBoard,
+    buffers: Option<Arc<dyn BufferSource>>,
+    log: Option<lemnosd::LogSink>,
+) -> Running {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     // The time keeps the name apart from one an earlier run with the same process id left.
     let nanos = std::time::SystemTime::now()
@@ -131,6 +142,7 @@ pub fn start_board(
         board: parse(&text).unwrap(),
         drivers,
         backend: Box::new(sim),
+        log,
         options: Options {
             call_deadline: Duration::from_millis(200),
             ..Options::default()

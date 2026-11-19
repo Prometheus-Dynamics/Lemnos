@@ -339,6 +339,39 @@ nothing (a chip ID, a node's `info`). A device that is not there is refused, and
 until it is: a supply that comes up later binds on a later retry. Binding does not start the device, so
 a device the bind found present still answers nothing new until `start` runs.
 
+### Notes for the log
+
+A driver that does something the operator should see in the daemon's log reports a note. A note is a
+fixed text and at most one `u32`, which the log shows after the text. The text names its own unit, and
+says what the driver did:
+
+```rust
+#[driver("my-fan", provides = [Fan])]
+pub struct MyFan {
+    notes: Notes,           // a field: the ring the notes wait in
+    // ...
+}
+
+impl Lifecycle for MyFan {
+    fn notes(&mut self) -> Option<&mut Notes> {
+        Some(&mut self.notes)
+    }
+    // in a method or in `tick`:
+    //   self.notes.push(Note::with_value("handed back: default duty, per mille", duty.into()));
+}
+```
+
+The host takes the notes after each call and each tick, when the driver is not running a call, and the
+daemon logs each as `lemnosd: <device id>: <text>`, with `: <value>` after the text when there is one. A
+note is logged once. A driver with no ring reports nothing (`notes` returns `None`, the default).
+
+The ring holds `NOTE_SLOTS` (8) notes. A driver that pushes more than the host takes between two takes
+loses the newest ones: the ring counts them, and the log says `N notes dropped before they were logged`
+once. Pushing allocates nothing, so a driver can push from its tick. The host takes notes only from a
+driver it can lock: a note pushed during a call is logged at the next take, a quarter second later at most.
+
+A note reports what was done. Health says what is wrong now; a note says what happened, once.
+
 ### Long jobs
 
 A method that runs longer than a call is marked `#[method(N, job, stall = SECS)]` in its contract and returns

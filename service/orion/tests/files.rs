@@ -204,6 +204,7 @@ fn start_lemnosd(dir: &Path, socket: &Path, reserve_mb: u64) -> Service {
         boot.display()
     );
     Service::start(LemnosdConfig {
+        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(&text).expect("board"),

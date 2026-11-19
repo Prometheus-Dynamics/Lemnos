@@ -65,6 +65,7 @@ fn start() -> (Service, Dir, SimBoard) {
         board: parse(text).unwrap(),
         drivers: vec![entry::<Plug>()],
         backend: Box::new(board.clone()),
+        log: None,
         options: Options {
             retry_first: Duration::from_secs(60),
             retry_cap: Duration::from_secs(60),

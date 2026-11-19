@@ -130,6 +130,7 @@ fn start_lemnosd(dir: &Path, socket: &Path, target: &Path, size_ok: bool) -> Ser
         mountinfo.display()
     );
     Service::start(LemnosdConfig {
+        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(&text).expect("board"),

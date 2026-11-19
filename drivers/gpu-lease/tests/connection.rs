@@ -30,6 +30,7 @@ fn a_lease_ends_with_its_connection_and_the_next_waiter_is_granted() {
         board: parse(BOARD).unwrap(),
         drivers: vec![entry::<GpuLeaseDevice>()],
         backend: Box::new(SimBoard::new()),
+        log: None,
         options: Options::default(),
     })
     .unwrap();

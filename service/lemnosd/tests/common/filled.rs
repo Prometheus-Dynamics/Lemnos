@@ -209,6 +209,7 @@ pub fn start(buffers: Arc<dyn BufferSource>, heap: &str) -> Running {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<FilledDriver>()],
         backend: Box::new(SimBoard::new()),
+        log: None,
         options: Options::default(),
     };
     let service = Service::start_with_buffers(config, buffers).unwrap();

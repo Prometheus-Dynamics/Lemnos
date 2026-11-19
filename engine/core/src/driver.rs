@@ -1,5 +1,5 @@
 use crate::{
-    Config, ConfigError, ContractInfo, Decode, Description, Encode, Need, Reader, Resources,
+    Config, ConfigError, ContractInfo, Decode, Description, Encode, Need, Notes, Reader, Resources,
     Result, Shape, Status, Writer,
 };
 use lemnos_hal::blocks::BufferHandle;
@@ -249,6 +249,10 @@ pub trait Driver: Sized {
     fn retrying(&self) -> Option<Retry> {
         None
     }
+    /// See [`Lifecycle::notes`].
+    fn notes(&mut self) -> Option<&mut Notes> {
+        None
+    }
     /// See [`Lifecycle::resume_record`].
     fn resume_record(&self) -> Option<ResumeRecord> {
         None
@@ -348,6 +352,13 @@ pub trait Lifecycle: Sized {
     /// Whether the driver is retrying a failed step itself, and how far it has got. See [`Retry`].
     /// `None` by default: a driver the host retries (a failed bind) says nothing here.
     fn retrying(&self) -> Option<Retry> {
+        None
+    }
+    /// The ring the driver keeps its notes in, for the host to drain into the log (see [`Note`]). A driver
+    /// that has notes to report keeps a [`Notes`] field and returns it here, and pushes into it from its
+    /// methods and its tick. The host takes them between calls, never while a call runs, and logs each as
+    /// `lemnosd: <device id>: <text>`, with the value after a colon. `None`, the default, reports nothing.
+    fn notes(&mut self) -> Option<&mut Notes> {
         None
     }
     /// What the driver keeps when the host lets go of it to bind it again (a rebind after

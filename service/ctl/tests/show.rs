@@ -54,6 +54,7 @@ fn start() -> Running {
     let text =
         format!("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n{DEVICES}");
     let config = Config {
+        log: None,
         socket: socket.clone(),
         name: "show-test".to_string(),
         board: parse(&text).unwrap(),

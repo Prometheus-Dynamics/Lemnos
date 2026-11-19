@@ -61,6 +61,7 @@ fn a_paused_consumer_loses_the_starts_it_queued_nothing_for_and_its_queued_frame
     let socket = dir.join("lemnosd.sock");
     let service = Service::start_with_buffers(
         Config {
+            log: None,
             socket: socket.clone(),
             name: board.board.id.clone(),
             board,

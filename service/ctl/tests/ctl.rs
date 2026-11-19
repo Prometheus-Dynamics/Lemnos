@@ -50,6 +50,7 @@ fn start_with(packages: PackageReport) -> Running {
         board: parse_lenient(text).unwrap(),
         drivers: vec![entry::<FakeCounter>(), entry::<FakeMagnetometer>()],
         backend: Box::new(SimBoard::new()),
+        log: None,
         options: Options::default(),
     };
     let service = Service::start_with_packages(config, packages).unwrap();
@@ -506,6 +507,7 @@ fn start_counting() -> (Running, PathBuf) {
         board: parse(text).unwrap(),
         drivers: vec![entry::<Counter>()],
         backend: Box::new(SimBoard::new()),
+        log: None,
         options: Options::default(),
     })
     .unwrap();
