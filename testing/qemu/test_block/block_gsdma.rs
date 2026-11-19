@@ -6,13 +6,20 @@
 //! raised. With `hang` set, a started chain never finishes and its progress register keeps moving, for
 //! `hang` ms after the channel is turned off (~0: forever).
 //!
-//! The tick runs on CPU 0, where the checks pin themselves, so the engine's progress and the driver's
-//! reads share a vCPU (see block_csi2.rs). It counts the milliseconds that really passed since the last
-//! tick, so a late tick catches up.
+//! A hung chain's progress is the engine's own clock, as on the block: the register holds the
+//! milliseconds since the chain started (until the hang ends), written by a hard timer on every CPU
+//! once a millisecond. The driver judges a stopped engine by that register holding still while it
+//! reads (10 ms), and its reads run on its own workqueue, on any CPU. A single tick elsewhere let the
+//! host's scheduling decide the judgement: when the vCPU that ran it was taken away for 10 ms, the
+//! register held still on the vCPU the driver read from, and a hung engine was judged stopped. With a
+//! timer on every CPU, the CPU the driver reads from moves the register itself, and when the host takes
+//! that vCPU away, the timer's interrupt is taken on its return before the driver's thread runs again.
+//! The tick (a work on CPU 0) only starts chains and raises their interrupt.
 //!
 //! Copyright (c) 2026 the Lemnos authors.
 
 use core::{
+    ffi::c_void,
     ptr,
     sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, Ordering},
 };
@@ -25,7 +32,7 @@ use super::{
 use kernel::{
     bindings,
     error::{code::*, from_err_ptr, to_result},
-    ffi::{c_int, c_uint, c_ulong},
+    ffi::{c_int, c_short, c_uint, c_ulong},
     prelude::*,
 };
 
@@ -36,8 +43,12 @@ const TGD_CTRL: usize = 0x10;
 const TGD_LLI_BASE: usize = 0x14;
 const TGD_CUR_DADDR: usize = 0x44;
 const TGD_DONE: u32 = 1 << 18;
-/// The CPU the tick runs on: the checks pin themselves there.
+/// The CPU the tick runs on.
 const TGD_CPU: c_int = 0;
+/// The period of the hard timers that move a hung chain's progress: 1 ms.
+const TGD_MOVE_NS: i64 = 1_000_000;
+/// One hard timer per CPU the kernel could have.
+const TGD_CPUS: usize = bindings::NR_CPUS as usize;
 
 /// The engine's register window, and the page it is in (freed at teardown).
 static TGD_REGS: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
@@ -50,18 +61,31 @@ static TGD_MUTEX: Shared<bindings::mutex> =
 static TGD_WORK: Shared<bindings::delayed_work> =
     // SAFETY: a delayed work of zeros is initialised by `init_statics` before it is queued.
     Shared::new(unsafe { core::mem::zeroed() });
+/// The raw spinlock of a hung chain's state, which the hard timers read and write (their context is
+/// not allowed a mutex).
+static TGD_HANG_LOCK: Shared<bindings::raw_spinlock_t> =
+    // SAFETY: a raw spinlock of zeros is unlocked; it is initialised by `init_statics`.
+    Shared::new(unsafe { core::mem::zeroed() });
+/// The hard timers that move a hung chain's progress, one per CPU (hrtimer_setup in `init_statics`).
+static TGD_TIMERS: [Shared<bindings::hrtimer>; TGD_CPUS] = [const {
+    // SAFETY: a timer of zeros is set up by `init_statics` before it is started.
+    Shared::new(unsafe { core::mem::zeroed() })
+}; TGD_CPUS];
 /// `hang`: jobs from now on hang, for this many ms after the channel is off; ~0: forever.
 static TGD_HANG: AtomicU32 = AtomicU32::new(0);
-/// The ms a hung chain still moves for, once the channel is off.
+/// The ms a hung chain still moves for, once the channel is off; ~0: forever.
 static TGD_LEFT: AtomicU32 = AtomicU32::new(0);
+/// When the hung chain started, in ns, and its progress register then.
+static TGD_HANG_START: AtomicI64 = AtomicI64::new(0);
+static TGD_HANG_BASE: AtomicU32 = AtomicU32::new(0);
+/// When the channel was first seen off while the chain hung, in ns; 0: not yet.
+static TGD_HANG_OFF: AtomicI64 = AtomicI64::new(0);
 static TGD_JOBS: AtomicU32 = AtomicU32::new(0);
 /// The first words of the last descriptors the chain ran.
 static TGD_WORD0: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
 /// Addresses the engine could not reach.
 static TGD_ERRORS: AtomicU32 = AtomicU32::new(0);
 static TGD_HANGING: AtomicBool = AtomicBool::new(false);
-/// The time of the last tick, in ns.
-static TGD_LAST: AtomicI64 = AtomicI64::new(0);
 
 static TGD_PROPS: Fixed<[bindings::property_entry; 2]> = Fixed([
     property_string(c"compatible", c"lemnos,test-gsdma"),
@@ -87,7 +111,7 @@ static TGD_GROUP: Fixed<bindings::attribute_group> = Fixed(bindings::attribute_g
     ..unsafe { core::mem::zeroed() }
 });
 
-/// Sets up the mutex and the tick, before any device.
+/// Sets up the locks, the tick and the hard timers, before any device.
 pub(crate) fn init_statics() {
     // SAFETY: the mutex is a static this module owns, initialised once with its own lockdep class.
     unsafe {
@@ -97,6 +121,26 @@ pub(crate) fn init_statics() {
             kernel::static_lock_class!().as_ptr(),
         )
     };
+    // SAFETY: the lock is a static this module owns, initialised once with its own lockdep class.
+    unsafe {
+        bindings::__raw_spin_lock_init(
+            TGD_HANG_LOCK.get(),
+            c"tgd_hang_lock".as_ptr().cast(),
+            kernel::static_lock_class!().as_ptr(),
+            bindings::lockdep_wait_type_LD_WAIT_SPIN as c_short,
+        )
+    };
+    for t in &TGD_TIMERS {
+        // SAFETY: each timer is a static this module owns, set up once before anything starts it.
+        unsafe {
+            bindings::hrtimer_setup(
+                t.get(),
+                Some(tgd_move),
+                bindings::CLOCK_MONOTONIC as bindings::clockid_t,
+                bindings::hrtimer_mode_HRTIMER_MODE_REL_PINNED_HARD,
+            )
+        };
+    }
     // SAFETY: the work is a static this module owns, initialised once before anything queues it.
     unsafe { init_delayed_work(TGD_WORK.get(), tgd_tick, c"tgd_work") };
 }
@@ -222,23 +266,98 @@ unsafe fn tgd_run() {
     TGD_JOBS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The tick: starts a chain when the channel is on, moves a hung one's progress, and says whether the
-/// interrupt is due. It runs every ms while a driver has the channel on, every 50 ms otherwise.
+/// Moves a hung chain's progress to `now`: the ms since it started, up to the end of its hang, which is
+/// `left` ms after the channel was first seen off (never, for ~0). Returns whether it still hangs.
+///
+/// # Safety
+///
+/// Called under `TGD_HANG_LOCK`, with the window mapped.
+unsafe fn tgd_hang_at(now: i64) -> bool {
+    if !TGD_HANGING.load(Ordering::Relaxed) {
+        return false;
+    }
+    let left = TGD_LEFT.load(Ordering::Relaxed);
+    // SAFETY: the caller's: the window is mapped.
+    let on = (unsafe { tgd_rd(TGD_CH_EN) } & TGD_CH_EN_BIT) != 0;
+    let mut off = TGD_HANG_OFF.load(Ordering::Relaxed);
+    if off == 0 && !on && left != u32::MAX {
+        off = now;
+        TGD_HANG_OFF.store(off, Ordering::Relaxed);
+    }
+    let end = if off == 0 {
+        i64::MAX
+    } else {
+        off.saturating_add(i64::from(left) * TGD_MOVE_NS)
+    };
+    let ms = (now.min(end) - TGD_HANG_START.load(Ordering::Relaxed)) / TGD_MOVE_NS;
+    let cur = TGD_HANG_BASE
+        .load(Ordering::Relaxed)
+        .wrapping_add(ms as u32);
+    // SAFETY: as above.
+    unsafe { tgd_wr(TGD_CUR_DADDR, cur) };
+    if now >= end {
+        TGD_HANGING.store(false, Ordering::Relaxed);
+    }
+    TGD_HANGING.load(Ordering::Relaxed)
+}
+
+/// A hard timer: moves a hung chain's progress every ms on its CPU, until the hang ends.
+///
+/// # Safety
+///
+/// `t` is one of `TGD_TIMERS`, as the hard timer calls it.
+unsafe extern "C" fn tgd_move(t: *mut bindings::hrtimer) -> bindings::hrtimer_restart {
+    if TGD_REGS.load(Ordering::Relaxed).is_null() {
+        return bindings::hrtimer_restart::HRTIMER_NORESTART;
+    }
+    // SAFETY: the kernel's clock, read.
+    let now = unsafe { bindings::ktime_get() };
+    // SAFETY: the lock is initialised by init_statics; the flags go back to the unlock below.
+    let flags = unsafe { bindings::_raw_spin_lock_irqsave(TGD_HANG_LOCK.get()) };
+    // SAFETY: under the lock; the window is mapped until teardown, which cancels these timers first.
+    let hanging = unsafe { tgd_hang_at(now) };
+    // SAFETY: the lock taken above, with its flags.
+    unsafe { bindings::_raw_spin_unlock_irqrestore(TGD_HANG_LOCK.get(), flags) };
+    if !hanging {
+        return bindings::hrtimer_restart::HRTIMER_NORESTART;
+    }
+    // SAFETY: the timer's own callback: `t` is the timer, whose clock is read.
+    let at = unsafe { bindings::hrtimer_cb_get_time(t.cast_const()) };
+    // SAFETY: as above: the timer is forwarded by whole periods from its clock.
+    unsafe { bindings::hrtimer_forward(t, at, TGD_MOVE_NS) };
+    bindings::hrtimer_restart::HRTIMER_RESTART
+}
+
+/// Starts the hard timer of the CPU this runs on (smp_call_function_single's function; `info` is the
+/// CPU's number).
+///
+/// # Safety
+///
+/// Called on CPU `info`, with interrupts off, after `init_statics`.
+unsafe extern "C" fn tgd_arm(info: *mut c_void) {
+    // SAFETY: the timer of this CPU, set up by init_statics; pinned, it stays on this CPU.
+    unsafe {
+        bindings::hrtimer_start_range_ns(
+            TGD_TIMERS[info as usize].get(),
+            TGD_MOVE_NS,
+            0,
+            bindings::hrtimer_mode_HRTIMER_MODE_REL_PINNED_HARD,
+        )
+    };
+}
+
+/// The tick: starts a chain when the channel is on, and says whether the interrupt is due. A chain
+/// that hangs starts the hard timers instead, which move its progress. It runs every ms while a driver
+/// has the channel on, every 50 ms otherwise.
 ///
 /// # Safety
 ///
 /// Called by the kernel's workqueue, for the work `init_statics` set up.
 unsafe extern "C" fn tgd_tick(_work: *mut bindings::work_struct) {
-    // SAFETY: the kernel's clock, read.
-    let now = unsafe { bindings::ktime_get() };
     // SAFETY: the mutex is initialised by init_statics; it is released below.
     unsafe { lock(TGD_MUTEX.get()) };
-    // Whole milliseconds since the last tick, at least one: a tick that ran late counts what it missed.
-    let last = TGD_LAST.load(Ordering::Relaxed);
-    // SAFETY: a pure conversion of the difference of two times.
-    let steps = unsafe { bindings::ktime_to_ms(now - last) }.max(1) as u32;
-    TGD_LAST.store(now, Ordering::Relaxed);
     let mut raise = false;
+    let mut hung = false;
     // SAFETY: the window is mapped by setup.
     if unsafe { tgd_rd(TGD_CTRL) } == 1 && !TGD_HANGING.load(Ordering::Relaxed) {
         // SAFETY: as above.
@@ -247,8 +366,18 @@ unsafe extern "C" fn tgd_tick(_work: *mut bindings::work_struct) {
         unsafe { tgd_wr(TGD_INT_STAT, 0) };
         let hang = TGD_HANG.load(Ordering::Relaxed);
         if hang != 0 {
-            TGD_HANGING.store(true, Ordering::Relaxed);
+            // SAFETY: the lock is initialised by init_statics; the flags go back to the unlock below.
+            let flags = unsafe { bindings::_raw_spin_lock_irqsave(TGD_HANG_LOCK.get()) };
+            // SAFETY: the kernel's clock, read.
+            TGD_HANG_START.store(unsafe { bindings::ktime_get() }, Ordering::Relaxed);
+            // SAFETY: as above: the window is mapped.
+            TGD_HANG_BASE.store(unsafe { tgd_rd(TGD_CUR_DADDR) }, Ordering::Relaxed);
+            TGD_HANG_OFF.store(0, Ordering::Relaxed);
             TGD_LEFT.store(hang, Ordering::Relaxed);
+            TGD_HANGING.store(true, Ordering::Relaxed);
+            // SAFETY: the lock taken above, with its flags.
+            unsafe { bindings::_raw_spin_unlock_irqrestore(TGD_HANG_LOCK.get(), flags) };
+            hung = true;
         } else {
             // SAFETY: called under the mutex, with the window mapped.
             unsafe { tgd_run() };
@@ -257,35 +386,27 @@ unsafe extern "C" fn tgd_tick(_work: *mut bindings::work_struct) {
             raise = true;
         }
     }
-    if TGD_HANGING.load(Ordering::Relaxed) {
-        // SAFETY: as above.
-        let en = unsafe { tgd_rd(TGD_CH_EN) } & TGD_CH_EN_BIT;
-        let left = TGD_LEFT.load(Ordering::Relaxed);
-        // It moves while on; once off, for `left` ms more.
-        if en == 0 && left != u32::MAX {
-            if left <= steps {
-                TGD_LEFT.store(0, Ordering::Relaxed);
-                TGD_HANGING.store(false, Ordering::Relaxed);
-            } else {
-                TGD_LEFT.store(left - steps, Ordering::Relaxed);
-                // SAFETY: as above.
-                let cur = unsafe { tgd_rd(TGD_CUR_DADDR) };
-                // SAFETY: as above.
-                unsafe { tgd_wr(TGD_CUR_DADDR, cur.wrapping_add(steps)) };
-            }
-        } else {
-            // SAFETY: as above.
-            let cur = unsafe { tgd_rd(TGD_CUR_DADDR) };
-            // SAFETY: as above.
-            unsafe { tgd_wr(TGD_CUR_DADDR, cur.wrapping_add(steps)) };
-        }
-    }
     // Looked at every ms only while a driver has the channel on, so it costs nothing otherwise.
     // SAFETY: as above.
-    let on =
-        TGD_HANGING.load(Ordering::Relaxed) || (unsafe { tgd_rd(TGD_CH_EN) } & TGD_CH_EN_BIT) != 0;
+    let on = (unsafe { tgd_rd(TGD_CH_EN) } & TGD_CH_EN_BIT) != 0;
     // SAFETY: the mutex taken above.
     unsafe { unlock(TGD_MUTEX.get()) };
+    if hung {
+        // SAFETY: nr_cpu_ids is set before any module loads.
+        let cpus = (unsafe { bindings::nr_cpu_ids } as usize).min(TGD_CPUS);
+        for cpu in 0..cpus {
+            // SAFETY: the function starts that CPU's timer, set up by init_statics; a CPU that is not
+            // online is refused (ENXIO) and has nothing to read the register with.
+            unsafe {
+                bindings::smp_call_function_single(
+                    cpu as c_int,
+                    Some(tgd_arm),
+                    cpu as *mut c_void,
+                    true,
+                )
+            };
+        }
+    }
     if raise {
         // SAFETY: the interrupt is one of the simulated domain's, mapped until teardown.
         unsafe {
@@ -371,17 +492,12 @@ pub(crate) fn setup() -> Result {
     TGD_PDEV.store(pdev, Ordering::Relaxed);
     // SAFETY: the device is registered; the group is a static.
     to_result(unsafe { bindings::sysfs_create_group(&raw mut (*pdev).dev.kobj, TGD_GROUP.get()) })?;
-    TGD_LAST.store(
-        // SAFETY: the kernel's clock, read.
-        unsafe { bindings::ktime_get() },
-        Ordering::Relaxed,
-    );
     // SAFETY: the work is initialised by init_statics; the first tick is queued.
     unsafe { schedule_on(TGD_CPU, TGD_WORK.get(), jiffies_of(1)) };
     Ok(())
 }
 
-/// Tears the engine down: its device and group, the tick, and its page.
+/// Tears the engine down: its device and group, the tick, the hard timers, and its page.
 pub(crate) fn teardown() {
     let pdev = TGD_PDEV.swap(ptr::null_mut(), Ordering::Relaxed);
     if !pdev.is_null() {
@@ -392,6 +508,11 @@ pub(crate) fn teardown() {
     }
     // SAFETY: the work is initialised by init_statics: cancelling it is valid, even when never queued.
     unsafe { bindings::cancel_delayed_work_sync(TGD_WORK.get()) };
+    TGD_HANGING.store(false, Ordering::Relaxed);
+    for t in &TGD_TIMERS {
+        // SAFETY: each timer is set up by init: cancelling it is valid, even when never started.
+        unsafe { bindings::hrtimer_cancel(t.get()) };
+    }
     TGD_REGS.store(ptr::null_mut(), Ordering::Relaxed);
     let page = TGD_PAGE.swap(ptr::null_mut(), Ordering::Relaxed);
     if !page.is_null() {

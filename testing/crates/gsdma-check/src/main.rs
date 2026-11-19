@@ -1098,15 +1098,8 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // The fake engine's tick runs on CPU 0; the driver's progress reads share its vCPU.
-    if let Err(e) = guest::set_cpu_affinity(Some(0)) {
-        let _ = writeln!(
-            io::stderr(),
-            "sched_setaffinity: {}",
-            strerror(errno_of(&e))
-        );
-        return ExitCode::from(2);
-    }
+    // No CPU pinning: the driver reads the engine's progress from its own workqueue, on any CPU, and
+    // the fake engine moves a hung chain's progress on every CPU (block_gsdma.rs).
     let (ctl, heap) = match (open_rw(&args[1]), open_rw(&args[3])) {
         (Ok(ctl), Ok(heap)) => (ctl, heap),
         (ctl, heap) => {
