@@ -11,7 +11,8 @@
 //!
 //! `rehearse` runs the same host check against the rehearsal's board (`lemnos_k230_usbboot::b2sim`): the
 //! check build's own code over a register model. The cases: `good`, `no-access`, `wrong-product`,
-//! `wrong-port`, `never-enumerates`, `corrupt-out`, `corrupt-in`, `rev-420a`, `no-ep0-rearm`.
+//! `wrong-port`, `never-enumerates`, `corrupt-out`, `corrupt-in`, `rev-420a`, `no-ep0-rearm`, `time-stopped`
+//! (the ROM's state: `time` at 0 until the stage enables it; every case's default), `time-dead`, `time-running`.
 //!
 //! Exit 0 only when the check passed (or the rehearsal's case ended as it must) and the boot ROM came back.
 
@@ -22,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lemnos_k230_usbboot::b2::{self, Board, Plan, Verdict, usb::Sysfs};
-use lemnos_k230_usbboot::b2sim::{Faults, Reset, SimBoard};
+use lemnos_k230_usbboot::b2sim::{Faults, Reset, SimBoard, TimeCsr};
 use lemnos_k230_usbboot::bootrom::{CPU_INFO_LEN, PAGE, PROG_START, SET_DATA_ADDRESS};
 use lemnos_k230_usbboot::console::Console;
 use lemnos_k230_usbboot::transport::UsbIo;
@@ -107,7 +108,11 @@ fn main() {
 fn case_faults(case: &str) -> (Faults, fn(&Verdict) -> bool) {
     let mut f = Faults::default();
     let want: fn(&Verdict) -> bool = match case {
-        "good" | "rev-420a" => |v| *v == Verdict::Passed,
+        "good" | "rev-420a" | "time-running" => |v| *v == Verdict::Passed,
+        // The board's ROM state (B2 run 1): `time` at 0 and not moving until the stage enables it.
+        "time-stopped" => |v| *v == Verdict::Passed,
+        // `time` never moves, even after the enable: the stage must stop before USB and reset.
+        "time-dead" => |v| matches!(v, Verdict::GaveUp(_)),
         "no-access" => |v| matches!(v, Verdict::Stopped(t) if t.contains("may not open")),
         "wrong-product" => |v| matches!(v, Verdict::Refused(t) if t.contains("product")),
         "wrong-port" => |v| matches!(v, Verdict::Refused(t) if t.contains("wrong port")),
@@ -120,6 +125,9 @@ fn case_faults(case: &str) -> (Faults, fn(&Verdict) -> bool) {
     };
     match case {
         "rev-420a" => f.rev_420a = true,
+        "time-stopped" => f.time = TimeCsr::StoppedUntilEnabled,
+        "time-dead" => f.time = TimeCsr::Dead,
+        "time-running" => f.time = TimeCsr::Running,
         "no-access" => f.access_denied = true,
         "wrong-product" => f.product = Some("Lemnos flash stage (other)".to_string()),
         "wrong-port" => f.port = Some("3-4.2.1.4.2".to_string()),

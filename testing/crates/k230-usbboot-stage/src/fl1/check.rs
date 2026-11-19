@@ -25,6 +25,7 @@ use lemnos_flash_wire::frame::{MAX_SECTORS, SECTOR};
 use lemnos_flash_wire::identity::{IDENTITY_LEN, identity_record};
 
 use crate::fl1::REGIONS;
+use crate::sysctl::STC_ENABLES;
 use crate::wdt::{BASES, CCVR, RegAccess};
 
 /// The check build's id ("K230" "B2", serial 1). Not the card build's [`crate::fl1::BUILD_ID`].
@@ -98,6 +99,54 @@ pub enum MeasureError {
     CounterStuck,
     /// The clock is outside [`CLOCK_HZ_LOWEST`]..=[`CLOCK_HZ_HIGHEST`].
     OutOfRange(u64),
+}
+
+/// Starts the `time` CSR: the system timer's clock for both harts and its first counter, written as the
+/// vendor's SPL writes them before it relies on `time` ([`STC_ENABLES`]). The boot ROM leaves `time` at 0 and
+/// not moving (B2 run 1, `testing/board-runs/K230-USB.md`). Nothing is read back here: [`timebase_runs`] is the
+/// check that it worked.
+pub fn enable_timebase<R: RegAccess>(regs: &mut R) {
+    for (addr, value) in STC_ENABLES {
+        regs.write32(addr, value);
+    }
+}
+
+/// The watchdog counts [`CROSS_COUNTS`] for the cross-check (10 ms at the 750 kHz C1b measured).
+pub const CROSS_COUNTS: u32 = 7_500;
+
+/// What the cross-check saw: the watchdog's counts and the microseconds `clock` gave for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cross {
+    pub counts: u32,
+    pub us: u64,
+}
+
+/// Whether `clock` (the `time` CSR) moves, judged by a clock that is known to run: `wdt0`'s counter, which
+/// the entry armed and read back moving. Waits for the counter to count [`CROSS_COUNTS`] (at most
+/// [`MEASURE_READS`] reads) and requires the timebase to have moved over them. `time` is trusted for nothing
+/// before this holds.
+pub fn timebase_runs<R: RegAccess, K: Clock>(
+    regs: &mut R,
+    clock: &mut K,
+) -> Result<Cross, MeasureError> {
+    let start = clock.now_us();
+    let first = regs.read32(BASES[0] + CCVR);
+    let mut reads = 0;
+    loop {
+        let now = regs.read32(BASES[0] + CCVR);
+        let counts = first.saturating_sub(now);
+        if counts >= CROSS_COUNTS {
+            let us = clock.now_us().saturating_sub(start);
+            if us == 0 {
+                return Err(MeasureError::TimebaseStuck);
+            }
+            return Ok(Cross { counts, us });
+        }
+        reads += 1;
+        if reads >= MEASURE_READS {
+            return Err(MeasureError::CounterStuck);
+        }
+    }
 }
 
 /// Measures `wdt0`'s clock against `clock`. The entry armed `wdt0` before this runs, so the counter is
@@ -178,9 +227,11 @@ pub mod record {
         "rounds",
         "ticks-arm-lo",
         "ticks-now-lo",
+        "tb-cross-counts",
+        "tb-cross-us",
     ];
     /// How many words the record has.
-    pub const WORDS: usize = 32;
+    pub const WORDS: usize = 34;
 
     /// The index of a named word.
     pub const fn index(name: &str) -> usize {
@@ -375,6 +426,70 @@ mod tests {
             measure(&mut slow, &mut Shared(now)),
             Err(MeasureError::OutOfRange(_))
         ));
+    }
+
+    struct Stopped;
+
+    impl Clock for Stopped {
+        fn now_us(&mut self) -> u64 {
+            0
+        }
+    }
+
+    struct Writes(Vec<(usize, u32)>);
+
+    impl RegAccess for Writes {
+        fn read32(&mut self, _addr: usize) -> u32 {
+            0
+        }
+        fn write32(&mut self, addr: usize, value: u32) {
+            self.0.push((addr, value));
+        }
+    }
+
+    #[test]
+    fn the_timebase_enable_writes_the_three_vendor_values_in_their_order() {
+        let mut bus = Writes(Vec::new());
+        enable_timebase(&mut bus);
+        assert_eq!(
+            bus.0,
+            [(0x9110_8020, 1), (0x9110_8030, 1), (0x9110_8000, 0x69)]
+        );
+    }
+
+    #[test]
+    fn the_timebase_is_trusted_only_when_it_moves_against_the_watchdog_counter() {
+        /// A 750 kHz counter that runs off its own clock (each read moves it on 7 us of it).
+        struct Counter(Shared);
+        impl RegAccess for Counter {
+            fn read32(&mut self, addr: usize) -> u32 {
+                assert_eq!(addr, BASES[0] + CCVR);
+                (0xFFFF_FFFF - self.0.now_us() * 750_000 / 1_000_000) as u32
+            }
+            fn write32(&mut self, _addr: usize, _value: u32) {}
+        }
+
+        // `time` on the same clock as the counter: trusted, about 10 ms for the counts.
+        let now = Rc::new(Cell::new(0));
+        let mut counter = Counter(Shared(now.clone()));
+        let cross = timebase_runs(&mut counter, &mut Shared(now)).unwrap();
+        assert!(cross.counts >= CROSS_COUNTS);
+        assert!((9_900..=10_200).contains(&cross.us), "{cross:?}");
+
+        // `time` reading 0 and never moving, as the boot ROM leaves it (B2 run 1): refused.
+        let mut counter = Counter(Shared(Rc::new(Cell::new(0))));
+        assert_eq!(
+            timebase_runs(&mut counter, &mut Stopped),
+            Err(MeasureError::TimebaseStuck)
+        );
+
+        // A counter that never counts: refused, bounded by the reads.
+        let mut frozen = Writes(Vec::new());
+        let mut clock = Fake(0, 7);
+        assert_eq!(
+            timebase_runs(&mut frozen, &mut clock),
+            Err(MeasureError::CounterStuck)
+        );
     }
 
     #[test]

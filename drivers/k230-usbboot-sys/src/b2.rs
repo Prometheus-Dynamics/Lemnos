@@ -7,8 +7,9 @@
 //! The order, after the entry armed both watchdogs (before any of this runs):
 //!
 //! 1. the banner on the console;
-//! 2. the watchdog clock measured against the timebase ([`check::measure`]); a measurement that fails
-//!    ends the run before USB is touched;
+//! 2. the timebase started ([`check::enable_timebase`]: the boot ROM leaves `time` stopped) and checked
+//!    to move against the watchdog's counter ([`check::timebase_runs`]); then the watchdog clock measured
+//!    against it ([`check::measure`]). Either failing ends the run before USB is touched;
 //! 3. the shared entry: arm at the longest setting, read back, lower to the smallest period covering
 //!    [`RUN_BUDGET_US`] at the measured clock ([`stage_with`], never fed);
 //! 4. the controller's core reset ([`Dwc2`]), the FL1 device, the [`Loopback`] storage;
@@ -22,7 +23,7 @@ use lemnos_flash_stage::guard::{Cause, finish};
 use lemnos_flash_stage::wait::Clock;
 use lemnos_flash_wire::frame::MAX_CHUNK;
 use lemnos_k230_usbboot_stage::fl1::check::{
-    self, CHECK_IDENTITY, Loopback, MAX_TOP, Measured, RUN_BUDGET_US, record,
+    self, CHECK_IDENTITY, Cross, Loopback, MAX_TOP, Measured, RUN_BUDGET_US, record,
 };
 use lemnos_k230_usbboot_stage::fl1::report::Uart;
 use lemnos_k230_usbboot_stage::fl1::run::{Profile, stage_with};
@@ -44,8 +45,14 @@ pub const END_LINE: &str = "lemnos stage: end";
 /// The line printed when the watchdog clock cannot be measured.
 pub const NO_CLOCK_LINE: &str = "b2 the watchdog clock could not be measured; no USB bring-up";
 
+/// The line printed when the timebase does not move against the watchdog's counter after its enable.
+pub const TIMEBASE_STOPPED_LINE: &str =
+    "b2 the timebase does not move against the watchdog counter after its enable; no USB bring-up";
+
 /// What the run knows besides the driver's counts.
 pub struct Known {
+    /// The timebase cross-check against the watchdog's counter, once it passed.
+    pub cross: Option<Cross>,
     /// The watchdog clock, once measured.
     pub measured: Option<Measured>,
     /// The setting chosen (0xff: none covers the budget; the shared entry then refuses).
@@ -60,6 +67,7 @@ impl Known {
     /// Nothing measured yet, from `arm_ticks`.
     pub const fn new(arm_ticks: u64) -> Self {
         Self {
+            cross: None,
             measured: None,
             top: 0,
             rounds: Cell::new(0),
@@ -74,6 +82,10 @@ pub fn words(stats: &Stats, known: &Known, now_ticks: u64) -> [u32; record::WORD
     words[0] = record::MAGIC;
     for (name, value) in stats.words() {
         words[record::index(name)] = value;
+    }
+    if let Some(c) = known.cross {
+        words[record::index("tb-cross-counts")] = c.counts;
+        words[record::index("tb-cross-us")] = c.us as u32;
     }
     if let Some(m) = known.measured {
         words[record::index("wdt-first")] = m.first;
@@ -143,6 +155,14 @@ where
     uart::clear_programmable_thre(regs);
     uart::configure_if_unset(regs);
     console.line(regs, &[BANNER]);
+    check::enable_timebase(regs);
+    match check::timebase_runs(regs, clock) {
+        Ok(cross) => known.cross = Some(cross),
+        Err(_) => {
+            console.line(regs, &[TIMEBASE_STOPPED_LINE]);
+            return Cause::Setup { step: 5 };
+        }
+    }
     let measured = match check::measure(regs, clock) {
         Ok(measured) => measured,
         Err(_) => {

@@ -205,9 +205,18 @@ pub struct Model {
     fired: bool,
     kicks: u64,
     fault: Fault,
+    /// Each CCVR read moves the counter on one cycle, so a model with no time behind it still counts.
+    read_steps: bool,
 }
 
 impl Model {
+    /// The same watchdog whose counter moves only with time ([`Model::advance_us`]), as on the board: a
+    /// model driven by a real clock reads it in tight loops, and a step per read would run it fast.
+    pub fn timed(mut self) -> Self {
+        self.read_steps = false;
+        self
+    }
+
     /// A watchdog at `base` that is not armed, at `clock_hz`, with `fault`.
     pub fn new(base: usize, clock_hz: u64, fault: Fault) -> Self {
         Self {
@@ -216,6 +225,7 @@ impl Model {
             torr: 0,
             cr: 0,
             remaining: 0,
+            read_steps: true,
             fired: false,
             kicks: 0,
             fault,
@@ -224,16 +234,21 @@ impl Model {
 
     /// Runs the counter for `us` microseconds. Returns true when it fires during that time.
     pub fn advance_us(&mut self, us: u64) -> bool {
+        let cycles = (u128::from(us) * u128::from(self.clock_hz)).div_ceil(1_000_000);
+        self.advance_cycles(cycles.min(u128::from(u64::MAX)) as u64)
+    }
+
+    /// Lets `cycles` of the watchdog's clock pass. Returns true when this made the counter run out.
+    pub fn advance_cycles(&mut self, cycles: u64) -> bool {
         if self.cr & CR_ENABLE == 0 || self.fired || self.fault == Fault::CounterStuck {
             return false;
         }
-        let cycles = (u128::from(us) * u128::from(self.clock_hz)).div_ceil(1_000_000);
-        if cycles >= u128::from(self.remaining) {
+        if cycles >= self.remaining {
             self.remaining = 0;
             self.fired = true;
             true
         } else {
-            self.remaining -= cycles as u64;
+            self.remaining -= cycles;
             false
         }
     }
@@ -270,7 +285,8 @@ impl RegAccess for Model {
             CR => self.cr,
             TORR => self.torr,
             CCVR => {
-                if self.cr & CR_ENABLE != 0 && self.fault != Fault::CounterStuck {
+                if self.read_steps && self.cr & CR_ENABLE != 0 && self.fault != Fault::CounterStuck
+                {
                     self.remaining = self.remaining.saturating_sub(1);
                 }
                 self.remaining as u32

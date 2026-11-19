@@ -37,7 +37,7 @@ use lemnos_flash_wire::usb::{
     BULK_IN, CONFIGURATION_VALUE, INTERFACE_NAME, LANGUAGE, PRODUCT, PRODUCT_ID, VENDOR_ID,
 };
 use lemnos_k230_usbboot_stage::fl1::check::{
-    CHECK_BUILD_ID, CHECK_IDENTITY, CHECK_LBA, CHECK_SECTORS, RECORD_LBA, record,
+    CHECK_BUILD_ID, CHECK_IDENTITY, CHECK_LBA, CHECK_SECTORS, CROSS_COUNTS, RECORD_LBA, record,
 };
 
 use crate::bootrom::{DOWNLOAD_PID, DOWNLOAD_VID};
@@ -956,6 +956,28 @@ pub fn record_checks(words: &[u32; record::WORDS], seen: &Seen) -> Vec<String> {
         w("ep0-status-out") >= 1,
         "no endpoint 0 OUT status stage was counted".to_string(),
     );
+    // The timebase cross-check: the watchdog counted its counts and `time` moved over them, at a rate
+    // the measured clock agrees with (`tb-cross-us` within a quarter of counts / wdt-hz).
+    let cross_ok = w("tb-cross-counts") >= CROSS_COUNTS && w("tb-cross-us") != 0;
+    want(
+        cross_ok,
+        format!(
+            "record timebase cross-check {} counts in {} us (the timebase was not shown to move)",
+            w("tb-cross-counts"),
+            w("tb-cross-us")
+        ),
+    );
+    if cross_ok && w("wdt-hz") != 0 {
+        let expect = u64::from(w("tb-cross-counts")) * 1_000_000 / u64::from(w("wdt-hz"));
+        let got = u64::from(w("tb-cross-us"));
+        want(
+            got * 4 >= expect * 3 && got * 4 <= expect * 5,
+            format!(
+                "record timebase cross-check {got} us for {} counts, the measured clock gives {expect} us",
+                w("tb-cross-counts")
+            ),
+        );
+    }
     want(
         w("wdt-top") <= 15,
         format!(
@@ -1012,7 +1034,7 @@ pub fn console_words(lines: &[String]) -> Vec<(String, u32)> {
 }
 
 /// The words that cannot change after the record was read over USB: the console must print the same.
-pub const STABLE_WORDS: [&str; 13] = [
+pub const STABLE_WORDS: [&str; 15] = [
     "magic",
     "gsnpsid",
     "ghwcfg3",
@@ -1026,6 +1048,8 @@ pub const STABLE_WORDS: [&str; 13] = [
     "wdt-first",
     "wdt-last",
     "wdt-hz",
+    "tb-cross-counts",
+    "tb-cross-us",
 ];
 
 /// Where the console's record and the USB record disagree on a stable word, or the console lacks one.

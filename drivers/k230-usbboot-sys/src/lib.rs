@@ -49,7 +49,8 @@ pub unsafe fn write32(addr: usize, value: u32) {
 }
 
 /// The register access of the stage image: the watchdogs (read and write), the first UART (read and write,
-/// the block only), the SoC reset (its one value, written only), and the pad block (read only). A write into the pad block is refused here too (the stage's
+/// the block only), the SoC reset (its one value, written only), the system timer's three enables (their
+/// values, written only), and the pad block (read only). A write into the pad block is refused here too (the stage's
 /// `PadGuard` refuses it first). An address outside these windows reads as zero and is never written.
 pub struct Mmio;
 
@@ -69,6 +70,14 @@ impl RegAccess for Mmio {
             // (`fl1::report::Uart`), so a bus that dropped it would leave the board to the watchdog.
             // SAFETY: `SOC_GLB_RST` is the boot system controller's aligned reset register
             // (`sysctl_boot.h:47`); the value is the documented reset, and nothing after it runs.
+            unsafe { write32(addr, value) };
+            return;
+        }
+        if sysctl::STC_ENABLES.contains(&(addr, value)) {
+            // The system timer's enables, exactly the three (register, value) pairs the vendor SPL writes
+            // before it relies on `time` (`sysctl::STC_ENABLES`, `cpu.c:73-79` at k230_sdk 7e302f7).
+            // SAFETY: each address is an aligned register of the system timer block at `0x9110_8000`
+            // (`platform.h:98`), outside the pad block; the values are the documented enables.
             unsafe { write32(addr, value) };
             return;
         }
