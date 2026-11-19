@@ -6,12 +6,17 @@
 //! before the next piece.
 //!
 //! ```text
-//! k230-card piece --op hash|zero|write|test --lba N --count N [--data FILE --data-offset BYTES]
+//! k230-card piece --op hash|zero|write|test --lba N --count N --extent FIRST,COUNT [--data FILE --data-offset BYTES]
 //!                 [--expect-source FILE] [--expect-sha HEX]
 //! k230-card flash --source FILE [--hold N,N] [--from N] [--to N] [--progress FILE]
 //! k230-card load  --file FILE --offset BYTES --size BYTES --address HEX        (a raw load and start)
 //! common: --port P --image STAGE.bin --cid HEX32 --blocks N --record FILE [--console TTY]... [--fast] [--dry]
 //! ```
+//!
+//! Every piece declares the whole run's extent (FLASH-EXTENT): `piece` takes it as `--extent FIRST,COUNT`, and
+//! `flash` declares the sectors it was asked to write, `--from` up to `--to`. The stage refuses a piece with no
+//! declaration, a write, zero or test piece outside it, and an extent past the card. An older stage refuses every
+//! piece this sends, with the refusal on the console.
 //!
 //! `--hold` names sectors written as zero instead of the source's content (the boot headers, so the card
 //! stays one the ROM does not boot). `--dry` does everything but open the device and the consoles.
@@ -27,6 +32,7 @@ use lemnos_k230_usbboot::bootrom::{CPU_INFO_LEN, PAGE, PROG_START, SET_DATA_ADDR
 use lemnos_k230_usbboot::console::Console;
 use lemnos_k230_usbboot::transport::UsbIo;
 use lemnos_k230_usbboot::usb::RusbIo;
+use lemnos_k230_usbboot_stage::extent::Extent;
 use lemnos_k230_usbboot_stage::format::crc32;
 use lemnos_k230_usbboot_stage::image::{LOAD_ADDRESS, mode_word, patch};
 use lemnos_k230_usbboot_stage::piece::{
@@ -56,6 +62,18 @@ fn now() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+/// `--extent FIRST,COUNT` for a piece: the declared extent, in sectors (decimal or 0x hex).
+fn extent_option(text: &str) -> Extent {
+    let (first, count) = text
+        .split_once(',')
+        .unwrap_or_else(|| die("--extent is FIRST,COUNT"));
+    let first =
+        u32::try_from(number(first)).unwrap_or_else(|_| die("--extent: FIRST is past 2 TiB"));
+    let count =
+        u32::try_from(number(count)).unwrap_or_else(|_| die("--extent: COUNT is past 2 TiB"));
+    Extent::new(first, count).unwrap_or_else(|e| die(&format!("--extent: {e}")))
 }
 
 fn number(text: &str) -> u64 {
@@ -222,6 +240,7 @@ impl Run {
         count: u32,
         payload: &[u8],
         expect: Option<&str>,
+        extent: Extent,
     ) -> Result<Said, String> {
         let job = Job {
             op,
@@ -235,14 +254,17 @@ impl Run {
             flags: if self.fast { FAST } else { 0 },
             card_blocks: self.blocks,
             cid: self.cid,
+            extent: Some(extent),
         };
         Job::parse(&job.encode()).map_err(str::to_string)?;
         let blob = self.blob(&job, payload);
         self.pieces += 1;
         let n = self.pieces;
         self.note(&format!(
-            "piece {n}: op {op:?} sectors {lba}..{} ({} bytes of payload, sha256 {}), load {} bytes sha256 {} at {LOAD_ADDRESS:#010x}",
+            "piece {n}: op {op:?} sectors {lba}..{} in extent {}..{} ({} bytes of payload, sha256 {}), load {} bytes sha256 {} at {LOAD_ADDRESS:#010x}",
             lba + u64::from(count),
+            extent.first(),
+            extent.end(),
             payload.len(),
             if payload.is_empty() { "-".into() } else { sha(payload) },
             blob.len(),
@@ -466,6 +488,7 @@ fn main() {
             } else {
                 Vec::new()
             };
+            let extent = extent_option(&need("extent"));
             let expect = match (opt.get("expect-sha"), opt.get("expect-source")) {
                 (Some(text), _) => Some(text.clone()),
                 (None, Some(path)) => {
@@ -489,7 +512,7 @@ fn main() {
                     "expected sha256 of the sectors read from the card: {e}"
                 ));
             }
-            run.piece(op, lba, count, &payload, expect.as_deref())
+            run.piece(op, lba, count, &payload, expect.as_deref(), extent)
                 .and_then(|said| {
                     if op == Op::Test {
                         run.note(&format!(
@@ -524,6 +547,18 @@ fn main() {
             run.note(&format!(
                 "flash: {path} sectors {from}..{to} of {total}, held as zero: {hold:?}"
             ));
+            // The run's whole extent, declared in every piece's job: the sectors this run was asked to write.
+            let extent = Extent::new(
+                u32::try_from(from).unwrap_or_else(|_| die("--from is past 2 TiB")),
+                u32::try_from(to.saturating_sub(from))
+                    .unwrap_or_else(|_| die("the flash is past 2 TiB")),
+            )
+            .unwrap_or_else(|e| die(&format!("nothing to flash: {e}")));
+            run.note(&format!(
+                "flash: declared extent {} sectors from {}",
+                extent.count(),
+                extent.first()
+            ));
             let started = Instant::now();
             let (mut at, mut written, mut zeroed) = (from, 0u64, 0u64);
             let mut outcome = Ok(());
@@ -547,11 +582,11 @@ fn main() {
                     let run_len = run_len.min(ZERO_RUN);
                     let expect = sha(&vec![0u8; run_len as usize * SECTOR]);
                     zeroed += u64::from(run_len);
-                    run.piece(Op::Zero, at, run_len, &[], Some(&expect))
+                    run.piece(Op::Zero, at, run_len, &[], Some(&expect), extent)
                         .map(|_| run_len)
                 } else {
                     written += u64::from(n);
-                    run.piece(Op::Write, at, n, &data, Some(&sha(&data)))
+                    run.piece(Op::Write, at, n, &data, Some(&sha(&data)), extent)
                         .map(|_| n)
                 };
                 match step {

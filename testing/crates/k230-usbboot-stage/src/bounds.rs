@@ -13,6 +13,11 @@
 //!
 //! A request is checked whole before the card is touched: if any one of its sectors is outside the range or
 //! protected, none of it is written.
+//!
+//! BENCH ONLY. These bounds are the bench card stages' (the card image's `stage` mode, and the FL1 card version).
+//! The whole-image flash path (`piece`) does not use them: a real flash writes the GPT and the boot headers. That
+//! path is bounded by the extent its job declares, [`crate::extent::Extent`]. The two are different types, so
+//! neither can be built from the other's storage.
 
 use crate::format::crc32;
 

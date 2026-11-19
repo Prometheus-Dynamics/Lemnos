@@ -403,6 +403,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
+    use lemnos_k230_usbboot_stage::extent::Extent;
     use lemnos_k230_usbboot_stage::format::crc32;
     use lemnos_k230_usbboot_stage::piece::{Job, Op, PieceError, run};
     use lemnos_k230_usbboot_stage::sd::Card;
@@ -709,6 +710,8 @@ mod tests {
             flags: 0,
             card_blocks: MODEL_SECTORS as u64,
             cid,
+            // The whole model card: these tests are about the transfers, not the extent (`flash_extent.rs` in the stage).
+            extent: Some(Extent::new(0, MODEL_SECTORS as u32).expect("the card")),
         }
     }
 

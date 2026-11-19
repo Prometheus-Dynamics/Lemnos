@@ -15,6 +15,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod bounds;
+pub mod extent;
 pub mod fl1;
 pub mod format;
 pub mod image;

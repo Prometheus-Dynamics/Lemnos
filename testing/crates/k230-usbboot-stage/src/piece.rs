@@ -7,9 +7,20 @@
 //!
 //! The watchdog is fed after a sector is written, read back and equal, or read and hashed. Nothing
 //! else feeds it.
+//!
+//! Every job declares the whole run's extent (`crate::extent`): the sectors the flash may touch. A job with no
+//! declaration, a write, zero or write-test outside it, or an extent past the card's end is refused before the
+//! card is written. The protected-sector list of the bench (`crate::bounds`) does not apply here.
+//!
+//! The header, sixteen little-endian words (`HEADER_LEN` bytes):
+//! 0 magic; 1 operation (1 write, 2 zero, 3 hash, 4 test); 2-3 first sector; 4 sector count; 5 payload CRC-32;
+//! 6 flags (bit 0 FAST, bit 1 EXTENT: the extent words are declared); 7-8 card size in sectors; 9-12 the card's CID
+//! (four big-endian words); 13 extent first sector; 14 extent sector count; 15 CRC-32 of words 0 to 14.
+//! The extent words are read only when bit 1 is set; a job from a host that does not declare one has bit 1 clear.
 
 use sha2::{Digest, Sha256};
 
+use crate::extent::{Extent, NO_EXTENT, OUTSIDE, PAST_CARD};
 use crate::format::crc32;
 use crate::sd::{BLOCK, Card, SdError, SdHost};
 
@@ -31,6 +42,8 @@ pub const TEST_SECTORS: usize = 8;
 pub const TRIES: u32 = 3;
 /// Flag: raise the card clock to the data rate after the card has started.
 pub const FAST: u32 = 1 << 0;
+/// Flag: the header's extent words (13 and 14) are declared. A job without it has no extent and is refused.
+pub const EXTENT_FLAG: u32 = 1 << 1;
 
 /// What a job does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +71,8 @@ pub struct Job {
     /// The card the job is for: its size in sectors and its CID. Any other card is refused.
     pub card_blocks: u64,
     pub cid: [u8; 16],
+    /// The whole run's extent (FLASH-EXTENT). `None` is a job without a declaration, which is refused.
+    pub extent: Option<Extent>,
 }
 
 impl Job {
@@ -75,12 +90,21 @@ impl Job {
         words[3] = (self.lba >> 32) as u32;
         words[4] = self.count;
         words[5] = self.data_crc;
-        words[6] = self.flags;
+        words[6] = (self.flags & !EXTENT_FLAG)
+            | if self.extent.is_some() {
+                EXTENT_FLAG
+            } else {
+                0
+            };
         words[7] = self.card_blocks as u32;
         words[8] = (self.card_blocks >> 32) as u32;
         for i in 0..4 {
             let b = &self.cid[4 * i..4 * i + 4];
             words[9 + i] = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        }
+        if let Some(extent) = self.extent {
+            words[13] = extent.first();
+            words[14] = extent.count();
         }
         let mut out = [0u8; HEADER_LEN];
         for (i, word) in words.iter().enumerate() {
@@ -118,14 +142,20 @@ impl Job {
         for i in 0..4 {
             cid[4 * i..4 * i + 4].copy_from_slice(&word(9 + i).to_be_bytes());
         }
+        let extent = if word(6) & EXTENT_FLAG != 0 {
+            Some(Extent::new(word(13), word(14))?)
+        } else {
+            None
+        };
         let job = Self {
             op,
             lba: u64::from(word(2)) | (u64::from(word(3)) << 32),
             count: word(4),
             data_crc: word(5),
-            flags: word(6),
+            flags: word(6) & !EXTENT_FLAG,
             card_blocks: u64::from(word(7)) | (u64::from(word(8)) << 32),
             cid,
+            extent,
         };
         if job.count == 0 {
             return Err("piece refused: no sectors");
@@ -136,7 +166,21 @@ impl Job {
         if job.op == Op::Test && job.count as usize > TEST_SECTORS {
             return Err("piece refused: the write test is at most eight sectors");
         }
+        // The extent, checked against the card size the header names, before the card is touched. The card's own
+        // size is checked again in `check`.
+        let extent = job.extent.ok_or(NO_EXTENT)?;
+        if !extent.within(job.card_blocks) {
+            return Err(PAST_CARD);
+        }
+        if job.writes() && !extent.holds(job.lba, u64::from(job.count)) {
+            return Err(OUTSIDE);
+        }
         Ok(job)
+    }
+
+    /// Whether the job writes or erases sectors: a write, a zero fill, or the write test. A hash only reads.
+    pub fn writes(&self) -> bool {
+        matches!(self.op, Op::Write | Op::Zero | Op::Test)
     }
 }
 
@@ -170,6 +214,13 @@ pub fn check<H: SdHost>(card: &Card<H>, job: &Job, data: &[u8]) -> Result<(), Pi
         return Err(PieceError::Refused(
             "piece refused: not the card the job names",
         ));
+    }
+    let extent = job.extent.ok_or(PieceError::Refused(NO_EXTENT))?;
+    if !extent.within(card.blocks()) {
+        return Err(PieceError::Refused(PAST_CARD));
+    }
+    if job.writes() && !extent.holds(job.lba, u64::from(job.count)) {
+        return Err(PieceError::Refused(OUTSIDE));
     }
     match job.lba.checked_add(u64::from(job.count)) {
         Some(end) if end <= card.blocks() => {}
@@ -334,12 +385,13 @@ mod tests {
     fn job() -> Job {
         Job {
             op: Op::Write,
-            lba: 0x1_0000_0002,
+            lba: 0x0100_0002,
             count: 7,
             data_crc: 0x1234_5678,
             flags: FAST,
             card_blocks: 124_735_488,
             cid: *b"\x03SDSR64G\x80\x14\xa7\xc9\xab\x01\x51\x00",
+            extent: Some(Extent::new(0, 124_735_488).expect("the card")),
         }
     }
 
@@ -375,5 +427,61 @@ mod tests {
         test.count = 9;
         assert!(Job::parse(&test.encode()).is_err());
         assert_eq!(MAX_SECTORS, 1016);
+    }
+
+    /// The header's bytes with the flags and extent words set as an old host sends them (CRC re-made).
+    fn patched(
+        mut bytes: [u8; HEADER_LEN],
+        flags: u32,
+        first: u32,
+        count: u32,
+    ) -> [u8; HEADER_LEN] {
+        bytes[24..28].copy_from_slice(&flags.to_le_bytes());
+        bytes[52..56].copy_from_slice(&first.to_le_bytes());
+        bytes[56..60].copy_from_slice(&count.to_le_bytes());
+        let crc = crc32(&bytes[..HEADER_LEN - 4]);
+        bytes[HEADER_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_job_without_a_declared_extent_is_refused_by_name() {
+        // What an old host sends: flag bit 1 clear, extent words zero.
+        assert_eq!(
+            Job::parse(&patched(job().encode(), FAST, 0, 0)),
+            Err(NO_EXTENT)
+        );
+        let mut none = job();
+        none.extent = None;
+        assert_eq!(Job::parse(&none.encode()), Err(NO_EXTENT));
+    }
+
+    #[test]
+    fn a_write_must_lie_wholly_inside_its_extent_and_a_hash_may_read_anywhere() {
+        let mut j = job();
+        j.extent = Some(Extent::new(1_048_576, 4).expect("four sectors"));
+        j.lba = 1_048_576;
+        j.count = 4;
+        assert!(Job::parse(&j.encode()).is_ok(), "the whole extent");
+        j.lba = 1_048_579;
+        j.count = 2;
+        assert_eq!(Job::parse(&j.encode()), Err(OUTSIDE), "straddling the end");
+        j.op = Op::Hash;
+        j.data_crc = 0;
+        assert!(
+            Job::parse(&j.encode()).is_ok(),
+            "a hash reads, so it is not held to the extent"
+        );
+    }
+
+    #[test]
+    fn an_extent_past_the_card_size_the_header_names_is_refused() {
+        let mut j = job();
+        j.extent = Some(Extent::new(124_735_480, 16).expect("sixteen sectors"));
+        j.lba = 124_735_480;
+        j.count = 1;
+        j.op = Op::Zero;
+        j.data_crc = 0;
+        assert_eq!(Job::parse(&j.encode()), Err(PAST_CARD));
     }
 }

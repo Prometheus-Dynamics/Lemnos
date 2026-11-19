@@ -115,6 +115,14 @@ capacity, CMD7, CMD16), single-block reads (CMD17) and writes (CMD24) with a bou
   stays busy, a v1 card, a write the card never finishes, and the CSD's bit positions.
 - Each write is read back by the stage before the stage feeds the watchdogs (`store`).
 
+## The whole-image flash extent
+
+The card flash's jobs (`piece` mode, `lemnos_k230_usbboot_stage::piece`) declare the sectors the whole run may
+touch, in the job header (words 13 and 14, flag bit 1). A stage refuses a piece with no declaration, a write, zero
+or write-test outside it, and an extent past the card's end, before any write. The bench's protected list does not
+apply to this path. The job format, the refusal texts and what an older host sees are in
+[`k230-flash-extent.md`](k230-flash-extent.md).
+
 ## The host transport
 
 `testing/crates/k230-usbboot/src/usb.rs`: `UsbIo` over libusb through `rusb` 0.9 (libusb 1.0 is on

@@ -29,8 +29,11 @@ SECTIONS
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         . = ALIGN(16);
-        lemnos_stack_bottom = .;  /* 64 KiB: the report's records and the boot areas are built on it */
-        . += 0x10000;
+        /* 16 KiB, was 64 KiB. The deepest mode's frames, summed down the image's direct-call graph, are 3.5 KiB (the
+         * card write piece; the report 1 KiB, the probe 0.7 KiB). The reserve is about four times that. The cut
+         * is what lets the image fit below the job address 0x80380000 with the flash extent's checks in it. */
+        lemnos_stack_bottom = .;
+        . += 0x4000;
         . = ALIGN(16);
         lemnos_stack_top = .;
         lemnos_bss_end = .;
