@@ -1,53 +1,63 @@
 //! A status light: a ring of LEDs, drawn on a `pixels/1` device, shown through `light/1`.
 //!
-//! Whoever calls the contract sends a whole look with each `show`, on a layer and at a priority. The
-//! highest priority among the layers with a look is what the ring shows ([`layers`]). The look is
-//! animated by [`animator`] and written to the `pixels` device in chunks of at most
+//! Each caller that shows something owns a layer (a slot the caller picks), at a priority. A layer
+//! holds one look, sent whole with [`Light::show`](lemnos_contract_light::Light::show), or one frame,
+//! which sets the LEDs it names ([`Light::show_frame`](lemnos_contract_light::Light::show_frame)). The
+//! look is animated by [`animator`] and written to the `pixels` device in chunks of at most
 //! [`MAX_LOCAL_LEDS`] LEDs, then shown. Nothing is shown from a catalogue of named looks, except the
 //! built-in `status.*` ([`builtin`]).
 //!
 //! # Precedence
 //!
-//! Among the layers with a look, the highest priority is shown. On equal priorities the higher layer
-//! is shown. With no look on any layer, the board's default look (`default_look`, `status.ok` unless
-//! the board says otherwise) is shown. `clear(layer)` and `clear_all` empty layers whoever showed
-//! them, as they always have. Clearing a layer reveals the next look by the same rule.
+//! Each LED shows the value of the owner with the highest priority that set it. On equal priorities
+//! the higher layer wins. A look sets every LED, so the highest look is the base; a frame wins over
+//! the base on the LEDs it sets, when its priority beats the base's. Where no owner set an LED, the
+//! board's default look (`default_look`, `status.ok` unless the board says otherwise) shows there.
+//! Nothing is blended ([`layers`]).
+//!
+//! `clear(layer)` empties a layer only when the caller owns it. `clear_all` empties every layer.
 //!
 //! # Callers
 //!
-//! The driver is told who calls (`TRACKS_CALLERS`). A look is owned by the caller that showed it,
-//! and a `show` on a layer replaces the layer's owner too. When a caller goes (its connection
-//! closes, or it dies), the looks it showed end, and the light shows what it would show without
-//! them: the next live look by the rule above, or the default. Another caller's looks are not
-//! touched. A look the host shows itself (no client) is never ended by a caller going.
+//! The driver is told who calls (`TRACKS_CALLERS`). An owner is the caller that showed the layer, and
+//! a `show` or `show_frame` on a layer replaces the layer's owner too. When a caller goes (its
+//! connection closes, or it dies), the layers it owns are emptied, and the ring shows what it would
+//! show without them. Another caller's layers are not touched. A layer the host shows itself (no
+//! client) is never ended by a caller going.
 //!
-//! The owner rule is per layer, not per LED: the light holds one look per layer, so the owner is the
-//! one who showed that look. Lemnos never blends looks; that is the caller's to decide.
+//! # Frames and looks
+//!
+//! A look covers the whole ring and is animated, and fades from what it replaces. A frame is sent as
+//! it is and has no fade. A frame's colours are scaled by the runtime brightness, and not by the
+//! board's look brightness.
+//!
+//! The base look is the highest look, whichever layer holds it. It is animated as one, so a change of
+//! the base fades as a look does, and frames are drawn over it at once.
 //!
 //! # Time
 //!
 //! The driver has no clock of its own. It is ticked (`Lifecycle::tick`) once after it starts, after
 //! each method call, and when the time it returned comes round. A tick can come early, so each one
-//! checks what is due: a render when the look is animating, and a write when a frame is unsent. A
-//! ring that is not animating returns `None`, so an idle light costs nothing: no thread, no timer,
-//! no sleep.
+//! checks what is due: a render when the look is animating, and a write when a composed frame is
+//! unsent. A ring that is not animating returns `None`, so an idle light costs nothing: no thread,
+//! no timer, no sleep.
 //!
 //! # Failure
 //!
-//! A failed write is never final. The frame stays, and the write is tried again after a backoff
+//! A failed write is never final. The composed frame stays, and the write is tried again after a backoff
 //! that starts at 100 ms, doubles, and is capped at 8 s. Nothing auto-offs. `health` reports the
 //! failure until a write succeeds.
 //!
 //! # State
 //!
-//! Nothing is kept across a restart. A brightness set at runtime, or a look sent before, is
-//! forgotten; the board's settings ([`settings`]) are read again. The looks a caller holds are kept
+//! Nothing is kept across a restart. A brightness set at runtime, or a look or frame sent before, is
+//! forgotten; the board's settings ([`settings`]) are read again. The layers a caller holds are kept
 //! only while it is connected: they end with it (see "Callers").
 //!
 //! # `no_std`
 //!
-//! The crate is `no_std`, and uses `alloc` for the frame buffers only. Those are allocated when the
-//! light starts, sized from the ring's `count`, and nothing allocates after that.
+//! The crate is `no_std`, and uses `alloc` for the frame and composition buffers only. Those are
+//! allocated when the light starts, sized from the ring's `count`, and nothing allocates after that.
 
 #![no_std]
 
@@ -74,9 +84,12 @@ pub use look::{Block, Envelope, Look, Rgbw};
 pub use settings::{EffectKind, Settings};
 pub use wire::{MAX_LEN, Spec};
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use animator::{Animator, Transition};
 use layers::{LAYERS, Layers};
-use lemnos_contract_light::{Layout, Light as LightContract};
+use lemnos_contract_light::{FRAME_ENTRY, Layout, Light as LightContract};
 use lemnos_contract_pixels::{MAX_LOCAL_LEDS, Pixels};
 use lemnos_core::{
     CallerId, Config, ConfigError, Description, Dev, Health, Item, Key, Kind, Lifecycle, MethodId,
@@ -102,15 +115,21 @@ pub struct StatusLight {
     settings: Settings,
     layers: Layers,
     animator: Animator,
-    /// The look the animator shows, so an unchanged winner does not restart its time.
+    /// The look the animator shows, so an unchanged base does not restart its time.
     shown: Option<Spec>,
+    /// The base look's `(priority, layer)`: `None` for the default look.
+    base_key: Option<(u8, usize)>,
+    /// The runtime brightness of everything shown, 0..=255.
+    brightness: u8,
+    /// What the ring shows: each LED's colour. Sized at start.
+    frame: Vec<Rgbw>,
     /// A method changed the layers or the runtime brightness since the last tick.
     changed: bool,
     /// Who the method about to run is for (see [`Lifecycle::caller`]). A look shown now is theirs.
     calling: CallerId,
     /// When the animator next renders, in nanoseconds (`None` while steady).
     render_at: Option<u64>,
-    /// The frame in the animator has not reached the device.
+    /// The composed frame has not reached the device.
     unsent: bool,
     /// When an unsent frame is next tried.
     retry_at: u64,
@@ -130,9 +149,23 @@ impl StatusLight {
         }
     }
 
-    /// Sends the animator's frame to the device, in chunks, then shows it.
+    /// Sends the composed frame to the device, in chunks, then shows it.
     fn write(&mut self) -> Result<()> {
-        write_frame(&mut self.pixels, self.animator.frame())
+        write_frame(&mut self.pixels, &self.frame)
+    }
+
+    /// Composes the ring from the base look and the frames, and queues a write when it changed.
+    fn compose(&mut self, now_ns: u64) {
+        let changed = self.layers.compose(
+            self.animator.frame(),
+            self.base_key,
+            self.brightness,
+            &mut self.frame,
+        );
+        if changed && !self.unsent {
+            self.unsent = true;
+            self.retry_at = now_ns;
+        }
     }
 }
 
@@ -189,12 +222,16 @@ impl Lifecycle for StatusLight {
 
     fn start(needs: StatusLightNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::from_config(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+        let count = usize::from(settings.count);
         Ok(Self {
             pixels: needs.pixels,
-            layers: Layers::default(),
-            animator: Animator::new(usize::from(settings.count)),
+            layers: Layers::new(count),
+            animator: Animator::new(count),
             settings,
             shown: None,
+            base_key: None,
+            brightness: 255,
+            frame: vec![Rgbw::OFF; count],
             // The first tick shows the default look, so the ring is never dark at start.
             changed: true,
             calling: CallerId::LOCAL,
@@ -232,12 +269,14 @@ impl Lifecycle for StatusLight {
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         let now_ms = now_ns / NS_PER_MS;
+        let mut due = false;
         if self.changed {
             self.changed = false;
-            let spec = self
-                .layers
-                .winner()
-                .unwrap_or(Spec::Status(self.settings.default_look));
+            let (spec, key) = match self.layers.top() {
+                Some(top) => (top.spec, Some((top.priority, top.layer))),
+                None => (Spec::Status(self.settings.default_look), None),
+            };
+            self.base_key = key;
             if self.shown != Some(spec) {
                 let look = wire::resolve(&spec, &self.settings);
                 let transition = Transition::new(self.settings.fade_ms, self.settings.easing);
@@ -245,15 +284,17 @@ impl Lifecycle for StatusLight {
                 self.shown = Some(spec);
             }
             self.render_at = Some(now_ns);
+            due = true;
         }
         if let Some(at) = self.render_at
             && now_ns >= at
         {
-            if self.animator.render(now_ms).is_some() && !self.unsent {
-                self.unsent = true;
-                self.retry_at = now_ns;
-            }
+            self.animator.render(now_ms);
             self.render_at = self.animator.next_frame_ms(now_ms).map(|ms| ms * NS_PER_MS);
+            due = true;
+        }
+        if due {
+            self.compose(now_ns);
         }
         if self.unsent && now_ns >= self.retry_at {
             match self.write() {
@@ -292,14 +333,16 @@ impl LightContract for StatusLight {
     fn show(&mut self, layer: u8, priority: u8, look: &[u8]) -> Result<()> {
         let layer = Self::layer(layer)?;
         let spec = Spec::decode(look)?;
-        self.layers.set(layer, priority, spec, self.calling);
+        self.layers.set_look(layer, priority, spec, self.calling);
         self.changed = true;
         Ok(())
     }
 
     fn clear(&mut self, layer: u8) -> Result<()> {
-        self.layers.clear(Self::layer(layer)?);
-        self.changed = true;
+        let layer = Self::layer(layer)?;
+        if self.layers.clear(layer, self.calling) {
+            self.changed = true;
+        }
         Ok(())
     }
 
@@ -311,6 +354,22 @@ impl LightContract for StatusLight {
 
     fn set_brightness(&mut self, level: u8) -> Result<()> {
         self.animator.set_ring(level);
+        self.brightness = level;
+        self.changed = true;
+        Ok(())
+    }
+
+    fn show_frame(&mut self, layer: u8, priority: u8, leds: &[u8]) -> Result<()> {
+        let layer = Self::layer(layer)?;
+        if !leds.len().is_multiple_of(FRAME_ENTRY) {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        let entries = leds.as_chunks::<FRAME_ENTRY>().0.iter().map(|e| {
+            let led = usize::from(u16::from_le_bytes([e[0], e[1]]));
+            (led, Rgbw::new(e[2], e[3], e[4], e[5]))
+        });
+        self.layers
+            .set_frame(layer, priority, entries, self.calling);
         self.changed = true;
         Ok(())
     }

@@ -59,6 +59,8 @@ fn steady_state_allocates_nothing_with_callers_coming_and_going() {
     let mut light = <StatusLight as Lifecycle>::start(needs, &Config::new(&plain(4))).unwrap();
     let red = fill(0xff0000);
     let blue = fill(0x0000ff);
+    // A frame over LEDs 0 and 2: two entries of a u16 index and four colour bytes.
+    let part = [0u8, 0, 255, 0, 0, 0, 2, 0, 0, 0, 255, 0];
     // Warm up: the first draw and every change of look.
     settle(&mut light, 0, 10_000);
     for round in 0..4u64 {
@@ -66,6 +68,8 @@ fn steady_state_allocates_nothing_with_callers_coming_and_going() {
         light.show(0, 200, &red).unwrap();
         <StatusLight as Lifecycle>::caller(&mut light, CallerId(7));
         light.show(1, 50, &blue).unwrap();
+        <StatusLight as Lifecycle>::caller(&mut light, CallerId(9));
+        light.show_frame(2, 10, &part).unwrap();
         settle(&mut light, round * 10, 10_000);
     }
 
@@ -75,11 +79,15 @@ fn steady_state_allocates_nothing_with_callers_coming_and_going() {
             light.show(0, 200, &red).unwrap();
             <StatusLight as Lifecycle>::caller(&mut light, CallerId(7));
             light.show(1, 50, &blue).unwrap();
+            <StatusLight as Lifecycle>::caller(&mut light, CallerId(9));
+            light.show_frame(2, 10, &part).unwrap();
             settle(&mut light, 100 + round * 10, 100_000);
             <StatusLight as Lifecycle>::caller_gone(&mut light, CallerId(5));
             settle(&mut light, 100 + round * 10 + 1, 100_000);
             <StatusLight as Lifecycle>::caller_gone(&mut light, CallerId(7));
             settle(&mut light, 100 + round * 10 + 2, 100_000);
+            <StatusLight as Lifecycle>::caller_gone(&mut light, CallerId(9));
+            settle(&mut light, 100 + round * 10 + 3, 100_000);
         }
     });
     assert_eq!(count, 0, "allocations in steady state");
