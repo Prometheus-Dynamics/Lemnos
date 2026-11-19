@@ -27,7 +27,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lemnos_driver_k230_usbboot_sys::b2::{self as stage_b2, Buffers, Known, RX_LEN};
-use lemnos_driver_k230_usbboot_sys::dwc2::{Dwc2Regs, Stats, bits::*, reg::*};
+use lemnos_driver_k230_usbboot_sys::dwc2::{Dwc2Regs, Stats, Trace, bits::*, reg::*};
 use lemnos_flash_stage::serve::BUFFER_LEN;
 use lemnos_flash_stage::wait::Clock;
 use lemnos_flash_wire::usb::LANGUAGE;
@@ -41,10 +41,24 @@ use crate::bootrom::{DOWNLOAD_PID, DOWNLOAD_VID};
 
 /// The watchdogs' clock in the model: the bench's C1b measurement.
 pub const WDT_HZ: u64 = 750_000;
-/// GSNPSID the model reports (a core before 4.20a: CSFTRST clears itself).
+/// GSNPSID of a core before 4.20a (CSFTRST clears itself).
 pub const GSNPSID_PRE_420A: u32 = 0x4f54_400a;
-/// GSNPSID of a core from 4.20a (CSFTRST_DONE sets and is written back).
+/// GSNPSID of a 4.20a core (CSFTRST_DONE sets and is written back).
 pub const GSNPSID_420A: u32 = 0x4f54_420a;
+/// GSNPSID of the board's core (B2 run 2's record): 4.30a.
+pub const GSNPSID_430A: u32 = 0x4f54_430a;
+
+/// The core revision the model plays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CoreRev {
+    /// Before 4.20a: the soft reset's bit clears itself.
+    Pre420a,
+    /// 4.20a: CSFTRST_DONE sets and is written back (Linux `core.c` `dwc2_core_reset`).
+    V420a,
+    /// 4.30a, the board's core (GSNPSID `4f54430a`, B2 run 2): as 4.20a for the reset.
+    #[default]
+    V430a,
+}
 /// GHWCFG3: 2048 words of FIFO RAM, 10-bit packet counts, 19-bit transfer sizes.
 pub const HWCFG3_VALUE: u32 = (0x0800 << 16) | (6 << 4) | 8;
 /// GAHBCFG as the model's ROM leaves it: DMA on (the driver must turn it off and record it).
@@ -68,8 +82,8 @@ pub struct Faults {
     pub corrupt_out: Option<u32>,
     /// The wire flips one bit of the n-th bulk IN packet (1-based), device to host.
     pub corrupt_in: Option<u32>,
-    /// The core is 4.20a or later (CSFTRST_DONE).
-    pub rev_420a: bool,
+    /// The core's revision (the board's, 4.30a, by default).
+    pub core: CoreRev,
     /// This user may not open the node (no udev rule grants it).
     pub access_denied: bool,
     /// The core's `time` CSR. The board's boot ROM leaves it at 0, not moving (B2 run 1); the default is that.
@@ -129,6 +143,8 @@ struct EpState {
     remaining: usize,
     pkts: u32,
     nak: bool,
+    /// DxEPTSIZ was written since the counters were last loaded from it.
+    sized: bool,
 }
 
 /// The dwc2 core's state.
@@ -147,6 +163,9 @@ struct CoreState {
     out_packets: u32,
     in_packets: u32,
     ep0_out_enables: u32,
+    /// DIEPINT0 and DOEPINT0 (transfer complete, setup phase done), write one to clear.
+    diepint0: u32,
+    doepint0: u32,
 }
 
 /// The core, shared by the stage's thread (registers) and the host's (the wire).
@@ -188,10 +207,10 @@ impl Core {
         let mut regs = HashMap::new();
         regs.insert(
             GSNPSID,
-            if faults.rev_420a {
-                GSNPSID_420A
-            } else {
-                GSNPSID_PRE_420A
+            match faults.core {
+                CoreRev::Pre420a => GSNPSID_PRE_420A,
+                CoreRev::V420a => GSNPSID_420A,
+                CoreRev::V430a => GSNPSID_430A,
             },
         );
         regs.insert(GHWCFG3, HWCFG3_VALUE);
@@ -215,6 +234,8 @@ impl Core {
                 out_packets: 0,
                 in_packets: 0,
                 ep0_out_enables: 0,
+                diepint0: 0,
+                doepint0: 0,
             }),
             moved: Condvar::new(),
             wdt: Mutex::new(Watchdogs {
@@ -296,12 +317,13 @@ impl Core {
                     s.reset_reads -= 1;
                     if s.reset_reads == 0 {
                         s.resets_done += 1;
-                        if self.faults.rev_420a {
+                        if self.faults.core != CoreRev::Pre420a {
                             s.reset_done_bit = true;
                         }
                     }
                 }
-                let pending = s.reset_reads > 0 || (self.faults.rev_420a && s.reset_done_bit);
+                let pending =
+                    s.reset_reads > 0 || (self.faults.core != CoreRev::Pre420a && s.reset_done_bit);
                 if pending {
                     v |= GRSTCTL_CSFTRST;
                 }
@@ -322,6 +344,10 @@ impl Core {
             }
             GRXSTSP => match s.rxq.pop_front() {
                 Some(entry) => {
+                    if (entry.status >> 17) & 0xf == PKTSTS_SETUPDONE {
+                        // The setup phase is done when its entry is popped: DOEPINT0.SETUP.
+                        s.doepint0 |= DXEPINT_SETUP;
+                    }
                     s.cur = entry.data;
                     drop(s);
                     self.moved.notify_all();
@@ -330,6 +356,8 @@ impl Core {
                 None => 0,
             },
             DSTS => 0, // ENUMSPD 0: high speed
+            o if o == diepint(0) => s.diepint0,
+            o if o == doepint(0) => s.doepint0,
             o if o == epfifo(0) || o == epfifo(1) => s.cur.pop_front().unwrap_or(0),
             o if (0x900..0x940).contains(&o) || (0xb00..0xb40).contains(&o) => {
                 let out = o >= 0xb00;
@@ -385,6 +413,8 @@ impl Core {
                 }
             }
             GINTSTS => s.gintsts &= !value,
+            o if o == diepint(0) => s.diepint0 &= !value,
+            o if o == doepint(0) => s.doepint0 &= !value,
             o if o == epfifo(0) || o == epfifo(1) => {
                 let i = if o == epfifo(0) { 0 } else { 1 };
                 s.tx[i].push_back(value);
@@ -413,7 +443,11 @@ impl Core {
                         if value & DXEPCTL_EPDIS != 0 {
                             ctl &= !DXEPCTL_EPENA;
                         }
-                        if !was && ctl & DXEPCTL_EPENA != 0 {
+                        // The counters load from DxEPTSIZ when the endpoint is enabled, and again
+                        // when the size register was written before an enable that finds it
+                        // already enabled (the register is the live counter on the core).
+                        if ctl & DXEPCTL_EPENA != 0 && (!was || ep.sized) {
+                            ep.sized = false;
                             let (size, pkts) = if i == 0 {
                                 (
                                     (ep.tsiz & 0x7f) as usize,
@@ -431,7 +465,10 @@ impl Core {
                         }
                         ep.ctl = ctl;
                     }
-                    0x10 => ep.tsiz = value,
+                    0x10 => {
+                        ep.tsiz = value;
+                        ep.sized = true;
+                    }
                     _ => {}
                 }
             }
@@ -510,9 +547,17 @@ impl Core {
             status: PKTSTS_SETUPDONE << 17,
             data: VecDeque::new(),
         });
-        // The core clears endpoint 0's stalls and ends its OUT transfer at a setup.
+        // The core clears endpoint 0's stalls at a setup (Linux `gadget.c`: the stall is cleared by
+        // the core on the next setup). It sets NAK on both directions of endpoint 0: every later
+        // stage needs CNAK from the driver (`gadget.c:1186-1189` "For Setup request do not clear
+        // NAK" / "clear NAK set by core", `gadget.c:2076`). A setup does not end the OUT transfer
+        // that took it: no OUT done entry and no transfer-complete for the setup packet, the case
+        // `gadget.c:2509-2521` handles ("if the core didn't generate GRXSTS_PKTSTS_OUTDONE for setup
+        // packet"); the endpoint stays enabled with the counts it had.
         s.ins[0].ctl &= !DXEPCTL_STALL;
-        s.outs[0].ctl &= !(DXEPCTL_STALL | DXEPCTL_EPENA);
+        s.outs[0].ctl &= !DXEPCTL_STALL;
+        s.ins[0].nak = true;
+        s.outs[0].nak = true;
         drop(s);
         self.moved.notify_all();
         Ok(())
@@ -545,6 +590,9 @@ impl Core {
             ep.pkts -= 1;
             if ep.pkts == 0 || (len < mps && ep.remaining == 0) {
                 ep.ctl &= !DXEPCTL_EPENA;
+                if i == 0 {
+                    s.diepint0 |= DXEPINT_XFERCOMPL;
+                }
             }
             Some(Ok(packet))
         })?
@@ -596,6 +644,12 @@ impl Core {
             ep.pkts -= 1;
             if data.len() < mps || ep.pkts == 0 {
                 ep.ctl &= !DXEPCTL_EPENA;
+                // The transfer is complete: the core NAKs further OUT packets until the driver
+                // clears it (`gadget.c:2076`).
+                ep.nak = true;
+                if i == 0 {
+                    s.doepint0 |= DXEPINT_XFERCOMPL;
+                }
                 s.rxq.push_back(Entry {
                     status: (i as u32) | (PKTSTS_OUTDONE << 17),
                     data: VecDeque::new(),
@@ -940,7 +994,7 @@ fn run_stage(core: Arc<Core>, shared: Arc<Mutex<Shared>>, at: Instant, time: Tim
         }
         let ticks = move || timebase.ticks();
         let mut known = Known::new(ticks());
-        let stats = Stats::new();
+        let stats = Stats::traced(Box::leak(Box::new(Trace::new())));
         let (mut buf, mut scratch) = (vec![0u8; BUFFER_LEN], vec![0u8; BUFFER_LEN]);
         let (mut rx, mut window) = (vec![0u8; RX_LEN], vec![0u8; WINDOW_LEN]);
         let mut clock = Micros(timebase);

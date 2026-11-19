@@ -327,7 +327,9 @@ fn wait_stage(
             ));
             last_here = state;
         }
-        if let Some(here) = here.filter(|s| s.is_stage()) {
+        // The stage's ids alone are not enough: its product (a locking attribute, read with a bound) must
+        // have answered before it is judged; until then the wait goes on, within its bound.
+        if let Some(here) = here.filter(|s| s.is_stage() && s.product.is_some()) {
             if here.product.as_deref() != Some(PRODUCT) {
                 return Err(Verdict::Refused(format!(
                     "the device at {} has the stage's ids but the product {:?}, not {:?}: not claimed",
@@ -902,20 +904,20 @@ pub fn record_checks(words: &[u32; record::WORDS], seen: &Seen) -> Vec<String> {
             w("speed")
         ),
     );
+    // The bus address is not the kernel's device number under xHCI: the host controller chooses it
+    // (its Address Device command) and it is not visible to this check (B2 run 2: address 17, devnums
+    // 119-122). What can be checked is the stage's own side: DCFG holds the address SET_ADDRESS gave.
+    let _ = seen;
     want(
-        w("set-address") == seen.devnum,
-        format!(
-            "record set-address {} differs from the kernel's device number {}",
-            w("set-address"),
-            seen.devnum
-        ),
+        w("set-address") != 0,
+        "record set-address is 0 (no SET_ADDRESS was taken)".to_string(),
     );
     want(
-        (w("dcfg-after-address") >> 4) & 0x7f == seen.devnum,
+        (w("dcfg-after-address") >> 4) & 0x7f == w("set-address"),
         format!(
-            "DCFG after SET_ADDRESS {:#x} does not hold address {}",
+            "DCFG after SET_ADDRESS {:#x} does not hold the address SET_ADDRESS gave, {}",
             w("dcfg-after-address"),
-            seen.devnum
+            w("set-address")
         ),
     );
     want(

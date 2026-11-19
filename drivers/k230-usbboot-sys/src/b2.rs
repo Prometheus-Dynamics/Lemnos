@@ -125,6 +125,11 @@ impl Console {
     }
 }
 
+/// Hex digits as text (they are always ASCII).
+fn text(digits: &[u8]) -> &str {
+    core::str::from_utf8(digits).unwrap_or("????????")
+}
+
 /// Eight hex digits, no formatting machinery.
 fn hex8(value: u32) -> [u8; 8] {
     let mut out = [b'0'; 8];
@@ -219,6 +224,39 @@ pub fn end<R: RegAccess>(
         let digits = hex8(value);
         let digits = core::str::from_utf8(&digits).unwrap_or("????????");
         console.line(regs, &["b2 ", name, " ", digits]);
+    }
+    if let Some(trace) = stats.trace {
+        let kept = (trace.count() as usize).min(crate::dwc2::TRACE_LEN);
+        let count = hex8(trace.count());
+        console.line(
+            regs,
+            &[
+                "b2 ep0-trace ",
+                core::str::from_utf8(&count).unwrap_or("????????"),
+                " entries",
+            ],
+        );
+        for i in 0..kept {
+            if let Some(entry) = trace.entry(i) {
+                let n = hex8(i as u32);
+                let [a, b, c, d] = entry.map(hex8);
+                console.line(
+                    regs,
+                    &[
+                        "b2 t ",
+                        text(&n[5..]),
+                        " ",
+                        text(&a),
+                        " ",
+                        text(&b),
+                        " ",
+                        text(&c),
+                        " ",
+                        text(&d),
+                    ],
+                );
+            }
+        }
     }
     console.line(regs, &[END_LINE]);
     finish(&mut Uart::new(regs), cause)

@@ -821,7 +821,7 @@ mod b2 {
     use super::read_time;
     use crate::Mmio;
     use crate::b2::{Buffers, Known, RX_LEN, check, end};
-    use crate::dwc2::{Stats, Window};
+    use crate::dwc2::{Stats, Trace, Window};
     use lemnos_flash_stage::serve::BUFFER_LEN;
     use lemnos_flash_stage::wait::Clock;
     use lemnos_k230_usbboot_stage::fl1::check::{TIMEBASE_HZ, WINDOW_LEN};
@@ -834,7 +834,8 @@ mod b2 {
     static mut WINDOW: [u8; WINDOW_LEN] = [0; WINDOW_LEN];
 
     /// The driver's counts, read by the record.
-    static STATS: Stats = Stats::new();
+    static TRACE: Trace = Trace::new();
+    static STATS: Stats = Stats::traced(&TRACE);
 
     /// The session's clock: the `time` CSR at [`TIMEBASE_HZ`], in microseconds.
     #[derive(Clone, Copy)]
