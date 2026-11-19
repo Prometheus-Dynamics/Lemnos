@@ -57,7 +57,8 @@ until its return path is proven.
 - **B2. The stage's device path has not run on hardware.** The dwc2 `UsbHw` (in `drivers/k230-usbboot-sys`)
   is written from the SDK's dwc2 registers; its enumeration, EP0 and bulk sequences are unverified. The
   adapter's bench checks are listed in `testing/crates/k230-usbboot-stage/src/fl1/usb.rs`. The first run's
-  plan and its PC rehearsal: "B2: the first run of the stage's own USB device path" below. **Not run.**
+  plan and its PC rehearsal: "B2: the first run of the stage's own USB device path" below. Run 1: the stage stopped
+  itself before USB because the `time` CSR does not run in the ROM's state; **still open**.
 - **B3. Gaia's kernel hang before earlycon** is Gaia's; it is not a precondition here (the stage does not
   boot the kernel in this plan).
 
@@ -1104,9 +1105,9 @@ enumerated as 29f1:0230 dev 117 (was 116), 89.9 s after the last command: the wa
 **The capture (read only).** A separate unit reads both CH342 ports from before R0 to the end and writes no byte to
 either. The console is never written in this run, so no step writes to the console.
 
-## B2: the first run of the stage's own USB device path (plan; PC rehearsal only, not run)
+## B2: the first run of the stage's own USB device path (plan, PC rehearsal, run 1)
 
-Branch `pr/K230-B2`. Nothing in this section has touched a board or opened a USB device.
+Branch `pr/K230-B2`. The plan and rehearsal below were made with no board contact; run 1 follows them.
 
 **Hypothesis.** The check build, loaded by the ROM over `29f1:0230` at `0x80360000` and started there, arms both
 watchdogs, measures the watchdog clock, brings the dwc2 core up as a device, and is enumerated by this PC as
@@ -1217,6 +1218,31 @@ before the period is lowered). Nothing is written to the card, the ROM's setting
 **Open.** The `1209:0001` pair is pid.codes' test pair: it is replaced before any release. The ROM-load step opens
 `29f1:0230` as the earlier K230-USB runs did; the B2 allowance names only `1209:0001`, so the load step's cover is
 for the reviewer to confirm.
+
+### B2 run 1 (2026-11-18, rev `df366ac6`): stopped by the stage before USB; the timebase does not run
+
+GO relayed by the coordinator; access for `1209:0001` from `60-atlas-usbboot.rules:20` (added by the user). Lock
+`/run/user/1000/lemnos-k230d.lock` held by `k230-b2 run` for the whole run; both CH342 ports read only. Image sha256
+`b203849c…ee9fd` as loaded (mode `check`). Hypothesis written first (`run1-hypothesis.md`).
+
+- 0.000 s: the ROM (devnum 117) answered `K230`; load and PROG_START sent.
+- +0.20 s (console): the banner "lemnos stage: check (B2: …)", after the entry's own `!BWKC`.
+- +11.18 s: "b2 the watchdog clock could not be measured; no USB bring-up", then the record words, all zero but
+  the magic (nothing measured, USB never touched), "lemnos stage: end", "flash stage: bring-up failed" (setup step 4),
+  and the SoC reset.
+- 11.63 s: port empty; 11.73 s: `29f1:0230` back at `3-4.2.1.4.1` as devnum 118. The stage never enumerated, so the
+  host made no open of `1209:0001`; no EP0 or bulk request was sent.
+
+**Finding.** `ticks-arm-lo` and `ticks-now-lo` are both 0: the `time` CSR reads 0 in the boot ROM's state and does not
+move. The measurement waited its whole bound (20,000,000 timebase reads, 11 s) for 20 ms that never passed
+(`TimebaseStuck`), so the 27 MHz timebase assumed from `k230.dtsi:20` is not running under the ROM. The stage did what
+the plan says: no USB bring-up, the report, the SoC reset; the board returned by itself, as found. Consequence beyond
+the measurement: every deadline of the FL1 session (`fl1::check`'s clock, the shared idle and transfer budgets) is
+read from the same CSR, so with it stopped no session deadline can pass; only read-count bounds and the watchdog
+would end waits. B2 stays open: the stage needs a running time source (the timebase enabled by the stage, or the
+watchdog counter or another running counter as its clock) before the next run. Not changed in this run.
+
+Records: `run1-hypothesis.md`, `run1-dry.log`, `run1-run.log`, `run1-stdout.log` (in the session's K230B2 folder).
 
 ## No state only hands can undo
 
