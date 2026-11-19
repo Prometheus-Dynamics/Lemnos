@@ -370,6 +370,8 @@ show() { # shows the finished steps of lane $1 that are next in its order; a fai
     next[$lane]=$(( next[$lane] + 1 ))
   done
 }
+# As each lane ends, "gate: lane <name> ended at <S> s" (whole seconds from the gate's start, bash's
+# SECONDS), and at the end "gate: wall <S> s": the lander reads them to see which lane set the wall.
 running=4
 while [ "$running" -gt 0 ]; do
   for lane in c s t f; do
@@ -377,6 +379,7 @@ while [ "$running" -gt 0 ]; do
     if [ "${lane_pid[$lane]}" != 0 ] && ! kill -0 "${lane_pid[$lane]}" 2>/dev/null; then
       rc=0; wait "${lane_pid[$lane]}" || rc=$?
       show "$lane"
+      echo "gate: lane ${lane_name[$lane]} ended at $SECONDS s"
       [ "$rc" = 0 ] || { echo "gate: the ${lane_name[$lane]} lane stopped (exit $rc) before its step finished" >&2; stop_lanes; exit 1; }
       lane_pid[$lane]=0
       running=$((running - 1))
@@ -385,4 +388,5 @@ while [ "$running" -gt 0 ]; do
   if [ "$running" -gt 0 ]; then sleep 0.2; fi
 done
 
+echo "gate: wall $SECONDS s"
 echo "gate passed${GATE_PART:+ (part $GATE_PART)}"

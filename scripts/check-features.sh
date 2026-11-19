@@ -74,7 +74,7 @@ done <packaging/shipped.txt
 # toolchain: they are kept under a key of those.
 graphs_key=$( { rustc -vV; sha256sum scripts/check-features.sh;
   git ls-files -z -co --exclude-standard -- '*Cargo.toml' Cargo.lock .cargo/config.toml rust-toolchain.toml packaging/shipped.txt |
-    xargs -0 sha256sum; env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+)=' | sort; } | sha256sum)
+    xargs -0 sha256sum; env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+)=' | sort || true; } | sha256sum)
 graph_files=(meta.json meta-full.json shipped.json tested.json)
 if [[ -f $cache/graphs.key && $(cat "$cache/graphs.key") == "$graphs_key" ]] &&
   (cd "$cache" && ls "${graph_files[@]}" >/dev/null 2>&1); then
@@ -209,12 +209,15 @@ paste <(cut -f3 "$work/requests") "$work/keys" >"$work/keyed"
 lookup() { awk -F'\t' -v e="$1" '$1 == e { print $2 }' "$work/keyed"; }
 
 failed=0
+# For the summary line: every crate checked, and the crates with a set that was not cached.
+declare -A seen=() rebuilt=()
 if [[ $part != options ]]; then
   while read -r crate features tested_set; do
     feat=()
     [[ $features == - ]] || feat=(--features "$features")
     dir=$(awk -v c="$crate" '$1 == c { print $2 }' "$work/dirs")
     entry="$cache/$crate.shipped"
+    seen[$crate]=1
     ktexts=("$(basename "$entry")" "$features" "$tested_set")
     k=$(lookup "$entry")
     if hit "$entry" "$k"; then
@@ -233,6 +236,7 @@ if [[ $part != options ]]; then
       fi
     fi
     rm -f "$entry"
+    rebuilt[$crate]=1
     : >"$work/messages.json"
     shipped_unit=$(graph test -p "$crate" --lib --no-default-features "${feat[@]}" </dev/null | test_unit "$crate")
     if [[ ${shipped_unit%% |*} != "$features" ]]; then
@@ -284,6 +288,7 @@ fi
 if [[ $part != shipped ]]; then
   while read -r crate flag; do
     entry="$cache/$crate$flag.option"
+    seen[$crate]=1
     ktexts=("$(basename "$entry")" "$flag")
     k=$(lookup "$entry")
     if hit "$entry" "$k"; then
@@ -292,6 +297,7 @@ if [[ $part != shipped ]]; then
       continue
     fi
     rm -f "$entry"
+    rebuilt[$crate]=1
     echo "    $crate $flag"
     ok=1
     cargo clippy -q --locked -p "$crate" "$flag" --all-targets --message-format json-render-diagnostics \
@@ -303,5 +309,9 @@ if [[ $part != shipped ]]; then
     if [[ $ok == 1 ]]; then store "$entry" "$crate" "$work/messages.json"; else failed=1; fi
   done < <(sets options)
 fi
+# One line for the lander: a crate is cached when every set of it was a hit, rebuilt otherwise.
+n=${#seen[@]} m=${#rebuilt[@]}
+if [[ $m == 0 ]]; then how=hit; elif [[ $m == "$n" ]]; then how=full; else how=partial; fi
+echo "features: $n crates, $((n - m)) cached, $m rebuilt ($how)"
 [[ $failed == 0 ]] || { echo "check-features: failed; see above" >&2; exit 1; }
 echo "check-features: every shipped set is tested and every library option builds clean"
