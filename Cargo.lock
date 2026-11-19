@@ -2270,6 +2270,7 @@ dependencies = [
  "lemnos-contract-light",
  "lemnos-contract-pixels",
  "lemnos-core",
+ "lemnos-measure",
 ]
 
 [[package]]
@@ -3146,6 +3147,8 @@ dependencies = [
  "lemnos-client",
  "lemnos-contract-fan",
  "lemnos-contract-fan-control",
+ "lemnos-contract-light",
+ "lemnos-contract-pixels",
  "lemnos-contract-temperature",
  "lemnos-contract-usb-function",
  "lemnos-core",
