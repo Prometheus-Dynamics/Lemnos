@@ -185,8 +185,9 @@ pub trait Uart {
     fn read(&mut self, out: &mut [u8], timeout: Duration) -> Result<usize, Self::Error>;
 }
 
-/// One filled buffer, ready for the consumer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One filled buffer, ready for the consumer. `Default` is all zeros; build one as
+/// `StreamFrame { buffer, bytes, ..Default::default() }` so a field added later keeps compiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StreamFrame {
     pub buffer: u32,
     pub bytes: u32,

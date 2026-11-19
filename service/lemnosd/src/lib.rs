@@ -106,6 +106,29 @@ pub struct Config {
     pub options: Options,
 }
 
+impl Config {
+    /// A config with the parts that have no default, and every other field at its default
+    /// (`options` is [`Options::default`]). Build a config as
+    /// `Config { options, ..Config::new(socket, name, board, drivers, backend) }` so a field added
+    /// later keeps compiling.
+    pub fn new(
+        socket: PathBuf,
+        name: String,
+        board: BoardFile,
+        drivers: Vec<DriverEntry>,
+        backend: Box<dyn Provider + Send>,
+    ) -> Self {
+        Self {
+            socket,
+            name,
+            board,
+            drivers,
+            backend,
+            options: Options::default(),
+        }
+    }
+}
+
 /// Takes one log line, without its newline. The daemon's log lines are the bring-up line of each
 /// device and the notes its drivers report; they go to stderr unless the service was started with
 /// [`Service::start_with_buffers_logged`].
