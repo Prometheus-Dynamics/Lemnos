@@ -60,11 +60,11 @@ PY
 # 2. Bytes. The merged run's binaries first, then each program built alone.
 cargo build --locked --profile service "${args[@]}"
 mkdir "$work/merged"
-for p in "${products[@]}"; do cp "target/service/$p" "$work/merged/$p"; done
+for p in "${products[@]}"; do cp "${CARGO_TARGET_DIR:-target}/service/$p" "$work/merged/$p"; done
 failed=0
 for p in "${products[@]}"; do
   cargo build --locked --profile service -p "$p"
-  cp "target/service/$p" "$work/solo-$p"
+  cp "${CARGO_TARGET_DIR:-target}/service/$p" "$work/solo-$p"
   if cmp -s "$work/merged/$p" "$work/solo-$p"; then
     echo "    $p: merged and solo identical ($(stat -c %s "$work/solo-$p") bytes)"
   else
