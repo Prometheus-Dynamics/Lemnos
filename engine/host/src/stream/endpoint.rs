@@ -473,10 +473,12 @@ impl StreamCore {
     /// Gives `caller`, the stream's consumer, a reader slot: a third process's view of the same
     /// buffers, read-only, with its own marks page, bell and liveness pipe.
     ///
-    /// `held` and `hold_ms` are asked for; zero asks for 2 buffers and 500 ms. A request is granted
-    /// up to the stream's `reader_held_max` and `reader_hold_ms_max`. A grant is refused when the
-    /// holds granted to all readers, with this one, would leave the producer fewer than two buffers
-    /// after the consumer's one: the refusal says what was asked and what is left.
+    /// `held` and `hold_ms` are asked for; zero asks for 500 ms and for the default of
+    /// [`DEFAULT_HELD`] buffers, and the default takes what fits: the most of 2, `reader_held_max`
+    /// and what the producer leaves, which can be 1 on a small stream. An explicit `held` is all or
+    /// refused: granted up to `reader_held_max`, or refused `BUSY` when the producer would be left
+    /// with fewer than [`MIN_PRODUCER_BUFFERS`] left after the consumer's one. A refusal says what
+    /// was asked and how many buffers are left.
     pub(crate) fn ticket(
         &mut self,
         caller: CallerId,
@@ -488,13 +490,12 @@ impl StreamCore {
         let stream = self.name.to_string();
         let refuse = |status: Status, text: String| TicketRefused { status, text };
         let buffers = self.layout.buffers;
-        let asked_held = if held == 0 { DEFAULT_HELD } else { held };
+        let ceiling = self.reader_held_max;
         let asked_ms = if hold_ms == 0 {
             DEFAULT_HOLD_MS
         } else {
             hold_ms
         };
-        let granted_held = asked_held.min(self.reader_held_max);
         let granted_ms = asked_ms.min(self.reader_hold_ms_max);
         let shared = self.memory == StreamMemory::Shared;
         let layout = self.layout;
@@ -556,16 +557,38 @@ impl StreamCore {
         // The producer keeps two buffers after the consumer's one; the readers share the rest.
         let sum: u32 = attached.grants.iter().map(|(_, held)| held).sum();
         let left = buffers.saturating_sub(sum).saturating_sub(CONSUMER_HELD);
-        if left < granted_held || left - granted_held < MIN_PRODUCER_BUFFERS {
-            return Err(refuse(
-                Status::BUSY,
-                format!(
-                    "stream {stream:?}: a reader asked for {granted_held} held buffers, and {left} \
-                     of {buffers} are left after the consumer's and the other readers' holds; the \
-                     producer needs {MIN_PRODUCER_BUFFERS}"
-                ),
-            ));
-        }
+        // The default takes what fits, up to DEFAULT_HELD: refused only when nothing fits. An
+        // explicit request is all or refused.
+        let granted_held = if held == 0 {
+            let fit = DEFAULT_HELD
+                .min(ceiling)
+                .min(left.saturating_sub(MIN_PRODUCER_BUFFERS));
+            if fit == 0 {
+                return Err(refuse(
+                    Status::BUSY,
+                    format!(
+                        "stream {stream:?}: a reader asked for the default of {DEFAULT_HELD} held \
+                         buffers, and {left} of {buffers} are left after the consumer's and the \
+                         other readers' holds; the producer keeps {MIN_PRODUCER_BUFFERS} of them, \
+                         so none fits"
+                    ),
+                ));
+            }
+            fit
+        } else {
+            let granted = held.min(ceiling);
+            if left < granted || left - granted < MIN_PRODUCER_BUFFERS {
+                return Err(refuse(
+                    Status::BUSY,
+                    format!(
+                        "stream {stream:?}: a reader asked for {granted} held buffers, and {left} \
+                         of {buffers} are left after the consumer's and the other readers' holds; \
+                         the producer needs {MIN_PRODUCER_BUFFERS}"
+                    ),
+                ));
+            }
+            granted
+        };
         let limits = Limits {
             max_held: granted_held,
             max_hold: Some(std::time::Duration::from_millis(u64::from(granted_ms))),
@@ -1503,7 +1526,8 @@ impl Drop for ProducerEndpoint {
     }
 }
 
-/// The buffers a reader is granted when it asks for none.
+/// The most buffers a reader is granted when it asks for none: fewer when the stream's
+/// `reader_held_max` or the buffers the producer leaves are fewer.
 pub(crate) const DEFAULT_HELD: u32 = 2;
 /// The time a reader is granted to hold a buffer when it asks for none.
 pub(crate) const DEFAULT_HOLD_MS: u32 = 500;

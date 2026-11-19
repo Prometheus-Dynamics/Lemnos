@@ -3499,8 +3499,9 @@ impl Host {
 
     /// Gives `caller`, who has a stream of `device` open, a reader slot on it: the descriptors and
     /// the slot for a third process to read the stream with, read-only (see [`ReaderTicket`]).
-    /// `held` and `hold_ms` are asked for; zero asks for 2 buffers and 500 ms; the stream's maxima
-    /// bound what is granted (the grant is in the answer).
+    /// `held` and `hold_ms` are asked for; zero asks for 500 ms and the default held count, which takes
+    /// what fits (up to 2); an explicit `held` is all or refused. The stream's maxima bound what is
+    /// granted (the grant is in the answer).
     ///
     /// # Errors
     ///
