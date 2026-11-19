@@ -10,6 +10,17 @@ field is 25 to 65 µT). Something magnetic sits near the chip. Before this chang
 heading from that field with health `ok`. The gate ignores a field whose total is outside 15 to 80 µT, and
 says so in health: `magnetometer ignored: field magnitude implausible`.
 
+Known risk, to check on the first board that trips it. The orientation calibrates nothing; it uses what the
+sensor drivers report. A board whose magnetometer carries a hard-iron offset can report a total above 80 µT
+with no magnet near it (dev's calibrator cites a 140 µT offset giving 90 to 190 µT), and on such a board the
+gate ignores the magnetometer for as long as the offset stays: the heading is the gyroscope's and health says
+so. Its heading from the uncorrected field would have been wrong anyway. The nearest data on record: B9
+(`testing/board-runs/B9.md`, check 2) read 65.1 to 67.6 µT still, above the expected 25 to 65 µT range,
+with an unexplained step noise of up to 3.5 µT (only 4 of 19 steps had every axis within 1 µT). That is
+inside 80 µT, but with little margin. If this board trips the gate with no magnet near it, record the raw
+axes and the total over 10 s still, and treat it as an offset to calibrate in the sensor driver, not as a
+reason to widen the bound.
+
 Setup: the board as in B10 (bmi088 on the PIO bus, bmm150 on `i2c-1` at 0x10), the orientation device in
 nine-axis mode:
 
