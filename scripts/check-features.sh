@@ -11,8 +11,10 @@
 #      for its own code (a dependency whose set differs is a line of its own). A test that reaches
 #      the same code of the crate in both sets ran it in the workspace tests, so only the tests
 #      that reach a difference run: the crate's tests are built alone in both sets with their LLVM
-#      IR, and when every dependency resolves the same in the two, the IR is compared function by
-#      function (scripts/feature-tests.py says how). When the dependencies differ, all run.
+#      IR (unoptimised, so nothing is inlined), and when every dependency resolves the same in the
+#      two, the IR is compared function by function (scripts/feature-tests.py says how); the tests
+#      it selects run from the shipped set's test program as `cargo test` builds it. When the
+#      dependencies differ, all run.
 #   2. Library options. Every member that declares features is linted (clippy --all-targets,
 #      -D warnings) and its library built with --no-default-features and with --all-features,
 #      unless that set is the one the workspace lint already covers. No test pass: no shipped
@@ -27,16 +29,66 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/check-features.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 part="${PART:-all}"
 
+# mark <phase>: with FEATURES_TIMES=<file>, appends "<phase> <wall seconds>" since the last mark.
+mark_at=$(date +%s.%N)
+mark() {
+  [[ -n ${FEATURES_TIMES:-} ]] || return 0
+  local now
+  now=$(date +%s.%N)
+  echo "$1 $(python3 -c 'import sys; print(round(float(sys.argv[1]) - float(sys.argv[2]), 2))' "$now" "$mark_at")" >>"$FEATURES_TIMES"
+  mark_at=$now
+}
+
 graph() { RUSTC_BOOTSTRAP=1 cargo "$@" --locked --unit-graph -Z unstable-options; }
 
-cargo metadata --locked --format-version 1 --no-deps >"$work/meta.json"
+
+# The cache: one entry per crate and form under the target directory, so a tree's target keeps it
+# from one gate to the next. An entry holds the key of what decided its result (see
+# scripts/features-cache.py): an unchanged key reuses the pass, and a changed one runs that crate
+# again. Only a pass is stored; a crate that fails, or whose key changed, loses its entry first.
+cache="${CARGO_TARGET_DIR:-target}/check-features"
+mkdir -p "$cache"
+toolchain_line=$(rustc -vV | tr '\n\t' '  ')
+scripts_hash_line=$(sha256sum scripts/check-features.sh scripts/feature-tests.py scripts/features-cache.py | tr '\n\t' '  ')
+ckey() { # ckey <crate> <dev|nodev> <entry> <text>...
+  scripts/features-cache.py key "$work/meta-full.json" "$1" "$2" "$3" "$toolchain_line" "$scripts_hash_line" "${@:4}"
+}
+# store <entry> <crate> <messages> <lines...>: writes a passing entry, keyed on the texts in
+# ${ktexts[@]} (the same the lookup used) and the files the build read (from the messages' dep-info).
+store() {
+  local entry="$1" crate="$2" messages="$3" k
+  shift 3
+  { printf '%s\n' "$@"; scripts/features-cache.py record "$messages" "$work/meta-full.json" "$crate" dev | sed 's/^/extra /'; } >"$entry.new"
+  k=$(ckey "$crate" dev "$entry.new" "${ktexts[@]}")
+  { echo "key $k"; cat "$entry.new"; } >"$entry"
+  rm -f "$entry.new"
+}
+# hit <entry> <key>: whether the entry is there with this key.
+hit() { [[ -f $1 ]] && [[ $(head -1 "$1") == "key $2" ]]; }
 args=()
 while read -r package _; do
   [[ -z "$package" || "$package" == \#* ]] && continue
   args+=(-p "$package")
 done <packaging/shipped.txt
-graph build --profile service "${args[@]}" >"$work/shipped.json"
-graph test --workspace --no-run >"$work/tested.json"
+# The two whole-workspace graphs depend only on the manifests, the lock, the configuration and the
+# toolchain: they are kept under a key of those.
+graphs_key=$( { rustc -vV; sha256sum scripts/check-features.sh;
+  git ls-files -z -co --exclude-standard -- '*Cargo.toml' Cargo.lock .cargo/config.toml rust-toolchain.toml packaging/shipped.txt |
+    xargs -0 sha256sum; env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+)=' | sort; } | sha256sum)
+graph_files=(meta.json meta-full.json shipped.json tested.json)
+if [[ -f $cache/graphs.key && $(cat "$cache/graphs.key") == "$graphs_key" ]] &&
+  (cd "$cache" && ls "${graph_files[@]}" >/dev/null 2>&1); then
+  (cd "$cache" && cp "${graph_files[@]}" "$work/")
+else
+  rm -f "$cache/graphs.key"
+  cargo metadata --locked --format-version 1 --no-deps >"$work/meta.json"
+  cargo metadata --locked --format-version 1 >"$work/meta-full.json"
+  graph build --profile service "${args[@]}" >"$work/shipped.json"
+  graph test --workspace --no-run >"$work/tested.json"
+  (cd "$work" && cp "${graph_files[@]}" "$cache/")
+  echo "$graphs_key" >"$cache/graphs.key"
+fi
+mark graphs
 
 # Prints "<package> <features, comma-separated or ->" for each workspace library whose shipped set
 # differs from its tested set (sets: ...-shipped), or each set to lint (sets: ...-options).
@@ -108,31 +160,80 @@ while todo:
 print(",".join(sorted(set(t["features"])-{"default"})) or "-", *sorted(deps), sep=" | ")' "$1"
 }
 
-# ir_build <crate> <features>: the crate's library tests built once, with their LLVM IR (one
-# codegen unit, which --emit gives). Prints the test program's path; its IR is beside it, from
-# the same compile. A program cargo holds as current but whose IR is gone is removed and built
-# again, so the two always come from one compile.
+# ir_build <crate> <features> <out.ll>: the crate's library tests compiled to LLVM IR only, with
+# no optimisation and one codegen unit: every function as its source has it, nothing inlined,
+# so the comparison sees each difference where it is. The output path is new each time, so cargo
+# always runs rustc for it.
 ir_build() {
-  local feat=() bin try
+  local feat=()
   [[ $2 == - ]] || feat=(--features "$2")
-  for try in 1 2; do
-    bin=$(cargo rustc -q --locked -p "$1" --lib --profile test --no-default-features "${feat[@]}" \
-      --message-format json-render-diagnostics -- --emit=llvm-ir,link </dev/null |
-      python3 -c 'import json,sys
-for l in sys.stdin:
-    m=json.loads(l)
-    if m.get("reason")=="compiler-artifact" and m.get("executable") and m["target"]["name"]==sys.argv[1].replace("-","_"): print(m["executable"])' "$1")
-    [[ -n $bin && -f $bin.ll && $bin.ll -nt $bin.d ]] && break
-    rm -f -- "$bin"
-  done
-  echo "$bin"
+  cargo rustc -q --locked -p "$1" --lib --profile test --no-default-features "${feat[@]}" \
+    --message-format json-render-diagnostics -- --emit="llvm-ir=$3" -C opt-level=0 -C codegen-units=1 \
+    </dev/null >>"$work/messages.json"
+  [[ -s $3 ]]
 }
+
+# test_build <crate> <features>: the crate's library test program as `cargo test` builds it; prints
+# its path. The selected tests run from it.
+test_build() {
+  local feat=()
+  [[ $2 == - ]] || feat=(--features "$2")
+  cargo test -q --locked --no-run -p "$1" --lib --no-default-features "${feat[@]}" \
+    --message-format json-render-diagnostics </dev/null >"$work/build.json"
+  cat "$work/build.json" >>"$work/messages.json"
+  python3 -c 'import json,sys
+for l in open(sys.argv[2]):
+    m=json.loads(l)
+    if m.get("reason")=="compiler-artifact" and m.get("executable") and m["target"]["name"]==sys.argv[1].replace("-","_"): print(m["executable"])' "$1" "$work/build.json"
+}
+
+python3 -c 'import json,sys
+for p in json.load(open(sys.argv[1]))["packages"]: print(p["name"], p["manifest_path"].rsplit("/",1)[0])' "$work/meta.json" >"$work/dirs"
+
+# Every lookup key at once (one process reads the metadata and hashes the files once).
+: >"$work/requests"
+if [[ $part != options ]]; then
+  sets shipped | while read -r crate features tested_set; do
+    printf '%s\tdev\t%s\t%s\t%s\t%s\t%s\t%s\n' "$crate" "$cache/$crate.shipped" "$toolchain_line" "$scripts_hash_line" \
+      "$crate.shipped" "$features" "$tested_set"
+  done >>"$work/requests"
+fi
+if [[ $part != shipped ]]; then
+  sets options | while read -r crate flag; do
+    printf '%s\tdev\t%s\t%s\t%s\t%s\t%s\n' "$crate" "$cache/$crate$flag.option" "$toolchain_line" "$scripts_hash_line" \
+      "$crate$flag.option" "$flag"
+  done >>"$work/requests"
+fi
+scripts/features-cache.py keys "$work/meta-full.json" "$work/requests" >"$work/keys"
+paste <(cut -f3 "$work/requests") "$work/keys" >"$work/keyed"
+lookup() { awk -F'\t' -v e="$1" '$1 == e { print $2 }' "$work/keyed"; }
 
 failed=0
 if [[ $part != options ]]; then
   while read -r crate features tested_set; do
     feat=()
     [[ $features == - ]] || feat=(--features "$features")
+    dir=$(awk -v c="$crate" '$1 == c { print $2 }' "$work/dirs")
+    entry="$cache/$crate.shipped"
+    ktexts=("$(basename "$entry")" "$features" "$tested_set")
+    k=$(lookup "$entry")
+    if hit "$entry" "$k"; then
+      # The selection is reused; the tests it names run again from the program it was made from
+      # (they are quick, and what they read at run time is not in the key). A program that is
+      # gone or not the one the entry names is a miss.
+      bin=$(sed -n 's/^bin //p' "$entry")
+      if [[ -x $bin ]] && [[ $(sha256sum <"$bin") == "$(sed -n 's/^sum //p' "$entry")" ]]; then
+        echo "    $crate, as shipped [$features]: $(sed -n 's/^why //p' "$entry") (cached)"
+        mapfile -t selected < <(sed -n 's/^test //p' "$entry")
+        if [[ ${#selected[@]} -gt 0 ]]; then
+          (cd "$dir" && CARGO_MANIFEST_DIR="$dir" "$bin" -q --exact "${selected[@]}" </dev/null) || { failed=1; rm -f "$entry"; }
+        fi
+        mark "$crate:cached"
+        continue
+      fi
+    fi
+    rm -f "$entry"
+    : >"$work/messages.json"
     shipped_unit=$(graph test -p "$crate" --lib --no-default-features "${feat[@]}" </dev/null | test_unit "$crate")
     if [[ ${shipped_unit%% |*} != "$features" ]]; then
       echo "check-features: $crate ships with [$features] but its tests alone build [${shipped_unit%% |*}]" >&2
@@ -149,20 +250,30 @@ if [[ $part != options ]]; then
     tfeat=()
     [[ $tested_set == - ]] || tfeat=(--features "$tested_set")
     solo_unit=$(graph test -p "$crate" --lib --no-default-features "${tfeat[@]}" </dev/null | test_unit "$crate")
+    mark "$crate:graphs"
     if [[ $tested_set != "?" && ${solo_unit%% |*} == "$tested_set" && ${shipped_unit#* |} == "${solo_unit#* |}" ]]; then
-      shipped_bin=$(ir_build "$crate" "$features") && tested_bin=$(ir_build "$crate" "$tested_set") &&
-        [[ -x $shipped_bin && -f ${shipped_bin}.ll && -f ${tested_bin}.ll ]] || {
-        echo "check-features: $crate: no IR build" >&2; failed=1; continue; }
+      ir_build "$crate" "$features" "$work/shipped.ll" && ir_build "$crate" "$tested_set" "$work/tested.ll" &&
+        shipped_bin=$(test_build "$crate" "$features") && [[ -x $shipped_bin ]] || {
+        echo "check-features: $crate: no IR or test build" >&2; failed=1; continue; }
+      mark "$crate:builds"
       "$shipped_bin" --list --format terse >"$work/tests.txt" </dev/null
-      scripts/feature-tests.py "$crate" "${shipped_bin}.ll" "${tested_bin}.ll" "$work/tests.txt" >"$work/selected.txt" 2>"$work/why.txt" || {
+      scripts/feature-tests.py "$crate" "$work/shipped.ll" "$work/tested.ll" "$work/tests.txt" >"$work/selected.txt" 2>"$work/why.txt" || {
         cat "$work/why.txt" >&2; failed=1; continue; }
       echo "    $crate, as shipped [$features]: $(cat "$work/why.txt")"
+      mark "$crate:compare"
+      ok=1
       if [[ -s $work/selected.txt ]]; then
         mapfile -t selected <"$work/selected.txt"
         # Run as cargo test runs it: from the package's directory, with its manifest directory set.
-        dir=$(python3 -c 'import json,sys
-print([p for p in json.load(open(sys.argv[1]))["packages"] if p["name"]==sys.argv[2]][0]["manifest_path"].rsplit("/",1)[0])' "$work/meta.json" "$crate")
-        (cd "$dir" && CARGO_MANIFEST_DIR="$dir" "$shipped_bin" -q --exact "${selected[@]}" </dev/null) || failed=1
+        (cd "$dir" && CARGO_MANIFEST_DIR="$dir" "$shipped_bin" -q --exact "${selected[@]}" </dev/null) || ok=0
+      fi
+      mark "$crate:tests"
+      if [[ $ok == 1 ]]; then
+        store "$entry" "$crate" "$work/messages.json" "bin $shipped_bin" "sum $(sha256sum <"$shipped_bin")" \
+          "why $(cat "$work/why.txt")"
+        sed 's/^/test /' "$work/selected.txt" >>"$entry"
+      else
+        failed=1
       fi
     else
       echo "    $crate, as shipped [$features]: its dependencies resolve differently in [$tested_set], all tests run"
@@ -172,9 +283,24 @@ print([p for p in json.load(open(sys.argv[1]))["packages"] if p["name"]==sys.arg
 fi
 if [[ $part != shipped ]]; then
   while read -r crate flag; do
+    entry="$cache/$crate$flag.option"
+    ktexts=("$(basename "$entry")" "$flag")
+    k=$(lookup "$entry")
+    if hit "$entry" "$k"; then
+      echo "    $crate $flag (cached)"
+      mark "$crate$flag:cached"
+      continue
+    fi
+    rm -f "$entry"
     echo "    $crate $flag"
-    cargo clippy -q --locked -p "$crate" "$flag" --all-targets -- -D warnings </dev/null || failed=1
-    cargo build -q --locked -p "$crate" "$flag" --lib </dev/null || failed=1
+    ok=1
+    cargo clippy -q --locked -p "$crate" "$flag" --all-targets --message-format json-render-diagnostics \
+      -- -D warnings </dev/null >"$work/messages.json" || ok=0
+    mark "$crate$flag:clippy"
+    cargo build -q --locked -p "$crate" "$flag" --lib --message-format json-render-diagnostics \
+      </dev/null >>"$work/messages.json" || ok=0
+    mark "$crate$flag:build"
+    if [[ $ok == 1 ]]; then store "$entry" "$crate" "$work/messages.json"; else failed=1; fi
   done < <(sets options)
 fi
 [[ $failed == 0 ]] || { echo "check-features: failed; see above" >&2; exit 1; }
