@@ -64,6 +64,26 @@ The drivers compiled in are listed in `service/lemnosd/src/builtin.rs`, which
 `scripts/generate-builtins.py` writes from the driver crates. The `fake-devices` feature adds the
 four fake drivers the simulated board uses.
 
+### Cargo features
+
+`lemnosd` has one feature that changes what it depends on, `orion-precheck`, on by default.
+
+- **`orion-precheck`** compiles in the Orion precheck driver (`drivers/orion-precheck`). That
+  driver asks Orion's `security_precheck` before the security switch changes, and it is the only
+  part of `lemnosd` that uses Orion. With the feature on, the build pulls in the `orion` crate
+  through `lemnos-shipped-features/orion`.
+- **Shipped builds have it.** `default` enables it, so a plain `cargo build` and every program in
+  `packaging/shipped.txt` include the precheck. `scripts/check-features.sh` checks that the shipped
+  build's `lemnosd` has it on.
+- **Embedding consumers turn it off.** A consumer that links `lemnosd` as a library builds it with
+  `default-features = false`. Then the build has no `orion` and no `orion-precheck` crate at all,
+  and the security switch is not gated by Orion.
+- **Lockstep if you turn it on.** A consumer that enables `orion-precheck` must pin `orion` at a
+  revision whose `shm-*` crates are the same revision as its Lemnos pin, so the build holds one
+  copy of each `shm-*` crate. Check the consumer's lock with
+  `scripts/check-shm-one-source.sh <Cargo.lock>` and `scripts/check-lemnos-pin.sh <Cargo.lock> <rev>`.
+  Enabling it is only supported in a build that keeps the root `[patch]` of the Lemnos source.
+
 The shipped form is a small static binary:
 
 ```sh slow

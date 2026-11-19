@@ -25,3 +25,6 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [package.metadata.lemnos]
 driver = "OrionPrecheck"
+# Off in a consumer that embeds lemnosd without it (default-features = false on lemnosd).
+feature = "orion-precheck"
+feature_requires = ["lemnos-shipped-features/orion"]

@@ -415,6 +415,9 @@ side_lane() {
   lane_step boundaries 351 scripts/check-boundaries.sh # lander green max 117 s
   # The bridge and Orion share one copy of each shm-* crate (the root Cargo.toml's patch of the Orion source).
   lane_step orion-copies 180 scripts/check-orion-copies.sh # lander green max 8 s
+  # The consumer-lock checkers (scripts/check-lemnos-pin.sh, scripts/check-shm-one-source.sh) pass the pinned fixture lock
+  # and fail the stray one, listing its strays (testing/lock-checks/). No lander measurement yet.
+  lane_step lock-checks 180 testing/lock-checks/check.sh
   # The unit, udev and sysusers files; nothing is installed here.
   lane_step packaging 180 scripts/check-packaging.sh # lander green max 5 s
   # Every file under packaging/ is listed in packaging/files.txt (installed, or marked never), and the list is well formed.

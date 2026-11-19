@@ -90,6 +90,18 @@ else
 fi
 mark graphs
 
+# The shipped build's lemnosd has orion-precheck on: the shipped set embeds the Orion precheck, and
+# the embedding consumers turn it off (service/lemnosd/Cargo.toml). Read from the shipped unit graph.
+python3 -I - "$work/meta.json" "$work/shipped.json" <<'PY' || { echo "check-features: the shipped build's lemnosd lacks the orion-precheck feature" >&2; exit 1; }
+import json, sys
+meta, shipped = (json.load(open(p)) for p in sys.argv[1:3])
+ids = {p["id"] for p in meta["packages"] if p["name"] == "lemnosd"}
+units = [u for u in shipped["units"] if u["pkg_id"] in ids and u["mode"] == "build"]
+on = [u for u in units if "orion-precheck" in u["features"]]
+print(f"features: lemnosd in the shipped build has {'orion-precheck' if on else 'no orion-precheck'}")
+sys.exit(0 if units and on else 1)
+PY
+
 # Prints "<package> <features, comma-separated or ->" for each workspace library whose shipped set
 # differs from its tested set (sets: ...-shipped), or each set to lint (sets: ...-options).
 sets() {

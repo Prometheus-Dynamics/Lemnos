@@ -4,7 +4,8 @@ use lemnos_host::{DriverEntry, entry};
 
 /// Every driver compiled into this service.
 pub fn drivers() -> Vec<DriverEntry> {
-    vec![
+    #[allow(unused_mut)]
+    let mut drivers = vec![
         entry::<lemnos_driver_a733_di::A733Di>(),
         entry::<lemnos_driver_a733_video::A733Video>(),
         entry::<lemnos_driver_bmi088::Bmi088>(),
@@ -39,7 +40,6 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_named_files::NamedFilesDriver>(),
         entry::<lemnos_driver_nonai2d::Nonai2dDriver>(),
         entry::<lemnos_driver_orientation::Orientation>(),
-        entry::<lemnos_driver_orion_precheck::OrionPrecheck>(),
         entry::<lemnos_driver_ov9782::Ov9782>(),
         entry::<lemnos_driver_pisp::PispBe>(),
         entry::<lemnos_driver_pisp::PispFe>(),
@@ -67,5 +67,8 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_vglite::VgliteDriver>(),
         entry::<lemnos_driver_vip9000::Vip9000Driver>(),
         entry::<lemnos_driver_ws2812::Ws2812>(),
-    ]
+    ];
+    #[cfg(feature = "orion-precheck")]
+    drivers.push(entry::<lemnos_driver_orion_precheck::OrionPrecheck>());
+    drivers
 }
