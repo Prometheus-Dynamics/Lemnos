@@ -2446,7 +2446,8 @@ fn test_sequence(env: &Env, b: &mut Bufs) {
     let a = good_start(s.raw_fd());
     let mut trace: Trace = Vec::new();
     let _ = read_trace(ctl, &mut trace);
-    check!(start(ctl, &a) == 0, "started");
+    let ret = start(ctl, &a);
+    check!(ret == 0, "started ({ret})");
     let n = read_trace(ctl, &mut trace);
     check!(n > 160, "the start's writes were logged ({n})");
     let ch = contains_write(&trace, n, MARK_CHANNEL_START, 0);
