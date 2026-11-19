@@ -129,6 +129,15 @@ impl SdhciRegs for Window {
 /// The SDHCI host over a controller's registers.
 pub struct SdhciHost<R: SdhciRegs = Window> {
     regs: R,
+    /// Runs before every write command is sent (FLASH-EXTENT): the image's stack guard, so a write is never
+    /// started from a stack that has overflowed. On the host it does nothing; a test sets it to count the calls.
+    pub before_write: fn(),
+}
+
+/// The guard the image runs before a write: the stack's guard band, or nothing on the host.
+fn stack_guard_before_write() {
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    crate::image::before_card_write();
 }
 
 impl SdhciHost<Window> {
@@ -142,7 +151,10 @@ impl<R: SdhciRegs> SdhciHost<R> {
     /// Resets the controller, powers the bus at 3.3 V, and starts the card clock at 400 kHz (see the
     /// module's note on the clock). Fails when the controller does not answer.
     pub fn start(regs: R) -> Result<Self, SdError> {
-        let host = Self { regs };
+        let host = Self {
+            regs,
+            before_write: stack_guard_before_write,
+        };
         host.set8(SOFTWARE_RESET, 1)?;
         host.wait_clear8(SOFTWARE_RESET, 1)?;
         host.set8(MSHC_CTRL, 0)?;
@@ -331,6 +343,10 @@ fn in_window(base: usize, addr: usize) -> bool {
 
 impl<R: SdhciRegs> SdHost for SdhciHost<R> {
     fn command(&mut self, index: u8, arg: u32, expect: Expect) -> Result<Reply, SdError> {
+        // The guard runs before the write command itself, so no write starts from an overflowed stack.
+        if index == 24 {
+            (self.before_write)();
+        }
         self.wait_inhibit_clear(CMD_INHIBIT, index)?;
         // The command register is the high halfword of the word at 0x0c, and the transfer mode is the
         // low halfword: both go in one write, so the data setup is in place when the command starts.
@@ -749,6 +765,32 @@ mod tests {
         assert_eq!(held(&mut card, 101, 1), vec![0; BLOCK]);
     }
 
+    static GUARD_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_guard() {
+        GUARD_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn the_stack_guard_runs_before_every_write_command_and_never_before_a_read() {
+        // Two sectors written and read back: two write commands, so two guard calls; a hash only reads: none.
+        let mut card = model_card(Model::with_card());
+        card.host_mut().before_write = counting_guard;
+        let data = vec![0x5a; 2 * BLOCK];
+        GUARD_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
+        run(
+            &mut card,
+            &job(Op::Write, 100, 2, &data),
+            &data,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(GUARD_CALLS.load(core::sync::atomic::Ordering::SeqCst), 2);
+        GUARD_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
+        run(&mut card, &job(Op::Hash, 100, 2, &[]), &[], &mut |_| {}).unwrap();
+        assert_eq!(GUARD_CALLS.load(core::sync::atomic::Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn a_write_the_card_does_not_keep_is_a_mismatch_and_the_watchdog_is_not_fed_for_it() {
         let model = Model::with_card();
@@ -924,7 +966,10 @@ mod tests {
     #[test]
     fn a_clock_word_without_the_roms_bits_never_completes_a_command() {
         // The first host's word, 0x0005: the bench result of 2026-11-18, kept as the stand-in's failing case.
-        let host = SdhciHost { regs: Model::new() };
+        let host = SdhciHost {
+            regs: Model::new(),
+            before_write: || {},
+        };
         host.set16(CLOCK_CONTROL, 0x0005).unwrap();
         let mut host = host;
         assert_eq!(host.command(0, 0, Expect::None), Err(SdError::Timeout(0)));
@@ -952,7 +997,10 @@ mod tests {
         for i in 0..4 {
             model.words[RESPONSE / 4 + i].set((held >> (32 * i)) as u32);
         }
-        let host = SdhciHost { regs: model };
+        let host = SdhciHost {
+            regs: model,
+            before_write: || {},
+        };
         let reply = host.long_reply();
         assert_eq!(field(&reply, 127, 126), 1);
         assert_eq!(field(&reply, 69, 48), 0x1_d2bf);

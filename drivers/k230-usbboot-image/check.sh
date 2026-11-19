@@ -41,19 +41,22 @@ rust-objcopy -O binary "$work/image.elf" "$work/image.bin"
 entry=$(readelf -hW "$work/image.elf" | awk '/Entry point/ {print $NF}')
 # The LOAD segments: VirtAddr (column 3) and MemSiz (column 6). The image's end is the largest
 # VirtAddr + MemSiz; its footprint is that end less the load address.
-read -r load_start end < <(readelf -lW "$work/image.elf" | awk '$1 == "LOAD" {print $3, $6}' | python3 -c '
+# The file's start is the lowest segment with file bytes (the guard and stack segment is NOLOAD, below it); the
+# footprint starts at the lowest segment of all, which is the guard band.
+read -r load_start end lowest < <(readelf -lW "$work/image.elf" | awk '$1 == "LOAD" {print $3, $5, $6}' | python3 -c '
 import sys
 rows = [l.split() for l in sys.stdin if l.strip()]
 starts = [int(r[0], 16) for r in rows]
-ends = [int(r[0], 16) + int(r[1], 16) for r in rows]
-print(hex(min(starts)), hex(max(ends)))
+file_starts = [int(r[0], 16) for r in rows if int(r[1], 16) > 0]
+ends = [int(r[0], 16) + int(r[2], 16) for r in rows]
+print(hex(min(file_starts)), hex(max(ends)), hex(min(starts)))
 ')
 bin_size=$(stat -c %s "$work/image.bin")
 relocs=$(readelf -rW "$work/image.elf" | grep -c "R_RISCV" || true)
-footprint=$((end - 0x80360000))
+footprint=$((end - lowest))
 
 echo "entry $entry, load segment starts at $load_start, image ends at $end"
-echo "file size $bin_size bytes, footprint $(printf '%#x' "$footprint") bytes from the load address"
+echo "file size $bin_size bytes, footprint $(printf '%#x' "$footprint") bytes from the guard band (the stack is in it)"
 echo "relocations $relocs"
 
 # One constant: the load address the host uses (testing/crates/k230-usbboot-stage/src/image.rs) must equal
@@ -70,8 +73,16 @@ python3 -I "$repo/drivers/k230-usbboot-image/check-entry.py" "$work/image.dis" |
 fail=0
 [ $((entry)) -eq $((0x80360000)) ] || { echo "FAIL: the entry is not at the load address"; fail=1; }
 [ $((load_start)) -eq $((0x80360000)) ] || { echo "FAIL: the load segment is not at the load address"; fail=1; }
+# The stack layout, from the linked symbols: guard band, then stack (16 KiB), with the stack's top at the entry, so
+# the stack is below every byte of code and data. The guard band is below the stack, the stack below the code.
+sym() { llvm-nm "$work/image.elf" | awk -v n="$1" '$3 == n {print $1}'; }
+g=$((0x$(sym lemnos_guard_bottom))); sb=$((0x$(sym lemnos_stack_bottom))); st=$((0x$(sym lemnos_stack_top)))
+[ "$g" -lt "$sb" ] && [ "$sb" -lt "$st" ] && [ "$st" -eq $((0x80360000)) ] || { echo "FAIL: the stack layout is not guard < stack < entry: guard $(printf %#x $g) stack $(printf %#x $sb)..$(printf %#x $st)"; fail=1; }
+[ $((sb - g)) -eq $((0x100)) ] && [ $((st - sb)) -eq $((0x4000)) ] || { echo "FAIL: the guard band is not 256 bytes or the reserve is not 16 KiB"; fail=1; }
+[ "$g" -ge $((0x80300000)) ] || { echo "FAIL: the guard band is below the vendor load range"; fail=1; }
+echo "stack layout: guard band $(printf %#x $g)..$(printf %#x $sb), stack $(printf %#x $sb)..$(printf %#x $st), code from 0x80360000"
 [ $((end)) -le $((0x80400000)) ] || { echo "FAIL: the image runs past 0x80400000"; fail=1; }
-[ "$footprint" -le $((0xA0000)) ] || { echo "FAIL: the footprint is over 0xA0000"; fail=1; }
+[ $((lowest)) -ge $((0x80300000)) ] || { echo "FAIL: the guard band is below the vendor load range 0x80300000"; fail=1; }
 if [ "$b2" = 0 ]; then
   [ $((end)) -le $((0x80380000)) ] || { echo "FAIL: the image runs into the piece job's address 0x80380000"; fail=1; }
 else

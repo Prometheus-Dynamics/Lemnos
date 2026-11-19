@@ -37,3 +37,39 @@ fn the_entry_symbol_is_the_first_section_at_the_origin() {
     assert!(LINKER_SCRIPT.contains("KEEP(*(.text.lemnos_image_entry))"));
     assert!(LINKER_SCRIPT.contains("ENTRY(lemnos_image_entry)"));
 }
+
+/// The address a `.name 0x... (NOLOAD)` section line places a section at.
+fn section_at(name: &str) -> u32 {
+    let prefix = format!(".{name} 0x");
+    let line = LINKER_SCRIPT
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("the linker script places .{name} at an explicit address"));
+    let hex: String = line[prefix.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    u32::from_str_radix(&hex, 16).expect("the address is hex")
+}
+
+#[test]
+fn the_stack_and_its_guard_band_sit_below_the_code_in_that_order() {
+    // The guard band, then the 16 KiB reserve, then the code at the origin: nothing of the image is below the stack.
+    let guard = section_at("guard");
+    let stack = section_at("stack");
+    assert!(
+        guard < stack,
+        "guard {guard:#x} is below the stack {stack:#x}"
+    );
+    assert_eq!(stack - guard, 0x100, "the guard band is 256 bytes");
+    assert_eq!(
+        stack + 0x4000,
+        LOAD_ADDRESS,
+        "the reserve is 16 KiB and its top is the code's first byte"
+    );
+    assert!(
+        guard >= LOAD_LOW,
+        "the guard band is inside the vendor's range"
+    );
+}
