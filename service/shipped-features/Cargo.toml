@@ -37,6 +37,7 @@ subtle = { version = "2.6", default-features = false, features = ["const-generic
 orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "8e37a8a4d4aa9e6772d1b7df401cadd71f948a71", default-features = false, features = ["actions", "files", "provider", "records", "topics"], optional = true }
 
 [features]
-# Turned on by lemnosd's orion-precheck feature and by lemnos-orion. A consumer that embeds lemnosd
+# Every shipped program turns this on (lemnosd through orion-precheck, the others directly), so a
+# merged build and each program built alone agree. A consumer that embeds lemnosd
 # without that feature gets no Orion at all.
 orion = ["dep:orion"]

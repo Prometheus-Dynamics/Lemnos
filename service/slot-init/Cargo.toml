@@ -18,7 +18,7 @@ path = "src/main.rs"
 # lemnos-linux-sys's safe wrappers.
 [dependencies]
 # The shipped programs' feature baseline (service/shipped-features): the same features whichever programs are built together.
-lemnos-shipped-features = { path = "../shipped-features" }
+lemnos-shipped-features = { path = "../shipped-features", features = ["orion"] }
 lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux"] }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-driver-rpi-firmware-sys = { path = "../../drivers/rpi-firmware-sys" }
