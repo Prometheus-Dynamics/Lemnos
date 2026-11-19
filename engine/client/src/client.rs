@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ const ARGS: usize = 256;
 #[derive(Debug, Clone)]
 pub struct Client {
     session: Arc<Mutex<Session>>,
+    dropped_events: Arc<AtomicU64>,
 }
 
 impl Client {
@@ -217,6 +219,15 @@ impl Client {
         self.lock().wait_event(timeout)
     }
 
+    /// How many device events this client has dropped since it was made. The queue keeps 64;
+    /// past that the oldest event goes and is counted here, whether or not it was read. The count
+    /// never goes down. Clones share it, and a reconnect does not reset it. It does not wait for a
+    /// call in progress, so any thread may read it at any time. A consumer that sees it rise
+    /// should list the devices again, since the changes it missed are not replayed.
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped_events.load(Ordering::Relaxed)
+    }
+
     pub fn is_connected(&self) -> bool {
         self.lock().is_connected()
     }
@@ -229,6 +240,7 @@ impl Client {
 impl From<Session> for Client {
     fn from(session: Session) -> Self {
         Self {
+            dropped_events: session.dropped_events_counter(),
             session: Arc::new(Mutex::new(session)),
         }
     }

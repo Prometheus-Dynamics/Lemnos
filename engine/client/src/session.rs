@@ -3,6 +3,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_core::{Contract, Status, Tail};
@@ -274,6 +275,9 @@ struct Shared {
     sub_retry: Option<(Instant, Duration)>,
     values: ValueQueue,
     events: VecDeque<Event>,
+    /// Device events the queue dropped, unread, for want of room. Shared with the [`Client`](crate::Client)
+    /// so it reads without waiting on the session.
+    dropped_events: Arc<AtomicU64>,
     /// Long jobs started on this connection and not over yet.
     jobs: Vec<u64>,
     /// Jobs that ended before their JobStarted was read, so it doesn't open them again.
@@ -524,6 +528,7 @@ impl Shared {
                 };
                 if self.events.len() == MAX_EVENTS {
                     self.events.pop_front();
+                    self.dropped_events.fetch_add(1, Ordering::Relaxed);
                 }
                 self.events.push_back(Event {
                     device,
@@ -641,6 +646,7 @@ impl Session {
                 sub_retry: None,
                 values: ValueQueue::new(),
                 events: VecDeque::new(),
+                dropped_events: Arc::new(AtomicU64::new(0)),
                 jobs: Vec::new(),
                 ended_early: VecDeque::new(),
                 job_events: VecDeque::new(),
@@ -685,6 +691,18 @@ impl Session {
 
     pub fn next_event(&mut self) -> Option<Event> {
         self.shared.events.pop_front()
+    }
+
+    /// How many device events this session has dropped for want of room in its queue, since it
+    /// was made. Never goes down: see [`Client::dropped_events`](crate::Client::dropped_events).
+    pub fn dropped_events(&self) -> u64 {
+        self.shared.dropped_events.load(Ordering::Relaxed)
+    }
+
+    /// The counter behind [`Session::dropped_events`], for a [`Client`](crate::Client) to read
+    /// without the session's lock.
+    pub(crate) fn dropped_events_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.shared.dropped_events)
     }
 
     /// The oldest change of a device's state, health or reason the service has told this session
