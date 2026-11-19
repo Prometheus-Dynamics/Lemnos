@@ -1019,6 +1019,11 @@ impl Fan for FakeFan {
         self.put(FAN_MAX)
     }
 
+    /// A fake has no timer: the timed override is refused by name, as a driver with none would refuse it.
+    fn override_for(&mut self, _per_mille: u16, _ms: u32) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
     fn hand_back(&mut self) -> Result<()> {
         if self.refusing() {
             return Err(Status::IO);

@@ -13,7 +13,8 @@ fn the_tag_and_numbers_are_stable() {
             ("duty", 2),
             ("rpm", 3),
             ("release", 4),
-            ("hand_back", 5)
+            ("hand_back", 5),
+            ("override_for", 6),
         ]
     );
     assert_eq!(info.methods[0].params[0].shape, Shape::U16);

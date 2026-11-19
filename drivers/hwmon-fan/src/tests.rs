@@ -1028,3 +1028,124 @@ fn a_client_that_replaced_the_controllers_write_hands_the_fan_back_to_it_without
     Lifecycle::caller_gone(&mut fan, CALLER_A);
     assert_eq!(last_note(&mut fan), None);
 }
+
+/// A timed override holds the duty, and the owner's baseline comes back on the tick at its deadline,
+/// with that tick the next due one the host is given.
+#[test]
+fn a_timed_override_hands_the_fan_back_on_the_tick_at_its_deadline() {
+    let tree = Tree::new("override-deadline");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    Lifecycle::tick(&mut fan, SEC);
+    fan.override_for(900, 5_000).unwrap();
+    // The tick after the call arms it: the next due time is the deadline, 5 s on.
+    assert_eq!(Lifecycle::tick(&mut fan, SEC), Some(6 * SEC));
+    assert_eq!(fan.duty().unwrap(), pwm_to_duty(duty_to_pwm(900)));
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1_enable")),
+        "1",
+        "held manual"
+    );
+
+    // Not yet: a millisecond early, the duty stands and the deadline is still the next due time.
+    assert_eq!(
+        Lifecycle::tick(&mut fan, 6 * SEC - 1_000_000),
+        Some(6 * SEC)
+    );
+    assert_eq!(fan.duty().unwrap(), pwm_to_duty(duty_to_pwm(900)));
+
+    // At the deadline the baseline is written (pwm 77, mode 2), and nothing is due any more.
+    assert_eq!(Lifecycle::tick(&mut fan, 6 * SEC), None);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+}
+
+/// The owner going before the deadline hands the fan back at once, and the timer goes with it.
+#[test]
+fn the_owner_going_before_a_timed_overrides_deadline_hands_the_fan_back_at_once() {
+    let tree = Tree::new("override-gone");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    Lifecycle::tick(&mut fan, SEC);
+    fan.override_for(900, 5_000).unwrap();
+    Lifecycle::tick(&mut fan, SEC);
+    Lifecycle::tick(&mut fan, 2 * SEC);
+    Lifecycle::caller_gone(&mut fan, CALLER_A);
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "77",
+        "at once, not at 6 s"
+    );
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+    assert_eq!(Lifecycle::tick(&mut fan, 6 * SEC), None, "no timer is left");
+}
+
+/// A new set replaces the timer: the deadline of the override it replaced does nothing.
+#[test]
+fn a_new_set_replaces_a_timed_overrides_timer() {
+    let tree = Tree::new("override-replaced-set");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    Lifecycle::tick(&mut fan, SEC);
+    fan.override_for(900, 5_000).unwrap();
+    Lifecycle::tick(&mut fan, SEC);
+    Lifecycle::tick(&mut fan, 3 * SEC);
+    fan.set_duty(300).unwrap();
+    assert_eq!(
+        Lifecycle::tick(&mut fan, 6 * SEC),
+        None,
+        "no hand-back at the old deadline"
+    );
+    assert_eq!(fan.duty().unwrap(), pwm_to_duty(duty_to_pwm(300)));
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1_enable")),
+        "1",
+        "still manual"
+    );
+}
+
+/// A new override replaces the old one's timer, and its own deadline is the one that counts.
+#[test]
+fn a_new_timed_override_replaces_the_timer_with_its_own_deadline() {
+    let tree = Tree::new("override-replaced-override");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    Lifecycle::tick(&mut fan, SEC);
+    fan.override_for(900, 5_000).unwrap();
+    Lifecycle::tick(&mut fan, SEC);
+    Lifecycle::tick(&mut fan, 2 * SEC);
+    Lifecycle::caller(&mut fan, CALLER_B);
+    fan.override_for(400, 2_000).unwrap();
+    // The new deadline, 2 s after the tick that arms it, is the next due time: not A's 6 s.
+    assert_eq!(Lifecycle::tick(&mut fan, 2 * SEC), Some(4 * SEC));
+    assert_eq!(fan.duty().unwrap(), pwm_to_duty(duty_to_pwm(400)));
+    assert_eq!(Lifecycle::tick(&mut fan, 4 * SEC), None);
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1")), "77");
+}
+
+/// Bounds: 1 s to 10 min, refused by name outside them, and a refusal sets nothing.
+#[test]
+fn an_override_outside_one_second_to_ten_minutes_is_refused_and_sets_nothing() {
+    let tree = Tree::new("override-bounds");
+    let root = tree.root();
+    let mut fan = pwm_fan(root);
+    Lifecycle::caller(&mut fan, CALLER_A);
+    Lifecycle::tick(&mut fan, SEC);
+    assert_eq!(fan.override_for(900, 999), Err(Status::INVALID_ARGUMENT));
+    assert_eq!(
+        fan.override_for(900, 600_001),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        "77",
+        "nothing was taken"
+    );
+    assert_eq!(read(root, &format!("{PWM_FAN}/pwm1_enable")), "2");
+    fan.override_for(900, 1_000).unwrap();
+    fan.override_for(900, 600_000).unwrap();
+}

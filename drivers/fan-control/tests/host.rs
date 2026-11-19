@@ -186,6 +186,11 @@ impl Fan for SimFan {
         Ok(())
     }
 
+    /// A fake has no timer: the timed override is refused by name, as a driver with none would refuse it.
+    fn override_for(&mut self, _per_mille: u16, _ms: u32) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
     fn hand_back(&mut self) -> Result<()> {
         self.hand_backs += 1;
         if self.bound_out {
@@ -908,6 +913,11 @@ impl Fan for FlapFan {
             fan.duty = 1000;
             Ok(())
         })
+    }
+
+    /// A fake has no timer: the timed override is refused by name, as a driver with none would refuse it.
+    fn override_for(&mut self, _per_mille: u16, _ms: u32) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
     }
 
     fn hand_back(&mut self) -> Result<()> {
