@@ -377,6 +377,22 @@ fn power_requests_are_answered() {
 }
 
 #[test]
+fn a_change_the_service_tells_of_ends_a_wait_for_events_and_none_is_none() {
+    let host = FakeHost::start();
+    let client = Client::connect(&host.path, "t").unwrap();
+    let started = Instant::now();
+    assert!(client.wait_event(Duration::from_millis(100)).is_none());
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    client.set_power(10, false).unwrap();
+    let event = client.wait_event(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        (event.device, event.state, event.reason.as_str()),
+        (10, DeviceState::Off, "powered off")
+    );
+    assert!(client.wait_event(Duration::from_millis(50)).is_none());
+}
+
+#[test]
 fn values_arrive_with_stable_identity() {
     let host = FakeHost::start();
     let client = Client::connect(&host.path, "t").unwrap();

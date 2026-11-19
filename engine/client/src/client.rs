@@ -211,6 +211,12 @@ impl Client {
         self.lock().next_event()
     }
 
+    /// See [`Session::wait_event`]. Holds the connection while it waits: other threads' calls
+    /// wait too.
+    pub fn wait_event(&self, timeout: Duration) -> Option<Event> {
+        self.lock().wait_event(timeout)
+    }
+
     pub fn is_connected(&self) -> bool {
         self.lock().is_connected()
     }
