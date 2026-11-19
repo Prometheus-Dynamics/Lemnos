@@ -1,12 +1,19 @@
 # B20 steps 8 and 9, detached (sourced by lemnos-check.sh run). Settings:
-#   COMM_UNIT      the comm core's unit (required; read it from `systemctl list-units` on the board)
+#   COMM_UNIT      the comm core's unit (default orion-comm.service, as the image installs it)
 #   STEPS          "8 9" (default) or one of them
-#   ORION_CLI      the comm core's command line (default `orion`); ORION_ADDRESS its --address
+#   ORION_CLI      Orion's command line (default /usr/bin/orion); ORION_ADDRESS its --address
+# The command line is the one at the Orion rev the image pins (455a956e, crates/client/ctl):
+# `orion [--address A] [--timeout MS] resource list [PREFIX]` prints one row per resource,
+# `NAME  KIND  STATE  on NODE`; `orion topic read TOPIC` prints `FIELD = VALUE` lines, then
+# `(its publisher is gone; these are the last values)` when the publisher has gone, or only
+# `nobody has declared TOPIC` (exit 1) when the topic is withdrawn. Its own timeout is 5000 ms by
+# default: --timeout 2000 keeps each call inside this script's 3 s bound, so a call that cannot
+# reach the comm core fails by itself instead of being killed.
 # Step 8 restarts the comm core (the login goes with it); lemnosd stays up, the watchdog is not
 # involved. Step 9 stops lemnosd for one bounded window (DOWN_BOUND_S, default 5 s).
 
 STEPS=${STEPS:-8 9}
-ORION_CLI=${ORION_CLI:-orion}
+ORION_CLI=${ORION_CLI:-/usr/bin/orion}
 ORION_ADDRESS=${ORION_ADDRESS:-}
 # Step 8: the record's 10 s for the resources to come back, the restart itself and margin.
 B20_S8_BOUND=25
@@ -15,19 +22,19 @@ CHECK_HYPOTHESIS="B20 on the board. Step 8: the comm core restarted while lemnos
 
 orion() {
   # shellcheck disable=SC2086
-  bounded 3 "$ORION_CLI" ${ORION_ADDRESS:+--address "$ORION_ADDRESS"} "$@"
+  bounded 3 "$ORION_CLI" ${ORION_ADDRESS:+--address "$ORION_ADDRESS"} --timeout 2000 "$@"
 }
 
 # resources: the number of lemnos. resources the comm core lists (-1 when the call fails).
 resources() {
   local out
   out=$(orion resource list lemnos. 2>/dev/null) || { echo -1; return; }
-  grep -c 'lemnos\.' <<<"$out"
+  awk '$1 ~ /^lemnos\./ && $2 == "lemnos.device"' <<<"$out" | grep -c .
 }
 
 check_precheck() {
   local ok=0
-  [ -n "$COMM_UNIT" ] || { log precheck "COMM_UNIT is not set"; ok=1; }
+  [ -n "$COMM_UNIT" ] || { log precheck "COMM_UNIT is empty: step 8 has no comm core to restart"; ok=1; }
   unit_active "$BRIDGE_UNIT" || { log precheck "$BRIDGE_UNIT is not active"; ok=1; }
   command -v "$ORION_CLI" >/dev/null 2>&1 || { log precheck "no '$ORION_CLI' command on the board"; ok=1; }
   [ "$ok" = 0 ] || return 1
@@ -91,15 +98,19 @@ b20_step9() {
     n=$((n + 1))
   done
   logout s9 orion resource list lemnos.
-  local ok=1
+  # The topic is gone in any of the three forms the pinned command line prints: withdrawn
+  # (`nobody has declared`), its publisher gone, or the bridge's own `state = gone`. A
+  # `state = running` line is a value from before: the record's "nothing shows running".
+  local ok=1 topic_gone=no
   [ "$gone" = 0 ] || ok=0
-  grep -qi 'gone' <<<"$topic" || ok=0
-  grep -qi 'running' <<<"$topic" && ok=0
+  grep -Eq 'nobody has declared|its publisher is gone|^state = gone$' <<<"$topic" && topic_gone=yes
+  grep -Eq '^state = running$' <<<"$topic" && topic_gone="no (shows running)"
+  [ "$topic_gone" = yes ] || ok=0
   [ -n "$back" ] || ok=0
   if [ "$ok" = 1 ]; then
-    result s9 PASS "resources while down: 0; topic says gone; all $EXPECT back $back s after lemnosd active"
+    result s9 PASS "resources while down: 0; status topic gone; all $EXPECT back $back s after lemnosd active"
   else
-    result s9 FAIL "resources while down: $gone (want 0); topic gone/never running: $(grep -qi gone <<<"$topic" && ! grep -qi running <<<"$topic" && echo yes || echo no); back after active: ${back:-not within 30 s}"
+    result s9 FAIL "resources while down: $gone (want 0); status topic gone: $topic_gone; back after active: ${back:-not within 30 s}"
   fi
 }
 

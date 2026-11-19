@@ -19,7 +19,7 @@ while :; do
     done
     env "${env_extra[@]}" "$STANDIN_BIN/lemnosd" "${args[@]}" &
     ;;
-  comm-core) "$STANDIN_BIN/comm-core" & ;;
+  orion-comm) "$STANDIN_BIN/orion-comm" & ;;
   lemnos-orion) "$STANDIN_BIN/bridge-standin" & ;;
   esac
   main=$!

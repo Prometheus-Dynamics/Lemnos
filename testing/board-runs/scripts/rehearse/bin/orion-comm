@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stand-in comm core: the bridge reconnects to it about 1 s after it starts.
 . "$(dirname "$0")/../world.sh"
-: >"$W/units/comm-core.ready"
+: >"$W/units/orion-comm.ready"
 ( sleep 1; [ "$(state lemnos-orion)" = active ] && journal lemnos-orion "connected to Orion node bench again" ) &
 echo "$(awk '{print $1}' /proc/uptime)" >"$W/comm.started"
 while :; do sleep 1; done

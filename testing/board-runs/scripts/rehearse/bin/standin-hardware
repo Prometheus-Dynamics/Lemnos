@@ -15,7 +15,7 @@ while :; do
     : >"$W/fail/lemnosd"
     cat /proc/sys/kernel/random/uuid >"$CR/proc/sys/kernel/random/boot_id"
     feed
-    for u in lemnosd comm-core lemnos-orion; do "$STANDIN_BIN/systemctl" start "$u" >/dev/null 2>&1; done
+    for u in lemnosd orion-comm lemnos-orion; do "$STANDIN_BIN/systemctl" start "$u" >/dev/null 2>&1; done
     printf '%s BOOTED again\n' "$(now)" >>"$W/events.log"
   fi
   sleep 0.2

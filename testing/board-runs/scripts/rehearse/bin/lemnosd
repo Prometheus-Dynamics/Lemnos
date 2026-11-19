@@ -15,7 +15,7 @@ journal lemnosd "lemnosd starting on $board"
 gs=$!
 echo "$gs" >"$W/units/lemnosd.children"
 teardown() {
-  rm -f "$sock"
+  rm -f "$sock" "$W/link.readded"
   rm -rf "$GADGET_DIR"
   del_mount "$FFS_LINE"
   kill -KILL "$gs" $(cat "$W/gsuper.child" 2>/dev/null) 2>/dev/null
