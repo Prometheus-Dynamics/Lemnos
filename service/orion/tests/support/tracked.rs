@@ -9,7 +9,10 @@ use lemnos_core::{
 /// A device whose driver tracks its callers: `take` remembers the caller that asked, `held` counts
 /// the callers it holds for, `who` says the caller's number, `hold_until_cancelled` is a long job
 /// that runs until it is cancelled and reports no progress, and `count_until_cancelled` is one that
-/// reports progress at every poll (appended after the others, so the contract only grows).
+/// reports progress at every poll, `finish_when_cancelled` is a job that, cancelled, finishes as
+/// done a moment later (its real outcome), and `ignore_cancel` is one that never finishes and
+/// never reacts to its cancel (a device call that never returns). All are appended after the
+/// others, so the contract only grows.
 #[contract("tracked", version = 1)]
 pub trait Tracked {
     #[method(1)]
@@ -22,6 +25,10 @@ pub trait Tracked {
     fn hold_until_cancelled(&mut self) -> Result<JobId>;
     #[method(5, job, stall = 60)]
     fn count_until_cancelled(&mut self) -> Result<JobId>;
+    #[method(6, job, stall = 60)]
+    fn finish_when_cancelled(&mut self) -> Result<JobId>;
+    #[method(7, job, stall = 60)]
+    fn ignore_cancel(&mut self) -> Result<JobId>;
 }
 
 #[driver("tracked", provides = [Tracked])]
@@ -31,6 +38,8 @@ pub struct TrackedDevice {
     job: Option<(JobId, bool)>,
     counting: Option<(JobId, bool)>,
     count: u64,
+    finishing: Option<(JobId, bool)>,
+    stubborn: Option<JobId>,
     next: u64,
 }
 
@@ -48,6 +57,8 @@ impl Lifecycle for TrackedDevice {
             job: None,
             counting: None,
             count: 0,
+            finishing: None,
+            stubborn: None,
             next: 0,
         })
     }
@@ -70,6 +81,18 @@ impl Lifecycle for TrackedDevice {
 
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
         let _ = result;
+        if self.stubborn == Some(job) {
+            return JobState::Running { done: 0, total: 0 };
+        }
+        if let Some((id, cancelled)) = self.finishing
+            && id == job
+        {
+            if cancelled {
+                self.finishing = None;
+                return JobState::Finished(DriverStatus::OK);
+            }
+            return JobState::Running { done: 0, total: 0 };
+        }
         if let Some((id, cancelled)) = self.counting
             && id == job
         {
@@ -97,6 +120,14 @@ impl Lifecycle for TrackedDevice {
     }
 
     fn job_cancel(&mut self, job: JobId) {
+        if self.stubborn == Some(job) {
+            return;
+        }
+        if let Some((id, cancelled)) = &mut self.finishing
+            && *id == job
+        {
+            *cancelled = true;
+        }
         if let Some((id, cancelled)) = &mut self.counting
             && *id == job
         {
@@ -147,6 +178,26 @@ impl Tracked for TrackedDevice {
         let id = JobId(self.next);
         self.counting = Some((id, false));
         self.count = 0;
+        Ok(id)
+    }
+
+    fn finish_when_cancelled(&mut self) -> Result<JobId> {
+        if self.job.is_some() || self.counting.is_some() || self.finishing.is_some() {
+            return Err(DriverStatus::BUSY);
+        }
+        self.next += 1;
+        let id = JobId(self.next);
+        self.finishing = Some((id, false));
+        Ok(id)
+    }
+
+    fn ignore_cancel(&mut self) -> Result<JobId> {
+        if self.job.is_some() || self.counting.is_some() || self.stubborn.is_some() {
+            return Err(DriverStatus::BUSY);
+        }
+        self.next += 1;
+        let id = JobId(self.next);
+        self.stubborn = Some(id);
         Ok(id)
     }
 }

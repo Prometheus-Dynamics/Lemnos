@@ -174,6 +174,9 @@ struct Running {
     /// A cancel was sent to lemnosd and the run is open until lemnosd says how the job ended. The run
     /// is reported as that end, never as a cancel of its own.
     cancelling: bool,
+    /// The run's own deadline passed and the bridge cancelled it (see [`expire_runs`]). A cancel that
+    /// lemnosd confirms then ends the run `TimedOut`, as Orion's node gives a deadline.
+    own_deadline: bool,
 }
 
 /// A session's lemnosd connection, and when its session last had a request: a run, a run's end or a
@@ -241,6 +244,13 @@ impl Ending {
     /// Cancelled by the bridge, for a caller's own cancel or a session's end; no status is named.
     pub const CANCELLED: Self = Self {
         outcome: Outcome::Cancelled,
+        code: 0,
+    };
+    /// The end is not known: the bridge cannot confirm how the device-side work ended (its cancel was not
+    /// answered in time, or was not carried out, or the connection went with the job, or a call got no
+    /// answer). Orion's `Indeterminate`, with code zero: never read as done, nor as not done.
+    pub const INDETERMINATE: Self = Self {
+        outcome: Outcome::Indeterminate,
         code: 0,
     };
     /// Ran out of time: the run's deadline passed, or its job went too long without progress. The
@@ -504,9 +514,23 @@ pub(crate) fn cancel_words(reason: u8) -> &'static str {
     }
 }
 
-/// How long a cancelling run waits for lemnosd to say how its job ended. Past it the run ends as
-/// failed, and never as cancelled: the bridge does not know whether the install stopped or finished.
+/// How long a cancelling run waits for lemnosd to say how its job ended. Past it the run ends
+/// `Indeterminate`: the bridge does not know whether the job stopped, finished or failed, so it reports
+/// neither a cancel nor a success.
 pub const CANCEL_WAIT: Duration = Duration::from_secs(5);
+/// Orion's node confirm window: how long a node waits for a program's word once it has told the program
+/// to stop (`CONFIRM_MS`, `crates/node/action-list/src/stop.rs` at b76a039). The test
+/// `the_answer_lands_inside_the_node_confirm_window` ties this to `orion_action_list::CONFIRM_MS`.
+pub const ORION_CONFIRM: Duration = Duration::from_secs(10);
+/// Headroom kept after the cancel wait for the bridge's loop, the send of its answer and the link to Orion.
+/// Not measured by the bridge itself; the timing tests in `tests/orion_bridge.rs` measure the whole.
+pub const ANSWER_HEADROOM: Duration = Duration::from_secs(2);
+/// The least `actions.confirm_ms` this bridge's answer can beat: its cancel wait plus its headroom. The
+/// bridge cannot read the node's setting, so this is a floor the deployment keeps: a node configured below
+/// it may end a stopped run `Indeterminate` itself, in its own words, before the bridge answers. The node
+/// keeps its default (`CONFIRM_MS`, 10 s), which leaves a margin of `ORION_CONFIRM - CONFIRM_FLOOR`.
+pub const CONFIRM_FLOOR: Duration = CANCEL_WAIT.saturating_add(ANSWER_HEADROOM);
+const _: () = assert!(CONFIRM_FLOOR.as_millis() < ORION_CONFIRM.as_millis());
 
 /// Sends the cancel of run `r`'s job to lemnosd, and leaves the run open: lemnosd's own end of the job
 /// is the run's report, so the run says what really happened (the driver's contract: a job cancelled
@@ -532,13 +556,14 @@ fn begin_cancel(clients: &mut Callers, r: &mut Running, now: Instant) -> Result<
     Ok(())
 }
 
-/// The run ends as failed, because its cancel could not be carried out or answered: never as cancelled.
-fn failed_cancel(r: &Running, ended: &mut Vec<CallerKey>, detail: String) -> Done {
+/// The run ends `Indeterminate`, because how its job ended could not be confirmed: its cancel was not
+/// carried out or answered, or its connection went with it. Never cancelled, and never a success.
+fn unconfirmed(r: &Running, ended: &mut Vec<CallerKey>, detail: String) -> Done {
     let (detail, session_note) = noted(ended, &r.caller, detail);
     Done {
         session: r.session,
         call: r.call,
-        ending: Ending::FAILED,
+        ending: Ending::INDETERMINATE,
         output: String::new(),
         detail,
         session_note,
@@ -570,15 +595,17 @@ fn cancel(
         Ok(()) => {}
         Err(detail) => {
             let r = running.remove(at);
-            shared.finished(failed_cancel(&r, ended, detail));
+            shared.finished(unconfirmed(&r, ended, detail));
         }
     }
 }
 
-/// Ends the runs whose deadline has passed at `now`: each is cancelled on lemnosd and ends
-/// `TimedOut` with code 110, as Orion's node ends a deadline. A run that is still going is never ended
-/// here before its deadline; a run that ends first is taken off `running` by its own end, so its
-/// deadline has nothing to act on.
+/// Ends the runs whose deadline has passed at `now`. A run that is cancelling and past its wait ends
+/// `Indeterminate`. A run whose own deadline passed is cancelled on lemnosd and waits for lemnosd's word
+/// as a cancel does (see [`begin_cancel`]): a confirmed cancel ends it `TimedOut` (see [`job_done`]), any
+/// other end is what lemnosd says, and no word by the wait is `Indeterminate`. Nothing is reported as
+/// timed out or cancelled before lemnosd says so. A run that ends first is taken off `running` by its own
+/// end, so its deadline has nothing to act on.
 fn expire_runs(
     clients: &mut Callers,
     running: &mut Vec<Running>,
@@ -592,13 +619,13 @@ fn expire_runs(
             at += 1;
             continue;
         }
-        let r = running.remove(at);
-        if r.cancelling {
+        if running[at].cancelling {
+            let r = running.remove(at);
             log(&format!(
                 "run {} cancelled, and lemnosd did not say how it ended",
                 r.call
             ));
-            replies.push(failed_cancel(
+            replies.push(unconfirmed(
                 &r,
                 ended,
                 format!(
@@ -608,20 +635,18 @@ fn expire_runs(
             ));
             continue;
         }
-        log(&format!("run {} ran out of time", r.call));
-        if let Some(lemnosd) = clients.get_mut(&r.caller) {
-            let _ = lemnosd.client.cancel_job(r.job);
-            lemnosd.seen = now;
+        log(&format!(
+            "run {} ran out of time: its job is cancelled on lemnosd",
+            running[at].call
+        ));
+        running[at].own_deadline = true;
+        match begin_cancel(clients, &mut running[at], now) {
+            Ok(()) => at += 1,
+            Err(detail) => {
+                let r = running.remove(at);
+                replies.push(unconfirmed(&r, ended, detail));
+            }
         }
-        let (detail, session_note) = noted(ended, &r.caller, "it ran out of time".to_owned());
-        replies.push(Done {
-            session: r.session,
-            call: r.call,
-            ending: Ending::TIMED_OUT,
-            output: String::new(),
-            detail,
-            session_note,
-        });
     }
     replies
 }
@@ -684,6 +709,7 @@ fn run_one(
                 due: (job.deadline_ms != 0)
                     .then(|| Instant::now() + Duration::from_millis(job.deadline_ms)),
                 cancelling: false,
+                own_deadline: false,
             });
             return;
         }
@@ -691,6 +717,7 @@ fn run_one(
         Err(Failure::Refused(why)) => (Ending::REJECTED, String::new(), why),
         Err(Failure::Status(status, why)) => (ending_of_status(status), String::new(), why),
         Err(Failure::Failed(why)) => (Ending::FAILED, String::new(), why),
+        Err(Failure::Unconfirmed(why)) => (Ending::INDETERMINATE, String::new(), why),
     };
     let (detail, session_note) = noted(ended, caller, detail);
     shared.finished(Done {
@@ -771,6 +798,13 @@ fn follow(
 fn job_done(run: &Running, status: Status, result: &[u8]) -> Done {
     let (ending, output, detail) = if status.is_ok() {
         (Ending::SUCCEEDED, result_text(result), String::new())
+    } else if run.own_deadline && status == Status::CANCELLED {
+        // The bridge cancelled the job at its deadline, and lemnosd confirms it stopped: it ran out of time.
+        (
+            Ending::TIMED_OUT,
+            String::new(),
+            "it ran out of time".to_owned(),
+        )
     } else {
         // The job ran, so a refusal's ending does not apply to it: only a cancel and a timeout keep theirs.
         let named = ending_of_status(status);
@@ -864,7 +898,7 @@ fn end_attached(
         }
         match begin_cancel(clients, &mut r, now) {
             Ok(()) => kept.push(r),
-            Err(detail) => shared.finished(failed_cancel(&r, ended, detail)),
+            Err(detail) => shared.finished(unconfirmed(&r, ended, detail)),
         }
     }
     *running = kept;
@@ -927,7 +961,7 @@ fn ended_with(caller: &str, running: &mut Vec<Running>, shared: &Shared, detail:
         shared.finished(Done {
             session: r.session,
             call: r.call,
-            ending: Ending::FAILED,
+            ending: Ending::INDETERMINATE,
             output: String::new(),
             detail: detail.to_owned(),
             session_note: SessionNote::None,
@@ -962,12 +996,23 @@ pub enum Failure {
     Status(Status, String),
     /// It ran, or tried to, and failed: lemnosd is not there, or the bridge could not do it.
     Failed(String),
+    /// It may have taken effect, and no answer came in time: how it ended is not known.
+    Unconfirmed(String),
 }
 
 fn failed(error: Error) -> Failure {
     match &error {
         Error::Refused { status, .. } => Failure::Status(*status, error.to_string()),
         _ => Failure::Failed(error.to_string()),
+    }
+}
+
+/// A failure of a request that may have taken effect in lemnosd (a call, a job's start, a power switch).
+/// A request that got no answer in time is not known to have done nothing, so it is `Unconfirmed`.
+fn effect(error: Error) -> Failure {
+    match &error {
+        Error::TimedOut => Failure::Unconfirmed(error.to_string()),
+        _ => failed(error),
     }
 }
 
@@ -979,7 +1024,7 @@ fn refused_reply(error: Error, call: &Call) -> Failure {
             Status::BUFFER_TOO_SMALL,
             format!("{error}: {}", too_small(call)),
         ),
-        _ => failed(error),
+        _ => effect(error),
     }
 }
 
@@ -1002,7 +1047,7 @@ pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Fail
             ["off"] => false,
             _ => return Err(Failure::Refused("power takes on or off".to_owned())),
         };
-        client.set_power(device.index, on).map_err(failed)?;
+        client.set_power(device.index, on).map_err(effect)?;
         return Ok(Served::Output(String::new()));
     }
     let Some((wanted, values)) = words.split_first() else {
@@ -1054,7 +1099,7 @@ pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Fail
     if method.job {
         let started = client
             .start_job(&mut handle, method.id, &call.args)
-            .map_err(failed)?;
+            .map_err(effect)?;
         return Ok(Served::Started(started));
     }
     let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
@@ -1147,6 +1192,7 @@ mod departure_tests {
             caller: caller.to_owned(),
             due: None,
             cancelling: false,
+            own_deadline: false,
         }
     }
 
@@ -1192,13 +1238,15 @@ mod deadline_tests {
             caller: caller_key(2),
             due,
             cancelling: false,
+            own_deadline: false,
         }
     }
 
-    /// A run whose deadline has passed ends `TimedOut` with code 110, and is off the books; a run whose
+    /// A run whose deadline has passed is cancelled on lemnosd; with no connection to ask it ends
+    /// `Indeterminate` at once (its end is not known, so never `TimedOut` by assumption). A run whose
     /// deadline has not passed, or that has none, is still running.
     #[test]
-    fn a_run_past_its_deadline_ends_timed_out_and_the_others_keep_going() {
+    fn a_run_past_its_deadline_is_not_known_without_lemnosd_and_the_others_keep_going() {
         let now = Instant::now();
         let mut running = vec![
             run(1, Some(now - Duration::from_millis(1))),
@@ -1208,9 +1256,12 @@ mod deadline_tests {
         let replies = expire_runs(&mut Callers::new(), &mut running, &mut Vec::new(), now);
         assert_eq!(replies.len(), 1, "only the run past its deadline ends");
         assert_eq!(replies[0].call, 1);
-        assert_eq!(replies[0].ending, Ending::TIMED_OUT);
-        assert_eq!(replies[0].ending.code, 110);
-        assert_eq!(replies[0].detail, "it ran out of time");
+        assert_eq!(replies[0].ending, Ending::INDETERMINATE);
+        assert!(
+            replies[0].detail.contains("not known how it ended"),
+            "{}",
+            replies[0].detail
+        );
         assert_eq!(running.iter().map(|r| r.call).collect::<Vec<_>>(), [2, 3]);
     }
 
@@ -1225,7 +1276,7 @@ mod deadline_tests {
         assert_eq!(replies[0].session_note, SessionNote::HoldsReleased);
         assert_eq!(
             replies[0].ending,
-            Ending::TIMED_OUT,
+            Ending::INDETERMINATE,
             "the outcome is not changed by the note"
         );
         assert!(ended.is_empty(), "the note is given once");
@@ -1254,6 +1305,7 @@ mod ending_tests {
             caller: caller_key(2),
             due: None,
             cancelling: false,
+            own_deadline: false,
         }
     }
 
@@ -1402,6 +1454,7 @@ mod cancel_tests {
             caller: caller_key(2),
             due: None,
             cancelling: false,
+            own_deadline: false,
         }
     }
 
@@ -1428,7 +1481,7 @@ mod cancel_tests {
     }
 
     #[test]
-    fn a_cancelling_run_past_its_bound_ends_failed_and_never_as_cancelled() {
+    fn a_cancelling_run_past_its_bound_ends_indeterminate_and_never_as_cancelled() {
         let mut clients: Callers = HashMap::new();
         let now = Instant::now();
         let mut ended = Vec::new();
@@ -1438,7 +1491,7 @@ mod cancel_tests {
         let mut running = vec![r];
         let done = expire_runs(&mut clients, &mut running, &mut ended, now);
         assert_eq!(done.len(), 1);
-        assert_eq!(done[0].ending, Ending::FAILED);
+        assert_eq!(done[0].ending, Ending::INDETERMINATE);
         assert_ne!(done[0].ending.outcome, Outcome::Cancelled);
         assert!(
             done[0].detail.contains("not reported as cancelled"),
@@ -1463,5 +1516,56 @@ mod cancel_tests {
             Outcome::Cancelled
         );
         assert_eq!(job_done(&r, Status::OK, b"os-3").ending, Ending::SUCCEEDED);
+    }
+}
+
+#[cfg(test)]
+mod confirm_bound_tests {
+    use super::*;
+
+    /// The bridge's answer lands before Orion's node gives up: the cancel wait and its headroom end inside
+    /// the node's confirm window, with a margin of 3 s, and the window is Orion's own `CONFIRM_MS`.
+    #[test]
+    fn the_answer_lands_inside_the_node_confirm_window() {
+        assert_eq!(
+            ORION_CONFIRM,
+            Duration::from_millis(orion_action_list::CONFIRM_MS)
+        );
+        assert_eq!(CONFIRM_FLOOR, CANCEL_WAIT + ANSWER_HEADROOM);
+        assert_eq!((ORION_CONFIRM - CONFIRM_FLOOR).as_secs(), 3, "the margin");
+    }
+
+    /// A call that got no answer may have taken effect: Indeterminate, never Failed.
+    #[test]
+    fn a_call_with_no_answer_in_time_is_not_known_to_have_failed() {
+        match effect(Error::TimedOut) {
+            Failure::Unconfirmed(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A deadline the bridge cancelled, which lemnosd confirms as cancelled, is a timeout with code 110;
+    /// a confirmed success stays a success.
+    #[test]
+    fn a_confirmed_cancel_of_an_own_deadline_is_timed_out() {
+        let mut r = Running {
+            session: 1,
+            token: 2,
+            detached: false,
+            call: 3,
+            job: 103,
+            caller: caller_key(2),
+            due: None,
+            cancelling: true,
+            own_deadline: true,
+        };
+        let done = job_done(&r, Status::CANCELLED, &[]);
+        assert_eq!(done.ending, Ending::TIMED_OUT);
+        r.own_deadline = false;
+        assert_eq!(
+            job_done(&r, Status::CANCELLED, &[]).ending.outcome,
+            Outcome::Cancelled
+        );
+        assert_eq!(job_done(&r, Status::OK, b"x").ending, Ending::SUCCEEDED);
     }
 }

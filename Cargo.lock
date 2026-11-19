@@ -2811,6 +2811,7 @@ dependencies = [
  "lemnos-wire",
  "lemnosd",
  "orion",
+ "orion-action-list",
  "orion-config",
  "orion-connect",
  "orion-hello",

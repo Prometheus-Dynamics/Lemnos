@@ -980,21 +980,24 @@ status and so code zero:
 | The bridge's ending | Orion outcome | Code | When |
 |---|---|---|---|
 | succeeded | `Succeeded` | 0 | a call's reply, or a job's result |
-| failed | `Failed` | 0 | lemnosd is not there, a job ran and ended with a status that is not in the table (a job's `Rejected` reading does not apply: it ran), the lease ran out or the session ended while the run was in flight, or a cancel was not carried out or not answered in 5 s (its detail says so: the job's end is then not known, and the run is never reported as cancelled) |
+| failed | `Failed` | 0 | lemnosd is not there before a call, a job ran and ended with a status that is not in the table (a job's `Rejected` reading does not apply: it ran) |
+| indeterminate | `Indeterminate` | 0 | how the device-side work ended is not known: a cancel or a deadline stop that lemnosd did not confirm within 5 s, a cancel that was refused or could not be sent, a job whose connection went with it, or a call that got no answer in time (its detail says so; the run is never reported as cancelled or as done) |
 | refused | `Rejected` | 0 | the bridge refused the arguments before any call: not what the device takes, no such item, a read-only item |
 | cancelled | `Cancelled` | 0 | lemnosd says the job was cancelled: the caller cancelled the run, or its session ended (Orion's reason 2), and the cancel stopped the job |
 
 A long job that ends takes the table's endings for `CANCELLED` and `TIMED_OUT` (its job was cancelled or timed
-out on lemnosd), and `Failed` with code zero for any other status: it ran, so a refusal does not apply.
+out on lemnosd), and `Failed` with code zero for any other status: it ran, so a refusal does not apply. A job the
+bridge cancelled at its own deadline, which lemnosd confirms as cancelled, ends `TimedOut` with code 110.
 
 **A cancel reports what lemnosd says the job did.** The bridge sends the cancel to lemnosd and keeps the run open
 until lemnosd's own end of the job arrives. The run then ends as that end says: `Cancelled` when the cancel stopped
 the job, or as the job really ended (`Succeeded` with its result, or `Failed`) when it got there first, the
 driver's own rule. The run is never reported as cancelled before lemnosd answers, so an install that completed
 is never reported as cancelled, and a cancelled one is never left installed. A cancel that lemnosd refuses (other
-than `NOT_FOUND`, which means the job is already over and its end is on its way) ends the run as `Failed` at once.
-Lemnosd has up to 5 s to answer; past that the run ends `Failed`, with words that say it is not known how the job
-ended.
+than `NOT_FOUND`, which means the job is already over and its end is on its way) ends the run as `Indeterminate` at
+once. Lemnosd has up to 5 s to answer (`CANCEL_WAIT`); past that the run ends `Indeterminate`, with words that say
+it is not known how the job ended. The bridge's 5 s, and its 2 s headroom, end inside Orion's 10 s confirm window
+(`CONFIRM_MS`); a node configured with `actions.confirm_ms` below 7 s may end such a run itself first.
 
 
 **What bounds a run.** Each kind of run has its own bound, and the lease does not bound any run: a caller with a

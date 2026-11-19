@@ -1722,6 +1722,148 @@ fn a_plain_cancel_ends_the_run_and_keeps_the_callers_holds() {
     );
 }
 
+/// A run of the tracked device's `args` from `caller`, with `deadline_ms` (zero for none).
+fn tracked_run(caller: &Orion, args: &str, deadline_ms: u64) -> orion::actions::Run {
+    caller
+        .run(&ActionCall {
+            name: "lemnos.tracked.call",
+            target: Target::Resource("lemnos.tracked".parse().expect("name")),
+            args: args.as_bytes(),
+            deadline_ms,
+            detached: false,
+        })
+        .expect("run")
+}
+
+/// The bridge's cancel wait, as `calls::CANCEL_WAIT` (5 s), and the node's confirm window (Orion's
+/// `CONFIRM_MS`, 10 s, which `orion_action_list` exports). The timing checks below measure how long
+/// a run takes to end on the real node, and compare it with these bounds; no check waits on a timer.
+const CANCEL_WAIT_SECS: u64 = 5;
+const CANCEL_WAIT_WORDS: &str = "lemnosd did not say how the job ended within 5 s";
+
+/// A job cancelled on lemnosd, whose device never says how it ended, is answered by the bridge as
+/// `Indeterminate` once its cancel wait runs out: never as `Failed`, never as `Cancelled`. It is
+/// answered inside Orion's confirm window, so the node's own bound never decides it. Mutation: the
+/// bridge answering `Failed` at the end of the wait fails the outcome check.
+#[test]
+fn a_cancelled_job_that_never_says_how_it_ended_is_indeterminate_at_its_cancel_wait() {
+    let dir = dir("indet-cancel");
+    let (board, _logic, _service, _bridge, _dashboard) = start_tracked(&dir);
+    let caller = second_session(&board);
+    let mut long = tracked_run(&caller, "ignore_cancel", 0);
+    let started = Instant::now();
+    long.cancel().expect("cancel");
+    let finished = long.finish(WAIT).expect("the run ends");
+    let took = started.elapsed();
+    assert_eq!(
+        (finished.outcome, finished.code),
+        (Outcome::Indeterminate, 0),
+        "{finished:?}"
+    );
+    assert!(
+        finished.detail.contains(CANCEL_WAIT_WORDS),
+        "{}",
+        finished.detail
+    );
+    assert!(
+        took >= Duration::from_secs(CANCEL_WAIT_SECS),
+        "the bridge answered before its cancel wait: {took:?}"
+    );
+    assert!(
+        took < Duration::from_millis(orion_action_list::CONFIRM_MS),
+        "the answer came after Orion's confirm window: {took:?}"
+    );
+}
+
+/// A job cancelled before it does anything, which lemnosd says ended `Cancelled`, is `Cancelled` at
+/// once: the bridge does not wait out its cancel wait for an end lemnosd has confirmed. Mutation: a
+/// bridge that answers only at the end of its wait takes 5 s and fails the bound.
+#[test]
+fn a_job_lemnosd_confirms_as_cancelled_is_cancelled_at_once() {
+    let dir = dir("confirmed-cancel");
+    let (board, _logic, _service, _bridge, _dashboard) = start_tracked(&dir);
+    let caller = second_session(&board);
+    let mut long = tracked_run(&caller, "hold_until_cancelled", 0);
+    let started = Instant::now();
+    long.cancel().expect("cancel");
+    let finished = long.finish(WAIT).expect("the run ends");
+    let took = started.elapsed();
+    assert_eq!(finished.outcome, Outcome::Cancelled, "{finished:?}");
+    assert!(
+        took < Duration::from_secs(CANCEL_WAIT_SECS),
+        "a confirmed cancel waited out the cancel wait: {took:?}"
+    );
+}
+
+/// A job cancelled that finishes during the cancel wait is answered with its real outcome, here
+/// `Succeeded`, and not as cancelled or as indeterminate.
+#[test]
+fn a_job_that_finishes_during_the_cancel_wait_gives_its_real_outcome() {
+    let dir = dir("finish-cancel");
+    let (board, _logic, _service, _bridge, _dashboard) = start_tracked(&dir);
+    let caller = second_session(&board);
+    let mut long = tracked_run(&caller, "finish_when_cancelled", 0);
+    let started = Instant::now();
+    long.cancel().expect("cancel");
+    let finished = long.finish(WAIT).expect("the run ends");
+    let took = started.elapsed();
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    assert!(
+        took < Duration::from_secs(CANCEL_WAIT_SECS),
+        "its real end came after the cancel wait: {took:?}"
+    );
+}
+
+/// The node's deadline and the bridge's own deadline both stop a job that never says how it ended:
+/// the run is answered `Indeterminate` by the bridge's cancel wait, inside Orion's confirm window. The
+/// node is the real `orion-node-app` with its default `CONFIRM_MS`, so had the bridge not answered
+/// the node would end the run at 1 s + 10 s with its own words. Mutation: no cancel wait on the
+/// bridge's deadline (the TimedOut it used to give at once) fails the outcome check.
+#[test]
+fn a_deadline_stop_of_a_job_that_never_says_how_it_ended_is_answered_inside_the_confirm_window() {
+    let dir = dir("indet-deadline");
+    let (board, _logic, _service, _bridge, _dashboard) = start_tracked(&dir);
+    let caller = second_session(&board);
+    let started = Instant::now();
+    let mut long = tracked_run(&caller, "ignore_cancel", 1_000);
+    let finished = long.finish(WAIT).expect("the run ends");
+    let took = started.elapsed();
+    assert_eq!(
+        (finished.outcome, finished.code),
+        (Outcome::Indeterminate, 0),
+        "{finished:?}"
+    );
+    assert!(
+        finished.detail.contains(CANCEL_WAIT_WORDS),
+        "{}",
+        finished.detail
+    );
+    assert!(
+        took >= Duration::from_secs(1 + CANCEL_WAIT_SECS),
+        "answered before the deadline and the cancel wait: {took:?}"
+    );
+    assert!(
+        took < Duration::from_millis(orion_action_list::CONFIRM_MS),
+        "the answer came after Orion's confirm window: {took:?}"
+    );
+}
+
+/// A deadline stop of a job lemnosd confirms as cancelled ends `TimedOut` with code 110, as it always
+/// has: the confirmed cancel is what makes it a timeout, not the deadline alone.
+#[test]
+fn a_deadline_stop_lemnosd_confirms_as_cancelled_is_timed_out_with_110() {
+    let dir = dir("timeout-deadline");
+    let (board, _logic, _service, _bridge, _dashboard) = start_tracked(&dir);
+    let caller = second_session(&board);
+    let mut long = tracked_run(&caller, "hold_until_cancelled", 1_000);
+    let finished = long.finish(WAIT).expect("the run ends");
+    assert_eq!(
+        (finished.outcome, finished.code),
+        (Outcome::TimedOut, 110),
+        "{finished:?}"
+    );
+}
+
 #[test]
 fn a_caller_that_goes_away_ends_its_run_and_releases_its_holds_at_once() {
     let dir = dir("callers");

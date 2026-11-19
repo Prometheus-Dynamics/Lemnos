@@ -44,6 +44,8 @@ orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev =
 orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd" }
 # A device topic's declaration, read back by the tests: its `on_subscribe` mode.
 orion-msg-topics = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd" }
+# The node's confirm window (`CONFIRM_MS`): the bridge's cancel wait must end inside it (calls.rs).
+orion-action-list = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "fd7ceba4b9809a53120971f0a4e9cca18fdfcccd" }
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-driver-board-self-test = { path = "../../drivers/board-self-test" }
