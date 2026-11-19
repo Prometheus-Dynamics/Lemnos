@@ -92,3 +92,55 @@ fn sigint_stops_the_daemon_and_removes_the_socket() {
 fn the_real_backend_is_the_default_and_stops_the_same_way() {
     stops_on("TERM", &[]);
 }
+
+/// Whether the daemon's main thread has SIGTERM blocked, which it does once it has made the signal
+/// descriptor. Read from `/proc`, so the test waits for this state rather than for a time.
+fn stop_signal_blocked(pid: u32) -> bool {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigBlk:"))
+        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        .is_some_and(|mask| mask & (1 << (lemnos_linux_sys::signal::SIGTERM - 1)) != 0)
+}
+
+/// A SIGTERM once the daemon has blocked it is a clean stop, whether or not it listens yet: the
+/// daemon exits 0 and leaves no socket. The sync point is the blocked mask, not a sleep. A
+/// regression guard: a SIGTERM sent before the mask is blocked, during exec, is not covered.
+#[test]
+fn sigterm_during_start_up_is_a_clean_stop() {
+    let dir = std::env::temp_dir().join(format!("lemnosd-early-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let board = dir.join("board.toml");
+    std::fs::write(&board, BOARD).unwrap();
+    let socket = dir.join("sock");
+    let mut daemon = Reaped(
+        Command::new(env!("CARGO_BIN_EXE_lemnosd"))
+            .args(["--sim", "--board"])
+            .arg(&board)
+            .arg("--socket")
+            .arg(&socket)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let pid = daemon.0.id();
+    eventually(
+        || stop_signal_blocked(pid),
+        "the daemon never blocked the stop signal",
+    );
+    lemnos_linux_sys::guest::kill(pid as i32, lemnos_linux_sys::signal::SIGTERM).unwrap();
+    let mut status = None;
+    eventually(
+        || {
+            status = daemon.0.try_wait().unwrap();
+            status.is_some()
+        },
+        "the daemon ignored the signal",
+    );
+    let status = status.unwrap();
+    assert!(status.success(), "SIGTERM during start-up: {status}");
+    assert!(!Path::new(&socket).exists(), "the socket was left behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}
