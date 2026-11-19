@@ -1815,6 +1815,78 @@ read rounds fed too.)
 
 `tests/b2_card.rs` holds the same cases.
 
+### B2 card write run 1 (2026-11-18 21:23:56 to 21:47:46, rev `08948e8e`): the writes PASSED; C3 stopped at its gate
+
+One script (`card1.sh`, outside the repository) held the bench lock on descriptor 9 for the whole run. The
+hypothesis was written first (`card1-hypothesis.md`). Before every load the port showed `29f1:0230` with product
+"K230 USB Boot Device". All four images matched their sha256 first: check build `dafa94a6…4796`, scratch build
+`c8de108f…d23c`, piece stage `2da8d976…52d8`, and the SPL source `033903a1…c6cd`. Wall time: 1,429.8 s.
+
+| step | at (s) | took (s) | result | ROM back as |
+|---|---|---|---|---|
+| 2a: check build `dafa94a6`, link only | 4.8 | 4.8 | PASSED, as run 4; no card contact | dev 18 |
+| before O2 0..33 | 5.9 | 1.1 | `fda1a6cc…92e3` = survey S1 | dev 19 |
+| before O3 415,711..415,743 | 6.9 | 1.0 | `e841d204…fa09` = survey S2 | dev 20 |
+| before O4 34..8,191 | 20.3 | 13.4 | `fa32a323…3c86` = survey S3 | dev 21 |
+| before O1 0..415,743 | 648.9 | 628.6 | `73064ef562c392409be896d8412f9095bce13c1d62b35ff962a49676b9c09698` (as found) | dev 22 |
+| before O5 card's last 33 | 650.0 | 1.1 | `72d7e12e…30b2` = survey S4 | dev 23 |
+| before O6 1,048,568..1,048,575 | 651.0 | 1.0 | `ad7facb2…2ca7` (zeros) | dev 24 |
+| before O7 1,050,624..1,050,631 | 652.0 | 1.0 | `ad7facb2…2ca7` (zeros) | dev 25 |
+| before R0 the range | 656.1 | 4.1 | `30e14955…cb58` (zeros) | dev 26 |
+| 2b: the write run, scratch build `c8de108f` | 686.8 | 30.7 | PASSED, every step as rehearsed (below) | dev 28 |
+| after O2, O3, O4 | 687.8 / 688.9 / 702.2 | 1.0 / 1.1 / 13.3 | each = before | dev 29 to 31 |
+| after O1 | 1,330.7 | 628.5 | `73064ef5…9698` = before | dev 32 |
+| after O5, O6, O7 | 1,331.7 / 1,332.7 / 1,333.7 | 1.0 each | each = before | dev 33 to 35 |
+| after R0 | 1,337.9 | 4.2 | `30e14955…cb58` = before (zeros) | dev 36 |
+| C3: SPL load, U-Boot, the commands up to `md.l` | 1,339.1 | 1.2 | load exit 0; the gate refused `boot` (below) | |
+| C3: the watchdog's return | 1,429.7 | 90.6 | not booted; wdt0 reset the SoC 90.0 s after `md.l` (at about 0.1 s polling) | dev 37 |
+
+**2b, the write run.** Every step was as rehearsed in `scratch-good`:
+- the console printed "b2 card: the card of record, storage limited to 1048576..1050623", with CID
+  `03534453 52363447 8014a7c9 ab015100` and blocks low word `076f5000`;
+- identify returned the scratch build `0x4b32333042320002`'s record, byte for byte;
+- the range read zeros;
+- the first sector (unmarked) and the last (marked) each returned status 0 and read back equal over USB;
+- 16 writes of 128 sectors returned status 0 and read back equal;
+- the 22 refusals came back as planned: status 4 for the unmarked writes at 0, 1, 2048 and 3072, and status 2 for
+  every other one, the marked writes at those four sectors included;
+- after the refusals the range read back as written;
+- the 16 zero writes left the range equal to the before read; identify returned the same record; END returned status 0;
+- `b2 rounds 00000022` (34 verified write rounds, so 34 feeds), `b2 card-retries 00000000`.
+
+Verdict Passed. The stage reset 0.74 s after END, and the ROM was back 1.22 s later. Every region outside the range,
+and the range itself, hashes the same after as before.
+
+**C3: stopped at the gate, correctly, on a defect in the gate.** The console script for this step is
+`k230-card1-console.py`: the bench console script plus one gate before `boot`. The gate compares everything the
+console said from "U-Boot SPL" on with C3's record. It refused `boot`, differing at byte 2,208 of 2,223:
+- this run's line was `91106000: 00000001 0000000a 03fff8a3 00000000  ................`;
+- C3's line was `91106000: 00000001 0000000a 03fff87d 00000000  ........}.......`.
+
+The gate masked the counter word (wdt0's CCVR, the third word) in hex but not in the ASCII column, where the same
+counter shows again: 0x7d prints as `}`, 0xa3 as `.`. With the ASCII characters masked as well, the whole 2,223 bytes
+of this run equal C3's. So the only difference before `boot` was the live counter (0x03fff8a3 here, 0x03fff87d in C3;
+both are 2.6 ms after the enable). Nothing else was sent. U-Boot sat at its prompt, and the watchdog armed by the
+commands (`00000001 0000000a`) reset the SoC. The ROM was back as dev 37, 90.0 s after the last command. Per the
+stop rule, no C3 boot, no re-hash after C3, no rerun and no recovery.
+
+**Why the rehearsal missed it.** The replay stand-in changed the counter's hex word but left C3's ASCII column, which
+mask v1 never looked at. A stand-in that passed where the board fails.
+
+**Fix (`daafe07d`; PC only, not run on the board).**
+- The mask now covers the counter in both places. The four ASCII characters must be the rendering of the hex word, and
+  the word must lie in 0x03f00000..0x04000000.
+- `--self-test` uses C3's and this run's real md.l lines. Mask v1 fails it (`--mask v1`, exit 1); v2 passes. A change
+  outside the counter (CR 0), and ASCII characters that are not the word's, are still refused.
+- The replay rehearsal (`k230-card1-replay.py`) now renders the ASCII column from the counter it sets. With this run's
+  counter, v1 refuses `boot`, as on the board, and v2 sends it. C3's exact replay sends it. A changed `bootargs` byte, a
+  late counter, or ASCII characters left stale are refused.
+
+C3 is not to be rerun until the coordinator says so.
+
+**Board state at the end:** the ROM, `29f1:0230` "K230 USB Boot Device", dev 37 at 3-4.2.1.4.1. Bench lock released.
+The card holds what it held before the run (every hash equal; the range zeros).
+
 ## No state only hands can undo
 
 - Steps R1 to R3 write nothing to the card, the boot ROM's settings, or the stored environment.
