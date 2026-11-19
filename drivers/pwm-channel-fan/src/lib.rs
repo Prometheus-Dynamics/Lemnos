@@ -80,7 +80,7 @@ mod tests;
 
 pub mod math;
 
-use lemnos_contract_fan::Fan;
+use lemnos_contract_fan::{Fan, OVERRIDE_MAX_MS, OVERRIDE_MIN_MS};
 use lemnos_core::{
     CallerId, Config, ConfigError, ConfigValue, Description, Health, Item, Key, Kind, Lifecycle,
     Line, MethodId, Note, Notes, Pwm, RefusalKind, Result, Status, Unit, driver, status_of,
@@ -190,6 +190,11 @@ pub struct PwmChannelFan {
     prior: Option<CallerId>,
     /// Notes for the log: what each hand-back did.
     notes: Notes,
+    /// The length of a timed override asked for by the last `override_for`, which the next tick arms
+    /// (a call has no time of its own).
+    override_ms: Option<u64>,
+    /// When the timed override ends (ns), once a tick has armed it. The owner is handed the channel then.
+    override_until_ns: Option<u64>,
 }
 
 /// The settings a board file gives the fan.
@@ -259,6 +264,8 @@ impl Lifecycle for PwmChannelFan {
             owner: None,
             prior: None,
             notes: Notes::new(),
+            override_ms: None,
+            override_until_ns: None,
         })
     }
 
@@ -309,15 +316,10 @@ impl Lifecycle for PwmChannelFan {
         if self.owner != Some(caller) {
             return;
         }
-        if self.prior == Some(CallerId::LOCAL) {
-            // The override replaced the daemon's own writes: the controller is the owner again, and its next
-            // step writes the duty it wants. Nothing is written here.
-            self.owner = Some(CallerId::LOCAL);
-            self.prior = None;
-            self.notes.push(HandBack::Controller.note());
-            return;
-        }
-        let _ = self.hand_back();
+        // The owner's timed override ends with it: its going hands the channel back at once.
+        self.override_ms = None;
+        self.override_until_ns = None;
+        self.release_owner();
     }
 
     fn notes(&mut self) -> Option<&mut Notes> {
@@ -327,6 +329,12 @@ impl Lifecycle for PwmChannelFan {
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         self.now_ns = now_ns;
         self.read_edges();
+        self.arm_override(now_ns);
+        if self.override_until_ns.is_some_and(|at| now_ns >= at) {
+            // The timed override is over: the owner is handed the channel back, and this tick writes it.
+            self.override_until_ns = None;
+            self.release_owner();
+        }
         // A failed write waits for its retry time. Everything else is due now.
         if self.retry_at_ns.is_none_or(|at| now_ns >= at) {
             let _ = self.apply(now_ns);
@@ -343,6 +351,30 @@ impl PwmChannelFan {
             self.prior = self.owner;
         }
         self.owner = Some(self.calling);
+        // A new set replaces any timed override.
+        self.override_ms = None;
+        self.override_until_ns = None;
+    }
+
+    /// Arms a timed override the last `override_for` asked for, from the tick's time.
+    fn arm_override(&mut self, now_ns: u64) {
+        if let Some(ms) = self.override_ms.take() {
+            self.override_until_ns = Some(now_ns.saturating_add(ms.saturating_mul(1_000_000)));
+        }
+    }
+
+    /// Hands the channel back for its owner, as `caller_gone` and an expired override do: the daemon's own
+    /// writes come back when they were replaced, and otherwise the channel goes as `hand_back` sends it.
+    fn release_owner(&mut self) {
+        if self.prior == Some(CallerId::LOCAL) {
+            // The override replaced the daemon's own writes: the controller is the owner again, and its next
+            // step writes the duty it wants. Nothing is written here.
+            self.owner = Some(CallerId::LOCAL);
+            self.prior = None;
+            self.notes.push(HandBack::Controller.note());
+            return;
+        }
+        let _ = self.hand_back();
     }
 
     /// Reads the tachometer's pending edges, up to [`MAX_EDGES_PER_TICK`].
@@ -429,6 +461,9 @@ impl PwmChannelFan {
         if self.tach.is_some() {
             want(now_ns.saturating_add(TACH_POLL_NS));
         }
+        if let Some(at) = self.override_until_ns {
+            want(at);
+        }
         due
     }
 }
@@ -466,6 +501,8 @@ impl Fan for PwmChannelFan {
     fn hand_back(&mut self) -> Result<()> {
         self.owner = None;
         self.prior = None;
+        self.override_ms = None;
+        self.override_until_ns = None;
         let applied = self
             .shape
             .default_duty
@@ -475,6 +512,16 @@ impl Fan for PwmChannelFan {
             HandBack::FullDuty | HandBack::Controller => FULL,
         };
         self.notes.push(applied.note());
+        Ok(())
+    }
+
+    fn override_for(&mut self, per_mille: u16, ms: u32) -> Result<()> {
+        if !(OVERRIDE_MIN_MS..=OVERRIDE_MAX_MS).contains(&ms) {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        // The set makes the caller the owner and cancels any timer; the timer is armed by the next tick.
+        self.set_duty(per_mille)?;
+        self.override_ms = Some(u64::from(ms));
         Ok(())
     }
 }

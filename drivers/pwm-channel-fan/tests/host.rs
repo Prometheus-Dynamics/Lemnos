@@ -438,3 +438,123 @@ fn a_client_that_replaced_the_controllers_write_leaves_the_channel_at_its_duty_a
         vec![lemnos_core::Note::new("handed back to the controller")]
     );
 }
+
+/// `override_for`, the timed override (method 6 of `fan/1`).
+const OVERRIDE: u16 = 6;
+
+impl Rig {
+    /// `caller` asks for `per_mille` for `ms` milliseconds.
+    fn override_as(&self, caller: CallerId, per_mille: u16, ms: u32) -> Result<(), Status> {
+        let index = self.host.device("fan").unwrap().index;
+        let mut args = [0u8; 6];
+        args[..2].copy_from_slice(&per_mille.to_le_bytes());
+        args[2..].copy_from_slice(&ms.to_le_bytes());
+        let mut reply = [0u8; 64];
+        self.host
+            .call_as(
+                caller,
+                index,
+                MethodId {
+                    contract: 0,
+                    method: OVERRIDE,
+                },
+                &args,
+                &mut reply,
+            )
+            .map(|_| ())
+    }
+}
+
+/// The duty a timed override holds is written at once, and the channel goes back to its hand-back
+/// duty on the tick at the deadline: not a tick after it.
+#[test]
+fn a_timed_override_gives_the_channel_back_on_the_tick_at_its_deadline() {
+    let rig = rig("frequency_hz = 25000", false);
+    rig.override_as(CALLER_A, 300, 2_000).unwrap();
+    let asked = rig.now();
+    assert_eq!(rig.pwm.current().duty_ns, 12_000, "held from the call");
+    rig.advance(Duration::from_millis(1_999));
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        12_000,
+        "still held a millisecond early"
+    );
+    rig.advance(Duration::from_millis(1));
+    assert_eq!(rig.now(), asked + 2_000 * MS, "the tick is at the deadline");
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        PERIOD,
+        "handed back: no default duty, so full"
+    );
+    assert_eq!(rig.duty(), 1000);
+}
+
+/// The owner going before its deadline hands the channel back at once, as `caller_gone` does.
+#[test]
+fn the_owner_going_before_the_deadline_hands_the_channel_back_at_once() {
+    let rig = rig("frequency_hz = 25000", false);
+    rig.override_as(CALLER_A, 300, 2_000).unwrap();
+    rig.advance(Duration::from_millis(500));
+    rig.host.caller_gone(CALLER_A);
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        PERIOD,
+        "at once, not at the deadline"
+    );
+}
+
+/// A new set replaces the timer: the deadline of the override it replaced does nothing.
+#[test]
+fn a_new_set_replaces_the_override_timer() {
+    let rig = rig("frequency_hz = 25000", false);
+    rig.override_as(CALLER_A, 300, 2_000).unwrap();
+    let asked = rig.now();
+    rig.advance(Duration::from_millis(1_000));
+    rig.set_as(CALLER_A, 600);
+    rig.advance(Duration::from_millis(4_000));
+    assert_eq!(rig.now(), asked + 5_000 * MS);
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        24_000,
+        "the set's duty stays past the old deadline"
+    );
+    assert_eq!(rig.duty(), 600);
+}
+
+/// A new override replaces the old one's timer, and the new deadline is the one that counts.
+#[test]
+fn a_new_override_replaces_the_timer_with_its_own_deadline() {
+    let rig = rig("frequency_hz = 25000", false);
+    rig.override_as(CALLER_A, 300, 2_000).unwrap();
+    let asked = rig.now();
+    rig.advance(Duration::from_millis(1_000));
+    rig.override_as(CALLER_B, 600, 3_000).unwrap();
+    rig.advance(Duration::from_millis(1_500));
+    assert_eq!(rig.now(), asked + 2_500 * MS, "past A's deadline");
+    assert_eq!(rig.pwm.current().duty_ns, 24_000, "B's duty holds");
+    rig.advance(Duration::from_millis(1_500));
+    assert_eq!(rig.now(), asked + 4_000 * MS, "B's deadline");
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        PERIOD,
+        "handed back at B's deadline"
+    );
+}
+
+/// Bounds: 1 s to 10 min, refused by name outside them, and a refusal sets nothing.
+#[test]
+fn an_override_outside_one_second_to_ten_minutes_is_refused_and_sets_nothing() {
+    let rig = rig("frequency_hz = 25000", false);
+    assert_eq!(
+        rig.override_as(CALLER_A, 300, 999),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        rig.override_as(CALLER_A, 300, 600_001),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    assert_eq!(rig.pwm.current().duty_ns, PERIOD, "nothing was set");
+    assert_eq!(rig.duty(), 1000);
+    rig.override_as(CALLER_A, 300, 1_000).unwrap();
+    rig.override_as(CALLER_A, 300, 600_000).unwrap();
+}

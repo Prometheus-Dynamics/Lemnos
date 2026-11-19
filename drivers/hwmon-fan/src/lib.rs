@@ -65,7 +65,7 @@ mod sysfs;
 #[cfg(test)]
 mod tests;
 
-use lemnos_contract_fan::Fan;
+use lemnos_contract_fan::{Fan, OVERRIDE_MAX_MS, OVERRIDE_MIN_MS};
 use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
@@ -185,6 +185,11 @@ pub struct HwmonFan {
     owed: Option<Owed>,
     /// The time (ns) of the last tick. The owner's going happens in a call, which has no time of its own.
     now_ns: u64,
+    /// The length of a timed override asked for by the last `override_for`, which the next tick arms
+    /// (a call has no time of its own).
+    override_ms: Option<u64>,
+    /// When the timed override ends (ns), once a tick has armed it. The owner is handed the fan back then.
+    override_until_ns: Option<u64>,
 }
 
 /// A hand-back owed to a caller that went, and the failures in a row that it has had.
@@ -350,8 +355,16 @@ impl Lifecycle for HwmonFan {
             };
             self.runner.tick(now_ns, &mut bench)
         };
+        self.arm_override(now_ns);
+        if self.override_until_ns.is_some_and(|at| now_ns >= at) {
+            self.override_until_ns = None;
+            self.hand_back_owner();
+        }
         self.retry_owed(now_ns);
-        earliest(next, self.owed.map(|owed| owed.retry_at_ns))
+        earliest(
+            earliest(next, self.owed.map(|owed| owed.retry_at_ns)),
+            self.override_until_ns,
+        )
     }
 
     fn caller(&mut self, caller: CallerId) {
@@ -366,22 +379,10 @@ impl Lifecycle for HwmonFan {
         if self.owner != Some(caller) {
             return;
         }
-        if self.prior == Some(CallerId::LOCAL) {
-            // The override replaced the daemon's own writes: the controller owns the fan again, and its next
-            // step writes the duty it wants. Nothing is written here, and nothing is owed.
-            self.owner = Some(CallerId::LOCAL);
-            self.prior = None;
-            self.owed = None;
-            self.notes.push(HandBack::Controller.note());
-            return;
-        }
-        self.owner = None;
-        self.prior = None;
-        self.owed = Some(Owed {
-            retry_at_ns: self.now_ns,
-            attempts: 0,
-        });
-        self.retry_owed(self.now_ns);
+        // The owner's timed override ends with it: its going hands the fan back at once.
+        self.override_ms = None;
+        self.override_until_ns = None;
+        self.hand_back_owner();
     }
 
     fn notes(&mut self) -> Option<&mut Notes> {
@@ -616,6 +617,8 @@ impl HwmonFan {
             now_ns: 0,
             prior: None,
             notes: Notes::new(),
+            override_ms: None,
+            override_until_ns: None,
         }
     }
 
@@ -660,6 +663,38 @@ impl HwmonFan {
         }
         self.owner = Some(self.calling);
         self.owed = None;
+        // A new set replaces any timed override.
+        self.override_ms = None;
+        self.override_until_ns = None;
+    }
+
+    /// Arms a timed override the last `override_for` asked for, from the tick's time.
+    fn arm_override(&mut self, now_ns: u64) {
+        if let Some(ms) = self.override_ms.take() {
+            self.override_until_ns = Some(now_ns.saturating_add(ms.saturating_mul(1_000_000)));
+        }
+    }
+
+    /// Hands the fan back for its owner, as `caller_gone` and an expired override do: the controller's own
+    /// writes come back when they were replaced, and otherwise the fan goes to its baseline, owed and retried
+    /// from the tick if the write fails.
+    fn hand_back_owner(&mut self) {
+        if self.prior == Some(CallerId::LOCAL) {
+            // The override replaced the daemon's own writes: the controller owns the fan again, and its next
+            // step writes the duty it wants. Nothing is written here, and nothing is owed.
+            self.owner = Some(CallerId::LOCAL);
+            self.prior = None;
+            self.owed = None;
+            self.notes.push(HandBack::Controller.note());
+            return;
+        }
+        self.owner = None;
+        self.prior = None;
+        self.owed = Some(Owed {
+            retry_at_ns: self.now_ns,
+            attempts: 0,
+        });
+        self.retry_owed(self.now_ns);
     }
 
     /// Tries an owed hand-back, if it is due at `now_ns`. A failure owes it again, after a longer wait each
@@ -775,8 +810,20 @@ impl Fan for HwmonFan {
         self.owner = None;
         self.prior = None;
         self.owed = None;
+        self.override_ms = None;
+        self.override_until_ns = None;
         let result = self.hand_back_fan();
         self.note(result)
+    }
+
+    fn override_for(&mut self, per_mille: u16, ms: u32) -> Result<()> {
+        if !(OVERRIDE_MIN_MS..=OVERRIDE_MAX_MS).contains(&ms) {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        // The set makes the caller the owner and cancels any timer; the timer is armed by the next tick.
+        self.set_duty(per_mille)?;
+        self.override_ms = Some(u64::from(ms));
+        Ok(())
     }
 }
 

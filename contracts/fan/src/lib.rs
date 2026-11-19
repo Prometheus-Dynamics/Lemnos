@@ -27,4 +27,19 @@ pub trait Fan {
     #[method(5)]
     #[added]
     fn hand_back(&mut self) -> Result<()>;
+    /// Sets the duty, as `set_duty` does, and gives the fan back `ms` milliseconds later, as `hand_back`
+    /// does: the controller, the governor or the board's declared duty, whichever the driver's own rule
+    /// gives. A new `set_duty`, `release`, `override_for` or `hand_back` replaces the timer; the caller
+    /// going (`caller_gone`) gives the fan back at once. `ms` outside [`OVERRIDE_MIN_MS`] to
+    /// [`OVERRIDE_MAX_MS`] is `INVALID_ARGUMENT`, and nothing is set.
+    /// Marked `#[added]`: the contract's base hash does not move, and a device without the method is
+    /// checked per method.
+    #[method(6)]
+    #[added]
+    fn override_for(&mut self, per_mille: u16, ms: u32) -> Result<()>;
 }
+
+/// The shortest timed override, in milliseconds (1 s).
+pub const OVERRIDE_MIN_MS: u32 = 1_000;
+/// The longest timed override, in milliseconds (10 min).
+pub const OVERRIDE_MAX_MS: u32 = 600_000;
