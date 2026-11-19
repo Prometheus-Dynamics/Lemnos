@@ -163,6 +163,14 @@ fn main() -> ExitCode {
             _ => return complain(USAGE),
         },
     };
+    // The stop signals are blocked from here on, before the board is read, the privilege phase
+    // forks anything, or a thread starts. Until this line a SIGTERM takes the process down with
+    // the default action (status 143), so a stop that comes during start-up is a crash, not a
+    // stop. Pending until `wait_for_signal` reads them, the signal is then handled as any other.
+    let signals = match SignalFd::new(&[SIGTERM, SIGINT]) {
+        Ok(signals) => signals,
+        Err(error) => return complain(&format!("signals: {error}")),
+    };
     let text = match std::fs::read_to_string(&board) {
         Ok(text) => text,
         Err(error) => return complain(&format!("{board}: {error}")),
@@ -243,11 +251,6 @@ fn main() -> ExitCode {
         .chain(board_file.each.iter().map(|each| &each.pattern))
         .cloned()
         .collect();
-    // Before any thread starts, so that every thread has these signals blocked.
-    let signals = match SignalFd::new(&[SIGTERM, SIGINT]) {
-        Ok(signals) => signals,
-        Err(error) => return complain(&format!("signals: {error}")),
-    };
     let packages = add_packages(&mut drivers, &packages);
     for line in packages.lines() {
         let _ = complain(&line);

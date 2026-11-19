@@ -138,6 +138,13 @@ def classify(info):
 
 
 SETTLE = r"""
+set -E
+__block=
+__fail() {
+  # The failing command and its status, named for the checker to report; the output above ends at it.
+  echo "docs-command-failed $__block: $2: exit status $1" >&2
+}
+trap '__fail $? "$BASH_COMMAND"' ERR
 __settle() {
   # A service a block started must be listening before the next block talks to it.
   local tries=0
@@ -146,8 +153,10 @@ __settle() {
   done
 }
 __finish() {
-  local pids; pids=$(jobs -p)
-  [ -n "$pids" ] && kill -TERM $pids 2>/dev/null
+  # Only jobs still running are stopped. A job that has exited is still listed by `jobs` until
+  # it is reaped, and `kill` on it fails: that is no failure of the document.
+  local pids; pids=$(jobs -pr)
+  if [ -n "$pids" ]; then kill -TERM $pids 2>/dev/null || true; fi
   wait 2>/dev/null
   return 0
 }
@@ -155,12 +164,17 @@ trap __finish EXIT
 """
 
 
+FAILED = re.compile(r"^docs-command-failed (\S+): (.*): exit status (\d+)\n?$")
+
+
 def run_document(path, commands, target_bin):
-    """Runs a document's blocks in one shell. Returns (ok, output)."""
+    """Runs a document's blocks in one shell. Returns (ok, output, failure): `failure` names the
+    block, the command and its exit status when the shell stopped, else None."""
     scratch = tempfile.mkdtemp(prefix="lemnos-docs-")
     try:
         script = ["set -euo pipefail", SETTLE]
         for number, body in commands:
+            script.append(f"__block='{path}:{number}'")
             script.append(f"echo '--- {path}:{number}'")
             lines = [l for l in body.splitlines() if l.strip() and not l.lstrip().startswith("#")]
             if all(whole_command(line) for line in lines):
@@ -186,7 +200,15 @@ def run_document(path, commands, target_bin):
             text=True,
             start_new_session=True,
         )
-        return result.returncode == 0, result.stdout
+        failure = None
+        lines = []
+        for line in result.stdout.splitlines(keepends=True):
+            match = FAILED.match(line)
+            if match:
+                failure = f"{match.group(1)}: `{match.group(2)}` exited with status {match.group(3)}"
+            else:
+                lines.append(line)
+        return result.returncode == 0, "".join(lines), failure
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -337,12 +359,12 @@ def main():
             continue
         if not commands:
             continue
-        ok, output = run_document(path, commands, target_bin)
+        ok, output, failure = run_document(path, commands, target_bin)
         ran += len(commands)
         sys.stdout.write(output)
         sys.stdout.flush()
         if not ok:
-            problems.append(f"{path}: a command failed (the output above ends at it)")
+            problems.append(f"{path}: a command failed: {failure or 'the shell stopped with no command named (see the output above)'}")
 
     print()
     for path, number, line in skipped_slow:
