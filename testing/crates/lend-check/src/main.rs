@@ -91,6 +91,10 @@ const ADDR_OUTPUT0: usize = 7;
 const BE_STATUS: u32 = 0x10;
 const BE_BATCH: u32 = 0x14;
 const BE_INT_STATUS: u32 = 0x1c;
+/// The fake block's control word, past its registers (kernel/rs/pisp_be.rs `LPB_FAKE_CTL`).
+const BE_FAKE_CTL: u32 = 0x198c;
+const FAKE_DONE: u32 = 0;
+const FAKE_HOLD: u32 = 1;
 /// Longer than the module's job timeout.
 const WEDGE_WAIT: Duration = Duration::from_millis(1400);
 
@@ -243,29 +247,10 @@ fn poke(h: &mut Harness, off: u32, value: u32) {
     }
 }
 
-/// Raises the fake block's interrupt.
-fn raise_irq(h: &mut Harness) {
-    if !write_node(&format!("{SYS}/irq"), b"1") {
-        h.fail("irq");
-    }
-}
-
-/// Reads the fake block's registers into `buf`, from its `regs` file. When the file does not open,
-/// nothing is read and nothing is reported.
-fn read_regs(h: &mut Harness, buf: &mut [u8; 64]) {
-    let Ok(f) = File::open(format!("{SYS}/regs")) else {
-        return;
-    };
-    let mut at = 0;
-    while at < buf.len() {
-        match f.read_at(&mut buf[at..], at as u64) {
-            Ok(got) if got > 0 => at += got,
-            _ => {
-                h.fail("regs");
-                break;
-            }
-        }
-    }
+/// Sets the fake block's control word (kernel/rs/pisp_be.rs `LPB_FAKE_CTL`): FAKE_DONE finishes each
+/// job the block is given, FAKE_HOLD keeps it on the block until the check says otherwise.
+fn fake_mode(h: &mut Harness, mode: u32) {
+    poke(h, BE_FAKE_CTL, mode);
 }
 
 /// A stream the fake back end runs: its file, its mappings, and the producer's own counters.
@@ -280,9 +265,6 @@ struct Stream {
     jobs_at: usize,
     jobs_head: u64,
     frames_tail: u64,
-    /// What the fake hardware says it has done.
-    hw_started: u8,
-    hw_done: u8,
 }
 
 /// The ring's words, as atomics. Empty only for a mapping that is not whole words, which opening
@@ -311,10 +293,6 @@ fn stream_open(h: &mut Harness, ctl: &OwnedFd) -> Option<Stream> {
     let ring = Mapping::new(fd.as_fd(), get64(&c, 40) as usize, 0, true).ok()?;
     let configs = Mapping::new(fd.as_fd(), get64(&c, 72) as usize, get64(&c, 64), true).ok()?;
     ring.as_atomic_words()?;
-    // The fake block's counters carry on across streams, as a real one's do.
-    let mut regs = [0u8; 64];
-    read_regs(h, &mut regs);
-    let batch = get32(&regs, BE_BATCH as usize);
     let control = shm_control(FRAME_SLOTS as usize, BUFFERS as usize);
     Some(Stream {
         ring,
@@ -326,8 +304,6 @@ fn stream_open(h: &mut Harness, ctl: &OwnedFd) -> Option<Stream> {
         jobs_at: control + SHM_JOB_SLOTS,
         jobs_head: 0,
         frames_tail: 0,
-        hw_done: batch as u8,
-        hw_started: (batch >> 8) as u8,
     })
 }
 
@@ -461,19 +437,6 @@ fn post(st: &mut Stream, job: &[u8; JOB_BYTES as usize]) {
     st.jobs_head += 1;
     fence(Ordering::Release);
     ring[st.control + SHM_JOB_HEAD].store(st.jobs_head, Ordering::Relaxed);
-}
-
-/// The fake hardware says it started and finished one job.
-fn complete_job(h: &mut Harness, st: &mut Stream, started: u8, done: u8) {
-    st.hw_started = st.hw_started.wrapping_add(started);
-    st.hw_done = st.hw_done.wrapping_add(done);
-    poke(
-        h,
-        BE_BATCH,
-        u32::from(st.hw_done) | (u32::from(st.hw_started) << 8),
-    );
-    poke(h, BE_INT_STATUS, 1);
-    raise_irq(h);
 }
 
 /// `shm_control(frame_slots, buffers)`: the control block's first word, after the pool page's
@@ -673,7 +636,6 @@ fn lend_release(h: &mut Harness, ctl: &OwnedFd) {
 
     post_job(&mut st, 5, a.addr);
     h.check(kick(&st) == 0, "!kick(&st)");
-    complete_job(h, &mut st, 1, 1);
     let (buffer, identity) = wait_frame(&mut st);
     h.check(buffer == 0 && identity == 5, "buffer == 0 && identity == 5");
 
@@ -731,6 +693,8 @@ fn lend_wedge(h: &mut Harness, ctl: &OwnedFd) {
     let Some(a) = must_lend(h, &st, lent_fd, 1, "lend cma for the wedge") else {
         return;
     };
+    // The job stays on the block (FAKE_HOLD): busy, never finishing.
+    fake_mode(h, FAKE_HOLD);
     post_job(&mut st, 7, a.addr);
     h.check(kick(&st) == 0, "!kick(&st)");
     // Busy, never finishing: the module times the job out and wedges the block.
@@ -748,6 +712,7 @@ fn lend_wedge(h: &mut Harness, ctl: &OwnedFd) {
         pisp_status(&st).is_some_and(|p| p.wedged == 1),
         "!ioctl(st.fd, LEMNOS_PISP_BE_IOC_STATUS, &pb) && pb.wedged == 1",
     );
+    fake_mode(h, FAKE_DONE);
     drop(st);
     let pinned = dmabuf_count(lent_fd);
     h.check(pinned > before, "pinned > before");
@@ -770,6 +735,7 @@ fn rebind(h: &mut Harness, bind: &str, unbind: &str, device: &str) {
             "write(fd, device, strlen(device)) == (ssize_t)strlen(device)",
         );
     }
+    fake_mode(h, FAKE_DONE);
     poke(h, BE_BATCH, 0);
     poke(h, BE_STATUS, 0);
     poke(h, BE_INT_STATUS, 0);

@@ -206,6 +206,15 @@ const BE_STATUS: u32 = 0x10;
 const BE_BATCH: u32 = 0x14;
 const BE_INT_STATUS: u32 = 0x1c;
 const BE_CONFIG: u32 = 0x40;
+/// The fake block's control word: the first word past the registers (`LPB_FAKE_CTL` in
+/// kernel/rs/pisp_be.rs, which is 0x40 + sizeof(pisp_be_config)).
+const BE_FAKE_CTL: u32 = 0x198c;
+/// The fake block's control values (kernel/rs/pisp_be.rs). DONE: the block finishes each job it is
+/// given and raises its interrupt, as the real block does. HOLD: the job stays on the block until a
+/// check completes it by hand. LOSE: the job is finished but its interrupt is not raised.
+const FAKE_DONE: u32 = 0;
+const FAKE_HOLD: u32 = 1;
+const FAKE_LOSE: u32 = 2;
 
 // lemnos.h: LEMNOS_INFO_MMIO_MAPPABLE.
 const INFO_MMIO_MAPPABLE: u32 = 1;
@@ -428,6 +437,11 @@ fn poke(off: u32, value: u32) {
     if !write_node(&format!("{SYS}/poke"), text.as_bytes()) {
         fail(&format!("poke {off:x}"));
     }
+}
+
+/// Sets the fake block's control word (see `BE_FAKE_CTL`).
+fn fake_mode(mode: u32) {
+    poke(BE_FAKE_CTL, mode);
 }
 
 /// Raises the fake block's interrupt.
@@ -798,8 +812,20 @@ impl Stream {
         );
     }
 
-    /// The hardware says it started `started` jobs and finished `done`, and interrupts.
+    /// Reads the fake block's counters from its batch register: the block finishes jobs by itself
+    /// (FAKE_DONE), so the counts this stream kept may be behind it.
+    fn sync_counters(&self) {
+        let mut regs = [0u8; 64];
+        read_regs(&mut regs);
+        let batch = get32(&regs, BE_BATCH as usize);
+        self.hw_done.set(batch as u8);
+        self.hw_started.set((batch >> 8) as u8);
+    }
+
+    /// The hardware says it started `started` jobs and finished `done`, and interrupts. Only for a job
+    /// the block holds (FAKE_HOLD): otherwise the block has finished it already.
     fn complete_job(&self, started: u8, done: u8) {
+        self.sync_counters();
         self.advance(started, done);
         self.post_batch();
         poke(BE_INT_STATUS, 1);
@@ -1611,10 +1637,12 @@ fn refuse_ring(env: &Env) {
     st.put_config(0, &c);
     job.buffer = 0;
     st.post(&job);
+    fake_mode(FAKE_HOLD);
     check(st.kick() == 0, "!kick(&st)");
     st.post(&job);
     check(st.kick() == EBUSY, "got == EBUSY");
     st.complete_job(1, 1);
+    fake_mode(FAKE_DONE);
     check(st.wait_frame().0 == -1, "wait_frame(&st, NULL) == -1");
     drop(st);
 
@@ -1693,6 +1721,8 @@ fn test_runs_and_registers(env: &Env) {
         addr,
     };
     st.post(&job);
+    // The job stays on the block while its registers are read (FAKE_HOLD).
+    fake_mode(FAKE_HOLD);
     check(st.kick() == 0, "kick(&st) == 0");
 
     read_regs(&mut regs);
@@ -1743,6 +1773,7 @@ fn test_runs_and_registers(env: &Env) {
 
     // It finishes: a frame comes out with the job's identity and buffer.
     st.complete_job(1, 1);
+    fake_mode(FAKE_DONE);
     let (buffer, id) = st.wait_frame();
     check(buffer == 2, "wait_frame(&st, &id) == 2");
     check(id == 0xabcd_0001, "id == 0xabcd0001");
@@ -1782,7 +1813,6 @@ fn test_accepted_variants(env: &Env) {
     } else {
         say("ok   compressed, mirrored job accepted");
     }
-    st.complete_job(1, 1);
     check(
         got != 0 || st.wait_frame().0 == 0,
         "got || wait_frame(&st, NULL) == 0",
@@ -1804,6 +1834,8 @@ fn test_counters_two_jobs(env: &Env) {
         config: 0,
         addr,
     };
+    // The jobs stay on the block until they are completed by hand (FAKE_HOLD).
+    fake_mode(FAKE_HOLD);
     st.post(&job);
     check(st.kick() == 0, "!kick(&st)");
     // First started, second job goes on the block while it runs.
@@ -1817,6 +1849,7 @@ fn test_counters_two_jobs(env: &Env) {
     check(st.kick() == 0, "!kick(&st)");
     // The first finishes, the second starts and finishes together: done +2, started +1.
     st.complete_job(1, 2);
+    fake_mode(FAKE_DONE);
     let (b0, id0) = st.wait_frame();
     check(b0 == 0 && id0 == 7, "wait_frame(&st, &id) == 0 && id == 7");
     let (b1, id1) = st.wait_frame();
@@ -1854,7 +1887,6 @@ fn test_fixture_config(env: &Env) {
             c.get32(CFG_NUM_TILES)
         ));
     }
-    st.complete_job(1, 1);
     check(
         got != 0 || st.wait_frame().0 == 0,
         "got || wait_frame(&st, NULL) == 0",
@@ -1929,7 +1961,6 @@ fn race_epoch(st: &Stream, addr: &Addrs, next: &mut u64, ran: &mut u32, refused:
                 fail(&format!("race: the block was given stride {stride}"));
             }
             *ran += 1;
-            st.complete_job(1, 1);
             let got = st.wait_frame_for(Some(*next));
             if got.buffer != 0 || got.identity != *next {
                 fail(&format!(
@@ -1989,12 +2020,13 @@ fn test_lost_interrupt(env: &Env) {
         config: 0,
         addr,
     };
+    // The block finishes the job and raises no interrupt (FAKE_LOSE). The watchdog (1 s) sees the
+    // block idle and finishes it.
+    fake_mode(FAKE_LOSE);
     st.post(&job);
     check(st.kick() == 0, "!kick(&st)");
-    // No interrupt. The watchdog (1 s) sees the block idle and finishes it.
-    st.advance(1, 1);
-    st.post_batch();
     check(st.wait_frame().0 == 0, "wait_frame(&st, NULL) == 0");
+    fake_mode(FAKE_DONE);
     check(
         st.status().is_some_and(|s| s.state == STATE_OPEN),
         "!status_of(&st, &status) && status.state == LEMNOS_RING_STATE_OPEN",
@@ -2035,7 +2067,6 @@ fn test_queued_bit_blocks_writing(env: &Env) {
         get32(&regs, BE_CONTROL as usize) & 1 != 0,
         "reg32(regs, BE_CONTROL) & 1",
     );
-    st.complete_job(1, 1);
     check(st.wait_frame().0 == 0, "wait_frame(&st, NULL) == 0");
 }
 
@@ -2054,6 +2085,7 @@ fn test_unregister_busy(env: &Env) {
         config: 0,
         addr,
     };
+    fake_mode(FAKE_HOLD);
     st.post(&job);
     check(st.kick() == 0, "!kick(&st)");
     let region = st.region;
@@ -2062,6 +2094,7 @@ fn test_unregister_busy(env: &Env) {
         "ioctl(st.fd, LEMNOS_STREAM_IOC_UNREGISTER, &u) == -1 && errno == EBUSY",
     );
     st.complete_job(1, 1);
+    fake_mode(FAKE_DONE);
     check(st.wait_frame().0 == 0, "wait_frame(&st, NULL) == 0");
     check(
         st.unregister(region).is_ok(),
@@ -2077,6 +2110,7 @@ fn test_unregister_busy(env: &Env) {
 /// The thread that completes the job later, as the hardware would: after the caller's close or
 /// unbind has started.
 fn complete_later(st: &Stream) -> Option<thread::JoinHandle<()>> {
+    st.sync_counters();
     let started = st.hw_started.get().wrapping_add(1);
     let done = st.hw_done.get().wrapping_add(1);
     let spawned = thread::Builder::new().spawn(move || {
@@ -2115,6 +2149,7 @@ fn test_close_waits(env: &Env) {
         config: 0,
         addr,
     };
+    fake_mode(FAKE_HOLD);
     st.post(&job);
     check(st.kick() == 0, "!kick(&st)");
     let (Ok(pool), Ok(region)) = (st.pool_fd.try_clone(), st.region_fd.try_clone()) else {
@@ -2135,6 +2170,7 @@ fn test_close_waits(env: &Env) {
     drop(fd);
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     join(later);
+    fake_mode(FAKE_DONE);
 
     say(&format!(
         "ok   close took {ms:.0} ms with a job on the block"
@@ -2228,6 +2264,7 @@ fn test_unbind_waits(env: &Env, bind: &str, unbind: &str, device: &str) {
         config: 0,
         addr,
     };
+    fake_mode(FAKE_HOLD);
     st.post(&job);
     check(st.kick() == 0, "!kick(&st)");
     let later = complete_later(&st);
@@ -2241,6 +2278,7 @@ fn test_unbind_waits(env: &Env, bind: &str, unbind: &str, device: &str) {
         "fd >= 0 && write(fd, device, strlen(device)) == (ssize_t)strlen(device)",
     );
     join(later);
+    fake_mode(FAKE_DONE);
     // The stream's over: no use-after-free in the module's status path.
     check(
         st.status().is_some_and(|s| s.state == STATE_CLOSED),
@@ -2305,6 +2343,7 @@ fn test_wedge_timeout(env: &Env) {
         config: 0,
         addr,
     };
+    fake_mode(FAKE_HOLD);
     st.post(&job);
     check(st.kick() == 0, "!kick(&st)");
     // Busy, never finishing.
@@ -2323,6 +2362,7 @@ fn test_wedge_timeout(env: &Env) {
     let region = st.region;
     let tiles = last_tiles();
     st.complete_job(1, 1);
+    fake_mode(FAKE_DONE);
     thread::sleep(Duration::from_millis(50));
     check(
         matches!(st.unregister(region), Err(ref e) if errno_of(e) == EBUSY),
@@ -2355,6 +2395,7 @@ fn test_wedge_counters(env: &Env) {
         config: 0,
         addr,
     };
+    fake_mode(FAKE_HOLD);
     st.post(&job);
     check(st.kick() == 0, "!kick(&st)");
     // Claims two done with one job, and three started. Nothing is finished.
@@ -2372,6 +2413,7 @@ fn test_wedge_counters(env: &Env) {
         "!ioctl(st.fd, LEMNOS_PISP_BE_IOC_STATUS, &pb) && pb.wedged == 1",
     );
     check(st.ring_word(SHM_W_HEAD) == 0, "st.ring[SHM_W_HEAD] == 0");
+    fake_mode(FAKE_DONE);
     close_and_expect_pinned(st, "wedged by counters");
 }
 
@@ -2387,6 +2429,7 @@ fn rebind(bind: &str, unbind: &str, device: &str) {
             "write(fd, device, strlen(device)) == (ssize_t)strlen(device)",
         );
     }
+    fake_mode(FAKE_DONE);
     poke(BE_BATCH, 0);
     poke(BE_STATUS, 0);
     poke(BE_INT_STATUS, 0);
