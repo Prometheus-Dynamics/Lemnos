@@ -760,17 +760,19 @@ impl Session {
         self.shared.retry_delay = (self.shared.retry_delay * 2).min(RETRY_CAP);
     }
 
-    fn try_connect(&mut self) {
+    /// Tries to connect when it is time to. True when it tried now and was refused: the attempt
+    /// has already answered, and the next one waits for [`Session::until_next_try`].
+    fn try_connect(&mut self) -> bool {
         if self.connection.is_some() || Instant::now() < self.next_try {
-            return;
+            return false;
         }
         let Ok(stream) = UnixStream::connect(&self.path) else {
             self.arm_retry();
-            return;
+            return true;
         };
         if stream.set_nonblocking(self.mode == Mode::Polled).is_err() {
             self.arm_retry();
-            return;
+            return true;
         }
         let mut connection = Connection::new(stream);
         let hello = Frame::Hello {
@@ -783,9 +785,10 @@ impl Session {
         };
         if append(&hello, &mut connection.tx).is_err() {
             self.arm_retry();
-            return;
+            return true;
         }
         self.connection = Some(connection);
+        false
     }
 
     fn retry_subscriptions(&mut self) {
@@ -853,11 +856,14 @@ impl Session {
         wait: Option<Duration>,
         handler: &mut dyn FnMut(Frame<'_>) -> bool,
     ) -> usize {
-        self.try_connect();
+        let refused = self.try_connect();
         self.retry_subscriptions();
         self.send_closing();
         let Some(connection) = self.connection.as_mut() else {
-            if let Some(wait) = wait {
+            // A connect refused in this turn is the turn's news: return it now. Sleeping here would
+            // hold a one-shot connect for the whole backoff after the service already said no.
+            // A caller that keeps waiting turns again and sleeps then, until the next try.
+            if !refused && let Some(wait) = wait {
                 let pause = wait
                     .min(self.until_next_try())
                     .max(Duration::from_millis(1));
@@ -2055,4 +2061,89 @@ fn copy(bytes: &[u8], into: &mut [u8]) -> Result<usize, Error> {
 
 fn ack(frame: Frame<'_>) -> Option<Result<(), Error>> {
     matches!(frame, Frame::Reply { .. }).then_some(Ok(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Wall-time room for one try against the session's own times: a try is a refused
+    /// `connect(2)` and a sleep's wake-up, far less than this, and the faults it tells apart are
+    /// whole backoffs (a second or more).
+    const SLACK: Duration = Duration::from_millis(250);
+
+    /// A path with no socket at it, so every try is refused at once.
+    fn absent(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lemnos-client-absent-{label}-{}",
+            std::process::id()
+        ))
+    }
+
+    /// Turns `session` as a caller that keeps waiting does (`next_value`, `wait_job_event`)
+    /// until it tries again. Returns when it tried, by the session's own clock (the try armed
+    /// `next_try` at that instant plus the delay it had), the delay it armed, and how many turns
+    /// it took.
+    fn next_try(session: &mut Session) -> (Instant, Duration, u32) {
+        let armed = session.next_try;
+        let delay = session.shared.retry_delay;
+        let mut turns = 0;
+        while session.next_try == armed {
+            session.turn(Some(REQUEST_TIMEOUT), &mut |_| false);
+            turns += 1;
+        }
+        (session.next_try - delay, delay, turns)
+    }
+
+    #[test]
+    fn the_background_reconnect_keeps_its_cadence_and_says_when_it_tries_next() {
+        let mut session = Session::new(&absent("cadence"), "t", Mode::Blocking);
+        let (mut at, mut delay, turns) = next_try(&mut session);
+        assert_eq!((delay, turns), (RETRY_FIRST, 1));
+        let mut delays = vec![delay];
+        // In real time: each try comes when the one before it said, never before and never a
+        // backoff late; what the session says is left of the wait is what is left; and the
+        // wait is one sleep, not a spin.
+        for _ in 0..2 {
+            let asked = Instant::now();
+            let said = session.until_next_try();
+            let (next_at, next_delay, turns) = next_try(&mut session);
+            let real = next_at - at;
+            assert!(
+                real >= delay && real < delay + SLACK,
+                "armed {delay:?}, came {real:?}"
+            );
+            let left = next_at - asked;
+            assert!(
+                left >= said && left < said + SLACK,
+                "said {said:?}, was {left:?}"
+            );
+            assert!(turns <= 3, "{turns} turns for one wait of {delay:?}");
+            (at, delay) = (next_at, next_delay);
+            delays.push(delay);
+        }
+        // The rest of the doubling, to the cap and staying there, with each wait taken as served
+        // rather than slept through.
+        for _ in 0..4 {
+            session.next_try = Instant::now();
+            let (_, delay, turns) = next_try(&mut session);
+            assert_eq!(turns, 1);
+            delays.push(delay);
+        }
+        let secs = |s| Duration::from_secs(s);
+        assert_eq!(
+            delays,
+            [
+                secs(1),
+                secs(2),
+                secs(4),
+                secs(8),
+                secs(8),
+                secs(8),
+                secs(8)
+            ]
+        );
+        assert_eq!(RETRY_CAP, secs(8));
+        assert!(!session.is_connected());
+    }
 }
