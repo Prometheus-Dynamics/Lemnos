@@ -23,6 +23,7 @@ mod driver;
 mod fixed;
 mod held;
 pub mod layout;
+mod notes;
 #[cfg(feature = "std")]
 pub mod package;
 mod resources;
@@ -50,6 +51,7 @@ pub use lemnos_hal::ErrorKind;
 pub use lemnos_hal::blocks::BufferHandle;
 pub use lemnos_hal::register::AddressWidth;
 pub use lemnos_macros::{Decode, Encode, contract, driver};
+pub use notes::{NOTE_SLOTS, Note, Notes};
 pub use resources::{
     BusKind, ClocksHandle, DmaHandle, Held, Hint, HintSource, Home, HostClockHandle, I2c,
     InterruptHandle, LendHandle, Line, Lock, Need, NeedKind, Pio, Provider, Pwm, RawSpiBus,

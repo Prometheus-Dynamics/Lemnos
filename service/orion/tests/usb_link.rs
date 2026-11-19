@@ -55,6 +55,7 @@ fn start_lemnosd(socket: &Path, function: &MockUsbFunction) -> Service {
     let sim = SimBoard::new();
     sim.add_usb_function_of("udc0", function.clone());
     Service::start(LemnosdConfig {
+        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(BOARD).expect("board"),

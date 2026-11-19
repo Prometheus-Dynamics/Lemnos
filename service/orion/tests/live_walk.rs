@@ -299,6 +299,7 @@ fn start_walk(dir: &Path, sim: SimBoard) -> Walk {
     let board = Board::start_for_node(dir);
     let logic = Logic::start(dir);
     let service = Service::start(LemnosdConfig {
+        log: None,
         socket: lemnosd.clone(),
         name: "t".to_string(),
         board: parse(&board_text(dir)).expect("board"),

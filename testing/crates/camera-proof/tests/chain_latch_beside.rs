@@ -35,6 +35,7 @@ fn the_latch_beside_the_chain_fails_as_on_a_board() {
     let socket = dir.join("lemnosd.sock");
     let service = Service::start_with_buffers(
         Config {
+            log: None,
             socket: socket.clone(),
             name: board.board.id.clone(),
             board,

@@ -44,6 +44,10 @@ pub trait Instance: Send {
     fn resume_record(&self) -> Option<ResumeRecord> {
         None
     }
+    /// See [`Driver::notes`].
+    fn notes(&mut self) -> Option<&mut lemnos_core::Notes> {
+        None
+    }
     /// See [`Driver::resume`].
     fn resume(&mut self, _record: &ResumeRecord) -> bool {
         false
@@ -149,6 +153,10 @@ impl<D: Driver + Send> Instance for D {
 
     fn caller_gone(&mut self, caller: CallerId) {
         Driver::caller_gone(self, caller);
+    }
+
+    fn notes(&mut self) -> Option<&mut lemnos_core::Notes> {
+        Driver::notes(self)
     }
 
     fn endpoints(&mut self, caller: CallerId) -> Result<[OwnedFd; 2]> {
@@ -3805,6 +3813,20 @@ impl Host {
             }
             (_, false) => None,
         }
+    }
+
+    /// Hands `each` the notes device `index`'s driver has reported since the last take, oldest first,
+    /// and returns how many were dropped since then. `None` when there is nothing to take now: the
+    /// driver is in a call (its notes wait for the next take), it has no notes, or the device is not
+    /// running. Allocates nothing.
+    pub fn take_notes(&self, index: u32, each: &mut dyn FnMut(lemnos_core::Note)) -> Option<u32> {
+        let slot = self.inner.slot(index)?;
+        let mut guard = slot.instance.try_lock().ok()?;
+        let notes = guard.as_mut()?.notes()?;
+        while let Some(note) = notes.pop() {
+            each(note);
+        }
+        Some(notes.take_dropped())
     }
 
     /// Switches a device off. A driver that keeps its hardware across off (`HOLDS_OFF`) is asked

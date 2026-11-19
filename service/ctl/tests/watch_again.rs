@@ -41,6 +41,7 @@ fn start(devices: &[(&str, &str)]) -> Running {
         ));
     }
     let config = Config {
+        log: None,
         socket: socket.clone(),
         name: "t".to_string(),
         board: parse(&text).unwrap(),

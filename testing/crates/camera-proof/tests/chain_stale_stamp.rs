@@ -43,6 +43,7 @@ fn a_stale_frame_start_fails_the_chain_proof_on_its_age_check() {
     let kind = buffers.kind();
     let service = Service::start_with_buffers(
         Config {
+            log: None,
             socket: socket.clone(),
             name: board.board.id.clone(),
             board,

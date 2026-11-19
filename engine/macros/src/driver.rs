@@ -205,6 +205,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::retrying(self)
             }
 
+            fn notes(&mut self) -> ::core::option::Option<&mut ::lemnos_core::Notes> {
+                <Self as ::lemnos_core::Lifecycle>::notes(self)
+            }
+
             fn resume_record(&self) -> ::core::option::Option<::lemnos_core::ResumeRecord> {
                 <Self as ::lemnos_core::Lifecycle>::resume_record(self)
             }

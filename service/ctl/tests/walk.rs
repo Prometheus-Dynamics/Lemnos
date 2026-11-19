@@ -44,6 +44,7 @@ fn start(devices: &str, board: SimBoard) -> Running {
     let dir = scratch("show");
     let socket = dir.join("sock");
     let config = Config {
+        log: None,
         socket: socket.clone(),
         name: "walk".to_string(),
         board: parse(&board_text(devices)).unwrap(),

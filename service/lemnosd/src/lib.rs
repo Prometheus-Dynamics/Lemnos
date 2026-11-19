@@ -104,9 +104,17 @@ pub struct Config {
     /// How the host treats its drivers. What the board file's `[host]` section sets wins over
     /// these; `lemnosd` passes the defaults.
     pub options: Options,
+    /// Where the daemon's log lines go: the bring-up line of each device and the notes its drivers
+    /// report. `None` writes them to stderr.
+    pub log: Option<LogSink>,
 }
 
+/// Takes one log line, without its newline.
+pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub(crate) struct Core {
+    /// Where log lines go (see [`Config::log`]).
+    pub(crate) log: Option<LogSink>,
     /// What became of the driver packages, for a client that asks.
     pub(crate) packages: PackageReport,
     pub(crate) host: Host,
@@ -125,6 +133,16 @@ pub(crate) struct Core {
 }
 
 impl Core {
+    /// Writes one log line: to the configured sink, or to stderr.
+    pub(crate) fn log_line(&self, line: &str) {
+        match &self.log {
+            Some(sink) => sink(line),
+            None => {
+                let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{line}\n"));
+            }
+        }
+    }
+
     pub(crate) fn stopping(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
@@ -232,6 +250,7 @@ impl Service {
         // open packages are the one setting that lifts that.
         host.set_signed_mode(packages.mode != packages::PackageMode::Open);
         let core = Arc::new(Core {
+            log: config.log,
             packages,
             host,
             liveness: Arc::clone(&liveness),

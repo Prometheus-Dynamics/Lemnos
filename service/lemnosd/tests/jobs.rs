@@ -156,6 +156,7 @@ fn serve(socket: &std::path::Path) -> Service {
         board: parse(text).unwrap(),
         drivers: vec![entry::<Copier>()],
         backend: Box::new(SimBoard::new()),
+        log: None,
         options: Options::default(),
     })
     .unwrap()

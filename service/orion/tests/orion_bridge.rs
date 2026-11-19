@@ -76,6 +76,7 @@ fn dir(test: &str) -> Scratch {
 /// lemnosd, over the simulated board with the fake devices.
 fn start_lemnosd(socket: &Path) -> Service {
     Service::start(LemnosdConfig {
+        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(BOARD).expect("board"),
@@ -93,6 +94,7 @@ const REFUSED_BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[boa
 
 fn start_lemnosd_refused(socket: &Path) -> Service {
     Service::start(LemnosdConfig {
+        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(REFUSED_BOARD).expect("board"),
@@ -786,6 +788,7 @@ fn manifest(slot: &str, product: &str, version: &str) -> String {
 /// lemnosd over a board file's text, with the identity driver as well as the fake devices.
 fn start_lemnosd_board(socket: &Path, board: &str) -> Service {
     Service::start(LemnosdConfig {
+        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(board).expect("board"),
@@ -1167,6 +1170,7 @@ fn start_lemnosd_with(
     drivers: Vec<lemnos_host::DriverEntry>,
 ) -> Service {
     Service::start(LemnosdConfig {
+        log: None,
         socket: socket.to_path_buf(),
         name: "t".to_string(),
         board: parse(board).expect("board"),
