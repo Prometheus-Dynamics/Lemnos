@@ -393,6 +393,26 @@ fn a_change_the_service_tells_of_ends_a_wait_for_events_and_none_is_none() {
 }
 
 #[test]
+fn events_the_queue_drops_are_counted_and_the_oldest_are_the_ones_lost() {
+    let host = FakeHost::start();
+    let client = Client::connect(&host.path, "t").unwrap();
+    assert_eq!(client.dropped_events(), 0);
+    // Each power-off makes the service send one event for its device, and nothing reads them
+    // here: 70 sent, the queue keeps 64.
+    for device in 0..70 {
+        client.set_power(device, false).unwrap();
+    }
+    assert_eq!(client.dropped_events(), 6);
+    let mut kept = Vec::new();
+    while let Some(event) = client.next_event() {
+        kept.push(event.device);
+    }
+    assert_eq!(kept, (6..70).collect::<Vec<u32>>());
+    // Reading does not reset the count.
+    assert_eq!(client.dropped_events(), 6);
+}
+
+#[test]
 fn values_arrive_with_stable_identity() {
     let host = FakeHost::start();
     let client = Client::connect(&host.path, "t").unwrap();

@@ -96,6 +96,9 @@ What a client can do:
   no change of state (about a quarter of a second after it), and a device that comes up after the
   list. An event may repeat a state the client has; the newest one is current. Up to 64 events
   queue. Past that the oldest go, so a client that stops reading should list the devices again.
+  `Client::dropped_events()` counts those: the events the queue dropped, read or not, since the
+  client was made. It never goes down. Clones share the count, and a reconnect does not reset it.
+  It reads without waiting for a call in progress. The C API has no counter of its own.
 
 ### Device descriptions
 
