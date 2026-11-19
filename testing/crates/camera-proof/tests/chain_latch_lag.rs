@@ -31,7 +31,6 @@ fn a_sensor_that_latches_a_frame_early_fails_the_latch() {
     let socket = dir.join("lemnosd.sock");
     let service = Service::start_with_buffers(
         Config {
-            log: None,
             socket: socket.clone(),
             name: board.board.id.clone(),
             board,

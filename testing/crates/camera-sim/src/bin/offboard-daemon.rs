@@ -100,7 +100,6 @@ fn main() -> ExitCode {
         Err(e) => return complain(&format!("signals: {e}")),
     };
     let config = ServiceConfig {
-        log: None,
         socket: PathBuf::from(&socket),
         name: board_file.board.id.clone(),
         board: board_file,

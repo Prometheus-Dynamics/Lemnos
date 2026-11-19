@@ -142,15 +142,19 @@ pub fn start_board_logged(
         board: parse(&text).unwrap(),
         drivers,
         backend: Box::new(sim),
-        log,
         options: Options {
             call_deadline: Duration::from_millis(200),
             ..Options::default()
         },
     };
-    let service = match buffers {
-        None => Service::start(config),
-        Some(buffers) => Service::start_with_buffers(config, buffers),
+    let service = match (buffers, log) {
+        (None, None) => Service::start(config),
+        (Some(buffers), None) => Service::start_with_buffers(config, buffers),
+        (buffers, Some(log)) => Service::start_with_buffers_logged(
+            config,
+            buffers.unwrap_or_else(|| Arc::new(lemnosd::DmaHeaps::default())),
+            log,
+        ),
     }
     .unwrap();
     Running {

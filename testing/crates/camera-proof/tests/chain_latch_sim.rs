@@ -26,7 +26,6 @@ fn service(dir: &std::path::Path) -> (Service, std::path::PathBuf) {
     let socket = dir.join("lemnosd.sock");
     let service = Service::start_with_buffers(
         Config {
-            log: None,
             socket: socket.clone(),
             name: board.board.id.clone(),
             board,

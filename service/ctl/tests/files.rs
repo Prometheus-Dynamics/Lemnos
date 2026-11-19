@@ -51,7 +51,6 @@ fn start() -> Running {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<NamedFilesDriver>()],
         backend: Box::new(SimBoard::new()),
-        log: None,
         options: Options::default(),
     })
     .unwrap();

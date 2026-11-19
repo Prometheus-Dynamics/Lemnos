@@ -117,7 +117,6 @@ fn a_clock_moved_backwards_mid_run_refuses_the_chain_proof() {
     let socket = dir.join("lemnosd.sock");
     let service = Service::start_with_buffers(
         Config {
-            log: None,
             socket: socket.clone(),
             name: board.board.id.clone(),
             board,

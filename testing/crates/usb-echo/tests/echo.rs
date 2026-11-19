@@ -64,7 +64,6 @@ fn the_tool_answers_requests_and_echoes_what_the_host_sends() {
         board: parse(BOARD).unwrap(),
         drivers: vec![entry::<UsbGadget>()],
         backend: Box::new(sim),
-        log: None,
         options: Options::default(),
     })
     .unwrap();

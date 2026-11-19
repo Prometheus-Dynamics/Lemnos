@@ -471,7 +471,6 @@ fn setup(test: &str, overlay: &Path) -> Setup {
         o = overlay.display()
     );
     let service = Service::start(LemnosdConfig {
-        log: None,
         socket: socket.clone(),
         name: "t".to_string(),
         board: parse(&text).expect("board"),

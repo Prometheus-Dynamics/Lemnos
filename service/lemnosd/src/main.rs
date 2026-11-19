@@ -262,7 +262,6 @@ fn main() -> ExitCode {
         } else {
             Box::new(linux_board(gadget_helper.as_ref()))
         },
-        log: None,
         options: Options::default(),
     };
     let mut service = match Service::start_with_packages(config, packages) {
