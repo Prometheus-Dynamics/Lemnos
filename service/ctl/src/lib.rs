@@ -156,6 +156,21 @@ fn line(out: &mut dyn Write, message: core::fmt::Arguments<'_>) -> Outcome {
     writeln!(out, "{message}").map_err(|e| e.to_string())
 }
 
+/// The sentence that says why a device is not running, `None` when it is running. It is the one
+/// `read` and `watch` print, and `call` prints it when the host refuses a call to such a device.
+fn not_running(name: &str, device: &DeviceEntry) -> Option<String> {
+    if device.state == DeviceState::Running {
+        return None;
+    }
+    let state = state_name(device.state);
+    Some(match device.reason.as_str() {
+        "" => format!("{name} is {state}"),
+        // The host's reason for a retry already starts with the state, as `retrying: attempt 1,`.
+        reason if reason.starts_with(state) => format!("{name} is {reason}"),
+        reason => format!("{name} is {state}: {reason}"),
+    })
+}
+
 const fn state_name(state: DeviceState) -> &'static str {
     match state {
         DeviceState::Running => "running",
@@ -855,16 +870,20 @@ impl Tool<'_> {
     /// is never printed as if the device had nothing to read.
     fn must_run(&self, name: &str) -> Outcome {
         let device = self.device(name)?;
-        if device.state == DeviceState::Running {
-            return Ok(());
+        match not_running(name, &device) {
+            Some(text) => Err(text),
+            None => Ok(()),
         }
-        let state = state_name(device.state);
-        Err(match device.reason.as_str() {
-            "" => format!("{name} is {state}"),
-            // The host's reason for a retry already starts with the state, as `retrying: attempt 1,`.
-            reason if reason.starts_with(state) => format!("{name} is {reason}"),
-            reason => format!("{name} is {state}: {reason}"),
-        })
+    }
+
+    /// A refused call's text. On a device that is not running, the sentence read and watch print
+    /// (its state and reason) replaces the host's refusal, which says only that the call failed.
+    /// Only the refusal path looks the device up again: a call that runs costs nothing extra.
+    fn refused(&self, device: &str, text: String) -> String {
+        match self.device(device) {
+            Ok(entry) => not_running(device, &entry).unwrap_or(text),
+            Err(_) => text,
+        }
     }
 
     fn description(&self, name: &str) -> Result<(DeviceEntry, DeviceDescription), String> {
@@ -1037,7 +1056,7 @@ impl Tool<'_> {
         let n = self
             .client
             .call(&mut handle, method.id, &call.args, &mut reply)
-            .map_err(|error| refusal(error, call))?;
+            .map_err(|error| self.refused(device, refusal(error, call)))?;
         reply.truncate(n);
         Ok(reply)
     }
@@ -1243,7 +1262,7 @@ impl Tool<'_> {
         let job = self
             .client
             .start_job(&mut handle, method.id, args)
-            .map_err(text)?;
+            .map_err(|error| self.refused(device, text(error)))?;
         line(self.out, format_args!("job {job:#x} started"))?;
         loop {
             let mut shown = Ok(());
