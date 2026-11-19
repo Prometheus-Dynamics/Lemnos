@@ -36,7 +36,7 @@
 //! |---|---|---|
 //! | `record` | required | The record file (two copies; `docs/slots.md`). On a board with slots it moves to the boot partition once I5i1 lands. |
 //! | `keys` | none | The board's one trust root (`[security] keys`, given by the host to this device and to `system-slots` and `system-flash`): the keys that verify slots, flash images and an off's authorization. No keys: off needs no authorization, and `state` says `trust root absent`. Read at each change, and by `state`. |
-//! | `orion` | `false` | Whether Orion ships on this board: its answer is then needed for `on`, and `on` is refused until Orion can be asked. |
+//! | `orion` | `false` | Whether Orion ships on this board: its answer is then needed for `on`, and `on` is refused unless Orion says yes, and while no `orion` device is bound. |
 //!
 //! The view is not configurable: it is rendered into `/run/board`, which the image links `/etc/board`
 //! to. A board file that names `run` (or `security_view`) is refused: no board file can point the

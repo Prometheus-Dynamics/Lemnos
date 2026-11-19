@@ -539,6 +539,23 @@ mod tests {
         assert!(Manifest::parse(&family).unwrap_err().contains("family"));
     }
 
+    /// A schema 3 manifest with a top-level `build` object (how a builder made the image) and one
+    /// other key the reader does not know reads as the same manifest without them, in every field.
+    /// The writer drops them: `to_json` of either reads back and writes the same bytes.
+    #[test]
+    fn unknown_top_level_keys_are_ignored_and_known_fields_read_the_same() {
+        let plain = manifest("\"variant\":\"lite\",", 300);
+        let extra = manifest(
+            "\"variant\":\"lite\",\"build\":{\"mode\":\"dev-reuse\"},\"note\":\"from a builder\",",
+            300,
+        );
+        let want = Manifest::parse(&plain).unwrap();
+        let got = Manifest::parse(&extra).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(got.to_json(), want.to_json());
+        assert!(!got.to_json().contains("build"), "{}", got.to_json());
+    }
+
     #[test]
     fn product_and_board_are_lowercase_names_and_board_is_required() {
         let missing = manifest("", 3).replace("\"board\":\"board-a\",", "");

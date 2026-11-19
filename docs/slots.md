@@ -276,7 +276,9 @@ install counter (`SEQ`) orders slots.
 | the default's bay holds the id with identical boot files | accepted and nothing is written (`AlreadyInstalled`) |
 | installed, and none of the above (a `FAILED` slot included) | replaced in place: the same bay set, the image and manifest renamed over the old ones, fresh metadata (the `FAILED` mark and its count are gone, `GOOD` is `untried`) and a new `SEQ`; the default is not touched. The bay's stored hashes are not compared here: a bay that is neither the default, the previous nor the trial is rewritten, as the install of any id is |
 
-A manifest with a `family` key is refused. That key belonged to schema 2.
+A manifest with a `family` key is refused. That key belonged to schema 2. Any other top-level key is accepted
+and ignored by the reader (a `build` object, for one), and `lemnos-ctl bundle` does not carry it: the bundle's
+manifest is rebuilt from the fixed fields above (`Manifest::to_json`).
 
 **The board.** The driver installs a slot only when its `board` equals the board file's
 `[board] id`. Otherwise the job ends `NOT_SUPPORTED`, and `list`'s `error` names both boards. A
@@ -540,8 +542,8 @@ uses = { slots = "slots", flash = "flash", identity = "identity" }   # the stake
   open, so it says so. `state` has the line `orion: not covered by this switch on this board (the board
   file says orion = false)` after `orion absent`, and the reply to `set` to on is
   `note: orion: not covered by this switch on this board (the board file says orion = false)`. A change
-  to off replies empty. With `orion = true` there is no such line, and a change to on stays refused by
-  name until Orion can be asked.
+  to off replies empty. With `orion = true` there is no such line: a change to on asks Orion, and is refused
+  by name unless Orion says yes.
 - The view is not configurable. It is rendered into `/run/board`, which the image links `/etc/board`
   to. A board file that names a view or a render directory (`security_view`, `run`) is refused by name
   or does not start the driver: no board file can point the switch's readers somewhere else.
@@ -582,8 +584,10 @@ precondition. On needs:
 - a trust root: the board's `[security] keys` list has a valid line (one list, seen by each stakeholder
   and by the switch);
 - on slots, the default slot and the running slot `verified` under that list;
-- Orion's answer, when `orion = true`. Orion's precheck is not at Orion's current revision, so ON is
-  refused with that reason until it is.
+- Orion's answer, when `orion = true`. The precheck is at Orion's pinned revision (`8e37a8a4`, where
+  `security_precheck` is interface level 5, the level `drivers/orion-precheck` asks for; "The Orion precheck").
+  A change to on is refused by name when Orion says no, is below level 5, does not answer, or no `orion`
+  device is bound.
 
 ### Turning it off
 
