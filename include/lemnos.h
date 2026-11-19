@@ -196,6 +196,11 @@ LemnosStatus lemnos_device_info(LemnosHandle client, uint32_t device, LemnosDevi
 /* Writes NUL-terminated text. *len is its length without the NUL, even when it did not fit. */
 LemnosStatus lemnos_device_text(LemnosHandle client, uint32_t device, uint32_t field, char *out,
                                 size_t capacity, size_t *len);
+/* Writes the board the service serves, its board file's [board] id, NUL-terminated, as
+ * lemnos_device_text writes text. A service that does not say which board it serves (one built
+ * before the board-id feature) refuses with -EOPNOTSUPP, the text in the sink. */
+LemnosStatus lemnos_board_id(LemnosHandle client, char *out, size_t capacity, size_t *len,
+                             LemnosMessageSink sink);
 
 /* Opens a contract on the named device, or on any device with it when device is "". */
 LemnosStatus lemnos_open(LemnosHandle client, const char *device, const char *tag, uint32_t *opened,

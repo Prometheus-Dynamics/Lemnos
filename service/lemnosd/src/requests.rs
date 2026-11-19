@@ -225,14 +225,14 @@ impl Client {
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
             // END belongs to the endpoints part: a client that refuses that part gets neither bit.
-            features: (feature::EVERY | lemnos_wire::ENDPOINTS_END)
+            features: (feature::EVERY | lemnos_wire::ENDPOINTS_END | lemnos_wire::BOARD_ID)
                 & !theirs.refused
                 & if theirs.refused & feature::ENDPOINTS != 0 {
                     !lemnos_wire::ENDPOINTS_END
                 } else {
                     !0
                 },
-            host: &self.core.name,
+            host: self.core.host.board_id(),
         });
         true
     }

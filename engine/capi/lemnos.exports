@@ -7,6 +7,7 @@ lemnos_client_close
 lemnos_device_count
 lemnos_device_info
 lemnos_device_text
+lemnos_board_id
 lemnos_open
 lemnos_contract_hash
 lemnos_call

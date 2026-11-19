@@ -85,6 +85,8 @@ appended to Device (rule 8): a host from before it sends Device without it, whic
 
 `refusal` in Device, and in Event, is why a device waits to retry: `0` none (running, or switched on), `1` absent (no such device here), `2` failed (present and not working). It is appended after `jobs`, so a host from before it sends none and a reader takes `0`; it moves no hash.
 
+`host` in Welcome is the service's name. When bit 7 (`BOARD_ID`, value 128) is set in `features`, it is instead the board file's `[board] id`, the board the service serves. Without the bit a client does not read a board id from `host` and reports `NOT_SUPPORTED` for it. The bit is not a part: it has no hash, and it adds no frame, so it moves no hash. It was added to version 1 after its first form, so a host from before it sends none, and a client from before it ignores it.
+
 `jobs` in Device is the long jobs open on the device, from the host's job table (never from the
 driver): `ID:DONE/TOTAL` each, the id in hex and the two counts decimal, joined by one space, at
 most 64 of them (the host's limit on open jobs); empty when none is open. `DONE` and `TOTAL` are
@@ -105,6 +107,7 @@ closes the connection on a kind it doesn't know (rule 3).
 | 2 | 4 | takes CallJob and JobCancel |
 | 4 | 16 | takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints |
 | 3 | 8 | frame streams are the shm rings of [`docs/ring.md`](ring.md), with the descriptors of this page's stream answers |
+| 7 | 128 | the Welcome's `host` is the board file's `[board] id`, the board the service serves (see below) |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never

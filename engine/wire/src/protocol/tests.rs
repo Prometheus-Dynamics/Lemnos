@@ -1247,6 +1247,15 @@ mod layout {
         );
     }
 
+    /// BOARD_ID is a feature bit of the Welcome, not a part: it is not one of the parts' bits, has no
+    /// hash of its own, and so moves none.
+    #[test]
+    fn the_board_id_bit_is_a_feature_bit_and_no_part() {
+        assert_eq!(BOARD_ID, 128);
+        assert!(!PART_BITS.contains(&BOARD_ID));
+        assert_eq!(BOARD_ID & feature::EVERY, 0);
+    }
+
     #[test]
     fn the_parts_and_the_core_are_different_hashes() {
         let mut all = vec![CORE_HASH];

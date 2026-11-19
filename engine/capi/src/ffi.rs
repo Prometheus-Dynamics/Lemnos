@@ -4,7 +4,7 @@
 
 #[cfg(not(feature = "shared"))]
 pub(crate) use crate::surface::{
-    lemnos_call, lemnos_check_version, lemnos_client_close, lemnos_client_open,
+    lemnos_board_id, lemnos_call, lemnos_check_version, lemnos_client_close, lemnos_client_open,
     lemnos_device_count, lemnos_device_text, lemnos_next_value, lemnos_open, lemnos_package_info,
     lemnos_package_list, lemnos_package_text, lemnos_stream_buffer_handle, lemnos_stream_close,
     lemnos_stream_end, lemnos_stream_generation, lemnos_stream_info, lemnos_stream_next_frame,
@@ -90,6 +90,13 @@ mod shared {
             client: Handle,
             package: u32,
             info: *mut PackageInfo,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_board_id(
+            client: Handle,
+            out: *mut c_char,
+            capacity: usize,
+            len: *mut usize,
+            sink: MessageSink,
         ) -> Status;
         pub(crate) unsafe fn lemnos_package_text(
             client: Handle,

@@ -28,6 +28,34 @@ fn it_says_who_it_is() {
     assert_eq!(*host.control.names.lock().unwrap(), ["the-tool"]);
 }
 
+/// A service that sets BOARD_ID says its board is its Welcome's host: the board file's id.
+#[test]
+fn the_board_id_is_the_board_the_service_says_it_serves() {
+    let host = FakeHost::start();
+    host.control
+        .features
+        .store(lemnos_wire::BOARD_ID, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "the-tool").unwrap();
+    assert_eq!(client.board_id().unwrap(), "fake");
+}
+
+/// A service from before BOARD_ID names itself, and the client does not take that name for a
+/// board: the answer is refused by name, so nothing is guessed.
+#[test]
+fn a_service_that_does_not_say_its_board_is_refused_not_guessed() {
+    let host = FakeHost::start();
+    let client = Client::connect(&host.path, "the-tool").unwrap();
+    match client.board_id() {
+        Err(Error::Refused { status, text }) => {
+            assert_eq!(status, Status::NOT_SUPPORTED);
+            assert!(text.contains("board"), "{text}");
+        }
+        other => panic!("expected NOT_SUPPORTED, got {other:?}"),
+    }
+    // The service is still usable: the refusal is the call's alone.
+    assert_eq!(client.list().unwrap().len(), 2);
+}
+
 #[test]
 fn listing_reports_every_device_as_the_service_does() {
     let host = FakeHost::start();

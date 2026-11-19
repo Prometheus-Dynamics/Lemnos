@@ -121,6 +121,7 @@ What a client can do:
   service's `consumer-hold` part; an older service is refused by name, never sent the declaration. See
   [The consumer's declared hold](streams.md#the-consumers-declared-hold).
 - **`packages`**: what became of the daemon's driver packages.
+- **`board_id`**: the board the service serves, its board file's `[board] id`. A service from before the board-id feature (bit 7 of `features` in [the wire](wire.md)) does not say which board it is, so it refuses with `NOT_SUPPORTED`, and the client never reads the id from the service's name.
 - **`next_event`**: a device's state, reason or health changed. Events come when the client asked
   for them in its Hello (the default). They are read off the socket inside any call and in
   `next_value`, and `next_event` only takes what has arrived by then. After a list, a client gets
@@ -247,6 +248,7 @@ function, struct and code is there with its rule.
 | `lemnos_version`, `lemnos_check_version` | The ABI handshake. Call `lemnos_check_version` first |
 | `lemnos_client_open`, `lemnos_client_close` | Connect and disconnect |
 | `lemnos_device_count`, `lemnos_device_info`, `lemnos_device_text` | The device list |
+| `lemnos_board_id` | The board the service serves, its board file's `[board] id`, as text. Refused with `-EOPNOTSUPP` by a service that does not say |
 | `lemnos_open` | Open a contract on a device, by tag |
 | `lemnos_contract_hash` | The base hash and additions level of an opened contract, as the device describes it |
 | `lemnos_call` | Call a method by number, with its arguments and reply as bytes |

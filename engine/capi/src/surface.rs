@@ -438,6 +438,29 @@ pub unsafe extern "C" fn lemnos_device_text(
     })
 }
 
+/// Writes the board id the service serves, the board file's `[board] id`, as NUL-terminated text
+/// (`*len` is its length without the NUL, as `lemnos_device_text` gives it). A service that does
+/// not say which board it serves refuses with `NOT_SUPPORTED`, with its text in `sink`.
+///
+/// # Safety
+/// `out` is null or valid for `capacity` bytes; `len` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_board_id(
+    client: Handle,
+    out: *mut c_char,
+    capacity: usize,
+    len: *mut usize,
+    sink: MessageSink,
+) -> Status {
+    guard(|| {
+        with_entry(client, |entry| match entry.session.board_id() {
+            // SAFETY: passed on from this function's contract.
+            Ok(id) => unsafe { give_text(&id, out, capacity, len) },
+            Err(error) => fail(error, sink),
+        })
+    })
+}
+
 /// # Safety
 /// `device` and `tag` are NUL-terminated; `opened` is null or valid for a
 /// write.

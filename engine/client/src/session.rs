@@ -785,6 +785,34 @@ impl Session {
         &self.shared.host
     }
 
+    /// The board the service serves: the board file's `[board] id`. A service from before
+    /// [`lemnos_wire::BOARD_ID`] does not say which board it is, so it is refused as
+    /// `NOT_SUPPORTED`; the client never reads a board id out of its name.
+    ///
+    /// # Errors
+    ///
+    /// `Disconnected` when not connected; `Refused` with `NOT_SUPPORTED` when the service does not
+    /// say which board it serves.
+    pub fn board_id(&mut self) -> Result<String, Error> {
+        self.settle()?;
+        self.known_board_id()
+    }
+
+    /// [`Session::board_id`] as the Welcome has it, without waiting on the connection. An async
+    /// client settles first, on its own.
+    pub(crate) fn known_board_id(&self) -> Result<String, Error> {
+        if !self.shared.ready {
+            return Err(Error::Disconnected);
+        }
+        if self.shared.features & lemnos_wire::BOARD_ID == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service does not say which board it serves".to_string(),
+            });
+        }
+        Ok(self.shared.host.clone())
+    }
+
     pub const fn is_connected(&self) -> bool {
         self.shared.ready
     }

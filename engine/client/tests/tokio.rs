@@ -47,6 +47,26 @@ fn the_async_form_calls_lists_and_receives() {
 }
 
 #[test]
+fn the_async_form_reports_its_board_as_the_service_says_it() {
+    let host = FakeHost::start();
+    host.control
+        .features
+        .store(feature::EVERY | lemnos_wire::BOARD_ID, Ordering::SeqCst);
+    block_on(async {
+        let mut client = AsyncClient::connect(&host.path, "t").await.unwrap();
+        assert_eq!(client.board_id().await.unwrap(), "fake");
+    });
+    let old = FakeHost::start();
+    block_on(async {
+        let mut client = AsyncClient::connect(&old.path, "t").await.unwrap();
+        match client.board_id().await {
+            Err(Error::Refused { status, .. }) => assert_eq!(status, Status::NOT_SUPPORTED),
+            other => panic!("expected NOT_SUPPORTED, got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn the_async_form_times_out_without_a_value() {
     let host = FakeHost::start();
     block_on(async {
