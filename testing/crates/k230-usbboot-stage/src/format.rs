@@ -113,6 +113,7 @@ pub fn put32(out: &mut [u8], at: usize, value: u32) {
 /// CRC-32 (IEEE, reflected), the checksum `kdimage.cpp` computes over a header: `crc32(0, ...)`
 /// there is this function. Bitwise, so it needs no table. Checked against the standard check value
 /// in the tests.
+#[inline(never)]
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in bytes {

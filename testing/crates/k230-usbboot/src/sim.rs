@@ -379,6 +379,18 @@ impl Medium for SimMedium {
             }
         }
     }
+
+    /// The simulated medium is a flat store for the legacy protocol, not the card: it has only its end. The card's
+    /// declared range and protected sectors are `SdMedium`'s, tested over the stage's own SD code.
+    fn permits(&self, offset: u64, len: u64) -> Result<(), MediumError> {
+        let end = offset
+            .checked_add(len)
+            .ok_or(MediumError("past the end of the medium"))?;
+        if end > self.shared.borrow().medium.len() as u64 {
+            return Err(MediumError("past the end of the medium"));
+        }
+        Ok(())
+    }
 }
 
 /// The watchdogs' registers, on the board's shared models: each address goes to the model whose

@@ -11,11 +11,13 @@ use lemnos_flash_stage::usb::{Controller, Event, UsbError};
 use lemnos_flash_stage::wait::Clock;
 use lemnos_flash_wire::frame::{Request, ResetKind};
 use lemnos_flash_wire::identity::IDENTITY_LEN;
+use lemnos_k230_usbboot_stage::bounds::Declared;
 use lemnos_k230_usbboot_stage::fl1::IDENTITY;
 use lemnos_k230_usbboot_stage::fl1::report::{Uart, describe};
 use lemnos_k230_usbboot_stage::fl1::run::stage;
 use lemnos_k230_usbboot_stage::fl1::storage::{Blocks, Sectors};
 use lemnos_k230_usbboot_stage::fl1::usb::{BULK_MAX, Device};
+use lemnos_k230_usbboot_stage::format::crc32;
 use lemnos_k230_usbboot_stage::sd::BLOCK;
 use lemnos_k230_usbboot_stage::sysctl::{SOC_GLB_RST, SOC_RESET_VALUE};
 use lemnos_k230_usbboot_stage::usb_dev::{
@@ -160,35 +162,57 @@ fn end_frame() -> Vec<u8> {
     Request::end(ResetKind::Normal).encode().to_vec()
 }
 
-/// A RAM card of `sectors` blocks, with an optional sector that fails.
+/// A sparse RAM card of [`RAM_BLOCKS`] blocks, with a valid primary GPT header in sector 1 (the backup at the
+/// card's end) and an optional sector that fails. The storage writes only inside [`TEST_RANGE`].
 struct Ram {
-    blocks: Vec<[u8; BLOCK]>,
+    blocks: std::collections::BTreeMap<u64, [u8; BLOCK]>,
     fail_at: Option<u64>,
 }
 
+const RAM_BLOCKS: u64 = 1 << 20;
+const TEST_RANGE: Declared = Declared {
+    first: 4096,
+    last: 4223,
+};
+/// The first sector of [`TEST_RANGE`]: where the storage tests write.
+const AT: u32 = 4096;
+
 impl Ram {
-    fn new(sectors: usize) -> Self {
+    fn new() -> Self {
+        let mut header = [0u8; BLOCK];
+        header[..8].copy_from_slice(b"EFI PART");
+        header[12..16].copy_from_slice(&92u32.to_le_bytes());
+        header[24..32].copy_from_slice(&1u64.to_le_bytes());
+        header[32..40].copy_from_slice(&(RAM_BLOCKS - 1).to_le_bytes());
+        header[80..84].copy_from_slice(&128u32.to_le_bytes());
+        header[84..88].copy_from_slice(&128u32.to_le_bytes());
+        let crc = crc32(&header[..92]);
+        header[16..20].copy_from_slice(&crc.to_le_bytes());
         Self {
-            blocks: vec![[0; BLOCK]; sectors],
+            blocks: [(1, header)].into(),
             fail_at: None,
         }
     }
 }
 
 impl Blocks for Ram {
+    fn blocks(&self) -> u64 {
+        RAM_BLOCKS
+    }
+
     fn read_block(&mut self, lba: u64, out: &mut [u8; BLOCK]) -> Result<(), IoError> {
-        if self.fail_at == Some(lba) {
+        if self.fail_at == Some(lba) || lba >= RAM_BLOCKS {
             return Err(IoError::Failed);
         }
-        *out = *self.blocks.get(lba as usize).ok_or(IoError::Failed)?;
+        *out = self.blocks.get(&lba).copied().unwrap_or([0; BLOCK]);
         Ok(())
     }
 
     fn write_block(&mut self, lba: u64, data: &[u8; BLOCK]) -> Result<(), IoError> {
-        if self.fail_at == Some(lba) {
+        if self.fail_at == Some(lba) || lba >= RAM_BLOCKS {
             return Err(IoError::Failed);
         }
-        *self.blocks.get_mut(lba as usize).ok_or(IoError::Failed)? = *data;
+        self.blocks.insert(lba, *data);
         Ok(())
     }
 }
@@ -208,7 +232,7 @@ fn run_stage(fault: Fault, host: Host, clock: &mut Tick) -> (Result<ResetKind, C
         brought_up.set(true);
         let host = host.borrow_mut().take().expect("bring-up runs once");
         let dev: Dev = Device::new(host, clock.clone());
-        let store: Store = Sectors::new(Ram::new(64), clock.clone());
+        let store: Store = Sectors::new(Ram::new(), clock.clone(), TEST_RANGE);
         Ok((dev, store))
     });
     (outcome, brought_up.get(), regs)
@@ -378,34 +402,34 @@ fn a_stall_is_taken_by_the_hardware_and_the_speed_is_high() {
 #[test]
 fn sectors_are_written_and_read_back_by_lba() {
     let clock = Tick::new();
-    let mut store: Store = Sectors::new(Ram::new(64), clock.clone());
+    let mut store: Store = Sectors::new(Ram::new(), clock.clone(), TEST_RANGE);
     let data: Vec<u8> = (0..2 * BLOCK).map(|i| (i % 251) as u8).collect();
-    store.write(10, &data, 1_000 * STEP_US).unwrap();
+    store.write(AT, &data, 1_000 * STEP_US).unwrap();
     let mut back = vec![0u8; 2 * BLOCK];
-    store.read(10, &mut back, 1_000 * STEP_US).unwrap();
+    store.read(AT, &mut back, 1_000 * STEP_US).unwrap();
     assert_eq!(back, data);
 }
 
 #[test]
 fn a_write_that_is_not_whole_sectors_is_refused_and_writes_nothing() {
     let clock = Tick::new();
-    let mut store: Store = Sectors::new(Ram::new(64), clock.clone());
+    let mut store: Store = Sectors::new(Ram::new(), clock.clone(), TEST_RANGE);
     assert_eq!(
-        store.write(10, &[1; BLOCK + 1], 1_000 * STEP_US),
+        store.write(AT, &[1; BLOCK + 1], 1_000 * STEP_US),
         Err(IoError::Failed)
     );
     let mut back = vec![0u8; BLOCK];
-    store.read(10, &mut back, 1_000 * STEP_US).unwrap();
+    store.read(AT, &mut back, 1_000 * STEP_US).unwrap();
     assert!(back.iter().all(|&b| b == 0));
 }
 
 #[test]
 fn a_budget_spent_before_the_first_sector_is_a_storage_timeout_and_writes_nothing() {
     let clock = Tick::new();
-    let mut store: Store = Sectors::new(Ram::new(64), clock.clone());
-    assert_eq!(store.write(10, &[7; BLOCK], STEP_US), Err(IoError::Timeout));
+    let mut store: Store = Sectors::new(Ram::new(), clock.clone(), TEST_RANGE);
+    assert_eq!(store.write(AT, &[7; BLOCK], STEP_US), Err(IoError::Timeout));
     let mut back = vec![0u8; BLOCK];
-    store.read(10, &mut back, 1_000 * STEP_US).unwrap();
+    store.read(AT, &mut back, 1_000 * STEP_US).unwrap();
     assert!(
         back.iter().all(|&b| b == 0),
         "nothing is written before the budget check passes"
@@ -415,19 +439,19 @@ fn a_budget_spent_before_the_first_sector_is_a_storage_timeout_and_writes_nothin
 #[test]
 fn a_card_fault_part_way_is_a_storage_failure_with_the_earlier_sectors_written() {
     let clock = Tick::new();
-    let mut ram = Ram::new(64);
-    ram.fail_at = Some(11);
-    let mut store: Store = Sectors::new(ram, clock.clone());
+    let mut ram = Ram::new();
+    ram.fail_at = Some(u64::from(AT) + 1);
+    let mut store: Store = Sectors::new(ram, clock.clone(), TEST_RANGE);
     let data = vec![9u8; 2 * BLOCK];
     assert_eq!(
-        store.write(10, &data, 1_000 * STEP_US),
+        store.write(AT, &data, 1_000 * STEP_US),
         Err(IoError::Failed)
     );
     let mut back = vec![0u8; BLOCK];
-    store.read(10, &mut back, 1_000 * STEP_US).unwrap();
+    store.read(AT, &mut back, 1_000 * STEP_US).unwrap();
     assert!(
         back.iter().all(|&b| b == 9),
-        "sector 10 was written before sector 11 failed"
+        "the first sector was written before the second failed"
     );
 }
 

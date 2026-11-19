@@ -21,6 +21,7 @@
 // The check build reaches only its own run: the rest of this file is not called, and the linker drops it.
 #![cfg_attr(feature = "b2", allow(dead_code, unused_imports))]
 
+use lemnos_k230_usbboot_stage::bounds::CARD_DECLARED;
 use lemnos_k230_usbboot_stage::image::{
     BLOCK_MAGIC, CHECK, PIECE, REPORT, SD_NONE, STAGE, read_block,
 };
@@ -757,6 +758,13 @@ impl Medium for ImageMedium {
             Self::Absent(m) => m.erase(offset, len),
         }
     }
+
+    fn permits(&self, offset: u64, len: u64) -> Result<(), MediumError> {
+        match self {
+            Self::Sd(m) => m.permits(offset, len),
+            Self::Absent(m) => m.permits(offset, len),
+        }
+    }
 }
 
 /// The SD controller the stage boots from: the boot mode the ROM latched, and the parameter the host
@@ -769,7 +777,7 @@ fn stage_medium(sd: Option<u32>) -> ImageMedium {
             .map_err(|_| ())
             .and_then(|host| Card::init(host).map_err(|_| ()))
         {
-            Ok(card) => ImageMedium::Sd(SdMedium::new(card)),
+            Ok(card) => ImageMedium::Sd(SdMedium::new(card, CARD_DECLARED)),
             Err(()) => ImageMedium::Absent(NoMedium),
         },
         Err(_) => ImageMedium::Absent(NoMedium),
