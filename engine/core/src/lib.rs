@@ -42,9 +42,9 @@ pub use driver::{
     JobId, JobState, Lifecycle, Manifest, MethodId, Origin, RESUME_BYTES, Reply, ResumeRecord,
     Retry,
 };
-#[cfg(feature = "float")]
-pub use fixed::to_f32;
 pub use fixed::{NO_VALUE, rescale};
+#[cfg(feature = "float")]
+pub use fixed::{from_f32, to_f32};
 pub use lemnos_abi::Status;
 pub use lemnos_hal::ErrorKind;
 pub use lemnos_hal::blocks::BufferHandle;

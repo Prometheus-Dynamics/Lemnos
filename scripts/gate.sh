@@ -77,7 +77,8 @@ esac
 # the order below. The side lane holds the steps that do not build: the U-Boot check (QEMU), the
 # packaging and kernel checks, and the cargo queries that read only the lock file. The tail lane
 # holds the cargo steps that touch nothing the workspace tests start or read: the doc tests, the
-# builds for other targets, the shipped programs (their own profile) and the library crates. It
+# builds for other targets, the shipped programs (their own profile), the library crates and the
+# feature sets the workspace tests do not build (library tests and checks only, no programs). It
 # starts once the workspace tests are built and running, when cargo's lock is free, and runs beside
 # them. Each step's output is kept whole and printed under its "==> label" line when it finishes,
 # with its "label: N s" line after it. A failing step's output is shown, the other lanes are
@@ -143,7 +144,7 @@ cargo_lane() {
   # without `std` (the generic sensors' `description_file`, the gadget's `interfaces_file`).
   lane_step "generic sensor, no std" cargo test -q -p lemnos-driver-generic-sensor
   lane_step "generic sensor, std" cargo test -q -p lemnos-driver-generic-sensor --features std
-  lane_step "usb gadget, no std" cargo test -q -p lemnos-driver-usb-gadget
+  lane_step "usb gadget, alloc" cargo test -q -p lemnos-driver-usb-gadget
   lane_step "usb gadget, std" cargo test -q -p lemnos-driver-usb-gadget --features std
   lane_step "client on tokio" cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
   lane_step "client on tokio" cargo test -q -p lemnos-client --features tokio
@@ -202,6 +203,9 @@ tail_lane() {
   lane_step libraries scripts/check-libraries.sh
   # The shipped programs (packaging/shipped.txt) agree: see scripts/check-products.sh.
   lane_step products scripts/check-products.sh
+  # The sets the workspace tests never build: each crate's tests in the exact set it ships with,
+  # and each library option (no defaults, all features) linted and built. See the script.
+  lane_step features scripts/check-features.sh
 }
 
 side_lane() {

@@ -360,8 +360,8 @@ fn the_header_matches_the_crate() {
 }
 
 mod package {
+    use crate::AbiVersion;
     use crate::package::*;
-    use crate::{AbiVersion, Status};
 
     #[test]
     fn the_descriptor_starts_with_what_says_it_is_one() {
@@ -481,7 +481,7 @@ mod package {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         use super::*;
-        use crate::Handle;
+        use crate::{Handle, Status};
 
         static DROPS: AtomicU32 = AtomicU32::new(0);
 
