@@ -27,6 +27,8 @@ pub struct Sysfs {
     root: PathBuf,
     /// Reads still running, by path and the device number they were started for.
     pending: HashMap<(PathBuf, u32), Receiver<Option<String>>>,
+    /// udev's database (`/run/udev/data`): a device it has finished has an entry `c<major>:<minor>`.
+    udev: PathBuf,
 }
 
 /// How long one locking attribute read may take before the scan goes on without it.
@@ -54,7 +56,14 @@ impl Sysfs {
         Self {
             root: root.into(),
             pending: HashMap::new(),
+            udev: PathBuf::from("/run/udev/data"),
         }
+    }
+
+    /// The same, with udev's database under `dir` (a test's copy).
+    pub fn with_udev(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.udev = dir.into();
+        self
     }
 
     /// One locking attribute of device `devnum`, read on a thread for at most [`ATTR_BOUND`]. A read
@@ -158,6 +167,14 @@ impl Board for Sysfs {
             Ok(()) => Access::Granted,
             Err(e) => Access::Denied(format!("access(R|W): {e}; {}", describe(&node))),
         }
+    }
+
+    /// The device's `dev` attribute (`189:<minor>`, the driver core's, no device lock) names udev's
+    /// database entry for it, `c189:<minor>`, which udev writes when it has finished the device.
+    fn udev_done(&mut self, seen: &Seen) -> bool {
+        read(&self.root.join(&seen.port), "dev")
+            .filter(|dev| dev.starts_with("189:"))
+            .is_some_and(|dev| self.udev.join(format!("c{dev}")).exists())
     }
 
     fn open(&mut self, seen: &Seen) -> Result<Box<dyn Link>, String> {

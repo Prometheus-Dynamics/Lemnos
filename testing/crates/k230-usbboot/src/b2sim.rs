@@ -86,6 +86,10 @@ pub struct Faults {
     pub core: CoreRev,
     /// This user may not open the node (no udev rule grants it).
     pub access_denied: bool,
+    /// udev finishes the stage's device only this long after the kernel publishes it: until then the
+    /// device has no udev database entry and its node no uaccess ACL, so this user may not open it (B2
+    /// run 3: the host's open 0.649 s after the load was denied while the rule itself was valid).
+    pub late_acl: Option<Duration>,
     /// The core's `time` CSR. The board's boot ROM leaves it at 0, not moving (B2 run 1); the default is that.
     pub time: TimeCsr,
     /// A driver fault for the model to catch: endpoint 0 OUT is never enabled again after the first
@@ -843,6 +847,8 @@ struct Shared {
     unexpected: Vec<String>,
     pad_writes_refused: u32,
     core: Option<Arc<Core>>,
+    /// When the kernel published each device, by devnum.
+    published: Vec<(u32, Instant)>,
 }
 
 /// The rehearsal's board.
@@ -1082,11 +1088,9 @@ fn kernel(
                         "New USB device found, idVendor=1209, idProduct=0001; product {:?}",
                         seen.product
                     ));
-                    shared
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .seen
-                        .push(seen);
+                    let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    s.published.push((seen.devnum, Instant::now()));
+                    s.seen.push(seen);
                     enumerated = true;
                 }
                 Err(text) => log(format!(
@@ -1219,20 +1223,39 @@ impl Link for SimLink {
     }
 }
 
+impl SimBoard {
+    /// Whether udev has finished `seen` (its database entry written and the ACL applied).
+    fn udev_finished(&self, seen: &Seen) -> bool {
+        let Some(late) = self.faults.late_acl else {
+            return true;
+        };
+        let s = self.lock();
+        s.published
+            .iter()
+            .rev()
+            .find(|(n, _)| *n == seen.devnum)
+            .is_some_and(|(_, at)| at.elapsed() >= late)
+    }
+}
+
 impl Board for SimBoard {
     fn scan(&mut self) -> Vec<Seen> {
         self.lock().seen.clone()
     }
 
     fn access(&mut self, seen: &Seen) -> Access {
-        if self.faults.access_denied {
+        if self.faults.access_denied || !self.udev_finished(seen) {
             Access::Denied(format!(
-                "access(R|W): Permission denied (os error 13); {} mode 664 owner 0:0, no ACL (the model's stand-in)",
+                "access(R|W): Permission denied (os error 13); {} mode 600 owner 0:0, no ACL (the model's stand-in)",
                 seen.devnode()
             ))
         } else {
             Access::Granted
         }
+    }
+
+    fn udev_done(&mut self, seen: &Seen) -> bool {
+        self.udev_finished(seen)
     }
 
     fn open(&mut self, seen: &Seen) -> Result<Box<dyn Link>, String> {

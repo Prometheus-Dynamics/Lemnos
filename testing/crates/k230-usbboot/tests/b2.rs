@@ -223,6 +223,9 @@ impl Board for Fake {
     fn access(&mut self, _: &Seen) -> Access {
         self.access.clone()
     }
+    fn udev_done(&mut self, _: &Seen) -> bool {
+        true
+    }
     fn open(&mut self, _: &Seen) -> Result<Box<dyn Link>, String> {
         self.opened.set(true);
         Err("the fake never opens".to_string())
@@ -263,6 +266,7 @@ fn fast() -> Bounds {
     Bounds {
         enumerate: Duration::from_millis(300),
         back: Duration::from_millis(50),
+        udev: Duration::from_millis(200),
         poll: Duration::from_millis(10),
         ..Bounds::BOARD
     }
@@ -323,6 +327,97 @@ fn without_access_the_run_stops_and_says_so_and_never_opens() {
         "{verdict:?}"
     );
     assert!(!opened);
+}
+
+/// B2 run 3: the kernel publishes the stage before udev has applied the uaccess ACL. The host waits for
+/// udev (bounded) and opens only then.
+#[test]
+fn a_node_whose_acl_comes_late_is_waited_for_and_then_opened() {
+    let faults = Faults {
+        late_acl: Some(Duration::from_millis(400)),
+        ..Faults::default()
+    };
+    let (outcome, _, lines, board) = rehearse(faults, quick());
+    assert_eq!(outcome.verdict, Verdict::Passed, "{lines:#?}");
+    assert!(lines.iter().any(|l| l.contains("udev done")), "{lines:#?}");
+    board.stop();
+}
+
+/// The same past the bound: denied as before, never opened.
+#[test]
+fn a_node_whose_acl_comes_after_the_bound_stops_the_run_unopened() {
+    let faults = Faults {
+        late_acl: Some(Duration::from_secs(60)),
+        ..Faults::default()
+    };
+    let bounds = Bounds {
+        udev: Duration::from_millis(500),
+        ..quick()
+    };
+    let (outcome, _, lines, board) = rehearse(faults, bounds);
+    assert!(
+        matches!(&outcome.verdict, Verdict::Stopped(t) if t.contains("may not open")),
+        "{lines:#?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("claimed")), "{lines:#?}");
+    board.stop();
+}
+
+/// Access granted but no udev database entry by the bound: stopped, never opened.
+#[test]
+fn granted_access_without_udevs_entry_is_not_enough() {
+    struct NoUdev(Vec<Seen>, Rc<Cell<bool>>);
+    impl Board for NoUdev {
+        fn scan(&mut self) -> Vec<Seen> {
+            self.0.clone()
+        }
+        fn access(&mut self, _: &Seen) -> Access {
+            Access::Granted
+        }
+        fn udev_done(&mut self, _: &Seen) -> bool {
+            false
+        }
+        fn open(&mut self, _: &Seen) -> Result<Box<dyn Link>, String> {
+            self.1.set(true);
+            Err("never".to_string())
+        }
+    }
+    let opened = Rc::new(Cell::new(false));
+    let mut board = NoUdev(
+        vec![stage_at(b2::PORT, lemnos_flash_wire::usb::PRODUCT)],
+        opened.clone(),
+    );
+    let started = Instant::now();
+    let outcome = b2::run(&mut board, &plan(fast()), None, started, &mut |_| {});
+    assert!(
+        matches!(&outcome.verdict, Verdict::Stopped(t) if t.contains("udev has not finished")),
+        "{:?}",
+        outcome.verdict
+    );
+    assert!(!opened.get());
+    assert!(started.elapsed() >= Duration::from_millis(200));
+}
+
+/// udev's entry is found from the device's `dev` attribute.
+#[test]
+fn udev_is_done_when_its_database_has_the_devices_entry() {
+    let root = std::env::temp_dir().join(format!("b2-udev-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let sys = root.join("sys");
+    let data = root.join("data");
+    let port = sys.join("3-4.2.1.4.1");
+    std::fs::create_dir_all(&port).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let seen = stage_at("3-4.2.1.4.1", lemnos_flash_wire::usb::PRODUCT);
+    let mut sysfs = Sysfs::at(&sys).with_udev(&data);
+    assert!(!sysfs.udev_done(&seen), "no dev attribute");
+    std::fs::write(port.join("dev"), "189:300\n").unwrap();
+    assert!(!sysfs.udev_done(&seen), "no database entry yet");
+    std::fs::write(data.join("c189:300"), "").unwrap();
+    assert!(sysfs.udev_done(&seen));
+    std::fs::write(port.join("dev"), "180:3\n").unwrap();
+    assert!(!sysfs.udev_done(&seen), "not a USB device node");
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]

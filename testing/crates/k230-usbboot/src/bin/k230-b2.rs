@@ -13,7 +13,8 @@
 //! check build's own code over a register model. The cases: `good`, `no-access`, `wrong-product`,
 //! `wrong-port`, `never-enumerates`, `corrupt-out`, `corrupt-in`, `rev-420a`, `rev-pre-420a`, `core-430a`
 //! (the board's core and every case's default: a setup leaves endpoint 0 OUT enabled and NAKs it, B2 run
-//! 2), `no-ep0-rearm`, `time-stopped`
+//! 2), `no-ep0-rearm`, `late-acl` (udev
+//! finishes the stage's node 400 ms after the kernel publishes it, B2 run 3), `time-stopped`
 //! (the ROM's state: `time` at 0 until the stage enables it; every case's default), `time-dead`, `time-running`.
 //!
 //! Exit 0 only when the check passed (or the rehearsal's case ended as it must) and the boot ROM came back.
@@ -110,7 +111,7 @@ fn main() {
 fn case_faults(case: &str) -> (Faults, fn(&Verdict) -> bool) {
     let mut f = Faults::default();
     let want: fn(&Verdict) -> bool = match case {
-        "good" | "rev-420a" | "rev-pre-420a" | "core-430a" | "time-running" => {
+        "good" | "rev-420a" | "rev-pre-420a" | "core-430a" | "time-running" | "late-acl" => {
             |v| *v == Verdict::Passed
         }
         // The board's ROM state (B2 run 1): `time` at 0 and not moving until the stage enables it.
@@ -135,6 +136,8 @@ fn case_faults(case: &str) -> (Faults, fn(&Verdict) -> bool) {
         "time-dead" => f.time = TimeCsr::Dead,
         "time-running" => f.time = TimeCsr::Running,
         "no-access" => f.access_denied = true,
+        // B2 run 3: udev applies the ACL some time after the kernel publishes the stage.
+        "late-acl" => f.late_acl = Some(Duration::from_millis(400)),
         "wrong-product" => f.product = Some("Lemnos flash stage (other)".to_string()),
         "wrong-port" => f.port = Some("3-4.2.1.4.2".to_string()),
         "never-enumerates" => f.hang = true,
