@@ -8,8 +8,8 @@ use lemnos_core::{Bound, Caller, Contract, JobId, Status};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{
-    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Subscription, UsbEndpoints,
-    UsbEndpointsEnd, ValueInfo,
+    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Subscription, SubscriptionState,
+    UsbEndpoints, UsbEndpointsEnd, ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
 
@@ -133,6 +133,23 @@ impl Client {
     ) -> Result<Subscription, Error> {
         self.lock()
             .subscribe(handle, method, period_us, only_changes)
+    }
+
+    /// Asks for a subscription and returns its id at once. See [`Session::subscribe_pending`].
+    pub fn subscribe_pending(
+        &self,
+        handle: &mut Handle,
+        method: u16,
+        period_us: u64,
+        only_changes: bool,
+    ) -> Result<u64, Error> {
+        self.lock()
+            .subscribe_pending(handle, method, period_us, only_changes)
+    }
+
+    /// See [`Session::subscription_state`].
+    pub fn subscription_state(&self, id: u64) -> SubscriptionState {
+        self.lock().subscription_state(id)
     }
 
     pub fn unsubscribe(&self, subscription: u64) -> Result<(), Error> {

@@ -23,6 +23,13 @@ pub struct StreamScript {
     pub fds: Vec<OwnedFd>,
 }
 
+impl Control {
+    /// How many subscriptions the service holds live, on the daemon's side of the socket.
+    pub fn live_subscriptions(&self) -> usize {
+        self.live.lock().unwrap().len()
+    }
+}
+
 #[derive(Default)]
 pub struct Control {
     /// StreamRingHandles' `plane_bytes`: empty for buffers of one plane.
@@ -33,6 +40,15 @@ pub struct Control {
     pub kick: AtomicBool,
     pub stop: AtomicBool,
     pub refuse_subscribe: AtomicBool,
+    /// How long a Subscribe waits before it is answered (refused or not), in milliseconds.
+    pub subscribe_delay_ms: AtomicU64,
+    /// Every Subscribe the service was sent, refused or not.
+    pub subscribes: AtomicU32,
+    /// The connection (by its number) of every subscription the service holds live. A connection
+    /// that ends takes its subscription with it.
+    pub live: Mutex<Vec<u32>>,
+    /// Subscribes the service answered with a subscription, counted after it is recorded live.
+    pub answers: AtomicU32,
     pub unsubscribed: AtomicU32,
     pub power_calls: AtomicU32,
     pub values_before_reply: AtomicU32,
@@ -130,8 +146,13 @@ fn spawn(path: &Path, control: Arc<Control>) {
 }
 
 /// Device numbers change per connection, as they may when a service restarts.
-fn serve(mut stream: UnixStream, control: Arc<Control>) {
+fn serve(stream: UnixStream, control: Arc<Control>) {
     let session = control.connections.fetch_add(1, Ordering::SeqCst) + 1;
+    serve_connection(stream, Arc::clone(&control), session);
+    control.live.lock().unwrap().retain(|live| *live != session);
+}
+
+fn serve_connection(mut stream: UnixStream, control: Arc<Control>, session: u32) {
     let device = session * 10;
     stream
         .set_read_timeout(Some(Duration::from_millis(5)))
@@ -344,6 +365,11 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     }
                 }
                 Frame::Subscribe { id, period_us, .. } => {
+                    control.subscribes.fetch_add(1, Ordering::SeqCst);
+                    let delay = control.subscribe_delay_ms.load(Ordering::SeqCst);
+                    if delay > 0 {
+                        thread::sleep(Duration::from_millis(delay));
+                    }
                     if control.refuse_subscribe.load(Ordering::SeqCst) {
                         send(
                             Frame::Refusal {
@@ -356,6 +382,12 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     } else {
                         let server = 100 + u64::from(session);
                         sub = Some(server);
+                        {
+                            let mut live = control.live.lock().unwrap();
+                            live.retain(|live| *live != session);
+                            live.push(session);
+                        }
+                        control.answers.fetch_add(1, Ordering::SeqCst);
                         send(
                             Frame::Subscribed {
                                 id,
@@ -368,6 +400,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                 }
                 Frame::Unsubscribe { id, .. } => {
                     sub = None;
+                    control.live.lock().unwrap().retain(|live| *live != session);
                     control.unsubscribed.fetch_add(1, Ordering::SeqCst);
                     send(Frame::Reply { id, bytes: &[] }, &mut out);
                 }

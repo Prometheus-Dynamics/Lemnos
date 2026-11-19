@@ -12,7 +12,8 @@ use tokio::time::{Instant, timeout_at};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{
-    DeviceEntry, Handle, JobEvent, Mode, PackageList, Session, Subscription, ValueInfo,
+    DeviceEntry, Handle, JobEvent, Mode, PackageList, Session, Subscription, SubscriptionState,
+    ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
 use lemnos_wire::ring::Mapping;
@@ -204,10 +205,29 @@ impl AsyncClient {
             self.session
                 .op_subscribe(handle, method, period_us, only_changes)?;
         let result = self.wait(id, pick).await;
-        if result.is_err() {
-            self.session.forget(local);
+        match result {
+            Ok(_) => {}
+            Err(Error::Refused { .. }) => self.session.forget(local),
+            Err(_) => self.session.cancel_subscription(local),
         }
         result
+    }
+
+    /// See [`Session::subscribe_pending`]. Does not wait for the service, so it is not async.
+    pub fn subscribe_pending(
+        &mut self,
+        handle: &Handle,
+        method: u16,
+        period_us: u64,
+        only_changes: bool,
+    ) -> Result<u64, Error> {
+        self.session
+            .subscribe_pending_on(handle, method, period_us, only_changes)
+    }
+
+    /// See [`Session::subscription_state`].
+    pub fn subscription_state(&mut self, id: u64) -> SubscriptionState {
+        self.session.subscription_state(id)
     }
 
     /// See [`Session::open_stream`]. The frames then come off the ring as they do anywhere else.
