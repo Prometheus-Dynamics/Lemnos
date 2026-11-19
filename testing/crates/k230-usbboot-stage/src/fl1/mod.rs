@@ -18,6 +18,7 @@ pub mod check;
 pub mod guard;
 pub mod report;
 pub mod run;
+pub mod scratch;
 pub mod storage;
 pub mod usb;
 
