@@ -13,3 +13,4 @@
 #include <linux/reset-controller.h>
 #include <linux/spi/spi.h>
 #include <linux/thermal.h>
+#include <uapi/linux/media/raspberrypi/pisp_fe_config.h>
