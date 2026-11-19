@@ -65,3 +65,74 @@ The board's gadget is the one `R1` checks. Its board file has a `usb-gadget` dev
 For each check: the output of the command, the daemon's error output lines for the step, and the times
 asked for above, in CM5 terms only. A check that does not pass is reported with its output, not
 re-run until it does.
+
+## Detached form (image where lemnosd owns the USB link)
+
+On that image every check here that changes the gadget cuts the runner's link, whether lemnosd
+stops or not: the gadget is the only route. Which steps do what, as `scripts/checks/V1g.sh` runs
+them, in this order:
+
+- 4: read only, first (the processes found by parent PID from lemnosd's main PID, not by name).
+- 5: the helper stopped five times by its recorded PID, after `/proc/<pid>/cmdline` and the parent
+  PID are read again and found unchanged; the waits to a new helper are timed. lemnosd stays up and
+  the gadget with it. Between the first and second kill the gadget's device is powered off and on
+  (`lemnos-ctl power`): the link goes for that time. Timed restore: 60 s (the waits 1 + 2 + 4 + 8 + 8
+  s and the power cycle); it powers the device on again.
+- 6: `systemctl stop lemnosd`, a snapshot (tree and FunctionFS mount), start. One lemnosd down
+  window, 5 s restore.
+- 3: lemnosd stopped, configfs unmounted, lemnosd started: one lemnosd down window (5 s restore).
+  Then the gadget's failure and the error lines are recorded, configfs is mounted again, and the
+  time to the gadget `running` on the driver's own retry is measured (want at most 8 s). A 40 s
+  restore around the whole check mounts configfs again whatever happens. If configfs cannot be
+  unmounted, check 3 is recorded NOT-RUN and nothing else changes.
+- 1: "boot with the controller held back" needs a reboot, which is not allowed; it runs as a
+  restart instead: lemnosd stopped, the controller unbound from its driver
+  (`/sys/class/udc/NAME/device/driver/unbind`, reported), lemnosd started (one down window, 5 s
+  restore), then bound again and the time to `running` measured (want at most 8 s, on the uevent).
+  The 40 s restore binds it again.
+- 2: only if the controller has a `usb_role` switch (none is known on the board): `host`, then
+  `device`, timed; the 40 s restore sets the role back. Otherwise NOT-RUN.
+- 5c and 7 are unchanged (5c needs an nvmem driver held back at start; 7 is a host check).
+
+Running it (shared by every detached form; `scripts/lemnos-check.sh`'s header has the details):
+
+1. Upload `scripts/lemnos-check.sh`, `scripts/detached-lib.sh` and `scripts/checks/` to
+   `/data/board/checks/bin/` over the session (not `/tmp`: the session's `/tmp` may be private to the
+   comm core's unit, and the transient units would not see it).
+2. Hold no board lock in the session: the check takes `/run/lock/raze-gpu.lock` and
+   `/run/lock/board-gpu.lock` itself (10 s wait) and refuses, stopping nothing, if either is held.
+3. As root: `bash /data/board/checks/bin/lemnos-check.sh start V1g [STEPS="4 5 6 3 1 2"]`. It copies the
+   scripts into `/data/board/checks/V1g/<UTC stamp>/bin/`, starts the check in the transient unit
+   `lemnos-check-V1g` and returns. The link then goes; nothing on the board depends on the session.
+4. The check logs its hypothesis, a baseline and every step (CLOCK_REALTIME stamp and seconds since
+   boot) to `log` in the run directory, verdicts to `result`. Before each stop it arms a timed
+   restore in its own transient unit (`lemnos-restore-V1g-NAME`) and sees it running; at the bound,
+   uncancelled, the restore kills the check's unit, undoes what the check changed, starts lemnosd
+   and the comm core with backoff 1, 2, 4, 8, 8 ... s, never giving up, and checks the end state.
+   The end state, checked by the check or the restore: lemnosd active, the `hw-watchdog` device
+   `running ok`, the comm core and the bridge as before, the gadget bound to the same controller, no
+   drop-in of ours, the link's addresses back (one still missing after 30 s is added back as it was,
+   and recorded as a finding), the same boot id. Nothing touches config.txt, the default slot,
+   `mem=`, `.reboot-ok` or the watchdog.
+5. Reconnect after 3 min and run `bash /data/board/checks/bin/lemnos-check.sh collect V1g`: the
+   log, the restore logs, the results, whether each restore was cancelled or fired, and whether the
+   board reset since the baseline (`THE BOARD RESET`, from the boot id). Paste it here.
+
+The watchdog: once slot-init has exec'd away, lemnosd's `hw-watchdog` driver is the only feeder of
+`/dev/watchdog`. It feeds every half period and never writes the magic close. When lemnosd stops or
+dies the kernel pings once on the close and logs `watchdog did not stop!`
+(`drivers/watchdog/watchdog_dev.c`, `watchdog_release`); the board resets one period (15 s) after
+that unless a new lemnosd feeds. A stop that hangs before it drops the driver leaves only what was
+left of the last feed: half a period (7.5 s) at worst. Every lemnosd down window is therefore bounded
+by its timed restore at `DOWN_BOUND_S` = 5 s, plus 2 s for lemnosd's start, under that 7.5 s; the
+check refuses to start if the device's own `timeout` makes this false. The log says for each window
+whether the close ping was seen and how long lemnosd was down. A lemnosd that cannot be started
+inside the period (the backoff running past it) resets the board: expected, recorded by `collect`.
+
+Status of the detached form: untested on board. Rehearsed on the PC against the stand-in board
+(`scripts/rehearse/rehearse.sh ID CASE`: fake systemd with `Restart=always` and starts that fail
+like a failed start job, the kernel's close ping, a 15 s watchdog that resets the stand-in): the
+normal run; the check killed right after it stops or restarts lemnosd; the check frozen there; two
+failed starts (the restore retries 1 and 2 s apart and the board stays up); five failed starts (the
+backoff passes the period and the stand-in resets, which `collect` reports). Three failed starts are
+the most a restore survives inside one period.

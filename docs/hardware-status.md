@@ -63,6 +63,7 @@ F2b) also gave the PIO I2C bus a module route.
 | [`F2h.md`](../testing/board-runs/F2h.md) | The sensor's frame period: the mean interval is 0.04 % to 0.11 % above the nominal frame (lines × line time); a fixed per-frame line of 1456 sysclk fits all six runs; decided by the board run in `F2h3.md` |
 | [`F2h3.md`](../testing/board-runs/F2h3.md) | The sensor's frame period `(N - 1) x HTS + G` (G = 0x382C/D, 1456), measured on the reference board at seven gated and five continuous frame lengths: every mean 7.5 to 8.1 ppm over it (the crystal); a write of G by 80 clocks moved the period by 832 ns (833.3 predicted); bit 2 of 0x382E reads 0 and the term is used anyway. 10-bit modes and the 720/400 windows: untested on board |
 | [`F2h-judge.py`](../testing/board-runs/F2h-judge.py) | Judges the F2h board step: the intercepts of the frame-period candidates and the 0x382C/D write, from the rate-proof logs; checked on synthetic B1 and A logs, not run on a board |
+| [`lemnos-check.sh`](../testing/board-runs/scripts/lemnos-check.sh) | Runs the checks that stop lemnosd or the comm core (B20, E25, E36, H4a, V1g) detached on the board, each stop behind a timed restore that outlives the check; rehearsed on the PC against the stand-in in `scripts/rehearse/`, not run on a board |
 | [`FLAKE-CSI2.md`](../testing/board-runs/FLAKE-CSI2.md) | Untested on board. The receiver's line counter during STOP at the reference board's mode (10 us lines), against the stop window that rests on it; the QEMU checks run the window, not the hardware |
 
 ## What has been shown, and how

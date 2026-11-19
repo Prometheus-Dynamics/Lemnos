@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Stand-in hardware watchdog: 15 s after the last feed or close ping, a reset.
+. "$(dirname "$0")/../world.sh"
+while :; do
+  age=$(( $(date +%s) - $(stat -c %Y "$CR/dev/watchdog") ))
+  if [ "$age" -ge "$WD_PERIOD" ]; then
+    printf '%s RESET: the watchdog was not fed for %s s\n' "$(now)" "$age" >>"$W/events.log"
+    for g in $(cat "$W/pgids" 2>/dev/null); do kill -KILL -- "-$g" 2>/dev/null; done
+    : >"$W/pgids"
+    sleep 0.2
+    # What a reboot clears: runtime drop-ins, mounts, the gadget tree, unit states; a new boot id.
+    rm -rf "$CR/run/systemd/system/lemnosd.service.d"/* "$W/loaded-dropins/lemnosd"/* "$GADGET_DIR" "$W/gadget.off"
+    printf 'configfs %s/sys/kernel/config configfs rw 0 0\n' "$CR" >"$CR/proc/mounts"
+    for u in "$W"/units/*; do rm -f "$u"; done
+    : >"$W/fail/lemnosd"
+    cat /proc/sys/kernel/random/uuid >"$CR/proc/sys/kernel/random/boot_id"
+    feed
+    for u in lemnosd comm-core lemnos-orion; do "$STANDIN_BIN/systemctl" start "$u" >/dev/null 2>&1; done
+    printf '%s BOOTED again\n' "$(now)" >>"$W/events.log"
+  fi
+  sleep 0.2
+done

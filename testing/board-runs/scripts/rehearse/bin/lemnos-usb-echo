@@ -1,0 +1,12 @@
+#!/bin/bash
+# (#!/bin/bash, not env: the process name must be this file's, as the real program's is.)
+# Stand-in echo tool: the host side's DONE request arrives STANDIN_DONE_AFTER s after it starts.
+. "$(dirname "$0")/../world.sh"
+echo "endpoints 0x81 0x02, stream data"
+echo "event Configured"
+t=0
+while [ -e "$1" ]; do
+  sleep 0.05; t=$((t + 1))
+  [ "$t" = $((${STANDIN_DONE_AFTER:-3} * 20)) ] && echo "request data [44, 4f, 4e, 45]"
+done
+echo "the service ended the stream: counters"

@@ -1,0 +1,16 @@
+#!/bin/bash
+# (#!/bin/bash, not env: the process name must be this file's, as the real program's is.)
+# Stand-in privileged parent: forks the helper again after 1, 2, 4, 8, 8 s.
+. "$(dirname "$0")/../world.sh"
+k=0
+while :; do
+  "$STANDIN_BIN/lemnosd-gadget" &
+  h=$!
+  echo "$h" >"$W/gsuper.child"
+  wait "$h"
+  rc=$?
+  k=$((k + 1))
+  d=$((1 << (k - 1))); [ "$d" -gt 8 ] && d=8
+  journal lemnosd "the gadget helper (pid $h) was killed by signal $((rc - 128)); starting it again in $((d * 1000)) ms (restart $k)"
+  sleep "$d"
+done

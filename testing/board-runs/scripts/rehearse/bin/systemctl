@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Stand-in systemctl (see ../world.sh).
+. "$(dirname "$0")/../world.sh"
+calls "systemctl $*"
+noblock=0 value=0 sig="" whom=all prop=""
+args=()
+while [ $# -gt 0 ]; do
+  case $1 in
+  --no-block) noblock=1 ;;
+  --value) value=1 ;;
+  --quiet | --no-pager) ;;
+  --signal=*) sig=${1#--signal=} ;;
+  -s) sig=$2; shift ;;
+  --kill-whom=*) whom=${1#--kill-whom=} ;;
+  -p) prop=$2; shift ;;
+  *) args+=("$1") ;;
+  esac
+  shift
+done
+verb=${args[0]:-}
+u=$(unit "${args[1]:-}")
+transient() { case $u in lemnos-check-* | lemnos-restore-*) return 0 ;; *) return 1 ;; esac; }
+alive_pgid() { local g; g=$(cat "$W/units/$u.pgid" 2>/dev/null) && [ -n "$g" ] && kill -0 -- "-$g" 2>/dev/null; }
+case $verb in
+is-active)
+  if transient; then
+    if alive_pgid; then echo active; exit 0; else echo inactive; exit 3; fi
+  fi
+  s=$(state "$u"); echo "$s"; [ "$s" = active ]; exit ;;
+show)
+  case $prop in
+  MainPID) p=$(cat "$W/units/$u.main" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null || p=0; [ "$value" = 1 ] && echo "$p" || echo "MainPID=$p" ;;
+  *) echo "" ;;
+  esac ;;
+cat)
+  case $u in
+  lemnosd | comm-core | lemnos-orion)
+    echo "# /usr/lib/systemd/system/$u.service (stand-in)"
+    for f in "$W/loaded-dropins/$u"/*.conf; do [ -e "$f" ] && { echo "# $f"; cat "$f"; }; done
+    exit 0 ;;
+  *) echo "No files found for $u.service." >&2; exit 1 ;;
+  esac ;;
+daemon-reload)
+  rm -rf "$W/loaded-dropins/lemnosd"; mkdir -p "$W/loaded-dropins/lemnosd"
+  cp "$CR/run/systemd/system/lemnosd.service.d/"*.conf "$W/loaded-dropins/lemnosd/" 2>/dev/null
+  exit 0 ;;
+start)
+  case $u in lemnosd | comm-core | lemnos-orion) ;; *) echo "Unit $u.service not found." >&2; exit 5 ;; esac
+  f=$W/fail/$u
+  if [ -s "$f" ] && [ "$(cat "$f")" -gt 0 ]; then
+    echo $(($(cat "$f") - 1)) >"$f"
+    journal "$u" "stand-in: start job failed"
+    set_state "$u" failed
+    echo "Job for $u.service failed because the control process exited with error code." >&2
+    exit 1
+  fi
+  [ "$(state "$u")" = active ] && exit 0
+  echo running >"$W/units/$u.want"
+  sp=$(cat "$W/units/$u.sup" 2>/dev/null)
+  if [ -z "$sp" ] || ! kill -0 "$sp" 2>/dev/null; then
+    set_state "$u" activating
+    setsid "$STANDIN_BIN/standin-supervise" "$u" </dev/null >>"$W/supervise.log" 2>&1 &
+    echo $! >"$W/units/$u.sup"
+    register $!
+  fi
+  [ "$noblock" = 1 ] && exit 0
+  for _ in $(seq 100); do
+    s=$(state "$u"); [ "$s" = active ] && exit 0; [ "$s" = failed ] && exit 1; sleep 0.1
+  done
+  exit 1 ;;
+stop)
+  echo stopped >"$W/units/$u.want"
+  p=$(cat "$W/units/$u.main" 2>/dev/null)
+  [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
+  sp=$(cat "$W/units/$u.sup" 2>/dev/null)
+  if [ "$noblock" = 0 ]; then
+    for _ in $(seq 300); do [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done
+  fi
+  exit 0 ;;
+restart)
+  "$0" stop "$u"; "$0" start "$u"; exit ;;
+kill)
+  sig=${sig#SIG}
+  if transient; then
+    g=$(cat "$W/units/$u.pgid" 2>/dev/null); [ -n "$g" ] && kill -"$sig" -- "-$g"; exit ;
+  fi
+  p=$(cat "$W/units/$u.main" 2>/dev/null); [ -n "$p" ] && kill -"$sig" "$p"; exit ;;
+*) echo "stand-in systemctl: verb '$verb' not modelled" >&2; exit 1 ;;
+esac

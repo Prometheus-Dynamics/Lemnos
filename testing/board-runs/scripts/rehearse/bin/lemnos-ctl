@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Stand-in lemnos-ctl: answers only while lemnosd runs and its socket is there.
+. "$(dirname "$0")/../world.sh"
+calls "lemnos-ctl $*"
+up() { p=$(cat "$W/units/lemnosd.main" 2>/dev/null) && kill -0 "$p" 2>/dev/null && [ -e "$CR/run/lemnos/lemnosd.sock" ] && [ -e "$W/units/lemnosd.ready" ]; }
+case ${1:-} in
+validate) [ -r "${2:-}" ] && { echo "ok ${2}"; exit 0; } || { echo "cannot read ${2:-}" >&2; exit 1; } ;;
+esac
+up || { echo "lemnos-ctl: cannot connect to $CR/run/lemnos/lemnosd.sock: Connection refused" >&2; exit 1; }
+case ${1:-} in
+list) cat "$W/list" ;;
+power)
+  case ${2:-} in
+  off) : >"$W/gadget.off"; echo "${3:-} off" ;;
+  on) rm -f "$W/gadget.off"; echo "${3:-} on" ;;
+  esac ;;
+*) echo "stand-in lemnos-ctl: '$*' not modelled" >&2; exit 1 ;;
+esac

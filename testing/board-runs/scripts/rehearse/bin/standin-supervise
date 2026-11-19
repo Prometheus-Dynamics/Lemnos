@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Stand-in service manager for one unit: Restart=always, RestartSec=1s, KillMode=control-group.
+. "$(dirname "$0")/../world.sh"
+u=$1
+while :; do
+  set_state "$u" activating
+  rm -f "$W/units/$u.ready"
+  case $u in
+  lemnosd)
+    args=(); env_extra=()
+    for f in "$W/loaded-dropins/lemnosd"/*.conf; do
+      [ -e "$f" ] || continue
+      while IFS= read -r l; do
+        case $l in
+        ExecStart=?*) read -r -a args <<<"${l#ExecStart=}"; args=("${args[@]:1}") ;;
+        RestrictAddressFamilies=AF_UNIX) env_extra=(STANDIN_NO_HINTS=1) ;;
+        esac
+      done <"$f"
+    done
+    env "${env_extra[@]}" "$STANDIN_BIN/lemnosd" "${args[@]}" &
+    ;;
+  comm-core) "$STANDIN_BIN/comm-core" & ;;
+  lemnos-orion) "$STANDIN_BIN/bridge-standin" & ;;
+  esac
+  main=$!
+  echo "$main" >"$W/units/$u.main"
+  journal "$u" "Started $u (pid $main)"
+  while kill -0 "$main" 2>/dev/null && [ ! -e "$W/units/$u.ready" ]; do sleep 0.05; done
+  [ -e "$W/units/$u.ready" ] && set_state "$u" active
+  wait "$main"
+  rc=$?
+  # The kernel's part: the watchdog's close ping, and ep0 closing on a killed daemon.
+  if [ "$u" = lemnosd ]; then
+    feed
+    kmsg "watchdog: watchdog0: watchdog did not stop!"
+    [ "$rc" -gt 128 ] && [ -e "$GADGET_DIR/UDC" ] && : >"$GADGET_DIR/UDC"
+  fi
+  # KillMode=control-group: the rest of the unit's processes go before a restart.
+  extra=""; [ "$u" = lemnosd ] && extra=$W/gsuper.child
+  for p in $(cat "$W/units/$u.children" $extra 2>/dev/null); do kill -KILL "$p" 2>/dev/null; done
+  rm -f "$W/units/$u.children" "$W/units/$u.main"
+  journal "$u" "$u main process exited, status $rc"
+  if [ "$(cat "$W/units/$u.want" 2>/dev/null)" != running ]; then
+    set_state "$u" inactive
+    journal "$u" "Stopped $u"
+    exit 0
+  fi
+  set_state "$u" activating
+  sleep 1
+done

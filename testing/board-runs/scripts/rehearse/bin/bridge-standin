@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+. "$(dirname "$0")/../world.sh"
+: >"$W/units/lemnos-orion.ready"
+journal lemnos-orion "connected to Orion node bench; 4 devices published"
+while :; do sleep 1; done

@@ -1,0 +1,3 @@
+#!/bin/bash
+# (#!/bin/bash, not env: the process name must be this file's, as the real program's is.)
+while :; do sleep 1; done
