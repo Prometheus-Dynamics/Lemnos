@@ -1663,12 +1663,109 @@ touches nothing. It writes the whole range, each write read back equal. With the
 refusal tests fail.
 
 **Before a write run:**
-- the B2 path's card build with this storage, and the host's write mode;
-- their rehearsal in `b2sim`;
+- the B2 path's card build with this storage, and the host's write mode: done, see the next section;
+- their rehearsal in `b2sim`: done, see the next section;
 - the coordinator's go on the plan (`PLAN-card.md`).
 
-The plan's one boot check needs a ruling. The card does not boot from its own headers, so reaching the login prompt
-means the C3 procedure, which types into U-Boot.
+The plan's one boot check was ruled on: the C3 procedure, approved as described, after the final hashes.
+
+### B2 card writes: the scratch build, its checks and its rehearsal (PC only, no board contact)
+
+**The images** (`drivers/k230-usbboot-image/check.sh`, one codegen unit):
+
+| build | check | file bytes | footprint | sha256 |
+|---|---|---|---|---|
+| scratch (`--b2-card`, the write run's image) | links only the scratch run: no piece, report, pre-FL1 stage, probe or RAM-window symbol; its own build id once, the check build's never | 36,856 | `0x49c30` | `6ff070bbe5fd01ef149e4f3eb82240d5c4c5967dd59e55c2c9a958769ba7b8f2` |
+| check (`--b2`) | no SD host | 27,064 | `0x575f0` | `dafa94a67a176371056d542a4f29485c32232b5bb5fc0caa0503c80b7b884796` |
+| card (default: piece, report, stage) | ends below the piece job's address `0x80380000` | 65,376 | `0x1ff90` | `ce8c161e46bd062112300f3c0fa11df473e5006f8aef29de642f30e6357f2956` |
+
+**The check build's bytes changed since run 4, with the same code.** Run 4 passed with `deece853…`. The bounds
+change made the card image's `crc32` `#[inline(never)]` to fit, and the check build's bytes became `dafa94a6…`, same
+size. A normalised disassembly diff shows only the `compiler_builtins` block (memset and its neighbours) moved and
+the offsets that follow it. The write run starts with a link-only run of these bytes (`k230-b2 run`, no card code in
+that image), under the same conditions as runs 3 and 4.
+
+**Size limit for the next card-image change: 112 bytes.** The card image (the piece path's) ends at `0x8037ff90`,
+112 bytes below the piece job's address `0x80380000`. `check.sh` now prints the margin on every build. A change to
+code the card image links (the SD host, the card protocol, the bounds, the piece or the report) that adds more than
+that fails the check. Making room means a size change on purpose, not a rearrangement: an impl block placed earlier
+in `sdhci.rs` renamed the image's symbols and moved its code with no code change (now noted in the file).
+
+**What the scratch build does** (`drivers/k230-usbboot-sys/src/scratch.rs`; build id `0x4b32333042320002`):
+1. The entry arms both watchdogs. The timebase is started and checked and the watchdog clock is measured, as in the
+   check build. The same setting is chosen (covering 60 s at the measured clock), and the build feeds after each
+   verified round.
+2. The card comes up before USB:
+   - the SD pads must be on the SD function;
+   - the host must have named a controller (the write run names `sdhci1`, as the piece path does);
+   - the card must start and be the card of record (CID `03534453523634478014a7c9ab015100`, 124,735,488 blocks);
+   - the data clock (25 MHz) must start.
+
+   Any failure here prints its line and takes the SoC reset, with no write to the card and USB never pulled up.
+3. The storage is `Scratch` over `Sectors` over `Retried`:
+   - any request outside 1,048,576..1,050,623, read or write, is refused whole before the card;
+   - under it, the bounds refuse anything outside the declared range and every protected sector;
+   - a failed block try is recovered with CMD12 and tried again, up to 3 times, and counted. This is the piece
+     path's rule for the bench's one-in-14,000 data CRC failures at 25 MHz.
+4. It runs only on the new `scratch` mode, which also carries the check flag:
+   - the card image resets on the check flag;
+   - the check build runs its RAM window and identifies as itself, and the host then sends no write.
+5. The end prints `b2 card-cid0..3`, `b2 card-blocks-lo` and `b2 card-retries`, then the check build's record, the
+   cause, and the SoC reset.
+
+**The host's write mode** (`k230-b2 write`, `testing/crates/k230-usbboot/src/b2/scratch.rs`):
+- It loads only the image whose sha256 is given (a wrong sha: STOP, nothing loaded).
+- It patches the `scratch` mode with `sdhci1`, then waits, refuses, waits for udev and claims as runs 3 and 4 do,
+  and makes the same EP0 checks.
+- The steps, with the first failure sending END and nothing more:
+  1. identify, byte for byte;
+  2. the range read before, which must be zeros;
+  3. the first sector, then the last, each written and read back over USB;
+  4. the range in 16 writes of 128 sectors, every other one marked, each read back;
+  5. 11 deliberate writes outside, each unmarked and marked (22 in all), each expected refused:
+     - first−1;
+     - last+1;
+     - both straddles;
+     - 128 sectors ending past the last;
+     - sectors 0, 1, 2048 and 3072;
+     - the backup GPT header;
+     - the card's last sector.
+
+     Status 4 is expected without the mark in the boot area, 2 otherwise;
+  6. the range read back unchanged;
+  7. 16 zero writes, each read back, and the range equal to the before read;
+  8. identify, then END.
+
+**Rehearsal** (`b2sim` with `Build::Scratch`):
+- The board side is the scratch build's own `scratch` and `end` over the dwc2, watchdog and console models, and an
+  SDHCI model with a sparse card of the card of record's size and CID in its slot (`sdcard.rs`).
+- The model card has the card of record's GPT header in sector 1, zeros in the range, and a non-zero pattern
+  elsewhere.
+- The plan's regions O1 to O7 and R0 are hashed from the model card before and after, standing in for the piece path's
+  hash jobs. Every block write is logged.
+
+Results:
+- **Fail-before.** The range limit was removed for this run (storage over the whole card, protected sectors only),
+  and `scratch-good` was run: **NOT AS IT MUST**. All three of these caught it:
+  - the host stopped at the first deliberate write (1,048,575 answered status 0, not 2);
+  - the write log shows 1 write outside the range;
+  - O6's hash changed (`rehearsal-scratch-good-before-fix.log`).
+- **With the limit, all 7 cases end AS IT MUST:**
+
+| case | verdict | card writes | notes |
+|---|---|---|---|
+| `scratch-good` | Passed | 4,098, all inside | O1 to O7 and R0 hash as before; 22 refusals; retries 0 |
+| `scratch-crc-retry` | Passed | 4,098, all inside | one sector fails its data CRC twice: retries 2 |
+| `scratch-drops-writes` | Failed, status 3 at the first write | 1 (dropped) | the stage's compare catches the card; END, back |
+| `scratch-wrong-card` | GaveUp | 0 | "not the card of record"; USB never up; SoC reset |
+| `scratch-no-sd` | GaveUp | 0 | no controller named |
+| `scratch-pads-off` | GaveUp | 0 | an SD pad on another function |
+| `scratch-on-check-image` | Failed at identify | 0 | the check build answers; no write sent |
+
+In the good case the watchdog setting is 10 at 750 kHz, as in runs 3 and 4. 116 rounds were counted: the verified
+writes and reads.
+
+`tests/b2_card.rs` holds the same cases.
 
 ## No state only hands can undo
 
