@@ -8,10 +8,20 @@
 //! range as its declared one and the protected sectors besides ([`crate::bounds`]); this limit adds reads, so
 //! the scratch build cannot read the card outside the range either.
 
+use core::cell::Cell;
+
 use crate::bounds::CARD_DECLARED;
 use crate::fl1::REGIONS;
+use crate::fl1::guard::Dogs;
+use crate::fl1::run::Profile;
+use crate::format::crc32;
+use crate::wdt::{BASES, CRR, KICK, RegAccess};
+use lemnos_flash_stage::guard::{Cause, Watchdog, start};
 use lemnos_flash_stage::link::{IoError, Storage};
-use lemnos_flash_wire::frame::SECTOR;
+use lemnos_flash_stage::session::{self, SessionStop, Setup};
+use lemnos_flash_stage::usb::{Controller, Ep0};
+use lemnos_flash_stage::wait::Clock;
+use lemnos_flash_wire::frame::{ResetKind, SECTOR};
 use lemnos_flash_wire::identity::{IDENTITY_LEN, identity_record};
 
 /// The scratch build's id ("K230" "B2", serial 2): neither the check build's
@@ -89,6 +99,172 @@ impl<S: Storage> Storage for Scratch<S> {
     }
 }
 
+/// What the scratch build's storage did last, as the feed gate reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Last {
+    /// Nothing the gate counts: a read that was not a write's read-back, a failed call, or a feed that used it.
+    Nothing,
+    /// A write the storage took whole: where, how long, and the CRC of what was written.
+    Written { lba: u32, len: usize, crc: u32 },
+    /// The read-back of that write: the same sectors, read whole, equal by CRC to what was written.
+    ReadBackEqual,
+}
+
+/// The scratch build's record of verified progress: a write the storage took whole, then a read of the same
+/// sectors that came back equal. [`VerifiedFeed`] feeds only on it, once.
+pub struct Progress(Cell<Last>);
+
+impl Progress {
+    /// Nothing done yet.
+    pub const fn new() -> Self {
+        Self(Cell::new(Last::Nothing))
+    }
+
+    /// Whether the last storage calls were a write and its equal read-back; true once, then nothing again.
+    fn take_verified(&self) -> bool {
+        self.0.replace(Last::Nothing) == Last::ReadBackEqual
+    }
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The storage, with each call noted in [`Progress`]: the gate's own evidence of a verified round. The shared
+/// round writes, reads the same sectors back and compares them, then calls the feed; this wrapper sees the write and
+/// the read-back itself and compares their CRCs, so the feed holds only where the round's own compare held. A read
+/// round (the host reading) calls the same feed, but its read follows no write here, so it never feeds.
+pub struct Watched<'p, S: Storage> {
+    inner: S,
+    progress: &'p Progress,
+}
+
+impl<'p, S: Storage> Watched<'p, S> {
+    pub fn new(inner: S, progress: &'p Progress) -> Self {
+        Self { inner, progress }
+    }
+
+    /// The storage under the record (for a test's look at it).
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+}
+
+impl<S: Storage> Storage for Watched<'_, S> {
+    fn write(&mut self, lba: u32, data: &[u8], budget_us: u64) -> Result<(), IoError> {
+        let result = self.inner.write(lba, data, budget_us);
+        self.progress.0.set(match result {
+            Ok(()) => Last::Written {
+                lba,
+                len: data.len(),
+                crc: crc32(data),
+            },
+            Err(_) => Last::Nothing,
+        });
+        result
+    }
+
+    fn read(&mut self, lba: u32, out: &mut [u8], budget_us: u64) -> Result<(), IoError> {
+        let result = self.inner.read(lba, out, budget_us);
+        let was = self.progress.0.get();
+        self.progress.0.set(match (result, was) {
+            (Ok(()), Last::Written { lba: at, len, crc })
+                if at == lba && len == out.len() && crc32(out) == crc =>
+            {
+                Last::ReadBackEqual
+            }
+            _ => Last::Nothing,
+        });
+        result
+    }
+}
+
+/// Kicks both watchdogs. The scratch build's only feed: called from one place, [`VerifiedFeed`]'s gate.
+/// `check.sh --b2-card` checks the image has exactly one call to it.
+#[inline(never)]
+pub fn kick<R: RegAccess>(regs: &mut R) {
+    for base in BASES {
+        regs.write32(base + CRR, KICK);
+    }
+}
+
+/// The scratch build's watchdog during the session: the shared loop calls its feed after a write round's compare
+/// held and after a read round's reply was sent; it kicks the dogs only when [`Progress`] shows a write and its equal
+/// read-back since the last kick. Each kick is counted in `rounds`.
+pub struct VerifiedFeed<'a, R: RegAccess> {
+    regs: R,
+    progress: &'a Progress,
+    rounds: Option<&'a Cell<u32>>,
+}
+
+impl<R: RegAccess> Watchdog for VerifiedFeed<'_, R> {
+    // Not inlined: the gate is one function in the image, and it holds the only call to `kick`.
+    #[inline(never)]
+    fn feed(&mut self) {
+        if self.progress.take_verified() {
+            if let Some(rounds) = self.rounds {
+                rounds.set(rounds.get().saturating_add(1));
+            }
+            kick(&mut self.regs);
+        }
+    }
+}
+
+/// The scratch build's entry, as [`crate::fl1::run::stage_with`] with one difference: the session's watchdog is
+/// [`VerifiedFeed`], so the dogs are kicked only after a verified write round. `bring_up` must give the storage
+/// wrapped in [`Watched`] over `progress`; with any other storage nothing is ever fed, and the period ends the run.
+/// `profile.feeds` is not read: the gate decides.
+pub fn stage_scratch<C, S, K, R, B>(
+    regs: &mut R,
+    clock: &mut K,
+    buf: &mut [u8],
+    scratch: &mut [u8],
+    profile: Profile<'_>,
+    progress: &Progress,
+    bring_up: B,
+) -> Result<ResetKind, Cause>
+where
+    C: Controller,
+    S: Storage,
+    K: Clock,
+    R: RegAccess,
+    B: FnOnce(&mut R, &mut K) -> Result<(C, S), Cause>,
+{
+    let armed_at_us = clock.now_us();
+    start(
+        &mut Dogs::with_clock(&mut *regs, profile.clock_hz, profile.max_top),
+        profile.budget_us,
+    )
+    .map_err(Cause::Start)?;
+    let (mut ctrl, mut storage) = bring_up(regs, clock)?;
+    let mut ep0 = Ep0::default();
+    let mut guard = VerifiedFeed {
+        regs: &mut *regs,
+        progress,
+        rounds: profile.rounds,
+    };
+    session::run(
+        &mut ctrl,
+        clock,
+        &mut ep0,
+        &mut storage,
+        &mut guard,
+        Setup {
+            regions: &REGIONS,
+            identity: profile.identity,
+            buf,
+            scratch,
+            armed_at_us,
+        },
+    )
+    .map_err(|stop| match stop {
+        SessionStop::Enumerate(_) => Cause::Setup { step: 2 },
+        SessionStop::Serve(error) => Cause::Serve(error),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +279,91 @@ mod tests {
         assert_ne!(SCRATCH_BUILD_ID, BUILD_ID);
         let peer = identity::check(&SCRATCH_IDENTITY).unwrap();
         assert_eq!(peer.build_id, SCRATCH_BUILD_ID);
+    }
+
+    /// A RAM storage for the gate's tests, with one sector that reads back wrong when asked.
+    struct Ram {
+        bytes: std::vec::Vec<u8>,
+        flip: Option<u32>,
+    }
+
+    impl Storage for Ram {
+        fn write(&mut self, lba: u32, data: &[u8], _: u64) -> Result<(), IoError> {
+            let at = lba as usize * SECTOR;
+            self.bytes[at..at + data.len()].copy_from_slice(data);
+            Ok(())
+        }
+        fn read(&mut self, lba: u32, out: &mut [u8], _: u64) -> Result<(), IoError> {
+            let at = lba as usize * SECTOR;
+            out.copy_from_slice(&self.bytes[at..at + out.len()]);
+            if self.flip == Some(lba) {
+                out[0] ^= 1;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Bus(std::vec::Vec<(usize, u32)>);
+
+    impl RegAccess for Bus {
+        fn read32(&mut self, _: usize) -> u32 {
+            0
+        }
+        fn write32(&mut self, addr: usize, value: u32) {
+            self.0.push((addr, value));
+        }
+    }
+
+    #[test]
+    fn the_gate_kicks_once_per_write_and_equal_read_back_and_never_for_anything_else() {
+        let progress = Progress::new();
+        let rounds = Cell::new(0);
+        let mut storage = Watched::new(
+            Ram {
+                bytes: std::vec![0; 64 * SECTOR],
+                flip: Some(8),
+            },
+            &progress,
+        );
+        let mut feed = VerifiedFeed {
+            regs: Bus::default(),
+            progress: &progress,
+            rounds: Some(&rounds),
+        };
+        let data = [0x5au8; 2 * SECTOR];
+        let mut back = [0u8; 2 * SECTOR];
+        // A write and its equal read-back: one kick of each dog, one round.
+        storage.write(4, &data, 0).unwrap();
+        storage.read(4, &mut back, 0).unwrap();
+        feed.feed();
+        assert_eq!(
+            feed.regs.0,
+            [(BASES[0] + CRR, KICK), (BASES[1] + CRR, KICK)]
+        );
+        // The same feed again with nothing new: nothing.
+        feed.feed();
+        // A read alone (a read round): nothing.
+        storage.read(4, &mut back, 0).unwrap();
+        feed.feed();
+        // A write then a read of other sectors, or a shorter read: nothing.
+        storage.write(4, &data, 0).unwrap();
+        storage.read(5, &mut back, 0).unwrap();
+        feed.feed();
+        storage.write(4, &data, 0).unwrap();
+        storage.read(4, &mut back[..SECTOR], 0).unwrap();
+        feed.feed();
+        // A read-back that differs: nothing.
+        storage.write(8, &data, 0).unwrap();
+        storage.read(8, &mut back, 0).unwrap();
+        feed.feed();
+        // A write, a read-back, then a read before the feed: the read-back is no longer the last call.
+        storage.write(4, &data, 0).unwrap();
+        storage.read(4, &mut back, 0).unwrap();
+        storage.read(4, &mut back, 0).unwrap();
+        feed.feed();
+        assert_eq!(feed.regs.0.len(), 2, "{:?}", feed.regs.0);
+        assert_eq!(rounds.get(), 1);
     }
 
     #[test]

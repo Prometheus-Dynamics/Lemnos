@@ -70,6 +70,65 @@ fn the_plans_sequence_writes_only_the_range_refuses_every_write_outside_and_leav
     );
     assert!(console_has(&run, "b2 card-retries 00000000"));
     assert!(console_has(&run, "b2 card-cid0 03534453"));
+    // One feed (a kick of each dog) per verified write round, and none for anything else: the edges and the 16
+    // range and 16 zero writes, not the reads, refusals, idle waits or polls.
+    assert_eq!(run.feed_kicks().len(), 2 * 34);
+    assert!(console_has(&run, "b2 rounds 00000022"));
+}
+
+#[test]
+fn a_round_that_stalls_before_its_compare_feeds_nothing_and_the_watchdog_resets_within_one_period()
+{
+    // The card takes the sixth range write's data and then stays busy for good. The host keeps the session busy
+    // with reads and identifies, no END: only the watchdog can end it, and only if nothing but verified progress feeds.
+    let stall = CARD_DECLARED.first + 5 * 128;
+    let mut card = SimCard::of_record();
+    card.stall_after_write = Some(stall);
+    let plan = Plan {
+        keep_asking: Some(Duration::from_secs(150)),
+        bounds: Bounds {
+            back: Duration::from_secs(200),
+            ..plan().bounds
+        },
+        ..Plan::scratch()
+    };
+    let mut lines = Vec::new();
+    let run = card_run(scratch(), card, &plan, &mut |t| lines.push(t.to_string()));
+    assert!(
+        matches!(&run.outcome.verdict, Verdict::Failed(f) if f.iter().any(|t| t.contains("status 2"))),
+        "{lines:#?}"
+    );
+    let stalled = run.stalled_at.expect("the card stalled");
+    let feeds = run.feed_kicks();
+    assert_eq!(
+        feeds.len(),
+        2 * 7,
+        "the two edges and five range writes, verified"
+    );
+    assert!(
+        run.kicks.iter().all(|(at, _)| *at < stalled),
+        "a kick after the stall"
+    );
+    let last = feeds.last().unwrap().0;
+    let reset = run
+        .resets_from_load
+        .iter()
+        .find(|(_, r)| *r == Reset::Watchdog)
+        .map(|(at, _)| *at)
+        .expect("the watchdog reset the board");
+    assert!(
+        reset - last <= 89.5,
+        "{} s after the last kick",
+        reset - last
+    );
+    assert_eq!(run.resets.len(), 1);
+    assert!(run.outcome.back.is_some());
+    assert!(
+        run.problems_outside().is_empty(),
+        "{:?}",
+        run.problems_outside()
+    );
+    assert_eq!(run.writes.last(), Some(&stall));
 }
 
 #[test]

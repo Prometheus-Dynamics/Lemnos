@@ -6,6 +6,11 @@
 //! k230-b2 rehearse CASE --record FILE
 //! ```
 //!
+//! `--lock-fd N` (run and write): the caller holds the board's lock on its descriptor `N`, inherited, and keeps it
+//! for a whole sequence of steps. The tool takes no lock of its own then, and checks instead, from
+//! `/proc/self/fd/N` and `/proc/self/fdinfo/N`, that `N` is the lock file and holds an exclusive flock on it. If
+//! not, it stops with nothing opened.
+//!
 //! `run` holds the board's lock, loads the check build (`--b2` image, patched to `check` mode) through
 //! the boot ROM at the port, reads the consoles read-only, and runs the host check (`lemnos_k230_usbboot::b2`).
 //! `--dry` reads sysfs and the image and prints what would be done; it takes no lock and opens nothing.
@@ -29,7 +34,10 @@
 //! `scratch-drops-writes` (the card keeps its old content: the first write must fail its compare and the run stop),
 //! `scratch-crc-retry` (one sector's data fails its CRC twice: tried again and counted), `scratch-no-sd` (no
 //! controller named), `scratch-pads-off` (an SD pad on another function), `scratch-on-check-image` (the check
-//! build answers the scratch mode: the host must send it no write).
+//! build answers the scratch mode: the host must send it no write), `scratch-stall-before-compare` (the card takes a
+//! range write's data, then stays busy for good, so the round never reaches its read-back and compare; the host then
+//! keeps the session busy with reads and identifies instead of END: there must be no kick after the stall, and the
+//! watchdog must reset the board within one period, 89.5 s, of the last kick).
 //!
 //! Exit 0 only when the check passed (or the rehearsal's case ended as it must) and the boot ROM came back.
 
@@ -251,6 +259,9 @@ fn card_case(case: &str) -> (Faults, SimCard, fn(&Verdict) -> bool) {
         "scratch-on-check-image" => {
             |v| matches!(v, Verdict::Failed(f) if f.iter().any(|t| t.contains("not the scratch build")))
         }
+        "scratch-stall-before-compare" => {
+            |v| matches!(v, Verdict::Failed(f) if f.iter().any(|t| t.contains("status 2")))
+        }
         other => die(&format!("unknown case {other}")),
     };
     match case {
@@ -262,17 +273,29 @@ fn card_case(case: &str) -> (Faults, SimCard, fn(&Verdict) -> bool) {
         "scratch-no-sd" => f.no_sd_parameter = true,
         "scratch-pads-off" => f.sd_pads_off = true,
         "scratch-on-check-image" => f.build = Build::Check,
+        "scratch-stall-before-compare" => card.stall_after_write = Some(STALL_SECTOR),
         _ => {}
     }
     (f, card, want)
 }
+
+/// The stalled sector: the first of the sixth 128-sector range write (after the two edges and five range writes,
+/// seven verified rounds).
+const STALL_SECTOR: u64 = 1_048_576 + 5 * 128;
+
+/// One watchdog period at the setting the run chooses (10) on the model's 750 kHz clock: 2^26 cycles.
+const PERIOD_S: f64 = 89.5;
 
 fn rehearse_card(case: &str, record: &Record) -> bool {
     let (faults, card, want) = card_case(case);
     record.note(&format!("rehearsal {case}: faults {faults:?}; the card: CID {}, {} blocks, drops writes {}, CRC fails {:?}",
         lemnos_k230_usbboot::hex(&card.cid), card.blocks, card.drops_writes, card.crc_fails));
     record.note("the board: the scratch build's code (lemnos_driver_k230_usbboot_sys::scratch::scratch and end: the dwc2 driver, the FL1 device and session, the SD host, Scratch over Sectors over Retried) over the register models, the SD controller with the card in its slot; the host: lemnos_k230_usbboot::b2::run in scratch mode, the code the write run uses; the hashes: the plan's regions, read from the model card where the board run uses the piece path");
-    let plan = Plan::scratch();
+    let stall = case == "scratch-stall-before-compare";
+    let plan = Plan {
+        keep_asking: stall.then_some(Duration::from_secs(150)),
+        ..Plan::scratch()
+    };
     record.note(&format!("plan: {plan:?}"));
     let run = card_run(faults, card, &plan, &mut |t| {
         record.note(&format!("host: {t}"))
@@ -293,7 +316,11 @@ fn rehearse_card(case: &str, record: &Record) -> bool {
         inside.len(),
         outside.len()
     ));
-    let problems = run.problems();
+    let problems = if stall {
+        run.problems_outside()
+    } else {
+        run.problems()
+    };
     for text in &problems {
         record.note(&format!("PROBLEM: {text}"));
     }
@@ -301,7 +328,53 @@ fn rehearse_card(case: &str, record: &Record) -> bool {
         record.note("every plan region hashes as before (the range too, zeroed at the end), and no card write fell outside the range");
     }
     let mut ok = want(&run.outcome.verdict) && run.outcome.back.is_some() && problems.is_empty();
-    ok &= !run.resets.is_empty() && run.resets.iter().all(|(_, r)| *r == Reset::Soc);
+    let reset = if stall { Reset::Watchdog } else { Reset::Soc };
+    ok &= !run.resets.is_empty() && run.resets.iter().all(|(_, r)| *r == reset);
+    // The feeds: every kick after the card's ready line, one per dog per verified write round.
+    let feeds = run.feed_kicks();
+    let rounds = run
+        .console
+        .iter()
+        .find_map(|(_, l)| l.strip_prefix("b2 rounds "))
+        .and_then(|h| u32::from_str_radix(h, 16).ok());
+    record.note(&format!(
+        "watchdog kicks by the session's feeds: {} ({} per dog); the record's rounds {rounds:?}",
+        feeds.len(),
+        feeds.len() / 2
+    ));
+    let verified = match case {
+        "scratch-good" | "scratch-crc-retry" => Some(2 + 2 * 16),
+        "scratch-stall-before-compare" => Some(2 + 5),
+        _ => Some(0),
+    };
+    let feeds_ok = verified == Some(feeds.len() / 2)
+        && feeds.len().is_multiple_of(2)
+        && (rounds.is_none() || rounds == verified.map(|v| v as u32));
+    record.note(&format!(
+        "feeds as the case must have them (one per verified write round, {verified:?}): {feeds_ok}"
+    ));
+    ok &= feeds_ok;
+    if stall {
+        let stalled = run.stalled_at.unwrap_or(f64::INFINITY);
+        let after: Vec<_> = run.kicks.iter().filter(|(at, _)| *at >= stalled).collect();
+        let last = feeds.last().map_or(0.0, |(at, _)| *at);
+        let reset = run
+            .resets_from_load
+            .iter()
+            .find(|(_, r)| *r == Reset::Watchdog)
+            .map(|(at, _)| *at);
+        record.note(&format!(
+            "stall at {stalled:.3} s from the load; kicks after it: {}; last kick at {last:.3} s; watchdog reset at {reset:?} s, {:?} s after the last kick (one period is {PERIOD_S} s)",
+            after.len(),
+            reset.map(|r| r - last)
+        ));
+        let in_time = reset.is_some_and(|r| r > stalled && r - last <= PERIOD_S);
+        record.note(&format!(
+            "no feed after the stall, and the watchdog within one period: {}",
+            after.is_empty() && in_time
+        ));
+        ok &= after.is_empty() && in_time;
+    }
     let console: Vec<&str> = run.console.iter().map(|(_, l)| l.as_str()).collect();
     let needs: &[&str] = match case {
         "scratch-good" => &["b2 card: the card of record", "b2 card-retries 00000000"],
@@ -322,6 +395,9 @@ fn rehearse_card(case: &str, record: &Record) -> bool {
     let writes_ok = match case {
         "scratch-good" | "scratch-crc-retry" => inside.len() == 2 + 2 * 2048,
         "scratch-drops-writes" => run.writes.len() == 1,
+        "scratch-stall-before-compare" => {
+            inside.len() == 2 + 5 * 128 + 1 && run.writes.last() == Some(&STALL_SECTOR)
+        }
         _ => run.writes.is_empty(),
     };
     record.note(&format!(
@@ -339,6 +415,35 @@ fn rehearse_card(case: &str, record: &Record) -> bool {
             .map(|(s, after)| (s.devnum, *after))
     ));
     ok
+}
+
+/// Whether the inherited descriptor `fd` is the board's lock file and holds an exclusive flock on it.
+fn held_by_caller(fd: &str) -> Result<(), String> {
+    let n: u32 = fd
+        .parse()
+        .map_err(|_| "not a descriptor number".to_string())?;
+    let target = std::fs::read_link(format!("/proc/self/fd/{n}"))
+        .map_err(|e| format!("descriptor {n} is not open ({e})"))?;
+    if target != std::path::Path::new(b2::LOCK) {
+        return Err(format!(
+            "descriptor {n} is {}, not {}",
+            target.display(),
+            b2::LOCK
+        ));
+    }
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{n}"))
+        .map_err(|e| format!("its fdinfo: {e}"))?;
+    let locked = info.lines().any(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.first() == Some(&"lock:") && w.contains(&"FLOCK") && w.contains(&"WRITE")
+    });
+    if !locked {
+        return Err(format!(
+            "descriptor {n} holds no exclusive flock on {}",
+            b2::LOCK
+        ));
+    }
+    Ok(())
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -446,22 +551,49 @@ fn board_run(
             rom.devnode(),
             sysfs.access(&rom)
         ));
+        if let Some(fd) = opt.get("lock-fd") {
+            let held = held_by_caller(fd);
+            record.note(&format!("dry: --lock-fd {fd}: {held:?}"));
+            if held.is_err() {
+                return false;
+            }
+        }
         record.note("dry: no lock taken, nothing opened, nothing loaded");
         return true;
     }
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(b2::LOCK)
-        .unwrap_or_else(|e| die(&format!("the lock {}: {e}", b2::LOCK)));
-    if let Err(e) = rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-        record.note(&format!(
-            "STOP: the board's lock {} is held ({e})",
-            b2::LOCK
-        ));
-        return false;
-    }
+    let lock = match opt.get("lock-fd") {
+        Some(fd) => match held_by_caller(fd) {
+            Ok(()) => {
+                record.note(&format!(
+                    "the board's lock {} is held by the caller on descriptor {fd} (an exclusive flock, checked)",
+                    b2::LOCK
+                ));
+                None
+            }
+            Err(e) => {
+                record.note(&format!("STOP: --lock-fd {fd}: {e}"));
+                return false;
+            }
+        },
+        None => {
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(b2::LOCK)
+                .unwrap_or_else(|e| die(&format!("the lock {}: {e}", b2::LOCK)));
+            if let Err(e) =
+                rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            {
+                record.note(&format!(
+                    "STOP: the board's lock {} is held ({e})",
+                    b2::LOCK
+                ));
+                return false;
+            }
+            Some(lock)
+        }
+    };
     // Console lines are stamped from here (just before the load's start command).
     let opened = Instant::now();
     let consoles: Vec<(String, Console)> = console_paths

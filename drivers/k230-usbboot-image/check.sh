@@ -96,6 +96,19 @@ if [ "$card" = 1 ]; then
   [ "$scratch_syms" -gt 0 ] || { echo "FAIL: no scratch run in the scratch build"; fail=1; }
   [ "$sd_host" -gt 0 ] || { echo "FAIL: no SD host in the scratch build"; fail=1; }
   grep -q '<lemnos_image_run>:' "$work/image.dis" || { echo "FAIL: no run entry in the scratch build"; fail=1; }
+  # The feed: the watchdog kick (fl1::scratch::kick) exists once and is reached from exactly one instruction, a
+  # call or tail call in the gate (VerifiedFeed's Watchdog::feed), which kicks only after a verified write round.
+  # References with an offset are branches inside kick itself.
+  kick_defs=$(grep -cE '^[0-9a-f]+ <[^>]*7scratch4kick[^>]*>:' "$work/image.dis" || true)
+  kick_refs=$(awk '
+    /^[0-9a-f]+ <[^>]*>:$/ { fn = $2; next }
+    /7scratch4kick/ && !/7scratch4kick[^>]*\+0x/ { print fn }
+  ' "$work/image.dis")
+  kick_callers=$(printf '%s' "$kick_refs" | grep -c . || true)
+  echo "b2-card: kick defined $kick_defs time(s), referenced from $kick_callers instruction(s)"
+  [ "$kick_defs" = 1 ] || { echo "FAIL: the kick is not one function"; fail=1; }
+  [ "$kick_callers" = 1 ] || { echo "FAIL: the kick has $kick_callers callers, not exactly one:"; echo "$kick_refs"; fail=1; }
+  printf '%s' "$kick_refs" | grep -qE '12VerifiedFeed.*8Watchdog4feed' || { echo "FAIL: the kick's caller is not the gate (VerifiedFeed's feed)"; fail=1; }
   # The identities, by their build ids as the record carries them (little-endian): the scratch build's present, the
   # check build's absent.
   python3 -I - "$work/image.bin" <<'PY' || fail=1
