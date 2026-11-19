@@ -8,12 +8,16 @@
 //! - [`packet`], [`burner`], [`write`]: the burner protocol, the reads and the write path.
 //! - [`flash`]: the flasher. Its order never leaves a valid header over an incomplete payload.
 //! - [`usb`]: the host's USB transport over libusb (`rusb`). It opens a device only when asked.
+//! - [`b2`]: the host's side of the B2 run (the FL1 stage's own USB device path), over traits; [`b2sim`]
+//!   is the rehearsal's board for it (the check build's code over a register model of the dwc2 core).
 //! - [`sim`]: a simulated board. Its boot ROM, its stage (the `lemnos-k230-usbboot-stage` code)
 //!   and its watchdog model, with power cuts and the faults a real medium can show.
 //!
 //! The facts each request depends on are the vendor sources' (see `docs/flashing.md`). Nothing
 //! here has run on a board.
 
+pub mod b2;
+pub mod b2sim;
 pub mod bootrom;
 pub mod burner;
 pub mod console;

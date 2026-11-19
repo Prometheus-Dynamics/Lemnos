@@ -11,12 +11,31 @@ use lemnos_flash_stage::guard::{Guard, Watchdog};
 /// The two watchdogs of the K230, driven through a register bus.
 pub struct Dogs<R: RegAccess> {
     regs: R,
+    /// The clock the periods are computed at.
+    clock_hz: u64,
+    /// The longest setting armed first.
+    max_top: u8,
 }
 
 impl<R: RegAccess> Dogs<R> {
-    /// Wraps the bus. It arms nothing: [`Guard::arm`] does, and the entry calls it first.
+    /// Wraps the bus. It arms nothing: [`Guard::arm`] does, and the entry calls it first. The periods are
+    /// taken at the lowest clock the design accepts, and the longest setting is [`TOP`].
     pub fn new(regs: R) -> Self {
-        Self { regs }
+        Self {
+            regs,
+            clock_hz: CLOCK_HZ_MIN,
+            max_top: TOP,
+        }
+    }
+
+    /// Wraps the bus with a clock the caller measured (`clock_hz`, rounded up by the caller so a period is
+    /// never taken longer than it is) and a longest setting of `max_top` (at most 15, the block's last).
+    pub fn with_clock(regs: R, clock_hz: u64, max_top: u8) -> Self {
+        Self {
+            regs,
+            clock_hz: clock_hz.max(1),
+            max_top: max_top.min(15),
+        }
     }
 }
 
@@ -31,7 +50,7 @@ impl<R: RegAccess> Watchdog for Dogs<R> {
 impl<R: RegAccess> Guard for Dogs<R> {
     fn arm(&mut self) {
         for base in BASES {
-            self.regs.write32(base + TORR, torr(TOP));
+            self.regs.write32(base + TORR, torr(self.max_top));
             self.regs.write32(base + CRR, KICK);
             self.regs.write32(base + CR, CR_ENABLE);
         }
@@ -52,11 +71,11 @@ impl<R: RegAccess> Guard for Dogs<R> {
     }
 
     fn max_top(&self) -> u8 {
-        TOP
+        self.max_top
     }
 
     fn period_us(&self, top: u8) -> u64 {
-        crate::wdt::period_us(top, CLOCK_HZ_MIN)
+        crate::wdt::period_us(top, self.clock_hz)
     }
 
     fn set_top(&mut self, top: u8) {

@@ -11,10 +11,19 @@
 //! code path writes a watchdog's CR to clear it, and the host reaches no register). The deadline (the
 //! time CSR against `SPIN_DEADLINE_TICKS`) and the SoC reset are the paths the image's own code takes.
 //!
+//! Built with the `b2` feature, the image is the B2 check build: [`lemnos_image_run`] runs only the check
+//! ([`run_check`]: the FL1 stage's USB device path over a RAM window, `fl1::check`), and nothing reaches the
+//! SD host, so the linker drops its code (`check.sh --b2` checks the image for it).
+//!
 //! The image is linked at `LOAD_ADDRESS` (`drivers/k230-usbboot-image/image.ld`), so it is not
 //! position-independent: the host loads it there and only there.
 
-use lemnos_k230_usbboot_stage::image::{BLOCK_MAGIC, PIECE, REPORT, SD_NONE, STAGE, read_block};
+// The check build reaches only its own run: the rest of this file is not called, and the linker drops it.
+#![cfg_attr(feature = "b2", allow(dead_code, unused_imports))]
+
+use lemnos_k230_usbboot_stage::image::{
+    BLOCK_MAGIC, CHECK, PIECE, REPORT, SD_NONE, STAGE, read_block,
+};
 use lemnos_k230_usbboot_stage::medium::{Geometry, Medium, MediumError, NoMedium};
 use lemnos_k230_usbboot_stage::pads::{self, PadGuard};
 use lemnos_k230_usbboot_stage::piece::{self, Job, PieceError};
@@ -32,7 +41,7 @@ use lemnos_k230_usbboot_stage::wdt::RegAccess;
 use lemnos_k230_usbboot_stage::wdt::{self, Dog};
 
 use crate::Mmio;
-use crate::dwc2::Dwc2;
+use crate::dwc2_legacy::Dwc2;
 use crate::sdhci::{self, SdhciHost};
 
 /// The mode block the host patches: magic, mode, !mode, SD parameter, !SD parameter. The host finds the
@@ -262,9 +271,14 @@ pub unsafe extern "C" fn lemnos_image_entry() -> ! {
 }
 
 /// The run the entry calls once the watchdogs the mode names are armed and read back: the stage (its
-/// medium, its device path and its state machine) or a probe (telemetry and the deadline).
+/// medium, its device path and its state machine) or a probe (telemetry and the deadline). This image is
+/// not the check build: the check mode is refused by the SoC reset.
+#[cfg(not(feature = "b2"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn lemnos_image_run(flags: u32) -> ! {
+    if flags & CHECK != 0 {
+        soc_reset()
+    }
     if flags & PIECE != 0 {
         run_piece()
     } else if flags & REPORT != 0 {
@@ -789,4 +803,75 @@ fn read_sd_parameter() -> Option<u32> {
     // aligned and in bounds.
     let words: [u32; 5] = unsafe { core::ptr::read_volatile(&raw const lemnos_image_block) };
     read_block(&words).and_then(|(_, sd)| sd)
+}
+
+/// The check build's run: the mode must be the check, or the SoC reset.
+#[cfg(feature = "b2")]
+#[unsafe(no_mangle)]
+pub extern "C" fn lemnos_image_run(flags: u32) -> ! {
+    if flags & CHECK != 0 {
+        b2::run_check()
+    }
+    soc_reset()
+}
+
+/// The B2 check run ([`lemnos_k230_usbboot_stage::fl1::check`]).
+#[cfg(feature = "b2")]
+mod b2 {
+    use super::read_time;
+    use crate::Mmio;
+    use crate::b2::{Buffers, Known, RX_LEN, check, end};
+    use crate::dwc2::{Stats, Window};
+    use lemnos_flash_stage::serve::BUFFER_LEN;
+    use lemnos_flash_stage::wait::Clock;
+    use lemnos_k230_usbboot_stage::fl1::check::{TIMEBASE_HZ, WINDOW_LEN};
+    use lemnos_k230_usbboot_stage::pads::PadGuard;
+
+    // The check's buffers, in .bss (the entry zeroes it). Each is borrowed once, in `run_check`.
+    static mut BUF: [u8; BUFFER_LEN] = [0; BUFFER_LEN];
+    static mut SCRATCH: [u8; BUFFER_LEN] = [0; BUFFER_LEN];
+    static mut RX: [u8; RX_LEN] = [0; RX_LEN];
+    static mut WINDOW: [u8; WINDOW_LEN] = [0; WINDOW_LEN];
+
+    /// The driver's counts, read by the record.
+    static STATS: Stats = Stats::new();
+
+    /// The session's clock: the `time` CSR at [`TIMEBASE_HZ`], in microseconds.
+    #[derive(Clone, Copy)]
+    struct Micros;
+
+    impl Clock for Micros {
+        fn now_us(&mut self) -> u64 {
+            read_time() / (TIMEBASE_HZ / 1_000_000)
+        }
+    }
+
+    /// The check on the board's buses (`crate::b2`), then its end: the record, the cause, the SoC reset.
+    pub(super) fn run_check() -> ! {
+        let mut regs = PadGuard::new(Mmio);
+        let mut known = Known::new(read_time());
+        // SAFETY: each static is borrowed exactly once, here, for the rest of the run (it never returns).
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
+        // SAFETY: as above, for the scratch buffer.
+        let scratch = unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) };
+        // SAFETY: as above, for the bulk OUT buffer.
+        let rx = unsafe { &mut *core::ptr::addr_of_mut!(RX) };
+        // SAFETY: as above, for the RAM window.
+        let window = unsafe { &mut *core::ptr::addr_of_mut!(WINDOW) };
+        let cause = check(
+            &mut regs,
+            Window,
+            &mut Micros,
+            &|| read_time(),
+            Buffers {
+                buf,
+                scratch,
+                rx,
+                window,
+            },
+            &STATS,
+            &mut known,
+        );
+        end(&mut regs, &STATS, &known, read_time(), cause)
+    }
 }

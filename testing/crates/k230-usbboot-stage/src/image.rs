@@ -45,6 +45,11 @@ pub const REPORT: u32 = 1 << 4;
 /// writes the card.
 pub const PIECE: u32 = 1 << 5;
 
+/// Mode flag: the B2 check build ([`crate::fl1::check`]): the FL1 stage's own USB device path, a RAM
+/// window and a record in place of the card, never fed. Only an image built for the check (no SD host code
+/// linked in) runs it; any other image refuses the flag by its SoC reset.
+pub const CHECK: u32 = 1 << 6;
+
 /// The mode word of a named run: the five probe runs and the stage.
 pub fn mode_word(name: &str) -> Option<u32> {
     match name {
@@ -56,6 +61,7 @@ pub fn mode_word(name: &str) -> Option<u32> {
         "stage" => Some(STAGE | WDT0 | WDT1),
         "report" => Some(REPORT | WDT0),
         "piece" => Some(PIECE | WDT0),
+        "check" => Some(CHECK | STAGE | WDT0 | WDT1),
         _ => None,
     }
 }
@@ -151,6 +157,7 @@ mod tests {
         assert_eq!(mode_word("spin"), Some(0));
         assert_eq!(mode_word("soc"), Some(SOC_AT_ONCE));
         assert_eq!(mode_word("stage"), Some(STAGE | WDT0 | WDT1));
+        assert_eq!(mode_word("check"), Some(CHECK | STAGE | WDT0 | WDT1));
         assert_eq!(mode_word("five"), None);
     }
 

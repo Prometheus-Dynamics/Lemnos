@@ -13,8 +13,9 @@
 use crate::fl1::guard::Dogs;
 use crate::fl1::report::Uart;
 use crate::fl1::{IDENTITY, REGIONS};
-use crate::wdt::RegAccess;
-use lemnos_flash_stage::guard::{Cause, finish, start};
+use crate::wdt::{CLOCK_HZ_MIN, RegAccess, TOP};
+use core::cell::Cell;
+use lemnos_flash_stage::guard::{Cause, Watchdog, finish, start};
 use lemnos_flash_stage::link::Storage;
 use lemnos_flash_stage::session::{self, SessionStop, Setup};
 use lemnos_flash_stage::usb::{Controller, Ep0};
@@ -40,20 +41,100 @@ where
     R: RegAccess,
     B: FnOnce(&mut R, &mut K) -> Result<(C, S), Cause>,
 {
+    stage_with(
+        regs,
+        clock,
+        buf,
+        scratch,
+        Profile {
+            identity: &IDENTITY,
+            budget_us: SESSION_BUDGET_US,
+            clock_hz: CLOCK_HZ_MIN,
+            max_top: TOP,
+            feeds: true,
+            rounds: None,
+        },
+        bring_up,
+    )
+}
+
+/// What a build of the stage serves with: its identity record, the budget its watchdog period must cover,
+/// the watchdog clock the periods are computed at, and whether a verified round feeds. The regions are the
+/// K230's ([`REGIONS`]) in every build.
+#[derive(Clone, Copy)]
+pub struct Profile<'a> {
+    /// The identity record a host reads first.
+    pub identity: &'a [u8],
+    /// The budget the period is lowered to cover ([`lemnos_flash_stage::guard::start`]).
+    pub budget_us: u64,
+    /// The watchdog clock, rounded up (a period is never taken as longer than it is).
+    pub clock_hz: u64,
+    /// The longest setting, armed first.
+    pub max_top: u8,
+    /// Whether a verified round feeds the watchdogs. A build that never feeds is bounded by one period
+    /// from the arming, whatever the host does.
+    pub feeds: bool,
+    /// Counts the verified rounds (the feeds the shared rule asks for, made or not), when given.
+    pub rounds: Option<&'a Cell<u32>>,
+}
+
+/// The session's watchdog: the two dogs, fed or not as the profile says, with the rounds counted.
+struct Rounds<'a, R: RegAccess> {
+    dogs: Dogs<R>,
+    feeds: bool,
+    rounds: Option<&'a Cell<u32>>,
+}
+
+impl<R: RegAccess> Watchdog for Rounds<'_, R> {
+    fn feed(&mut self) {
+        if let Some(rounds) = self.rounds {
+            rounds.set(rounds.get().saturating_add(1));
+        }
+        if self.feeds {
+            self.dogs.feed();
+        }
+    }
+}
+
+/// [`stage`] with a build's own [`Profile`]. The order is the same: arm and read back first, then the
+/// bring-up, then the session.
+pub fn stage_with<C, S, K, R, B>(
+    regs: &mut R,
+    clock: &mut K,
+    buf: &mut [u8],
+    scratch: &mut [u8],
+    profile: Profile<'_>,
+    bring_up: B,
+) -> Result<ResetKind, Cause>
+where
+    C: Controller,
+    S: Storage,
+    K: Clock,
+    R: RegAccess,
+    B: FnOnce(&mut R, &mut K) -> Result<(C, S), Cause>,
+{
     let armed_at_us = clock.now_us();
-    start(&mut Dogs::new(&mut *regs), SESSION_BUDGET_US).map_err(Cause::Start)?;
+    start(
+        &mut Dogs::with_clock(&mut *regs, profile.clock_hz, profile.max_top),
+        profile.budget_us,
+    )
+    .map_err(Cause::Start)?;
     let (mut ctrl, mut storage) = bring_up(regs, clock)?;
     let mut ep0 = Ep0::default();
-    let mut dogs = Dogs::new(&mut *regs);
+    let mut guard = Rounds {
+        dogs: Dogs::with_clock(&mut *regs, profile.clock_hz, profile.max_top),
+        feeds: profile.feeds,
+        rounds: profile.rounds,
+    };
     session::run(
         &mut ctrl,
         clock,
         &mut ep0,
         &mut storage,
-        &mut dogs,
+        &mut guard,
         Setup {
             regions: &REGIONS,
-            identity: &IDENTITY,
+            identity: profile.identity,
             buf,
             scratch,
             armed_at_us,

@@ -14,3 +14,7 @@ workspace = true
 
 [dependencies]
 lemnos-driver-k230-usbboot-sys = { path = "../k230-usbboot-sys" }
+
+[features]
+# The B2 check build (see lemnos-driver-k230-usbboot-sys's feature of the same name).
+b2 = ["lemnos-driver-k230-usbboot-sys/b2"]
