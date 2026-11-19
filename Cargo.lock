@@ -1807,6 +1807,8 @@ dependencies = [
 name = "lemnos-driver-k230-usbboot-sys"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-flash-stage",
+ "lemnos-flash-wire",
  "lemnos-k230-usbboot-stage",
 ]
 
@@ -2634,6 +2636,9 @@ dependencies = [
 name = "lemnos-k230-usbboot"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-driver-k230-usbboot-sys",
+ "lemnos-flash-stage",
+ "lemnos-flash-wire",
  "lemnos-k230-usbboot-stage",
  "rusb",
  "rustix",

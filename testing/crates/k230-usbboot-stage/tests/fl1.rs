@@ -330,7 +330,7 @@ fn a_setup_during_a_status_wait_aborts_the_request_and_is_kept_for_the_next_poll
 }
 
 #[test]
-fn a_bulk_frame_is_taken_once_with_its_length_and_an_oversize_frame_is_refused() {
+fn a_bulk_frame_is_taken_once_with_its_length_and_an_oversize_frame_keeps_its_length() {
     let mut clock = Tick::new();
     let host = Host {
         script: VecDeque::from(vec![
@@ -348,10 +348,11 @@ fn a_bulk_frame_is_taken_once_with_its_length_and_an_oversize_frame_is_refused()
     assert_eq!(&out[..5], &[1, 2, 3, 4, 5]);
     assert_eq!(dev.bulk_poll(&mut out), Ok(None), "a frame is taken once");
     assert_eq!(dev.poll(deadline), Event::None);
+    let mut out = [0u8; 8];
     assert_eq!(
-        dev.bulk_poll(&mut out[..8]),
-        Err(UsbError::Failed),
-        "9 bytes into 8 is refused"
+        dev.bulk_poll(&mut out),
+        Ok(Some(9)),
+        "9 bytes into 8 is reported as 9, so the serve loop refuses it by length; it is not cut to 8"
     );
 }
 

@@ -5,16 +5,30 @@
 # The checks: the entry is at the load address; the image's footprint (code, data, bss and stack, the
 # whole memory it occupies from the load address) ends inside the range 0x80300000..=0x80400000, so the
 # footprint is at most 0xA0000 bytes; the image has no relocations (it is linked where it runs).
+#
+# With --b2 it builds the B2 check build instead (feature `b2`: the FL1 stage's USB device path over a RAM
+# window, testing/board-runs/K230-USB.md "B2") into its own directory, and checks two more things: the image
+# reaches no SD host (no symbol of the SD code, and no instruction that forms an SD controller's base
+# address), and it carries the check build's identity. The piece job's address does not apply to it.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 target=riscv64imac-unknown-none-elf
 out="${CARGO_TARGET_DIR:-$repo/target}"
+b2=0
+[ "${1:-}" = "--b2" ] && b2=1
 cd "$repo"
-cargo build -p lemnos-k230-usbboot-image --target "$target" --release
+if [ "$b2" = 1 ]; then
+  # Its own target subdirectory, so the two builds' libraries never overwrite each other.
+  out="$out/b2"
+  CARGO_TARGET_DIR="$out" cargo build -p lemnos-k230-usbboot-image --target "$target" --release --features b2
+else
+  cargo build -p lemnos-k230-usbboot-image --target "$target" --release
+fi
 lib="$out/$target/release/liblemnos_k230_usbboot_image.a"
 sysroot="$(rustc --print sysroot)"
 lld="$(ls "$sysroot"/lib/rustlib/*/bin/rust-lld | head -1)"
 work="${TMPDIR:-/tmp}/k230-usbboot-image"
+[ "$b2" = 1 ] && work="$work-b2"
 mkdir -p "$work"
 "$lld" -flavor gnu -T "$repo/drivers/k230-usbboot-image/image.ld" --gc-sections -o "$work/image.elf" "$lib"
 rust-objcopy -O binary "$work/image.elf" "$work/image.bin"
@@ -53,6 +67,18 @@ fail=0
 [ $((load_start)) -eq $((0x80360000)) ] || { echo "FAIL: the load segment is not at the load address"; fail=1; }
 [ $((end)) -le $((0x80400000)) ] || { echo "FAIL: the image runs past 0x80400000"; fail=1; }
 [ "$footprint" -le $((0xA0000)) ] || { echo "FAIL: the footprint is over 0xA0000"; fail=1; }
-[ $((end)) -le $((0x80380000)) ] || { echo "FAIL: the image runs into the piece job's address 0x80380000"; fail=1; }
+if [ "$b2" = 0 ]; then
+  [ $((end)) -le $((0x80380000)) ] || { echo "FAIL: the image runs into the piece job's address 0x80380000"; fail=1; }
+else
+  # No SD host in the check build: no symbol of the SD code, and no lui that forms 0x91580000 or 0x91581000
+  # (the two SDHCI bases, k230.dtsi:154-176) or 0x91585000 and up.
+  sd_symbols=$(grep -cE '<[^>]*(sdhci|SdhciHost|sd5Card|read_card|run_piece|run_report|stage_medium)[^>]*>:' "$work/image.dis" || true)
+  sd_bases=$(grep -ciE 'lui[[:space:]]+[a-z0-9]+, (0x9158[01]|594304|594305)$' "$work/image.dis" || true)
+  echo "b2: SD symbols $sd_symbols, SD base loads $sd_bases"
+  [ "$sd_symbols" = 0 ] || { echo "FAIL: the check build carries SD host code"; fail=1; }
+  [ "$sd_bases" = 0 ] || { echo "FAIL: the check build forms an SD controller's address"; fail=1; }
+  grep -q '<lemnos_image_run>:' "$work/image.dis" || { echo "FAIL: no run entry in the check build"; fail=1; }
+fi
 [ "$relocs" = "0" ] || { echo "FAIL: the image has relocations"; fail=1; }
+sha256sum "$work/image.bin"
 [ "$fail" = "0" ] && echo "image link checks hold" || exit 1

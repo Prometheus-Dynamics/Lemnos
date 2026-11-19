@@ -25,3 +25,11 @@ multiple_unsafe_ops_per_block = "deny"
 
 [dependencies]
 lemnos-k230-usbboot-stage = { path = "../../testing/crates/k230-usbboot-stage" }
+# The B2 check build's session and frame sizes (the shared stage rules and the wire).
+lemnos-flash-stage = { path = "../flash-stage" }
+lemnos-flash-wire = { path = "../flash-wire" }
+
+[features]
+# The B2 check build: the image runs only the check (fl1::check), and the SD host code is not reached, so
+# the linker drops it. drivers/k230-usbboot-image/check.sh --b2 builds it and checks the image for it.
+b2 = []

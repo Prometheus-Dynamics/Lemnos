@@ -6,15 +6,21 @@
 //! Waits: every method that waits takes the phase's deadline and returns `UsbError::Timeout` when
 //! the clock passes it. A `UsbHw` call that cannot finish is the hardware's own bounded wait.
 //!
-//! Bench checks, not proven in simulation: the speed (the stage reports high speed; dwc2's enum
-//! speed is not read), the order of SET_ADDRESS against its status stage (`address_before_status`),
-//! and that the dwc2 device path arms the bulk OUT after each frame, as `UsbHw` implies.
+//! Bench checks, not proven in simulation: the speed (read from the controller when it can say, see
+//! [`UsbHw::enum_speed`]; dwc2 reads `DSTS.ENUMSPD`), the order of SET_ADDRESS against its status stage
+//! (`address_before_status`), and that the dwc2 device path arms the bulk OUT after each frame, as
+//! `UsbHw` implies. The K230 B2 check build records each of them (`fl1::check::record`).
+//!
+//! A bulk OUT transfer longer than the frame the shared code armed for is reported with its whole
+//! length, so the shared serve loop refuses it by length (status 5) and the session goes on; it is
+//! never cut down to a frame of the expected length.
 
 use crate::usb_dev::{self as hw, BULK_IN, BULK_OUT, EP0, Event as HwEvent, HwError, UsbHw};
 use lemnos_flash_stage::usb::{Controller, Event, Speed, UsbError};
 use lemnos_flash_stage::wait::Clock;
 
-/// The largest bulk frame the device takes. Larger is a failed transfer, not a truncated one.
+/// The largest bulk frame the default device buffer takes ([`UsbHw::rx_capacity`] is the controller's
+/// own). An arm for more is refused before the hardware is asked.
 pub const BULK_MAX: usize = hw::RX_MAX;
 
 /// The controller over the device hardware, with the clock its waits are read on.
@@ -49,7 +55,11 @@ impl<H: UsbHw, K: Clock> Device<H, K> {
     fn map(&mut self, event: HwEvent) -> Event {
         match event {
             HwEvent::Idle => Event::None,
-            HwEvent::BusReset => Event::BusReset,
+            HwEvent::BusReset => {
+                // A frame from before the reset is gone with it.
+                self.bulk_ready = None;
+                Event::BusReset
+            }
             HwEvent::Setup(setup) => Event::Setup(setup),
             HwEvent::Out { ep: BULK_OUT, len } => {
                 self.bulk_ready = Some(len);
@@ -89,10 +99,15 @@ impl<H: UsbHw, K: Clock> Controller for Device<H, K> {
         Ok(())
     }
 
-    fn set_configured(&mut self, _on: bool, deadline_us: u64) -> Result<(), UsbError> {
-        // The endpoints are set up at core reset (bench check); configuring is only a deadline.
+    fn set_configured(&mut self, on: bool, deadline_us: u64) -> Result<(), UsbError> {
         if self.passed(deadline_us) {
             return Err(UsbError::Timeout);
+        }
+        // The bulk pair is activated here, not at core reset: dwc2 deactivates its non-control
+        // endpoints on every bus reset, and a host resets the bus before it configures.
+        self.hw.configure(on);
+        if !on {
+            self.bulk_ready = None;
         }
         Ok(())
     }
@@ -139,7 +154,13 @@ impl<H: UsbHw, K: Clock> Controller for Device<H, K> {
     }
 
     fn speed(&mut self) -> Speed {
-        Speed::High
+        match self.hw.enum_speed() {
+            // A controller that cannot say is taken at high speed, as the device descriptor states.
+            None | Some(0) => Speed::High,
+            Some(1 | 3) => Speed::Full,
+            Some(2) => Speed::Low,
+            Some(_) => Speed::Unknown,
+        }
     }
 
     fn address_before_status(&self) -> bool {
@@ -147,13 +168,14 @@ impl<H: UsbHw, K: Clock> Controller for Device<H, K> {
     }
 
     fn bulk_arm(&mut self, len: usize, deadline_us: u64) -> Result<(), UsbError> {
-        if len > BULK_MAX {
+        if len > self.hw.rx_capacity() {
             return Err(UsbError::Failed);
         }
         if self.passed(deadline_us) {
             return Err(UsbError::Timeout);
         }
-        self.bulk_ready = None;
+        // A frame that completed before this arm is kept: the hardware holds it (its endpoint is not
+        // armed again until the frame is taken), so dropping it here would lose it for good.
         Ok(())
     }
 
@@ -161,14 +183,15 @@ impl<H: UsbHw, K: Clock> Controller for Device<H, K> {
         let Some(len) = self.bulk_ready.take() else {
             return Ok(None);
         };
-        if len > out.len() {
-            return Err(UsbError::Failed);
-        }
+        // A transfer longer than the frame is taken whole by the hardware and reported with its own
+        // length: the caller refuses it by length. What fits is copied; the rest is dropped.
+        let take = len.min(out.len());
         let n = self
             .hw
-            .read_out(BULK_OUT, &mut out[..len])
+            .read_out_part(BULK_OUT, &mut out[..take])
             .map_err(map_error)?;
-        Ok(Some(n))
+        // The transfer's length is the one the hardware reported for it, whatever was copied.
+        Ok(Some(n.max(len)))
     }
 
     fn bulk_send(&mut self, data: &[u8], budget_us: u64) -> Result<(), UsbError> {

@@ -407,10 +407,15 @@ pub fn enumerate<C: Controller, K: Clock>(
             Event::None => {}
             Event::BusReset => ep0.reset(),
             // A control command that cannot finish by the deadline is the enumeration's deadline, not a controller fault.
-            Event::Setup(bytes) => ep0.handle(ctrl, bytes, deadline_us).map_err(|e| match e {
-                UsbError::Timeout => EnumError::NotConfigured,
-                other => EnumError::Controller(other),
-            })?,
+            // A command a bus reset (or the host's next setup) cut short is gone, not a fault: the host starts again,
+            // and the controller hands the event that cut it to the next poll. Linux resets the bus right after the
+            // first 64-byte device descriptor read, so this happens in every enumeration where the reset is seen
+            // before the status stage (found by the B2 rehearsal's register model).
+            Event::Setup(bytes) => match ep0.handle(ctrl, bytes, deadline_us) {
+                Ok(()) | Err(UsbError::Reset) => {}
+                Err(UsbError::Timeout) => return Err(EnumError::NotConfigured),
+                Err(other) => return Err(EnumError::Controller(other)),
+            },
             Event::Disconnect => return Err(EnumError::Disconnected),
             Event::Fault => return Err(EnumError::Controller(UsbError::Failed)),
         }

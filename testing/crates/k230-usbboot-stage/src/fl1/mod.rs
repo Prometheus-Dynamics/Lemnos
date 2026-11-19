@@ -14,6 +14,7 @@
 //! The regions and the identity record are the K230's: see [`REGIONS`]. The build id is
 //! [`BUILD_ID`]. Both are checked by the tests and stated in `testing/board-runs/K230-USB.md`.
 
+pub mod check;
 pub mod guard;
 pub mod report;
 pub mod run;

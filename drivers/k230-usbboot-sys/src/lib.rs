@@ -14,11 +14,14 @@
 
 #![no_std]
 
+pub mod b2;
 pub mod dwc2;
+pub mod dwc2_legacy;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod image;
 pub mod sdhci;
 
+use lemnos_k230_usbboot_stage::sysctl;
 use lemnos_k230_usbboot_stage::wdt::{self, RegAccess};
 
 /// Reads the 32-bit register at `addr`.
@@ -46,7 +49,7 @@ pub unsafe fn write32(addr: usize, value: u32) {
 }
 
 /// The register access of the stage image: the watchdogs (read and write), the first UART (read and write,
-/// the block only), and the pad block (read only). A write into the pad block is refused here too (the stage's
+/// the block only), the SoC reset (its one value, written only), and the pad block (read only). A write into the pad block is refused here too (the stage's
 /// `PadGuard` refuses it first). An address outside these windows reads as zero and is never written.
 pub struct Mmio;
 
@@ -61,6 +64,14 @@ impl RegAccess for Mmio {
     }
 
     fn write32(&mut self, addr: usize, value: u32) {
+        if addr == sysctl::SOC_GLB_RST && value == sysctl::SOC_RESET_VALUE {
+            // The SoC reset, and only its documented value: the FL1 report takes it through this bus
+            // (`fl1::report::Uart`), so a bus that dropped it would leave the board to the watchdog.
+            // SAFETY: `SOC_GLB_RST` is the boot system controller's aligned reset register
+            // (`sysctl_boot.h:47`); the value is the documented reset, and nothing after it runs.
+            unsafe { write32(addr, value) };
+            return;
+        }
         if !addr.is_multiple_of(4) || !(in_window(addr) || in_uart(addr)) || in_pad_block(addr) {
             return;
         }

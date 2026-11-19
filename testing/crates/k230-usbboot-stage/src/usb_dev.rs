@@ -74,6 +74,28 @@ pub trait UsbHw {
     fn stall(&mut self, ep: u8);
     /// Sets the device address after the SET_ADDRESS status stage.
     fn set_address(&mut self, address: u8);
+    /// Activates the bulk pair (`on`, after SET_CONFIGURATION with a configuration) or deactivates it. A
+    /// controller whose bulk endpoints are always active keeps the default, which does nothing. The dwc2
+    /// core deactivates its non-control endpoints on a bus reset, so it activates them here.
+    fn configure(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// The speed the bus enumerated at, as the controller encodes it (dwc2 `DSTS.ENUMSPD`: 0 high, 1 full,
+    /// 2 low, 3 full at 48 MHz), when the controller can say. `None` when it cannot.
+    fn enum_speed(&self) -> Option<u8> {
+        None
+    }
+    /// The longest bulk OUT transfer the controller reassembles. A longer one is cut at this length.
+    fn rx_capacity(&self) -> usize {
+        RX_MAX
+    }
+    /// Takes the data of the last [`Event::Out`] on `ep`: copies what fits in `buf` and returns the
+    /// transfer's whole length, so a caller sees a transfer longer than its buffer as longer (refused by
+    /// length, never truncated into a valid-looking frame). The endpoint is free for the next transfer
+    /// after this. The default is [`UsbHw::read_out`], which refuses a transfer longer than `buf`.
+    fn read_out_part(&mut self, ep: u8, buf: &mut [u8]) -> Result<usize, HwError> {
+        self.read_out(ep, buf)
+    }
 }
 
 /// The stage's bulk side, as the device sees it: commands and data in, replies out, and a reset.
@@ -227,6 +249,7 @@ impl<H: UsbHw> Device<H> {
             // SET_CONFIGURATION.
             (0x00, 9) => {
                 self.configured = value != 0;
+                self.hw.configure(self.configured);
                 self.hw.write_in(EP0, &[])
             }
             // The stage's identity: GET_CPU_INFO, 32 bytes, NUL padded (`bootrom::stage` reads it).
