@@ -240,6 +240,27 @@ fn read_and_watch_of_a_device_that_is_not_running_say_its_state_and_reason() {
 }
 
 #[test]
+fn call_of_a_device_that_is_not_running_says_its_state_and_reason() {
+    // `mag` is absent at bind and retrying. Its driver's `read` is listed, so the call reaches the
+    // host, which refuses it. The refusal says the same as `read` does, not the bare "the call failed".
+    let running = start();
+    let err = ctl(&running, &["call", "mag", "read"]).unwrap_err();
+    assert!(err.starts_with("mag is retrying: "), "{err}");
+    assert!(err.contains("fake refusal: absent"), "{err}");
+    // The sentence is the one `read` prints; only the retry countdown may differ between the two.
+    let read = ctl(&running, &["read", "mag"]).unwrap_err();
+    let sentence = |text: &str| text.split(", next try").next().unwrap().to_string();
+    assert_eq!(sentence(&err), sentence(&read));
+    // A device that is off says so.
+    ctl(&running, &["off", "thing"]).unwrap();
+    let err = ctl(&running, &["call", "thing", "peek"]).unwrap_err();
+    assert!(err.starts_with("thing is off"), "{err}");
+    // A running device still calls.
+    ctl(&running, &["on", "thing"]).unwrap();
+    assert_eq!(ctl(&running, &["call", "thing", "peek"]).unwrap(), "41\n");
+}
+
+#[test]
 fn packages_shows_what_was_loaded_and_why_the_rest_was_refused() {
     // A service with packages off says so.
     assert_eq!(
