@@ -1022,8 +1022,14 @@ fn test_nowait(h: &mut Harness, sess: &OwnedFd, main: &Buf) {
     let (e, _) = wait_job(&mut j, sess);
     let running = e == libc::EAGAIN && h.resets() == before;
     h.check(running, "runs until its time is up");
-    sleep_ms(150);
-    let (e, _) = wait_job(&mut j, sess);
+    // The deadline is checked when the job is collected (kernel/rs/regjob.rs, collect): collect until
+    // the job is no longer running, up to 5000 ms.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut e = wait_job(&mut j, sess).0;
+    while e == libc::EAGAIN && std::time::Instant::now() < until {
+        sleep_ms(1);
+        e = wait_job(&mut j, sess).0;
+    }
     let timed_out = e == libc::ETIMEDOUT && h.resets() == before + 1 && h.info(sess).live == 0;
     h.check(
         timed_out,

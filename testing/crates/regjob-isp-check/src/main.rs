@@ -1224,8 +1224,14 @@ impl Harness {
         self.check(started, "a frame that never comes");
         let got = self.collect(&mut j);
         self.check(got.err == libc::EAGAIN, "is waited for (EAGAIN)");
-        sleep_ms(150);
-        let got = self.collect(&mut j);
+        // The deadline is checked when the job is collected (kernel/rs/regjob.rs, collect): collect until
+        // the job is no longer running, up to 5000 ms.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got = self.collect(&mut j);
+        while got.err == libc::EAGAIN && std::time::Instant::now() < until {
+            sleep_ms(1);
+            got = self.collect(&mut j);
+        }
         let timed_out = got.err == libc::ETIMEDOUT && self.resets() == before + 1;
         self.check(
             timed_out,

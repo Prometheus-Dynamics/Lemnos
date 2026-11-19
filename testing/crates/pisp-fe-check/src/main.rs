@@ -512,6 +512,15 @@ fn sleep_ms(ms: u64) {
     thread::sleep(Duration::from_millis(ms));
 }
 
+/// Polls `holds` every 1 ms until it holds or `timeout_ms` has run out.
+fn wait_until(timeout_ms: u64, mut holds: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    let limit = Duration::from_millis(timeout_ms);
+    while !holds() && start.elapsed() < limit {
+        sleep_ms(1);
+    }
+}
+
 fn open_rw(path: &str) -> io::Result<OwnedFd> {
     OpenOptions::new()
         .read(true)
@@ -3070,7 +3079,8 @@ fn test_own_buffers(env: &Env, b: &mut Bufs, heap: &str, dev: &str) {
     );
     hw_word(hw, TCSI_FE_BUSY, 0);
     check!(fe_info(ctl).streaming == 0, "and stops it");
-    sleep_ms(5);
+    // The pins go when the stream's close has run: wait for them to be released, up to 5000 ms.
+    wait_until(5000, || bufinfo_attached(dev) == before);
     check!(
         bufinfo_attached(dev) == before,
         "every pin released ({} left)",
@@ -3167,7 +3177,7 @@ fn test_stop_in_flight(env: &mut Env, b: &mut Bufs, node: &str, unbind: &str, de
     check!(el >= ms - 20, "unbinding waited ({el} ms)");
     check!(s.ld(SHM_W_END) == STATE_CLOSED, "the stream ended closed");
     drop(s);
-    sleep_ms(5);
+    wait_until(5000, || bufinfo_attached(dev) == env.attached_before);
     check!(
         bufinfo_attached(dev) == env.attached_before,
         "every mapping released after the unbind"
