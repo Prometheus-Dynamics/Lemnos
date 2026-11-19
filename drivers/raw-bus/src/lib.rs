@@ -23,6 +23,10 @@
 //! may be part of a message or more than one, and the caller frames it. Bytes that arrive while no
 //! one reads wait in the port's own buffer.
 //!
+//! The transfer lists (`i2c_transactions`, `spi_transfers`) take up to 8 ops or transfers in one call.
+//! The SPI list needs the device's SPI bus named twice, as `spi` and as `raw_spi`: the same bus, opened
+//! for the list's own settings (mode, clock, word size, chip select and delay) on each transfer.
+//!
 //! A transfer's bytes arrive in its call, so the driver holds no transfer buffer and allocates
 //! nothing. The driver makes no retries and no timers. A failed bus call is returned on that call and
 //! marks health `Failed`. The next call tries again, and a success clears the mark.
@@ -34,13 +38,15 @@ mod policy;
 use core::time::Duration;
 use lemnos_contract_raw_bus::RawBus as RawBusContract;
 
-use lemnos_contract_raw_bus::UART_MAX_WAIT_MS;
+use lemnos_contract_raw_bus::{
+    I2cOp, I2cOps, MAX_I2C_OPS, MAX_SPI_TRANSFERS, SpiTransfers, UART_MAX_WAIT_MS,
+};
 use lemnos_core::{
-    Config, ConfigError, ConfigValue, Health, I2c, Key, Kind, Lifecycle, Line, Pwm, Result, Spi,
-    Status, Uart, driver, status_of,
+    Config, ConfigError, ConfigValue, Health, I2c, Key, Kind, Lifecycle, Line, Pwm, RawSpiBus,
+    Result, Spi, Status, Uart, driver, status_of,
 };
 use lemnos_hal::i2c::{I2c as HalI2c, Operation as I2cOperation};
-use lemnos_hal::raw::{Direction, LineConfig, Polarity, PwmConfig};
+use lemnos_hal::raw::{Direction, LineConfig, Polarity, PwmConfig, SpiConfig, SpiMode, SpiSegment};
 use lemnos_hal::spi::{Operation as SpiOperation, SpiDevice};
 use lemnos_hal::{Parity, StopBits, UartFormat};
 
@@ -73,6 +79,10 @@ pub struct RawBus {
     i2c: Option<I2c>,
     #[needs(optional)]
     spi: Option<Spi>,
+    /// The same SPI device as `spi`, for the transfer lists, whose transfers each have their own settings. A
+    /// board names it as `raw_spi`, next to `spi`, when a device is to use the lists.
+    #[needs(optional)]
+    raw_spi: Option<RawSpiBus>,
     #[needs(optional)]
     line: Option<Line>,
     #[needs(optional)]
@@ -139,6 +149,7 @@ impl Lifecycle for RawBus {
     fn start(needs: RawBusNeeds, cfg: &Config<'_>) -> Result<Self> {
         if needs.i2c.is_none()
             && needs.spi.is_none()
+            && needs.raw_spi.is_none()
             && needs.line.is_none()
             && needs.pwm.is_none()
             && needs.uart.is_none()
@@ -164,6 +175,7 @@ impl Lifecycle for RawBus {
         Ok(Self {
             i2c: needs.i2c,
             spi: needs.spi,
+            raw_spi: needs.raw_spi,
             line,
             pwm: needs.pwm,
             uart,
@@ -236,6 +248,88 @@ impl RawBusContract for RawBus {
         self.failed = result.is_err();
         result.map_err(status_of)?;
         Ok(read)
+    }
+
+    fn i2c_transactions(&mut self, address: u16, ops: &[u8], into: &mut [u8]) -> Result<usize> {
+        let address = u8::try_from(address)
+            .ok()
+            .filter(|address| *address <= 0x7f)
+            .ok_or(Status::INVALID_ARGUMENT)?;
+        let list = I2cOps::parse(ops, into.len())?;
+        self.policy.admit_i2c(address, !list.needs_writes())?;
+        let bus = self.i2c.as_mut().ok_or(Status::NOT_SUPPORTED)?;
+        // The ops are built on the stack: the list's bound is what holds the array's size.
+        let mut operations = [const { I2cOperation::Write(&[]) }; MAX_I2C_OPS];
+        let mut rest: &mut [u8] = into;
+        let mut count = 0;
+        for op in list.iter() {
+            operations[count] = match op {
+                I2cOp::Write(bytes) => I2cOperation::Write(bytes),
+                I2cOp::Read(len) => {
+                    let len = len as usize;
+                    let (head, tail) = core::mem::take(&mut rest)
+                        .split_at_mut_checked(len)
+                        .ok_or(Status::BUFFER_TOO_SMALL)?;
+                    rest = tail;
+                    I2cOperation::Read(head)
+                }
+            };
+            count += 1;
+        }
+        let result = bus.transaction(address, &mut operations[..count]);
+        self.failed = result.is_err();
+        result.map_err(status_of)?;
+        Ok(list.read_total())
+    }
+
+    fn spi_transfers(&mut self, transfers: &[u8], into: &mut [u8]) -> Result<usize> {
+        let list = SpiTransfers::parse(transfers, into.len())?;
+        self.policy.admit_spi(!list.needs_writes())?;
+        let bus = self.raw_spi.as_mut().ok_or(Status::NOT_SUPPORTED)?;
+        // Every segment starts with an empty reply, borrowed from a local array (one slot each, so no
+        // two are the same borrow); each is replaced by its own reply before the transfer runs.
+        let mut slots = [[0u8; 0]; MAX_SPI_TRANSFERS];
+        let mut spare = slots.iter_mut();
+        let mut segments: [SpiSegment<'_>; MAX_SPI_TRANSFERS] = core::array::from_fn(|_| {
+            let Some(rx) = spare.next() else {
+                unreachable!("one slot per segment")
+            };
+            SpiSegment {
+                config: SpiConfig {
+                    mode: SpiMode::Mode0,
+                    speed_hz: 0,
+                    bits_per_word: 0,
+                },
+                tx: &[],
+                rx,
+                cs_change: false,
+                delay_us: 0,
+            }
+        });
+        let mut rest: &mut [u8] = into;
+        let mut count = 0;
+        for transfer in list.iter() {
+            let (rx, tail) = core::mem::take(&mut rest)
+                .split_at_mut_checked(transfer.read as usize)
+                .ok_or(Status::BUFFER_TOO_SMALL)?;
+            rest = tail;
+            segments[count] = SpiSegment {
+                config: SpiConfig {
+                    mode: SpiMode::from_bits(transfer.mode),
+                    speed_hz: transfer.speed_hz,
+                    bits_per_word: transfer.bits_per_word,
+                },
+                tx: transfer.write,
+                rx,
+                cs_change: transfer.cs_change,
+                delay_us: transfer.delay_us,
+            };
+            count += 1;
+        }
+        let result = bus.transfer(&mut segments[..count]);
+        self.failed = result.is_err();
+        result.map_err(status_of)?;
+        Ok(list.read_total())
     }
 
     fn line_get(&mut self) -> Result<bool> {

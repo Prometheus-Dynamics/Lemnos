@@ -41,7 +41,7 @@ python3 scripts/generate-builtins.py --check
 | `vcm` | `lens/1` | `bus`: I2C; `chip`; optional `direction`, `settle_us` | Serves its contract. The position is unknown until the first move. Direction and settle time are unknown unless the board gives them |
 | `ws2812` | `pixels/1` | `bus`: SPI device, or a `pio-out` name (PIO state machine running the strip's 800 kHz program) | Serves its contract. The PIO program's timing is untested on board (`Q1.md`) |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
-| `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm`, `uart` | Serves its contract. Closed by default: each bus is allowed only by `config`, and writes only with `writes = true`; reads, including a register read (a pointer, then a read), need no `writes`. A UART's frame is set at bind; reading it needs no `writes` |
+| `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm`, `uart` | Serves its contract. Closed by default: each bus is allowed only by `config`, and writes only with `writes = true`; reads, including a register read (a pointer, then a read), need no `writes`. A UART's frame is set at bind; reading it needs no `writes`. The transfer lists (`i2c_transactions`, `spi_transfers`) take up to 8 ops or transfers each; a list that writes needs `writes` as a single write does, and an SPI list needs its SPI bus named as `raw_spi` as well as `spi` (the same bus, opened for each transfer's own settings) |
 | `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Modes 0 and 1 measured on the reference board with both clock-lane settings, the exposure limit and the clamp of a value outside the limits, and a bus trace with no OTP access (`D8.md`). When a posted exposure takes effect is an assumption until a run with the scene lit (`D10.md`). Restarts itself after a bus error and when its linked receiver's frame-start count stands still past `max(4 frame periods, 250 ms)` (`docs/streams.md`, "The sensor that stops sending"); health is `failed` meanwhile |
 
 ## Devices with no bus of their own
@@ -265,7 +265,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `indicator/1` | 1 set, 2 states | `indicator` |
 | `self-test/1` | 1 tests, 2 run (job), 3 last | `hwmon-fan`, `bmm150`, `ina2xx`, `indicator`, `hw-watchdog`, `board-self-test` (add-on: see [Self-tests](#self-tests)) |
 | `lens/1` | 1 range, 2 set_position, 3 position, 4 direction, 5 settle_us | `vcm` |
-| `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set, 6 uart_write, 7 uart_read | `raw-bus` |
+| `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set, 6 uart_write, 7 uart_read, 8 i2c_transactions (added), 9 spi_transfers (added) | `raw-bus` |
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
 | `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern, 12 identity, 13 post_values_at, 14 applied_landing, 15 in_force, 16 set_exposure, 17 set_analogue_gain, 18 set_frame_length | `ov9782` |
 | `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds, 9 embedded_stream, 10 source, 11 layout, 12 frame_starts, 13 inputs, 14 input | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |

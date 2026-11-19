@@ -9,7 +9,8 @@
 //!   as one frame, `lemnos_wire::MAX_FRAME` (1 MiB), less the call's own fixed fields. The reply's
 //!   size is the `into` buffer the caller gives.
 //! - Between drivers (a `LocalCaller`), the arguments are at most `LOCAL_ARGS` (64) bytes, which
-//!   leaves 50 bytes of write for `i2c_transfer` and 52 for `spi_transfer`.
+//!   leaves 50 bytes of write for `i2c_transfer` and 52 for `spi_transfer`. A transfer list is
+//!   encoded in those same arguments, so a driver-to-driver list holds only a few short ops.
 //!
 //! Whether a call is allowed is the device's write policy, set in the board file. A call the policy
 //! refuses reaches no bus and returns `NOT_PERMITTED`.
@@ -64,7 +65,307 @@ pub trait RawBus {
     #[method(7)]
     fn uart_read(&mut self, max_len: u32, timeout_ms: u32, #[out] into: &mut [u8])
     -> Result<usize>;
+    /// One I2C transaction of several segments to the 7-bit `address`: the ops in `ops`, in order,
+    /// with a repeated start between them and one stop at the end. Each op is a write of its bytes or
+    /// a read of its length (see [`I2cOp`] and [`encode_i2c_ops`]). The bytes read go into `into` one
+    /// after another, in op order, and the total is returned. More than [`MAX_I2C_OPS`] ops, an empty
+    /// list, an empty op, a malformed list, or reads that do not fit `into` are `INVALID_ARGUMENT`.
+    /// Marked `#[added]`: the base hash does not move, and a device without the method is checked per
+    /// method.
+    #[method(8)]
+    #[added]
+    fn i2c_transactions(
+        &mut self,
+        address: u16,
+        ops: &[u8],
+        #[out] into: &mut [u8],
+    ) -> Result<usize>;
+    /// A list of SPI transfers, each on its own settings: mode, clock, word size, whether it ends with
+    /// a chip-select change, and a delay after it (see [`SpiTransfer`] and [`encode_spi_transfers`]).
+    /// The reads go into `into` one after another, in transfer order, and the total is returned. More
+    /// than [`MAX_SPI_TRANSFERS`] transfers, an empty list, a malformed list, a mode above 3, a word
+    /// size that is neither 0 nor 8 to 32, or reads that do not fit `into` are `INVALID_ARGUMENT`.
+    /// Marked `#[added]`, as [`RawBus::i2c_transactions`] is.
+    #[method(9)]
+    #[added]
+    fn spi_transfers(&mut self, transfers: &[u8], #[out] into: &mut [u8]) -> Result<usize>;
 }
 
 /// The longest `uart_read` waits, in milliseconds: half the host's call deadline.
 pub const UART_MAX_WAIT_MS: u32 = 1000;
+
+/// The most ops one `i2c_transactions` list carries.
+pub const MAX_I2C_OPS: usize = 8;
+/// The most transfers one `spi_transfers` list carries.
+pub const MAX_SPI_TRANSFERS: usize = 8;
+
+/// Bytes an I2C op's header takes: its kind (1) and its length (4, little-endian).
+const I2C_HEAD: usize = 1 + 4;
+/// Bytes an SPI transfer's header takes: mode (1), `cs_change` (1), bits per word (1), speed (4),
+/// delay (2), write length (4) and read length (4), all little-endian where they are more than one.
+const SPI_HEAD: usize = 1 + 1 + 1 + 4 + 2 + 4 + 4;
+
+/// One op of an I2C list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum I2cOp<'a> {
+    /// Writes these bytes.
+    Write(&'a [u8]),
+    /// Reads this many bytes.
+    Read(u32),
+}
+
+/// One transfer of an SPI list, on its own settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpiTransfer<'a> {
+    /// SPI mode, 0 to 3.
+    pub mode: u8,
+    /// Clock in hertz, 0 for the device's default.
+    pub speed_hz: u32,
+    /// Bits per word: 0 for 8, or 8 to 32.
+    pub bits_per_word: u8,
+    /// Deselect the chip after this transfer.
+    pub cs_change: bool,
+    /// Wait after this transfer, in microseconds.
+    pub delay_us: u16,
+    /// The bytes clocked out (may be empty).
+    pub write: &'a [u8],
+    /// How many bytes are clocked in.
+    pub read: u32,
+}
+
+/// Encodes the ops of an `i2c_transactions` list into `out`, and returns how many bytes it took.
+/// `INVALID_ARGUMENT` when `out` is too small or the list would not be accepted.
+pub fn encode_i2c_ops(ops: &[I2cOp<'_>], out: &mut [u8]) -> lemnos_core::Result<usize> {
+    let mut at = 0;
+    for op in ops {
+        let (kind, len, payload): (u8, u32, &[u8]) = match *op {
+            I2cOp::Write(bytes) => (0, bytes.len() as u32, bytes),
+            I2cOp::Read(len) => (1, len, &[]),
+        };
+        let end = at + I2C_HEAD + payload.len();
+        let record = out
+            .get_mut(at..end)
+            .ok_or(lemnos_core::Status::BUFFER_TOO_SMALL)?;
+        record[0] = kind;
+        record[1..5].copy_from_slice(&len.to_le_bytes());
+        record[I2C_HEAD..].copy_from_slice(payload);
+        at = end;
+    }
+    Ok(at)
+}
+
+/// Encodes the transfers of an `spi_transfers` list into `out`, and returns how many bytes it took.
+pub fn encode_spi_transfers(
+    transfers: &[SpiTransfer<'_>],
+    out: &mut [u8],
+) -> lemnos_core::Result<usize> {
+    let mut at = 0;
+    for transfer in transfers {
+        let end = at + SPI_HEAD + transfer.write.len();
+        let record = out
+            .get_mut(at..end)
+            .ok_or(lemnos_core::Status::BUFFER_TOO_SMALL)?;
+        record[0] = transfer.mode;
+        record[1] = u8::from(transfer.cs_change);
+        record[2] = transfer.bits_per_word;
+        record[3..7].copy_from_slice(&transfer.speed_hz.to_le_bytes());
+        record[7..9].copy_from_slice(&transfer.delay_us.to_le_bytes());
+        record[9..13].copy_from_slice(&(transfer.write.len() as u32).to_le_bytes());
+        record[13..17].copy_from_slice(&transfer.read.to_le_bytes());
+        record[SPI_HEAD..].copy_from_slice(transfer.write);
+        at = end;
+    }
+    Ok(at)
+}
+
+/// The ops of an encoded I2C list, checked once: `parse` says whether the list is one the driver
+/// takes (its count, its shapes, and its reads' total, which must fit the reply buffer). Iterating
+/// it then cannot fail.
+#[derive(Debug, Clone, Copy)]
+pub struct I2cOps<'a> {
+    bytes: &'a [u8],
+    count: usize,
+    read: usize,
+}
+
+impl<'a> I2cOps<'a> {
+    /// Checks `bytes` as an `i2c_transactions` list whose reads total at most `reply` bytes.
+    pub fn parse(bytes: &'a [u8], reply: usize) -> lemnos_core::Result<Self> {
+        let mut at = 0;
+        let mut count = 0;
+        let mut read = 0usize;
+        while at < bytes.len() {
+            let head = bytes
+                .get(at..at + I2C_HEAD)
+                .ok_or(lemnos_core::Status::INVALID_ARGUMENT)?;
+            let len = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
+            at += I2C_HEAD;
+            match head[0] {
+                0 => {
+                    if len == 0 {
+                        return Err(lemnos_core::Status::INVALID_ARGUMENT);
+                    }
+                    at = at
+                        .checked_add(len)
+                        .filter(|&end| end <= bytes.len())
+                        .ok_or(lemnos_core::Status::INVALID_ARGUMENT)?;
+                }
+                1 => {
+                    if len == 0 {
+                        return Err(lemnos_core::Status::INVALID_ARGUMENT);
+                    }
+                    read = read
+                        .checked_add(len)
+                        .ok_or(lemnos_core::Status::INVALID_ARGUMENT)?;
+                }
+                _ => return Err(lemnos_core::Status::INVALID_ARGUMENT),
+            }
+            count += 1;
+        }
+        if count == 0 || count > MAX_I2C_OPS || read > reply {
+            return Err(lemnos_core::Status::INVALID_ARGUMENT);
+        }
+        Ok(Self { bytes, count, read })
+    }
+
+    /// How many ops the list has.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether the list has no ops (never true of a parsed list).
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The reads' total, in bytes: what the call returns.
+    pub fn read_total(&self) -> usize {
+        self.read
+    }
+
+    /// Whether the list needs the device's `writes`: it has no read, or it writes after a read. A
+    /// write before the first read is the register pointer of a read, as `i2c_transfer` admits it,
+    /// so a list of that shape is a read.
+    pub fn needs_writes(&self) -> bool {
+        let mut read = false;
+        for op in self.iter() {
+            match op {
+                I2cOp::Read(_) => read = true,
+                I2cOp::Write(_) if read => return true,
+                I2cOp::Write(_) => {}
+            }
+        }
+        !read
+    }
+
+    /// The ops, in order.
+    pub fn iter(&self) -> impl Iterator<Item = I2cOp<'a>> + 'a {
+        let mut at = 0;
+        let bytes = self.bytes;
+        core::iter::from_fn(move || {
+            let head = bytes.get(at..at + I2C_HEAD)?;
+            let len = u32::from_le_bytes([head[1], head[2], head[3], head[4]]);
+            at += I2C_HEAD;
+            Some(if head[0] == 0 {
+                let payload = &bytes[at..at + len as usize];
+                at += len as usize;
+                I2cOp::Write(payload)
+            } else {
+                I2cOp::Read(len)
+            })
+        })
+    }
+}
+
+/// The transfers of an encoded SPI list, checked once like [`I2cOps`].
+#[derive(Debug, Clone, Copy)]
+pub struct SpiTransfers<'a> {
+    bytes: &'a [u8],
+    count: usize,
+    read: usize,
+}
+
+impl<'a> SpiTransfers<'a> {
+    /// Checks `bytes` as an `spi_transfers` list whose reads total at most `reply` bytes.
+    pub fn parse(bytes: &'a [u8], reply: usize) -> lemnos_core::Result<Self> {
+        let mut at = 0;
+        let mut count = 0;
+        let mut read = 0usize;
+        while at < bytes.len() {
+            let head = bytes
+                .get(at..at + SPI_HEAD)
+                .ok_or(lemnos_core::Status::INVALID_ARGUMENT)?;
+            if head[0] > 3 || !(head[2] == 0 || (8..=32).contains(&head[2])) {
+                return Err(lemnos_core::Status::INVALID_ARGUMENT);
+            }
+            let write = spi_write_len(head);
+            let transfer_read = spi_read_len(head);
+            if write == 0 && transfer_read == 0 {
+                return Err(lemnos_core::Status::INVALID_ARGUMENT);
+            }
+            at = (at + SPI_HEAD)
+                .checked_add(write)
+                .filter(|&end| end <= bytes.len())
+                .ok_or(lemnos_core::Status::INVALID_ARGUMENT)?;
+            read = read
+                .checked_add(transfer_read as usize)
+                .ok_or(lemnos_core::Status::INVALID_ARGUMENT)?;
+            count += 1;
+        }
+        if count == 0 || count > MAX_SPI_TRANSFERS || read > reply {
+            return Err(lemnos_core::Status::INVALID_ARGUMENT);
+        }
+        Ok(Self { bytes, count, read })
+    }
+
+    /// How many transfers the list has.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether the list has no transfers (never true of a parsed list).
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The reads' total, in bytes: what the call returns.
+    pub fn read_total(&self) -> usize {
+        self.read
+    }
+
+    /// Whether the list needs the device's `writes`: a transfer with no read part is a write.
+    pub fn needs_writes(&self) -> bool {
+        self.iter().any(|transfer| transfer.read == 0)
+    }
+
+    /// The transfers, in order.
+    pub fn iter(&self) -> impl Iterator<Item = SpiTransfer<'a>> + 'a {
+        let mut at = 0;
+        let bytes = self.bytes;
+        core::iter::from_fn(move || {
+            let head = bytes.get(at..at + SPI_HEAD)?;
+            let write = spi_write_len(head);
+            let start = at + SPI_HEAD;
+            at = start + write;
+            Some(SpiTransfer {
+                mode: head[0],
+                cs_change: head[1] != 0,
+                bits_per_word: head[2],
+                speed_hz: u32::from_le_bytes([head[3], head[4], head[5], head[6]]),
+                delay_us: u16::from_le_bytes([head[7], head[8]]),
+                write: &bytes[start..start + write],
+                read: spi_read_len(head),
+            })
+        })
+    }
+}
+
+/// The write length in an SPI transfer's header.
+fn spi_write_len(head: &[u8]) -> usize {
+    u32::from_le_bytes([head[9], head[10], head[11], head[12]]) as usize
+}
+
+/// The read length in an SPI transfer's header.
+fn spi_read_len(head: &[u8]) -> u32 {
+    u32::from_le_bytes([head[13], head[14], head[15], head[16]])
+}
