@@ -174,6 +174,34 @@ impl Client {
         self.open_stream_with(device, name, surface::STREAM_OPEN_UNMAPPED)
     }
 
+    /// Takes a device's stream as a consumer that declares it holds `hold` of its buffers at once
+    /// (see `lemnos_stream_open_held`).
+    pub fn open_stream_held(
+        &self,
+        device: u32,
+        name: &str,
+        hold: u32,
+    ) -> Result<Stream<'_>, Status> {
+        let name = c_string(name)?;
+        let mut handle = Handle::NULL;
+        // SAFETY: the string is NUL-terminated and outlives the call, and `handle` is valid for a write.
+        checked(unsafe {
+            ffi::lemnos_stream_open_held(
+                self.handle,
+                device,
+                name.as_ptr(),
+                hold,
+                0,
+                &mut handle,
+                MessageSink::NONE,
+            )
+        })?;
+        Ok(Stream {
+            client: self,
+            handle,
+        })
+    }
+
     fn open_stream_with(&self, device: u32, name: &str, flags: u32) -> Result<Stream<'_>, Status> {
         let name = c_string(name)?;
         let mut handle = Handle::NULL;

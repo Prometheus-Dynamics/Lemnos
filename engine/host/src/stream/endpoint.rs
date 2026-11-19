@@ -47,6 +47,9 @@ struct Memory {
 /// A consumer's attachment: the memory it reads from, and what the host reads back from it.
 struct Attached {
     caller: CallerId,
+    /// The buffers the consumer declared it holds at once, when it declared any. `None` reserves
+    /// [`CONSUMER_HELD`] for it, as before a declaration existed.
+    hold: Option<u32>,
     memory: Memory,
     holds: HoldTable<ReadMap>,
     jobs: JobCollector,
@@ -370,6 +373,46 @@ impl StreamCore {
     /// Takes the consumer's end for `caller`: the memory waiting on standby, with the frame kept
     /// on it at once, or memory made now.
     pub(crate) fn attach(&mut self, caller: CallerId) -> Result<Lease, Status> {
+        self.attach_inner(caller, None)
+    }
+
+    /// Takes the consumer's end for `caller`, which declares it holds `hold` buffers at once. The
+    /// declaration is checked before anything is taken or made: the producer keeps
+    /// [`MIN_PRODUCER_BUFFERS`] of the stream's buffers, so `hold` must be at least 1 and leave that
+    /// many. A declaration that doesn't fit is refused by name and nothing is attached.
+    pub(crate) fn attach_declared(
+        &mut self,
+        caller: CallerId,
+        hold: u32,
+    ) -> Result<Lease, TicketRefused> {
+        let stream = self.name.to_string();
+        let buffers = self.layout.buffers;
+        let refuse = |status: Status, text: String| TicketRefused { status, text };
+        if hold == 0 {
+            return Err(refuse(
+                Status::INVALID_ARGUMENT,
+                format!("stream {stream:?}: a consumer declares at least 1 held buffer"),
+            ));
+        }
+        if buffers < hold.saturating_add(MIN_PRODUCER_BUFFERS) {
+            return Err(refuse(
+                Status::BUSY,
+                format!(
+                    "stream {stream:?}: the consumer declares {hold} held buffers, and {buffers} \
+                     buffers leave {} for the producer; the producer needs {MIN_PRODUCER_BUFFERS}",
+                    buffers.saturating_sub(hold)
+                ),
+            ));
+        }
+        self.attach_inner(caller, Some(hold)).map_err(|status| {
+            refuse(
+                status,
+                format!("can't open stream {stream:?} (status {status:?})"),
+            )
+        })
+    }
+
+    fn attach_inner(&mut self, caller: CallerId, hold: Option<u32>) -> Result<Lease, Status> {
         if self.attached.is_some() {
             return Err(Status::BUSY);
         }
@@ -399,6 +442,7 @@ impl StreamCore {
         jobs.set_producer(self.producer);
         self.attached = Some(Attached {
             caller,
+            hold,
             memory,
             holds,
             jobs,
@@ -556,7 +600,9 @@ impl StreamCore {
         })?;
         // The producer keeps two buffers after the consumer's one; the readers share the rest.
         let sum: u32 = attached.grants.iter().map(|(_, held)| held).sum();
-        let left = buffers.saturating_sub(sum).saturating_sub(CONSUMER_HELD);
+        // The consumer's reservation: its declared hold, or the one it has always had.
+        let reserved = attached.hold.unwrap_or(CONSUMER_HELD);
+        let left = buffers.saturating_sub(sum).saturating_sub(reserved);
         // The default takes what fits, up to DEFAULT_HELD: refused only when nothing fits. An
         // explicit request is all or refused.
         let granted_held = if held == 0 {

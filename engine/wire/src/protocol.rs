@@ -651,6 +651,18 @@ frames! {
         /// (EOF or a hang-up) once the hold is over for good. Only the connection that asked holds them.
         added 41 EndpointsEnd { id: u32 }
     }
+    // The consumer-hold part: a consumer declares, at attach, how many of a stream's buffers it
+    // holds at once, and the host reserves exactly that for it. Its one frame is a base frame of
+    // this part, so the part's hash covers it; the part is announced by its bit, and a client sends
+    // the frame only to a host that set it (rule 10).
+    "consumer-hold" = 6 bit CONSUMER_HOLD {
+        /// StreamOpen, with a declared hold: `hold` is how many buffers the consumer holds at once,
+        /// at least 1, and the producer must be left its two. `handles` is as StreamOpenHandles'
+        /// (the answer is StreamRingHandles for a stream of dma-bufs). A host refuses what does not
+        /// fit by name, and nothing is attached; it never trims the declaration. Answered as
+        /// StreamOpen is, or Refusal.
+        42 StreamOpenHeld { id: u32, device: u32, name: &'a str, hold: u32, handles: bool }
+    }
 }
 
 /// How many descriptors StreamRingHandles carries for a stream of `buffers` buffers of `planes`

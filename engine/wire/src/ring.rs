@@ -1151,6 +1151,26 @@ impl Consumer {
         shared: bool,
         mapping: Mapping,
     ) -> Result<Self, RingError> {
+        Self::attach_held(descriptors, layout, planes, shared, mapping, 0)
+    }
+
+    /// As [`attach_with`](Self::attach_with), and the consumer holds at most `max_held` buffers at
+    /// once: a frame that would be its `max_held + 1`th is not taken, and the read says so
+    /// (`Pop::AtLimit` here, `Next::AtLimit` in the client). Zero is no limit. This is the
+    /// consumer's declared hold: the host reserves that many buffers for it, so it is the bound the
+    /// readers' grants were made against.
+    ///
+    /// # Errors
+    ///
+    /// As [`attach`](Self::attach).
+    pub fn attach_held(
+        descriptors: Vec<OwnedFd>,
+        layout: Layout,
+        planes: &[u32],
+        shared: bool,
+        mapping: Mapping,
+        max_held: u32,
+    ) -> Result<Self, RingError> {
         let layout = layout.checked()?;
         let descs = layout.pool_descs(shared, planes);
         let pool_fds = if shared { 1 } else { descs.len() };
@@ -1214,7 +1234,7 @@ impl Consumer {
             WriteMap::new(marks)?,
             layout.buffers * planes.len().max(1) as u32,
             0,
-            0,
+            max_held,
         )?;
         let frames = shm_ring_buffers::BufferReader::new(reader, FieldId(0), view, marks);
         let jobs = JobPoster::new(job_ring, job_acks, &layout)?;

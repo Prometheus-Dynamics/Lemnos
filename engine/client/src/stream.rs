@@ -487,7 +487,7 @@ impl FrameStream {
     pub(crate) fn new(
         device: u32,
         name: &str,
-        (layout, planes, working, job_driven): (Layout, Planes, u32, bool),
+        (layout, planes, working, job_driven, max_held): (Layout, Planes, u32, bool, u32),
         shared: bool,
         fds: Vec<OwnedFd>,
         mapping: Mapping,
@@ -517,8 +517,8 @@ impl FrameStream {
         if writable && slots.iter().any(|slot| !slot.writable) {
             return Err(Error::StreamBuffersReadOnly);
         }
-        let consumer =
-            Consumer::attach_with(fds, layout, lengths, shared, mapping).map_err(Error::Stream)?;
+        let consumer = Consumer::attach_held(fds, layout, lengths, shared, mapping, max_held)
+            .map_err(Error::Stream)?;
         Ok(Self {
             seen_edges: 0,
             told_stalled: false,
