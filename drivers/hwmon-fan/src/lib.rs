@@ -35,11 +35,20 @@
 //! - `release` puts the fan at full duty and leaves it in manual mode. It is the safe state for a
 //!   failure (a write that will not go, a controller that cannot run).
 //!
+//! Ownership. Every `set_duty` and `release` makes its caller the fan's owner: the last writer owns
+//! it, and the daemon's own writes (a controller's, `CallerId::LOCAL`) are writes too. When the owner
+//! goes (`caller_gone`: its connection closed or it died), the driver hands the fan back exactly as
+//! `hand_back` does. An older caller going changes nothing, and neither does a newer owner's going
+//! when an older writer still holds the fan. A hand-back that fails is owed: it is tried from the
+//! tick, after 1 s, then 2, 4 and 8 s, and every 8 s after that, and it is never given up. The
+//! baseline is kept until the hand-back has worked.
+//!
 //! Dropping the driver puts the fan at full duty if it still holds it, as a device that stops or is
 //! rebound, or a call that panics, leaves it. A controller that is dropped in an orderly way hands the
 //! fan back first, so the drop then finds nothing held. The fan is not handed to the kernel's thermal
 //! governor, except that the baseline mode is restored, which is the mode the fan had. A process killed
-//! with `SIGKILL` runs no code, so the fan keeps the duty it was last given.
+//! with `SIGKILL` runs no code, but its connection ends, and the daemon tells the driver: see
+//! [Ownership](self#ownership) above.
 //!
 //! Failure rule: an attribute that cannot be read or written fails that call and is tried again
 //! on the next one. The driver never switches itself off.
@@ -157,6 +166,38 @@ pub struct HwmonFan {
     runner: Runner,
     /// Who the method being run is for (see [`Lifecycle::caller`]).
     calling: CallerId,
+    /// The caller whose write holds the fan (see the module's ownership). Its going hands the fan back.
+    owner: Option<CallerId>,
+    /// A hand-back owed because its owner went and the write failed: when it is next tried, and how many
+    /// times it has failed.
+    owed: Option<Owed>,
+    /// The time (ns) of the last tick. The owner's going happens in a call, which has no time of its own.
+    now_ns: u64,
+}
+
+/// A hand-back owed to a caller that went, and the failures in a row that it has had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Owed {
+    retry_at_ns: u64,
+    attempts: u32,
+}
+
+/// The first wait before an owed hand-back is tried again, and the longest one. The wait doubles after each
+/// failure and stays at the cap.
+const RETRY_FIRST_NS: u64 = 1_000_000_000;
+const RETRY_CAP_NS: u64 = 8_000_000_000;
+
+/// How long an owed hand-back waits after its `attempts`-th failure in a row.
+fn retry_wait_ns(attempts: u32) -> u64 {
+    (RETRY_FIRST_NS << attempts.saturating_sub(1).min(3)).min(RETRY_CAP_NS)
+}
+
+/// The earlier of two optional times, where `None` is no time.
+fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// The fan's `pwm1` and `pwm1_enable` before this driver took it.
@@ -257,15 +298,20 @@ impl Lifecycle for HwmonFan {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
-        let mut bench = Spin {
-            pwm: &self.pwm,
-            enable: &self.enable,
-            rpm: &self.rpm,
-            manual: &mut self.manual,
-            reads_only: self.reads_only,
-            settings: self.test,
+        self.now_ns = now_ns;
+        let next = {
+            let mut bench = Spin {
+                pwm: &self.pwm,
+                enable: &self.enable,
+                rpm: &self.rpm,
+                manual: &mut self.manual,
+                reads_only: self.reads_only,
+                settings: self.test,
+            };
+            self.runner.tick(now_ns, &mut bench)
         };
-        self.runner.tick(now_ns, &mut bench)
+        self.retry_owed(now_ns);
+        earliest(next, self.owed.map(|owed| owed.retry_at_ns))
     }
 
     fn caller(&mut self, caller: CallerId) {
@@ -275,6 +321,16 @@ impl Lifecycle for HwmonFan {
 
     fn caller_gone(&mut self, caller: CallerId) {
         self.runner.caller_gone(caller);
+        // Only the owner's going hands the fan back: an older writer's, or one that a newer owner has
+        // overtaken, leaves what the newer one set.
+        if self.owner == Some(caller) {
+            self.owner = None;
+            self.owed = Some(Owed {
+                retry_at_ns: self.now_ns,
+                attempts: 0,
+            });
+            self.retry_owed(self.now_ns);
+        }
     }
 
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
@@ -500,6 +556,9 @@ impl HwmonFan {
             },
             runner: Runner::new(SPECS),
             calling: CallerId::LOCAL,
+            owner: None,
+            owed: None,
+            now_ns: 0,
         }
     }
 
@@ -534,6 +593,44 @@ impl HwmonFan {
             self.manual = true;
         }
         sysfs::write_number(&self.pwm, duty_to_pwm(per_mille))
+    }
+
+    /// Makes the caller of the method the fan's owner: its going hands the fan back. An owed hand-back is
+    /// dropped, since the fan is taken again and the baseline it returns to is still the one recorded.
+    fn claim(&mut self) {
+        self.owner = Some(self.calling);
+        self.owed = None;
+    }
+
+    /// Tries an owed hand-back, if it is due at `now_ns`. A failure owes it again, after a longer wait each
+    /// time, up to the cap. While a self-test runs, the hand-back waits a second: the test puts the fan back
+    /// when it ends.
+    fn retry_owed(&mut self, now_ns: u64) {
+        let Some(owed) = self.owed else {
+            return;
+        };
+        if now_ns < owed.retry_at_ns {
+            return;
+        }
+        if self.runner.busy() {
+            self.owed = Some(Owed {
+                retry_at_ns: now_ns.saturating_add(RETRY_FIRST_NS),
+                ..owed
+            });
+            return;
+        }
+        let result = self.hand_back_fan();
+        self.failing = result.is_err();
+        self.owed = match result {
+            Ok(()) => None,
+            Err(_) => {
+                let attempts = owed.attempts.saturating_add(1);
+                Some(Owed {
+                    retry_at_ns: now_ns.saturating_add(retry_wait_ns(attempts)),
+                    attempts,
+                })
+            }
+        };
     }
 
     /// Puts the fan back as the take-over found it: `pwm1` in manual mode first, then the mode. The
@@ -578,6 +675,7 @@ impl Fan for HwmonFan {
         if self.runner.busy() {
             return Err(Status::BUSY);
         }
+        self.claim();
         let result = self.drive(per_mille);
         self.note(result)
     }
@@ -596,6 +694,7 @@ impl Fan for HwmonFan {
         if self.runner.busy() {
             return Err(Status::BUSY);
         }
+        self.claim();
         let result = self.put_at_safe_state();
         self.note(result)
     }
@@ -604,6 +703,9 @@ impl Fan for HwmonFan {
         if self.runner.busy() {
             return Err(Status::BUSY);
         }
+        // An explicit hand-back ends the fan's owner and any owed hand-back: the caller who asked owns the answer.
+        self.owner = None;
+        self.owed = None;
         let result = self.hand_back_fan();
         self.note(result)
     }

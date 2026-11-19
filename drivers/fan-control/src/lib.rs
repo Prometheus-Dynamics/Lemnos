@@ -60,6 +60,11 @@
 //!   each second.
 //! - Dropping the driver (the daemon stops, its device stops or is rebound, or a call into it panics)
 //!   hands the fan back the same way. A killed process runs no code, so the fan keeps its last duty.
+//! - A client's override of the fan lasts until this controller's next step (a second): the controller
+//!   writes its duty at every step. If that client goes after a step, the controller is the last writer and
+//!   nothing is handed back. If it goes between two steps, the fan goes back to its baseline (the fan
+//!   driver's ownership rule, see `hwmon-fan` and `pwm-channel-fan`) for that gap, and the controller takes
+//!   the fan again at its next step: about one second, measured.
 //!
 //! The fan's safe state is full duty, the state a failure leaves it in: the fan driver keeps it
 //! (`release`). A controller that is stopped or disabled gives the fan back as it found it, and that is

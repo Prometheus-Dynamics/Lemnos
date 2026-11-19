@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lemnos_core::{Decode, ErrorKind, Health, Reader, Status};
+use lemnos_core::{CallerId, Decode, ErrorKind, Health, Reader, Status};
 use lemnos_driver_pwm_channel_fan::PwmChannelFan;
 use lemnos_hal::raw::{EdgeDetect, Polarity};
 use lemnos_host::board::parse;
@@ -336,4 +336,68 @@ fn a_tachometer_reads_zero_when_its_pulses_stop() {
 fn without_a_tachometer_the_speed_is_not_there() {
     let rig = rig("", false);
     assert_eq!(rig.rpm(), None);
+}
+
+/// A caller that goes away, as a client does: two of them, and the daemon's own writes (`LOCAL`).
+const CALLER_A: CallerId = CallerId(7);
+const CALLER_B: CallerId = CallerId(8);
+
+impl Rig {
+    /// A `set_duty` made for `caller`, as a client's call is.
+    fn set_as(&self, caller: CallerId, per_mille: u16) {
+        let index = self.host.device("fan").unwrap().index;
+        let mut reply = [0u8; 64];
+        self.host
+            .call_as(
+                caller,
+                index,
+                MethodId {
+                    contract: 0,
+                    method: SET_DUTY,
+                },
+                &per_mille.to_le_bytes(),
+                &mut reply,
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn the_owner_going_hands_the_channel_back_to_full_duty_at_once() {
+    let rig = rig("frequency_hz = 25000", false);
+    rig.set_as(CALLER_A, 300);
+    assert_eq!(rig.pwm.current().duty_ns, 12_000);
+    // The host ticks the device after the call that tells it, so no time has to pass for the write.
+    rig.host.caller_gone(CALLER_A);
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        PERIOD,
+        "full duty, the channel's hand-back"
+    );
+    assert_eq!(rig.duty(), 1000);
+}
+
+#[test]
+fn an_older_caller_going_leaves_the_newer_owners_duty() {
+    let rig = rig("frequency_hz = 25000", false);
+    rig.set_as(CALLER_A, 300);
+    rig.set_as(CALLER_B, 600);
+    rig.host.caller_gone(CALLER_A);
+    assert_eq!(rig.pwm.current().duty_ns, 24_000, "B's duty stays");
+    rig.host.caller_gone(CALLER_B);
+    assert_eq!(rig.pwm.current().duty_ns, PERIOD);
+}
+
+#[test]
+fn a_controller_write_after_a_client_keeps_the_channel_when_the_client_goes() {
+    let rig = rig("frequency_hz = 25000", false);
+    rig.set_as(CALLER_A, 300);
+    // The daemon's own write (LOCAL) after the client's makes the daemon the owner.
+    rig.set(500).unwrap();
+    rig.host.caller_gone(CALLER_A);
+    assert_eq!(
+        rig.pwm.current().duty_ns,
+        20_000,
+        "the controller's duty stays"
+    );
 }
