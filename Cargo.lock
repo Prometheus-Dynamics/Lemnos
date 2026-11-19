@@ -2791,6 +2791,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-driver-board-self-test",
  "lemnos-driver-indicator",
+ "lemnos-driver-named-files",
  "lemnos-driver-raw-bus",
  "lemnos-driver-system-flash",
  "lemnos-driver-system-identity",

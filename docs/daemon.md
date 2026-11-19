@@ -636,9 +636,15 @@ seeks to its offset. The node is named by `LEMNOS_ORION_NAMED_FILES` (the device
 `named-files`); unset, nothing is served. A name without the `lemnos/` prefix is refused and nothing is
 opened.
 
-Orion's offer for a prefix (`Files::offer`) is not in the pinned Orion revision yet, so the loop that
-connects the offer to these snapshots is not compiled: the marked `ORION-OFFER` comment in
-`named.rs` gives it. Until that switch is on, the bridge serves no `lemnos/` names over Orion.
+The bridge offers the `lemnos/` prefix to Orion with `Files::offer` (at the pinned revision,
+`crates/client/files/src/offer.rs`). `named::run` runs on its own thread with its own Orion session and
+serves each file asked for from a snapshot. A name outside `lemnos/` is refused before lemnosd is reached.
+A name the node refuses, or a node that cannot be reached before the file begins, is refused to the client
+with its reason. A file that is given is digested first and then given from the client's offset. If the
+node fails once the gift has begun, the bridge logs it and the client's own silence limit ends the transfer,
+because the pinned Orion has no call that ends a gift already under way. A failed or ended offer is taken
+again on the bridge's backoff (1 s, doubling, capped at 8 s); nothing gives up, and the state and the log
+keep the reason.
 
 | Lemnos | Orion |
 |---|---|
