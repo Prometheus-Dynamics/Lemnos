@@ -113,19 +113,49 @@ enum FrameRead {
     Frame(ShmFrame),
 }
 
-/// How long a job's frame may take to appear once its completion is posted, on the clock. The
-/// module finishes a job the block never reported on its own watchdog (`LPB_TIMEOUT_MS`, 1 s), so
-/// the wait covers that recovery with room left over on a loaded host.
-const FRAME_WAIT: Duration = Duration::from_secs(5);
+/// How long a job's frame may take to appear once its completion is posted, on the monotonic clock.
+/// This is the bound the check has always had (2 s); it is a clock bound now, not a count of sleeps.
+const FRAME_WAIT: Duration = Duration::from_secs(2);
 
 /// What a frame wait got: the frame's buffer and identity (buffer -1 when none came in time), the
-/// frames of other jobs passed over first, and the time the wait took.
+/// frames of other jobs passed over first, the time the wait took, and the ring's head and tail then.
 #[derive(Debug, Clone, Copy)]
 struct Got {
     buffer: i64,
     identity: u64,
     stale: u32,
     elapsed: Duration,
+    head: u64,
+    tail: u64,
+}
+
+/// The module's own view of the block, from its test-only parameters (`test_pb_*` in pisp_be.rs): the
+/// watchdog's runs and recoveries, and the job state the last interrupt or watchdog left.
+fn module_view() -> String {
+    let read = |name: &str| -> u64 {
+        fs::read_to_string(format!("/sys/module/lemnos/parameters/{name}"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(u64::MAX)
+    };
+    let job = read("test_pb_job");
+    let bit = |n: u32| (job >> n) & 1;
+    let byte = |n: u32| (job >> n) & 0xff;
+    format!(
+        "watchdog runs {} recoveries {} last recovery at {} ns (monotonic); job: queued {} running {} ready {} busy {} wedged {}, stream started {} done {}, block started {} done {}",
+        read("test_pb_wd_runs"),
+        read("test_pb_wd_recovered"),
+        read("test_pb_wd_recovered_ns"),
+        bit(0),
+        bit(1),
+        bit(2),
+        bit(3),
+        bit(4),
+        byte(8),
+        byte(16),
+        byte(32),
+        byte(24),
+    )
 }
 
 /// The fields of a published frame that the check uses.
@@ -801,6 +831,8 @@ impl Stream {
                             identity: f.identity,
                             stale,
                             elapsed: t0.elapsed(),
+                            head: self.words()[SHM_W_HEAD].load(Ordering::Acquire),
+                            tail: self.frames_tail.get(),
                         };
                     }
                     stale += 1;
@@ -813,6 +845,8 @@ impl Stream {
                             identity: 0,
                             stale,
                             elapsed,
+                            head: self.words()[SHM_W_HEAD].load(Ordering::Acquire),
+                            tail: self.frames_tail.get(),
                         };
                     }
                     thread::sleep(Duration::from_millis(1));
@@ -1899,11 +1933,14 @@ fn race_epoch(st: &Stream, addr: &Addrs, next: &mut u64, ran: &mut u32, refused:
             let got = st.wait_frame_for(Some(*next));
             if got.buffer != 0 || got.identity != *next {
                 fail(&format!(
-                    "job {next}: wait_frame got buffer {} identity {:#x} after {} ms, {} stale frames passed (wanted buffer 0, identity {next})",
+                    "job {next}: no frame for it (wanted buffer 0, identity {next}): got buffer {} identity {:#x} after {} ms, {} stale frames passed, ring head {} tail {}; module: {}",
                     got.buffer,
                     got.identity,
                     got.elapsed.as_millis(),
-                    got.stale
+                    got.stale,
+                    got.head,
+                    got.tail,
+                    module_view()
                 ));
             }
             *next += 1;

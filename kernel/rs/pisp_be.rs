@@ -237,6 +237,53 @@ param!(
     "Test only: the block's register window is ordinary memory (the test harness)"
 );
 
+// Test only: what the watchdog did and the job state, for the check to name the cause of a frame that
+// never came. Read live from sysfs (see `Value::publish`); each is written under the block's state lock.
+param!(
+    DBG_WD_RUNS,
+    test_pb_wd_runs: u64 = 0,
+    param_ops_ullong,
+    "ullong",
+    "Test only: watchdog runs that found a job outstanding"
+);
+param!(
+    DBG_WD_RECOVERED,
+    test_pb_wd_recovered: u64 = 0,
+    param_ops_ullong,
+    "ullong",
+    "Test only: jobs the watchdog finished because the interrupt had not"
+);
+param!(
+    DBG_WD_RECOVERED_NS,
+    test_pb_wd_recovered_ns: u64 = 0,
+    param_ops_ullong,
+    "ullong",
+    "Test only: monotonic ns of the last watchdog recovery (0 when none)"
+);
+param!(
+    DBG_JOB,
+    test_pb_job: u64 = 0,
+    param_ops_ullong,
+    "ullong",
+    "Test only: the job state as the last interrupt or watchdog left it, packed by note_job"
+);
+
+/// Test only: the job state, packed. Bit 0 queued, 1 running, 2 ready, 3 busy, 4 wedged; bits 8..16 the
+/// stream's started count, 16..24 its done count, 24..32 the block's done count and 32..40 the block's
+/// started count, as the batch register says them.
+fn note_job(st: &PbState, j: &StreamJobs, batch: u32) {
+    let packed = u64::from(j.queued.is_some())
+        | u64::from(j.running.is_some()) << 1
+        | u64::from(!j.ready.is_empty()) << 2
+        | u64::from(st.busy) << 3
+        | u64::from(st.wedged) << 4
+        | u64::from(st.started) << 8
+        | u64::from(st.done) << 16
+        | u64::from(batch as u8) << 24
+        | u64::from((batch >> 8) as u8) << 32;
+    DBG_JOB.publish(packed);
+}
+
 type Image = lb::pisp_image_format_config;
 
 /// One job slot of a stream (`struct lpb_job`): the checked copy of a config, the tiles where the block
@@ -1161,6 +1208,10 @@ impl LemPb {
             // interrupt was lost. Account them. If none finished, the counters and the jobs disagree
             // and the block is wedged; whatever came after them has its own timeout, set by `process`.
             self.process(st, ps, j, batch);
+            if st.finished != finished {
+                DBG_WD_RECOVERED.publish(DBG_WD_RECOVERED.get() + 1);
+                DBG_WD_RECOVERED_NS.publish(ktime_now() as u64);
+            }
             if st.finished != finished || st.wedged {
                 return;
             }
@@ -1189,6 +1240,7 @@ unsafe extern "C" fn lpb_isr(_irq: c_int, data: *mut c_void) -> bindings::irqret
         // SAFETY: `state` is held, and this is the only use of the stream's jobs under it.
         let j = unsafe { ps.jobs() };
         l.process(&mut st, ps, j, batch);
+        note_job(&st, j, batch);
     }
     bindings::irqreturn::IRQ_HANDLED
 }
@@ -1210,7 +1262,10 @@ unsafe extern "C" fn lpb_watchdog(work: *mut bindings::work_struct) {
     // SAFETY: `state` is held, and this is the only use of the stream's jobs under it.
     let j = unsafe { ps.jobs() };
     if j.queued.is_some() || j.running.is_some() || !j.ready.is_empty() {
+        DBG_WD_RUNS.publish(DBG_WD_RUNS.get() + 1);
         l.watchdog_locked(&mut st, ps, j);
+        let batch = l.rd(BE_BATCH_STATUS_REG);
+        note_job(&st, j, batch);
     }
 }
 
