@@ -220,6 +220,7 @@ use lemnos_core::{Config, ConfigValue, Held, Lifecycle};
 use lemnos_sim::mock::MockPwm;
 
 use super::{HandBack, PwmChannelFanNeeds};
+use lemnos_core::{CallerId, Note};
 
 /// A driver started on a mock channel with `config` as the board file's settings.
 fn fan_with(config: &[(&str, ConfigValue<'_>)]) -> PwmChannelFan {
@@ -230,19 +231,31 @@ fn fan_with(config: &[(&str, ConfigValue<'_>)]) -> PwmChannelFan {
     <PwmChannelFan as Lifecycle>::start(needs, &Config::new(config)).unwrap()
 }
 
+/// The note the driver pushed last, taken from its ring.
+fn last_note(fan: &mut PwmChannelFan) -> Option<Note> {
+    let mut last = None;
+    while let Some(note) = Lifecycle::notes(fan).and_then(|notes| notes.pop()) {
+        last = Some(note);
+    }
+    last
+}
+
 #[test]
 fn a_hand_back_goes_to_the_declared_default_duty_and_to_full_duty_when_none_is_declared() {
     let mut declared = fan_with(&[("default_duty", ConfigValue::Int(300))]);
     declared.set_duty(800).unwrap();
     declared.hand_back().unwrap();
     assert_eq!(declared.duty().unwrap(), 300);
-    assert_eq!(declared.handed_back(), Some(HandBack::Declared(300)));
+    assert_eq!(
+        last_note(&mut declared),
+        Some(HandBack::Declared(300).note())
+    );
 
     let mut undeclared = fan_with(&[]);
     undeclared.set_duty(800).unwrap();
     undeclared.hand_back().unwrap();
     assert_eq!(undeclared.duty().unwrap(), 1000);
-    assert_eq!(undeclared.handed_back(), Some(HandBack::FullDuty));
+    assert_eq!(last_note(&mut undeclared), Some(HandBack::FullDuty.note()));
 }
 
 #[test]
@@ -255,7 +268,33 @@ fn a_release_is_still_full_duty_and_the_default_is_for_a_hand_back_only() {
         1000,
         "release is the safe state for a failure"
     );
-    assert_eq!(fan.handed_back(), None, "nothing was handed back");
+    assert_eq!(last_note(&mut fan), None, "nothing was handed back");
+}
+
+#[test]
+fn a_client_that_replaced_the_daemons_write_leaves_the_channel_to_the_controller() {
+    // The daemon's own write (LOCAL) is the owner; a client overrides it, then goes. Nothing is written: the
+    // channel keeps the client's duty until the controller's next step, and the note says so.
+    let mut fan = fan_with(&[]);
+    fan.set_duty(500).unwrap();
+    Lifecycle::caller(&mut fan, CallerId(7));
+    fan.set_duty(800).unwrap();
+    Lifecycle::caller_gone(&mut fan, CallerId(7));
+    assert_eq!(fan.duty().unwrap(), 800, "nothing was written");
+    assert_eq!(last_note(&mut fan), Some(HandBack::Controller.note()));
+    // The controller owns the channel again: a second going of the client changes nothing.
+    Lifecycle::caller_gone(&mut fan, CallerId(7));
+    assert_eq!(last_note(&mut fan), None);
+}
+
+#[test]
+fn a_client_that_replaced_nobody_gets_the_default_on_its_going() {
+    let mut fan = fan_with(&[("default_duty", ConfigValue::Int(300))]);
+    Lifecycle::caller(&mut fan, CallerId(7));
+    fan.set_duty(800).unwrap();
+    Lifecycle::caller_gone(&mut fan, CallerId(7));
+    assert_eq!(fan.duty().unwrap(), 300);
+    assert_eq!(last_note(&mut fan), Some(HandBack::Declared(300).note()));
 }
 
 #[test]
@@ -273,13 +312,17 @@ fn a_default_duty_outside_zero_to_full_is_refused_by_name_at_bind() {
 }
 
 #[test]
-fn the_hand_back_note_names_which_target_applied_and_its_duty() {
+fn the_hand_back_notes_name_which_target_applied() {
     assert_eq!(
         HandBack::Declared(300).note(),
-        "hand-back to the declared default duty 300 per mille"
+        Note::with_value("handed back to the declared default duty, per mille", 300)
     );
     assert_eq!(
         HandBack::FullDuty.note(),
-        "hand-back to full duty: no default duty is declared"
+        Note::new("handed back to full duty: no default duty is declared")
+    );
+    assert_eq!(
+        HandBack::Controller.note(),
+        Note::new("handed back to the controller")
     );
 }

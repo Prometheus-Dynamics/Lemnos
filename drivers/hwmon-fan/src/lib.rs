@@ -47,8 +47,8 @@
 //! `pwm1_enable`. In automatic mode (2) the kernel's governor drives the fan again, which is the usual
 //! case. There is always a baseline once this driver has taken a fan: a fan whose `pwm1_enable` cannot be
 //! read is not taken at all (the first write is refused), so there is no mode to restore that is missing.
-//! The board's `default_duty` of `pwm-channel-fan` therefore has no counterpart here. The last hand-back
-//! is kept for the log: [`HwmonFan::handed_back`].
+//! The board's `default_duty` of `pwm-channel-fan` therefore has no counterpart here. Each hand-back
+//! pushes what it did into the driver's notes, which the daemon logs.
 //!
 //! Dropping the driver puts the fan at full duty if it still holds it, as a device that stops or is
 //! rebound, or a call that panics, leaves it. A controller that is dropped in an orderly way hands the
@@ -71,7 +71,7 @@ use lemnos_contract_self_test::{
 };
 use lemnos_core::{
     CallerId, Config, ConfigError, Description, Health, Item, JobId, JobState, Key, Kind,
-    Lifecycle, MethodId, Reply, Result, Status, Unit, driver,
+    Lifecycle, MethodId, Note, Notes, Reply, Result, Status, Unit, driver,
 };
 use std::path::{Path, PathBuf};
 
@@ -175,8 +175,11 @@ pub struct HwmonFan {
     calling: CallerId,
     /// The caller whose write holds the fan (see the module's ownership). Its going hands the fan back.
     owner: Option<CallerId>,
-    /// What the last hand-back applied, for the log line. `None` until one has happened.
-    handed_back: Option<HandBack>,
+    /// The owner before the current one. A client that replaced the daemon's own writes hands the fan back to
+    /// them, not to the baseline, when it goes (see the module's ownership).
+    prior: Option<CallerId>,
+    /// Notes for the log: what each hand-back did.
+    notes: Notes,
     /// A hand-back owed because its owner went and the write failed: when it is next tried, and how many
     /// times it has failed.
     owed: Option<Owed>,
@@ -216,28 +219,30 @@ struct Baseline {
     mode: i64,
 }
 
-/// What a hand-back gave the fan back to: the baseline the take-over recorded, or full duty when this driver
-/// has no baseline for a fan it holds. [`HandBack::note`] says which, in words.
+/// What a hand-back did, for the log: the baseline the take-over recorded (the kernel's governor in automatic
+/// mode), full duty when this driver has no baseline for a fan it holds, or the controller, when the owner that
+/// went had replaced the daemon's own writes and nothing is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandBack {
     /// `pwm1` and `pwm1_enable` as the take-over found them.
     Baseline { pwm: u32, mode: i64 },
     /// Full duty, the safe state: the fan is held and no baseline was recorded for it.
     SafeState,
+    /// The daemon's own writes (`CallerId::LOCAL`) come back: nothing is written.
+    Controller,
 }
 
 impl HandBack {
-    /// The hand-back in words, for a log line: which target applied, and the values it wrote.
-    pub fn note(self) -> String {
+    /// The note the log shows for this hand-back.
+    pub const fn note(self) -> Note {
         match self {
-            Self::Baseline { pwm, mode } => {
-                format!(
-                    "hand-back to the baseline the take-over found: pwm1 {pwm}, pwm1_enable {mode}"
-                )
+            // Mode 2 is the kernel's automatic mode, the governor.
+            Self::Baseline { mode: 2, .. } => Note::new("handed back to the governor"),
+            Self::Baseline { mode, .. } => {
+                Note::with_value("handed back to the baseline pwm1_enable mode", mode as u32)
             }
-            Self::SafeState => {
-                "hand-back to full duty: no baseline was recorded for this fan".to_string()
-            }
+            Self::SafeState => Note::new("handed back to full duty: no baseline recorded"),
+            Self::Controller => Note::new("handed back to the controller"),
         }
     }
 }
@@ -358,14 +363,29 @@ impl Lifecycle for HwmonFan {
         self.runner.caller_gone(caller);
         // Only the owner's going hands the fan back: an older writer's, or one that a newer owner has
         // overtaken, leaves what the newer one set.
-        if self.owner == Some(caller) {
-            self.owner = None;
-            self.owed = Some(Owed {
-                retry_at_ns: self.now_ns,
-                attempts: 0,
-            });
-            self.retry_owed(self.now_ns);
+        if self.owner != Some(caller) {
+            return;
         }
+        if self.prior == Some(CallerId::LOCAL) {
+            // The override replaced the daemon's own writes: the controller owns the fan again, and its next
+            // step writes the duty it wants. Nothing is written here, and nothing is owed.
+            self.owner = Some(CallerId::LOCAL);
+            self.prior = None;
+            self.owed = None;
+            self.notes.push(HandBack::Controller.note());
+            return;
+        }
+        self.owner = None;
+        self.prior = None;
+        self.owed = Some(Owed {
+            retry_at_ns: self.now_ns,
+            attempts: 0,
+        });
+        self.retry_owed(self.now_ns);
+    }
+
+    fn notes(&mut self) -> Option<&mut Notes> {
+        Some(&mut self.notes)
     }
 
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
@@ -575,12 +595,6 @@ impl Spin<'_> {
 }
 
 impl HwmonFan {
-    /// What the last hand-back applied: the baseline it restored, or full duty. `None` until one has happened, or
-    /// when the last one had nothing to give back. The driver has no log of its own; see [`HandBack::note`].
-    pub fn handed_back(&self) -> Option<HandBack> {
-        self.handed_back
-    }
-
     fn new(fan: &Path) -> Self {
         Self {
             pwm: fan.join("pwm1"),
@@ -600,7 +614,8 @@ impl HwmonFan {
             owner: None,
             owed: None,
             now_ns: 0,
-            handed_back: None,
+            prior: None,
+            notes: Notes::new(),
         }
     }
 
@@ -640,6 +655,9 @@ impl HwmonFan {
     /// Makes the caller of the method the fan's owner: its going hands the fan back. An owed hand-back is
     /// dropped, since the fan is taken again and the baseline it returns to is still the one recorded.
     fn claim(&mut self) {
+        if self.owner != Some(self.calling) {
+            self.prior = self.owner;
+        }
         self.owner = Some(self.calling);
         self.owed = None;
     }
@@ -682,11 +700,10 @@ impl HwmonFan {
         // fan goes back to.
         let Some(base) = self.baseline.or_else(|| recorded(&self.pwm)) else {
             if !self.manual {
-                self.handed_back = None;
                 return Ok(());
             }
             self.put_at_safe_state()?;
-            self.handed_back = Some(HandBack::SafeState);
+            self.notes.push(HandBack::SafeState.note());
             return Ok(());
         };
         sysfs::write_number(&self.pwm, base.pwm)?;
@@ -696,10 +713,13 @@ impl HwmonFan {
         self.manual = false;
         self.baseline = None;
         forget(&self.pwm);
-        self.handed_back = Some(HandBack::Baseline {
-            pwm: base.pwm,
-            mode: base.mode,
-        });
+        self.notes.push(
+            HandBack::Baseline {
+                pwm: base.pwm,
+                mode: base.mode,
+            }
+            .note(),
+        );
         Ok(())
     }
 
@@ -753,6 +773,7 @@ impl Fan for HwmonFan {
         }
         // An explicit hand-back ends the fan's owner and any owed hand-back: the caller who asked owns the answer.
         self.owner = None;
+        self.prior = None;
         self.owed = None;
         let result = self.hand_back_fan();
         self.note(result)
