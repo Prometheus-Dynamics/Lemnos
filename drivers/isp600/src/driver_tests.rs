@@ -638,6 +638,7 @@ fn a_job_carries_its_image_in_and_its_statistics_and_image_out() {
             dropped: 0,
             errors: 0,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
     // Every image went back to the node.
@@ -811,6 +812,7 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
             dropped: 1,
             errors: 0,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
     // And its frame comes out on the buffer the consumer gave back.
@@ -829,6 +831,7 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
             dropped: 1,
             errors: 0,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
 }
@@ -963,6 +966,7 @@ fn a_bad_image_or_one_too_big_counts_as_an_error() {
             dropped: 0,
             errors: 1,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
 
@@ -1102,6 +1106,7 @@ fn stop_releases_every_config_buffer_and_a_restart_runs_jobs_with_rewritten_cont
             dropped: 0,
             errors: 0,
             lent: 0,
+            last_lent_inode: 0,
         }
     );
 }

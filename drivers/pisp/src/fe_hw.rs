@@ -424,6 +424,7 @@ impl Hardware for LinuxHardware {
             dropped: info.dropped,
             errors: info.errors,
             lent: 0,
+            last_lent_inode: 0,
         })
     }
 
