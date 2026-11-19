@@ -56,7 +56,8 @@ until its return path is proven.
     the run record. If the same image still traps, B1 stays open.
 - **B2. The stage's device path has not run on hardware.** The dwc2 `UsbHw` (in `drivers/k230-usbboot-sys`)
   is written from the SDK's dwc2 registers; its enumeration, EP0 and bulk sequences are unverified. The
-  adapter's bench checks are listed in `testing/crates/k230-usbboot-stage/src/fl1/usb.rs`.
+  adapter's bench checks are listed in `testing/crates/k230-usbboot-stage/src/fl1/usb.rs`. The first run's
+  plan and its PC rehearsal: "B2: the first run of the stage's own USB device path" below. **Not run.**
 - **B3. Gaia's kernel hang before earlycon** is Gaia's; it is not a precondition here (the stage does not
   boot the kernel in this plan).
 
@@ -1102,6 +1103,120 @@ enumerated as 29f1:0230 dev 117 (was 116), 89.9 s after the last command: the wa
 
 **The capture (read only).** A separate unit reads both CH342 ports from before R0 to the end and writes no byte to
 either. The console is never written in this run, so no step writes to the console.
+
+## B2: the first run of the stage's own USB device path (plan; PC rehearsal only, not run)
+
+Branch `pr/K230-B2`. Nothing in this section has touched a board or opened a USB device.
+
+**Hypothesis.** The check build, loaded by the ROM over `29f1:0230` at `0x80360000` and started there, arms both
+watchdogs, measures the watchdog clock, brings the dwc2 core up as a device, and is enumerated by this PC as
+`1209:0001` "Lemnos flash stage" at port `3-4.2.1.4.1`, at high speed; EP0 answers the descriptors, GET_STATUS,
+GET_CONFIGURATION and stalls an unknown request; the bulk pair carries FL1 frames up to the largest chunk, CRC
+checked each way, refuses the largest chunk and one byte with status 5; END makes the stage print its record and
+take the SoC reset; the ROM is back as `29f1:0230` under a new device number. Any one of these can fail: each is a
+separate line of the record.
+
+**The build.** `bash drivers/k230-usbboot-image/check.sh --b2` (the `b2` feature): the FL1 session
+(`fl1::run::stage_with`) over the rewritten dwc2 driver (`drivers/k230-usbboot-sys/src/dwc2.rs`), storage a RAM
+window of 128 sectors at LBA 1048576 and a read-only record sector at 1048704 (`fl1::check::Loopback`); any other
+sector is status 2. Build id `0x4b32333042320001` (not the card build's). `check.sh --b2` refuses the image if any
+SD host symbol or SD base address load is in it ("SD symbols 0, SD base loads 0"); the Loopback tests refuse writes
+outside the window. At rev `efa03253`: 23,968 bytes, ends `0x803b6030` (inside the vendor tool's range to
+`0x80400000`; the ROM's own limit is unverified), sha256 `ba26d539…a074f` before the mode patch, `b203849c…ee9fd` as
+loaded (mode `check`, `0x4b`).
+
+**Watchdog.** The entry arms both at setting 11 before any Rust (at 750 kHz, C1b: 179 s). The check then measures
+`wdt0`'s clock over 20 ms of the timebase (27 MHz, `k230.dtsi:20`, unverified in the ROM's state; the record keeps
+the ticks so the console's stamps check it), adds 5 %, and the shared entry re-arms at setting 15 and lowers to the
+smallest period covering the run budget, 60 s (init, the 30 s idle limit, the host's whole check). At 750 kHz that
+is setting 10, 89.5 s. It is never fed: one period from the arming bounds the whole run whatever the host does. A
+clock outside 100 kHz..200 MHz ends the run before USB (report, SoC reset). Every stage wait ends in a reset: END,
+the idle limit (30 s), the enumeration limit (the idle deadline), a failure: each prints and takes the SoC reset;
+the watchdog is the backstop.
+
+**Host side** (`k230-b2 run`, `testing/crates/k230-usbboot/src/b2`): holds `/run/user/1000/lemnos-k230d.lock`;
+loads through the ROM (identity `K230` first); waits at most 15 s for `1209:0001` at the port (sysfs only); refuses
+before claiming if the product is not "Lemnos flash stage" or the interface string is not the wire's; a `1209:0001`
+at any other port is never opened and, if it is the only one, the run is refused as the wrong port; checks access
+with `access(2)` on the node (opens nothing); a denial stops the run and says so. Then EP0 (descriptors against the
+shared stage's bytes, GET_STATUS device and `0x81`, GET_CONFIGURATION, two unknown vendor requests that must stall,
+GET_STATUS after them), identify (must be the check build), writes and reads of 1, 8, 9, 64, 127 and 128 sectors
+(status 0, the reply's CRC checked, compared), a chunk with a bit flipped after its CRC (status 1, window
+unchanged), the largest chunk and one byte (status 5, window unchanged), 129 sectors (status 5), an 11-byte request
+(status 5), identify again, the record sector (bench checks below), END. No request addresses a sector outside the
+window and the record. Then the ROM back at the port under a new number, at most 200 s (the entry's 179 s worst
+case with margin). Bounds: control 1 s, bulk 5 s.
+
+**Access on this PC (read only, 2026-11-18): will not work without a system change.** `/dev/bus/usb/003/117`
+(`29f1:0230`) is `crw-rw----+ root root`, ACL `user:sozo:rw-`, from `TAG+="uaccess"` in
+`/etc/udev/rules.d/60-atlas-usbboot.rules:19`, which matches `29f1:0230` only. No rule matches `1209:0001` (the
+only `1209` rules are hidraw and other products); the hwdb gives it a name and nothing else. Nodes without a rule
+on bus 3 are `crw-rw-r-- root root` (13 of them): `open(O_RDWR)` fails EACCES (libusb `LIBUSB_ERROR_ACCESS`), and a
+read-only open fails every usbfs ioctl (`devio.c`, FMODE_WRITE). So the run will stop at the access check with the
+stage enumerated: the record still gets the enumeration from sysfs (product, interface string, speed, configuration,
+device number) and the way back (the stage's idle limit, 30 s after configuration, then the SoC reset). EP0 and
+bulk need access: granting it is the user's call.
+
+**Bench checks the record carries** (`fl1::check::record`, printed as `b2 <name> <hex>` and read over USB):
+speed (DSTS ENUMSPD 0, and sysfs 480); SET_ADDRESS order (`set-address` equals the kernel's device number, DCFG read
+right after the write holds it, `address-status-in` 1: the status IN went out after the address was written);
+bulk OUT re-arm after each frame (`out-rearms` equals `out-frames`, `out-longest` 65539, `out-oversize` 0); also
+GSNPSID, GHWCFG3, GAHBCFG as the ROM left it, how the core reset ended, bus resets, setups, stalls, endpoint 0 status
+stages, IN transfers and bytes, the longest FIFO wait in reads, the measured watchdog clock and the setting chosen.
+The console's words must equal the USB record's on the stable ones.
+
+**PC rehearsal** (`k230-b2 rehearse CASE`; `cargo test -p lemnos-k230-usbboot --test b2`): the board is the check
+build's own code (`k230-usbboot-sys` `b2::check` and `b2::end`, the dwc2 driver, the FL1 device and session) in a
+thread over a register model of the dwc2 core, the watchdogs at 750 kHz, the console and the SoC reset, with a kernel
+that enumerates as Linux does; the host is the same `b2::run` the board run uses, through the same traits. Not a
+timing model. Results at `efa03253`, every case as it must end:
+
+| Case | Host's verdict | Board's reset | ROM back |
+|---|---|---|---|
+| good | passed (every EP0, bulk and record check; console agrees) | SoC, 1.06 s | 0.30 s after END |
+| core from 4.20a | passed (`reset-done` 2) | SoC | yes |
+| no access | stopped at the access check, never opened | SoC at its idle limit, 30.0 s | yes |
+| wrong product | refused, never opened | SoC, 30.0 s | yes |
+| wrong port | refused at the 15 s bound, never opened | SoC, 30.0 s | yes |
+| never enumerates (bus hang in core reset) | gave up at 15 s | watchdog, 89.5 s | yes |
+| bit flipped host to device | write status 1 (CRC) | SoC after END | yes |
+| bit flipped device to host | read reply CRC mismatch | SoC after END | yes |
+| endpoint 0 OUT never re-armed (the old driver's fault) | gave up: the kernel cannot enumerate | SoC, 30.0 s | yes |
+
+Found by the rehearsal, each failing before its fix: a bus reset right after a request's data stage ended the
+whole enumeration (the shared `flash-stage` `enumerate`); a zero-length status OUT reported twice; a stall on
+endpoint 0's OUT half carried past the next setup by the re-arm; the report's SoC reset dropped by the image's bus.
+
+**Faults of the driver before this branch** (`drivers/k230-usbboot-sys/src/dwc2.rs` at `8c46f7c8`, now
+`dwc2_legacy.rs` for the card image). The register offsets and bits all match the SDK's `hw.h` (k230_sdk
+`7e302f7`, `src/little/linux/drivers/usb/dwc2/hw.h`); the faults are in the sequences:
+- `:149-180` endpoint 0's OUT completion is dropped (`:178`): no status stage is ever reported, so the FL1 adapter's
+  `ep0_out_status` times out on every request with an IN data stage. Enumeration cannot complete.
+- `:228-229` endpoint 0 OUT is enabled once, at core reset; the core clears it at each setup, so the second
+  request's status stage is NAKed for ever.
+- `:325-333` a stall of endpoint 0 sets only DOEPCTL0: an IN data or status stage is never stalled; the host times
+  out.
+- `:291-303` bulk IN waits for room for the whole transfer: any reply over the 512-word FIFO (a read of four
+  sectors or more) times out.
+- `:184-188` bulk OUT armed for 4,156 bytes, not a whole number of packets, and below the FL1 chunk (65,538).
+- `:200-238` core reset: only the pre-4.20a CSFTRST self-clear (no CSFTRST_DONE, `hw.h:129`); no AHB idle wait
+  (`hw.h:127`); no soft disconnect first; GAHBCFG left as the ROM had it (`hw.h:74-80`); device mode not waited
+  for (`hw.h:175`); no FIFO flush; FIFO sizes not checked against GHWCFG3 (`hw.h:289-303`); the bulk pair enabled
+  once, before any bus reset, and never again.
+- `:243-256` a bus reset neither clears DEVADDR (`hw.h:458`) nor re-arms endpoint 0.
+- Citations: `:16` gives DXEPCTL's bits as `hw.h:14-45` and `:222` the MPS as `hw.h:42-45`; they are at
+  `hw.h:547-582`.
+- In the stage crate at the same rev: `fl1/usb.rs:141-143` reports high speed without reading DSTS;
+  `fl1/usb.rs:92-96` configures nothing; `wdt.rs:44` takes 1 MHz as the lowest watchdog clock, C1b measured 750 kHz.
+
+**Way back, and why no hands.** Every outcome ends in a reset the board makes by itself: the stage's report and SoC
+reset (END, idle 30 s, enumeration limit, failure), else the watchdog within one period (89.5 s at 750 kHz; 179 s
+before the period is lowered). Nothing is written to the card, the ROM's settings or an environment. The host waits
+200 s for the ROM; if it is not back, the run is stopped and reported, not recovered by hand.
+
+**Open.** The `1209:0001` pair is pid.codes' test pair: it is replaced before any release. The ROM-load step opens
+`29f1:0230` as the earlier K230-USB runs did; the B2 allowance names only `1209:0001`, so the load step's cover is
+for the reviewer to confirm.
 
 ## No state only hands can undo
 
