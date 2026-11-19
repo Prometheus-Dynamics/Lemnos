@@ -1,5 +1,8 @@
 //! The tool against a real service. It holds no code for these devices.
 
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -13,6 +16,7 @@ use lemnosd::{Config, Service};
 struct Running {
     _service: Service,
     socket: PathBuf,
+    _dir: Scratch,
 }
 
 fn start() -> Running {
@@ -22,11 +26,11 @@ fn start() -> Running {
 /// A service that reports `packages` as what became of its driver packages.
 fn start_with(packages: PackageReport) -> Running {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = Scratch(std::env::temp_dir().join(format!(
         "lemnos-ctl-test-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
     let socket = dir.join("sock");
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
         [[devices]]\nid = \"thing\"\ndriver = \"fake-counter\"\n[devices.config]\nstart = 41\n\
@@ -50,6 +54,7 @@ fn start_with(packages: PackageReport) -> Running {
     };
     let service = Service::start_with_packages(config, packages).unwrap();
     Running {
+        _dir: dir,
         _service: service,
         socket,
     }
@@ -271,7 +276,7 @@ fn packages_shows_what_was_loaded_and_why_the_rest_was_refused() {
     // A real scan of a directory holding a file that is no package, in open mode, and beside it
     // a package that loaded.
     let dir = std::env::temp_dir().join(format!("lemnos-ctl-packages-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&*dir).unwrap();
     std::fs::write(dir.join("junk.so"), "not a shared object").unwrap();
     let mut drivers = vec![entry::<FakeCounter>()];
     let mut report = add_packages(
@@ -334,7 +339,7 @@ fn validate(text: &str) -> Result<String, String> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&*dir).unwrap();
     let path = dir.join("board.toml");
     std::fs::write(&path, text).unwrap();
     let mut out = Vec::new();
@@ -346,7 +351,7 @@ fn validate(text: &str) -> Result<String, String> {
         path.display().to_string(),
     ];
     let result = lemnos_ctl::run(&args, &mut out).map(|()| String::from_utf8(out).unwrap());
-    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&*dir).unwrap();
     result
 }
 
@@ -486,12 +491,13 @@ impl Counting for Counter {
 
 fn start_counting() -> (Running, PathBuf) {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = Scratch(std::env::temp_dir().join(format!(
         "lemnos-ctl-jobs-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
     let socket = dir.join("sock");
+    let kept = dir.to_path_buf();
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
         [[devices]]\nid = \"counter\"\ndriver = \"counting\"\n";
     let service = Service::start(Config {
@@ -505,10 +511,11 @@ fn start_counting() -> (Running, PathBuf) {
     .unwrap();
     (
         Running {
+            _dir: dir,
             _service: service,
             socket,
         },
-        dir,
+        kept,
     )
 }
 

@@ -156,11 +156,21 @@ mod tests {
     }
 
     /// A directory for one test's staged id and target, under a name of its own.
-    fn staging(name: &str) -> (PathBuf, PathBuf) {
+    /// A directory under TMPDIR, removed when the guard drops, pass or panic.
+    struct Dir(PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn staging(name: &str) -> (Dir, PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("machine-id-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("new/etc")).unwrap();
         (
+            Dir(dir.clone()),
             dir.join("run/lemnos/machine-id"),
             dir.join("new/etc/machine-id"),
         )
@@ -172,7 +182,7 @@ mod tests {
 
     #[test]
     fn a_bound_id_is_staged_read_only_and_bound_over_the_target() {
-        let (staged, target) = staging("bound");
+        let (_dir, staged, target) = staging("bound");
         fs::write(&target, "").unwrap();
         let calls = RefCell::new(Vec::new());
         let result = bind(&staged, &target, &ok_serial(), |s, t| {
@@ -196,7 +206,7 @@ mod tests {
 
     #[test]
     fn no_serial_is_refused_by_name_and_nothing_is_staged() {
-        let (staged, target) = staging("no_serial");
+        let (_dir, staged, target) = staging("no_serial");
         fs::write(&target, "").unwrap();
         let result = bind(&staged, &target, &Err("no source".into()), |_, _| {
             panic!("no bind")
@@ -210,7 +220,7 @@ mod tests {
     /// The target is checked before anything is written: a missing target creates nothing.
     #[test]
     fn a_missing_target_is_refused_by_name_and_nothing_is_created() {
-        let (staged, target) = staging("missing");
+        let (_dir, staged, target) = staging("missing");
         let result = bind(&staged, &target, &ok_serial(), |_, _| panic!("no bind"));
         assert_eq!(result.unwrap_err().reason(), "machine-id-target-missing");
         assert!(!target.exists(), "the target is not created");
@@ -219,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_target_that_is_a_symlink_is_refused_as_missing() {
-        let (staged, target) = staging("symlink");
+        let (_dir, staged, target) = staging("symlink");
         let elsewhere = target.with_file_name("elsewhere");
         fs::write(&elsewhere, "").unwrap();
         std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
@@ -230,7 +240,7 @@ mod tests {
     /// A bind that fails is refused by name, and the staged copy is taken back.
     #[test]
     fn a_bind_that_fails_is_refused_by_name_and_leaves_no_staged_file() {
-        let (staged, target) = staging("bind_fails");
+        let (_dir, staged, target) = staging("bind_fails");
         fs::write(&target, "").unwrap();
         let result = bind(&staged, &target, &ok_serial(), |_, _| Err("EPERM".into()));
         let refusal = result.unwrap_err();

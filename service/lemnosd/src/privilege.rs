@@ -365,19 +365,29 @@ mod node_tests {
     use super::check_nodes;
 
     /// A file of the test's own, in a directory of its own under the test's scratch directory.
-    fn node(name: &str, mode: u32) -> (std::path::PathBuf, u32, u32) {
+    /// A directory the test removes when it ends, pass or panic.
+    struct Dir(std::path::PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn node(name: &str, mode: u32) -> (Dir, std::path::PathBuf, u32, u32) {
         let dir = std::env::temp_dir().join(format!("lemnosd-node-{name}-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
+        let guard = Dir(dir.clone());
         let path = dir.join("node");
         fs::write(&path, b"").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
         let meta = fs::metadata(&path).unwrap();
-        (path, meta.uid(), meta.gid())
+        (guard, path, meta.uid(), meta.gid())
     }
 
     #[test]
     fn a_node_the_group_can_open_is_accepted() {
-        let (path, _uid, gid) = node("group-rw", 0o660);
+        let (_dir, path, _uid, gid) = node("group-rw", 0o660);
         // A user outside the file's owner but in its group: the group bits are read and written.
         assert!(check_nodes(std::slice::from_ref(&path), 987_654, gid, "lemnos").is_ok());
     }
@@ -385,7 +395,7 @@ mod node_tests {
     #[test]
     fn a_node_only_root_can_open_is_named_with_the_fix() {
         // The reference board's state before the udev fragment: root:root, mode 600.
-        let (path, _uid, _gid) = node("root-only", 0o600);
+        let (_dir, path, _uid, _gid) = node("root-only", 0o600);
         let error =
             check_nodes(std::slice::from_ref(&path), 987_654, 987_654, "lemnos").unwrap_err();
         assert_eq!(
@@ -405,9 +415,9 @@ mod node_tests {
 
     #[test]
     fn a_node_readable_and_writable_by_other_is_accepted_and_one_half_open_is_not() {
-        let (path, _uid, gid) = node("other-rw", 0o606);
+        let (_dir, path, _uid, gid) = node("other-rw", 0o606);
         assert!(check_nodes(std::slice::from_ref(&path), 987_654, gid + 1, "lemnos").is_ok());
-        let (path, _uid, gid) = node("other-r", 0o604);
+        let (_dir, path, _uid, gid) = node("other-r", 0o604);
         assert!(check_nodes(std::slice::from_ref(&path), 987_654, gid + 1, "lemnos").is_err());
     }
 }

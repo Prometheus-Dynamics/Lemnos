@@ -38,7 +38,16 @@ impl Plugged for Plug {
 
 /// A service whose one device needs `port-a`, which isn't there, and whose retries are a minute
 /// apart: only a hint can bind it within a test.
-fn start() -> (Service, SimBoard) {
+/// A directory under TMPDIR, removed when the guard drops, pass or panic.
+struct Dir(std::path::PathBuf);
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn start() -> (Service, Dir, SimBoard) {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "lemnosd-hotplug-{}-{}",
@@ -46,6 +55,7 @@ fn start() -> (Service, SimBoard) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let guard = Dir(dir.clone());
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
                 [[devices]]\nid = \"cam\"\ndriver = \"plug\"\nbus = \"port-a\"\n";
     let board = SimBoard::new();
@@ -62,7 +72,7 @@ fn start() -> (Service, SimBoard) {
         },
     })
     .unwrap();
-    (service, board)
+    (service, guard, board)
 }
 
 fn running(service: &Service) -> bool {
@@ -71,7 +81,7 @@ fn running(service: &Service) -> bool {
 
 #[test]
 fn a_device_that_arrives_is_bound_at_the_hint() {
-    let (mut service, board) = start();
+    let (mut service, _dir, board) = start();
     service.watch(Box::new(board.hints())).unwrap();
     assert!(!running(&service));
     // Long enough that the bind which failed at the start is further back than the gap.
@@ -92,7 +102,7 @@ fn a_device_that_arrives_is_bound_at_the_hint() {
 
 #[test]
 fn without_the_hint_it_waits_for_its_retry() {
-    let (service, board) = start();
+    let (service, _dir, board) = start();
     board.add_line("port-a");
     std::thread::sleep(Duration::from_millis(600));
     assert!(!running(&service), "nothing told the host");
@@ -100,7 +110,7 @@ fn without_the_hint_it_waits_for_its_retry() {
 
 #[test]
 fn a_service_that_is_watching_stops_promptly() {
-    let (mut service, board) = start();
+    let (mut service, _dir, board) = start();
     service.watch(Box::new(board.hints())).unwrap();
     let start = Instant::now();
     service.stop();

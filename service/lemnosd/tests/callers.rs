@@ -61,7 +61,16 @@ impl Holding for Holder {
     }
 }
 
-fn start() -> (Service, std::path::PathBuf) {
+/// A directory under TMPDIR, removed when the guard drops, pass or panic.
+struct Dir(std::path::PathBuf);
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn start() -> (Service, Dir, std::path::PathBuf) {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "lemnosd-callers-{}-{}",
@@ -69,6 +78,7 @@ fn start() -> (Service, std::path::PathBuf) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let guard = Dir(dir.clone());
     let socket = dir.join("sock");
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
                 [[devices]]\nid = \"h\"\ndriver = \"holder\"\n";
@@ -81,12 +91,12 @@ fn start() -> (Service, std::path::PathBuf) {
         options: Options::default(),
     })
     .unwrap();
-    (service, socket)
+    (service, guard, socket)
 }
 
 #[test]
 fn a_closed_connection_gives_up_only_its_own_holds() {
-    let (_service, socket) = start();
+    let (_service, _dir, socket) = start();
     let watcher = Client::connect(&socket, "watcher").unwrap();
     let mut watch = watcher.open::<dyn Holding>("h").unwrap();
     watch.take().unwrap();
@@ -109,7 +119,7 @@ fn a_closed_connection_gives_up_only_its_own_holds() {
 
 #[test]
 fn a_method_the_contract_does_not_have_is_refused_by_number() {
-    let (_service, socket) = start();
+    let (_service, _dir, socket) = start();
     let client = Client::connect(&socket, "t").unwrap();
     let mut handle = client.open_tag("h", "holder/1").unwrap();
     let mut reply = [0u8; 16];

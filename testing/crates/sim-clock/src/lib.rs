@@ -180,10 +180,33 @@ pub fn age_bad(stamp: u64, now: u64, max_age_ns: u64) -> bool {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
+    /// A scratch directory under TMPDIR, removed when the guard drops, pass or panic. It derefs to
+    /// `path`, a file or directory inside `dir`, so the guard must stay bound while `path` is used.
+    struct Scratch {
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("sim-clock-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("clock")
+        Scratch {
+            path: dir.join("clock"),
+            dir,
+        }
     }
 
     #[test]
@@ -241,17 +264,17 @@ mod tests {
         let reader = FileClock::open(&path).unwrap();
         assert_eq!(reader.now_ns().unwrap(), 200);
         // A file rewritten behind the reader's back, earlier, is refused.
-        std::fs::write(&path, [0u8; 16]).unwrap();
+        std::fs::write(&*path, [0u8; 16]).unwrap();
         assert!(reader.now_ns().is_err());
     }
 
     #[test]
     fn a_missing_or_short_file_is_refused_by_name() {
         let path = scratch("missing");
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&*path);
         let e = FileClock::open(&path).err().unwrap();
         assert!(e.contains("clock file"), "{e}");
-        std::fs::write(&path, [0u8; 8]).unwrap();
+        std::fs::write(&*path, [0u8; 8]).unwrap();
         let e = FileClock::open(&path).err().unwrap();
         assert!(e.contains("short"), "{e}");
     }

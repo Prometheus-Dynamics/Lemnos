@@ -1,5 +1,8 @@
 //! `lemnos-ctl tree BOARD --bridge-env FILE` writes the bridge's link line, and only that file.
 
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 use std::path::PathBuf;
 
 fn repo() -> PathBuf {
@@ -8,8 +11,9 @@ fn repo() -> PathBuf {
 
 #[test]
 fn tree_writes_the_reference_boards_bridge_env_to_the_named_file() {
-    let dir = std::env::temp_dir().join(format!("lemnos-ctl-bridge-env-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch directory");
+    let dir =
+        Scratch(std::env::temp_dir().join(format!("lemnos-ctl-bridge-env-{}", std::process::id())));
+    std::fs::create_dir_all(&*dir).expect("scratch directory");
     let socs = repo().join("socs");
     let board = repo().join("testing/boards/reference.toml");
     let env = dir.join("lemnos-orion.env.generated");
@@ -35,5 +39,5 @@ fn tree_writes_the_reference_boards_bridge_env_to_the_named_file() {
             .expect("the golden");
     assert_eq!(written, golden);
     assert!(overlay.exists());
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&*dir);
 }

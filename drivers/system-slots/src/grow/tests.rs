@@ -29,7 +29,23 @@ const EBUSY: i32 = 16;
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
 
-fn dir(name: &str) -> PathBuf {
+/// A scratch directory under TMPDIR, removed when the test ends, whether it passed or panicked.
+struct Scratch(std::path::PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn dir(name: &str) -> Scratch {
     let d = std::env::temp_dir().join(format!("lemnos-grow-{}-{name}", std::process::id()));
     // Whatever is at the name is not ours to keep: a file left there would stop the directory.
     if fs::symlink_metadata(&d).is_ok_and(|m| m.is_dir()) {
@@ -38,7 +54,7 @@ fn dir(name: &str) -> PathBuf {
         let _ = fs::remove_file(&d);
     }
     fs::create_dir_all(&d).unwrap();
-    d
+    Scratch(d)
 }
 
 fn entry(kind: u8, start: u32, sectors: u32) -> [u8; 16] {
@@ -384,7 +400,8 @@ impl Disk for Fake {
 /// The result of a grow with nothing going wrong: the snapshot, the kernel's length and the
 /// filesystem's blocks.
 fn reference(tag: &str) -> (Vec<u8>, u64, u64) {
-    let img = make(&dir(&format!("reference-{tag}")).join("disk.img"));
+    let scratch1 = dir(&format!("reference-{tag}"));
+    let img = make(&scratch1.join("disk.img"));
     let mut fake = Fake::boot(&img);
     grow(&mut fake).unwrap();
     (snapshot(&img), fake.kernel_sectors, fs_blocks(&img))
@@ -392,7 +409,8 @@ fn reference(tag: &str) -> (Vec<u8>, u64, u64) {
 
 #[test]
 fn a_last_data_partition_grows_its_table_the_kernel_and_the_filesystem_and_nothing_else() {
-    let img = make(&dir("full").join("disk.img"));
+    let scratch2 = dir("full");
+    let img = make(&scratch2.join("disk.img"));
     let before = snapshot(&img);
     let before_mbr = sector0_of(&img);
     let mut fake = Fake::boot(&img);
@@ -437,7 +455,8 @@ fn a_last_data_partition_grows_its_table_the_kernel_and_the_filesystem_and_nothi
 
 #[test]
 fn a_grown_disk_is_left_alone_by_the_next_pass() {
-    let img = make(&dir("again").join("disk.img"));
+    let scratch3 = dir("again");
+    let img = make(&scratch3.join("disk.img"));
     grow(&mut Fake::boot(&img)).unwrap();
     let grown = snapshot(&img);
     let mut again = Fake::boot(&img);
@@ -453,7 +472,8 @@ fn a_power_cut_or_a_restart_at_any_step_is_finished_by_the_next_pass() {
         for after in [false, true] {
             for restart in [false, true] {
                 let case = format!("cut-{n}-{after}-{restart}");
-                let img = make(&dir(&case).join("disk.img"));
+                let scratch4 = dir(&case);
+                let img = make(&scratch4.join("disk.img"));
                 let mut cut = Fake::boot(&img);
                 if after {
                     cut.die_after = Some(n);
@@ -485,11 +505,12 @@ fn a_power_cut_or_a_restart_at_any_step_is_finished_by_the_next_pass() {
 
 #[test]
 fn a_refused_layout_writes_nothing_and_says_why() {
+    let root = dir("refused-layout");
     let cases: Vec<(&str, PathBuf, &str)> = vec![
         (
             "not last",
             make_custom(
-                &dir("r-last").join("d.img"),
+                &root.join("r-last.img"),
                 DISK,
                 P2_OLD,
                 0x83,
@@ -503,7 +524,7 @@ fn a_refused_layout_writes_nothing_and_says_why() {
         (
             "type",
             make_custom(
-                &dir("r-type").join("d.img"),
+                &root.join("r-type.img"),
                 DISK,
                 P2_OLD,
                 0x0c,
@@ -517,7 +538,7 @@ fn a_refused_layout_writes_nothing_and_says_why() {
         (
             "label",
             make_custom(
-                &dir("r-label").join("d.img"),
+                &root.join("r-label.img"),
                 DISK,
                 P2_OLD,
                 0x83,
@@ -531,7 +552,7 @@ fn a_refused_layout_writes_nothing_and_says_why() {
         (
             "disk smaller",
             make_custom(
-                &dir("r-small").join("d.img"),
+                &root.join("r-small.img"),
                 u64::from(P2_START) + 50_000,
                 P2_OLD,
                 0x83,
@@ -545,7 +566,7 @@ fn a_refused_layout_writes_nothing_and_says_why() {
         (
             "not ext4",
             make_custom(
-                &dir("r-ext4").join("d.img"),
+                &root.join("r-ext4.img"),
                 DISK,
                 P2_OLD,
                 0x83,
@@ -559,7 +580,7 @@ fn a_refused_layout_writes_nothing_and_says_why() {
         (
             "unsigned table",
             make_custom(
-                &dir("r-sig").join("d.img"),
+                &root.join("r-sig.img"),
                 DISK,
                 P2_OLD,
                 0x83,
@@ -583,8 +604,9 @@ fn a_refused_layout_writes_nothing_and_says_why() {
 
 #[test]
 fn a_gain_under_one_mib_writes_nothing() {
+    let guard_gain = dir("gain");
     let img = make_custom(
-        &dir("gain").join("d.img"),
+        &guard_gain.join("d.img"),
         u64::from(P2_START) + u64::from(P2_OLD) + 2047,
         P2_OLD,
         0x83,
@@ -602,8 +624,9 @@ fn a_gain_under_one_mib_writes_nothing() {
 
 #[test]
 fn a_kernel_view_longer_than_the_table_is_refused_and_nothing_is_written() {
+    let guard_kernel_long = dir("kernel-long");
     let img = make_custom(
-        &dir("kernel-long").join("d.img"),
+        &guard_kernel_long.join("d.img"),
         u64::from(P2_START) + u64::from(P2_OLD) + 2047,
         P2_OLD,
         0x83,
@@ -626,7 +649,8 @@ fn a_kernel_view_longer_than_the_table_is_refused_and_nothing_is_written() {
 
 #[test]
 fn a_filesystem_larger_than_its_partition_is_refused_and_not_shrunk() {
-    let img = make(&dir("fs-long").join("d.img"));
+    let scratch5 = dir("fs-long");
+    let img = make(&scratch5.join("d.img"));
     poke(
         &img,
         u64::from(P2_START) * SECT + 1024 + 4,
@@ -640,7 +664,8 @@ fn a_filesystem_larger_than_its_partition_is_refused_and_not_shrunk() {
 
 #[test]
 fn a_torn_table_write_is_refused_on_the_next_start_and_only_the_count_bytes_differ() {
-    let img = make(&dir("torn").join("d.img"));
+    let scratch6 = dir("torn");
+    let img = make(&scratch6.join("d.img"));
     let before = sector0_of(&img);
     let mut torn = Fake::boot(&img);
     torn.tear = true;
@@ -667,8 +692,9 @@ fn a_new_count_whose_top_byte_is_the_old_one_is_written_and_not_refused() {
     // A disk under 2^24 sectors (8 GB): the count's top byte is 0 before and after, so only three
     // bytes of the sector change. The write is right and must not be refused for that.
     let disk = 8_000_000u64;
+    let guard_top_byte = dir("top-byte");
     let img = make_custom(
-        &dir("top-byte").join("disk.img"),
+        &guard_top_byte.join("disk.img"),
         disk,
         P2_OLD,
         0x83,
@@ -697,7 +723,8 @@ fn a_new_count_whose_top_byte_is_the_old_one_is_written_and_not_refused() {
 fn a_resize_the_kernel_accepted_is_finished_without_reading_the_superblock_back() {
     // The mounted filesystem's count is not on the device until a checkpoint: the pass must end on
     // the kernel's answer, not on a superblock read that still shows the old count.
-    let img = make(&dir("journal-held").join("disk.img"));
+    let scratch7 = dir("journal-held");
+    let img = make(&scratch7.join("disk.img"));
     let mut fake = Fake::boot(&img);
     fake.journal_holds_count = true;
     let mut task = Task::new(Err("no disk".into()), PathBuf::from("/data"));
@@ -718,7 +745,8 @@ fn a_resize_the_kernel_accepted_is_finished_without_reading_the_superblock_back(
 fn a_kernel_view_that_never_grows_reaches_grown_unconfirmed_after_the_bound_and_keeps_trying() {
     // The superblock never updates and the kernel's view never shows the resize: the pass must
     // name `grown-unconfirmed` with the sizes it saw after CONFIRM_TRIES checks, and keep trying.
-    let img = make(&dir("never-grows").join("disk.img"));
+    let scratch8 = dir("never-grows");
+    let img = make(&scratch8.join("disk.img"));
     let mut fake = Fake::boot(&img);
     fake.journal_holds_count = true;
     fake.view_frozen = true;
@@ -756,7 +784,8 @@ fn a_kernel_view_that_never_grows_reaches_grown_unconfirmed_after_the_bound_and_
 
 #[test]
 fn a_view_that_shows_the_grow_clears_the_unconfirmed_state() {
-    let img = make(&dir("view-clears").join("disk.img"));
+    let scratch9 = dir("view-clears");
+    let img = make(&scratch9.join("disk.img"));
     let mut fake = Fake::boot(&img);
     fake.journal_holds_count = true;
     fake.view_frozen = true;
@@ -778,7 +807,8 @@ fn a_driver_restarted_after_the_resize_before_the_confirmation_reads_ok() {
     // superblock on the device still shows the old count (the journal holds it). The restarted
     // driver reads the stored baseline and confirms against it: ok, and the record is cleared.
     let old = 100_000 * SECT;
-    let img = make(&dir("restart-after").join("disk.img"));
+    let scratch10 = dir("restart-after");
+    let img = make(&scratch10.join("disk.img"));
     let mut first = Fake::boot(&img);
     first.journal_holds_count = true;
     let pass = grow(&mut first).unwrap();
@@ -830,7 +860,8 @@ fn a_missing_or_corrupt_stored_baseline_reaches_grown_unconfirmed_and_names_it()
         ),
     ];
     for (case, damage, words) in cases {
-        let img = make(&dir(&format!("baseline-{case}")).join("disk.img"));
+        let scratch11 = dir(&format!("baseline-{case}"));
+        let img = make(&scratch11.join("disk.img"));
         let mut first = Fake::boot(&img);
         first.journal_holds_count = true;
         grow(&mut first).unwrap_or_else(|why| panic!("{case}: {why}"));
@@ -876,7 +907,8 @@ fn a_record_round_trips_and_a_damaged_one_does_not_decode() {
 #[test]
 fn a_refused_partition_resize_is_finished_by_the_next_pass() {
     let (want, want_kernel, want_blocks) = reference("busy");
-    let img = make(&dir("busy").join("d.img"));
+    let scratch12 = dir("busy");
+    let img = make(&scratch12.join("d.img"));
     let mut busy = Fake::boot(&img);
     busy.blkpg_fails = 1;
     let why = grow(&mut busy).unwrap_err();
@@ -894,7 +926,8 @@ fn a_refused_partition_resize_is_finished_by_the_next_pass() {
 #[test]
 fn a_filesystem_that_cannot_grow_yet_is_finished_by_a_later_pass() {
     let (want, _, want_blocks) = reference("enospc");
-    let img = make(&dir("enospc").join("d.img"));
+    let scratch13 = dir("enospc");
+    let img = make(&scratch13.join("d.img"));
     let mut full = Fake::boot(&img);
     full.fs_fails = 1;
     let why = grow(&mut full).unwrap_err();
@@ -976,7 +1009,8 @@ fn gated_open(
 
 #[test]
 fn a_tick_returns_at_once_while_the_resize_blocks_and_takes_the_result_when_it_finishes() {
-    let img = make(&dir("tick-blocks").join("disk.img"));
+    let scratch14 = dir("tick-blocks");
+    let img = make(&scratch14.join("disk.img"));
     let gate = Arc::new(Gate::default());
     let open = gated_open(img.clone(), gate.clone());
     let mut task = Task::new(Ok(img.clone()), PathBuf::from("/data"));
@@ -1013,7 +1047,8 @@ fn a_tick_returns_at_once_while_the_resize_blocks_and_takes_the_result_when_it_f
 
 #[test]
 fn a_resize_past_its_bound_is_named_and_its_result_is_still_taken() {
-    let img = make(&dir("overrun").join("disk.img"));
+    let scratch15 = dir("overrun");
+    let img = make(&scratch15.join("disk.img"));
     let gate = Arc::new(Gate::default());
     let open = gated_open(img.clone(), gate.clone());
     let mut task = Task::new(Ok(img.clone()), PathBuf::from("/data"));
@@ -1037,7 +1072,8 @@ fn a_restart_during_the_resize_is_confirmed_from_the_stored_baseline() {
     // The first process starts the resize and dies inside it: its thread never returns from the
     // ioctl, so the superblock and the kernel's view are still the old size. The table and the
     // kernel's partition are already the new ones, and the baseline is stored.
-    let img = make(&dir("restart-during").join("disk.img"));
+    let scratch16 = dir("restart-during");
+    let img = make(&scratch16.join("disk.img"));
     let gate = Arc::new(Gate::default());
     let mut first = Task::new(Ok(img.clone()), PathBuf::from("/data"));
     first.tick(0, &gated_open(img.clone(), gate.clone()));
@@ -1070,9 +1106,10 @@ fn a_restart_during_the_resize_is_confirmed_from_the_stored_baseline() {
 }
 
 /// A disk of `bytes` with the same table and filesystem as [`make`], for the cap's tests.
-fn make_disk_bytes(name: &str, bytes: u64) -> PathBuf {
-    make_custom(
-        &dir(name).join("disk.img"),
+fn make_disk_bytes(name: &str, bytes: u64) -> (Scratch, PathBuf) {
+    let guard = dir(name);
+    let img = make_custom(
+        &guard.join("disk.img"),
         bytes / SECT,
         P2_OLD,
         0x83,
@@ -1080,12 +1117,13 @@ fn make_disk_bytes(name: &str, bytes: u64) -> PathBuf {
         LABEL,
         true,
         true,
-    )
+    );
+    (guard, img)
 }
 
 #[test]
 fn a_grow_to_more_than_256_gib_is_refused_by_name_and_nothing_is_written() {
-    let img = make_disk_bytes("too-large", 2 << 40);
+    let (_dir, img) = make_disk_bytes("too-large", 2 << 40);
     let before = snapshot(&img);
     let before_mbr = sector0_of(&img);
     let mut fake = Fake::boot(&img);
@@ -1111,7 +1149,7 @@ fn a_grow_to_more_than_256_gib_is_refused_by_name_and_nothing_is_written() {
 
 #[test]
 fn a_grow_to_256_gib_or_less_is_allowed() {
-    let img = make_disk_bytes("at-the-cap", 256 << 30);
+    let (_dir, img) = make_disk_bytes("at-the-cap", 256 << 30);
     let mut fake = Fake::boot(&img);
     assert!(matches!(grow(&mut fake).unwrap(), Pass::Resized { .. }));
     let t = mbr::entries(&sector0_of(&img)).unwrap();
@@ -1121,7 +1159,7 @@ fn a_grow_to_256_gib_or_less_is_allowed() {
 
 #[test]
 fn a_refused_grow_is_named_once_by_the_driver_and_never_tried_again() {
-    let img = make_disk_bytes("refused-driver", 512 << 30);
+    let (_dir, img) = make_disk_bytes("refused-driver", 512 << 30);
     let before = snapshot(&img);
     let open = {
         let img = img.clone();
@@ -1286,17 +1324,18 @@ const P2_OLD_GPT: u64 = 100_000;
 
 /// A GPT disk of [`DISK`] sectors, grown in place: its backup is at the end and the old one sits
 /// where the image's end was (extended by a file set_len, see [`make_gpt_extended`]).
-fn make_gpt_extended(name: &str, old_disk: u64, new_disk: u64) -> PathBuf {
-    let img = make_gpt_disk(&dir(name).join("disk.img"), old_disk, P2_OLD_GPT);
+fn make_gpt_extended(name: &str, old_disk: u64, new_disk: u64) -> (Scratch, PathBuf) {
+    let scratch17 = dir(name);
+    let img = make_gpt_disk(&scratch17.join("disk.img"), old_disk, P2_OLD_GPT);
     let f = OpenOptions::new().write(true).open(&img).unwrap();
     f.set_len(new_disk * SECT).unwrap();
-    img
+    (scratch17, img)
 }
 
 #[test]
 fn a_gpt_last_partition_grows_and_both_copies_move_to_the_new_end() {
     let disk = 2 * DISK;
-    let img = make_gpt_extended("gpt-full", DISK, disk);
+    let (_dir, img) = make_gpt_extended("gpt-full", DISK, disk);
     let (_, new_end) = ends(disk);
     let mut fake = Fake::boot(&img);
     assert!(matches!(grow(&mut fake).unwrap(), Pass::Resized { .. }));
@@ -1315,7 +1354,7 @@ fn a_gpt_last_partition_grows_and_both_copies_move_to_the_new_end() {
 #[test]
 fn a_stale_backup_gpt_past_the_old_end_is_zeroed_before_the_grow_writes() {
     let disk = 2 * DISK;
-    let img = make_gpt_extended("gpt-stale", DISK, disk);
+    let (_dir, img) = make_gpt_extended("gpt-stale", DISK, disk);
     let old_backup = DISK - 1;
     let mut before = [0u8; 512];
     File::open(&img)
@@ -1346,7 +1385,7 @@ fn a_gpt_grow_cut_after_any_write_reads_as_the_old_table_or_the_new_one() {
     let disk = 2 * DISK;
     let (old_end, new_end) = ends(disk);
     for cut in 1..=12usize {
-        let img = make_gpt_extended(&format!("gpt-cut-{cut}"), DISK, disk);
+        let (_dir, img) = make_gpt_extended(&format!("gpt-cut-{cut}"), DISK, disk);
         let mut fake = Fake::boot(&img);
         fake.die_after = Some(cut);
         let _ = grow(&mut fake);
@@ -1381,7 +1420,7 @@ fn a_gpt_grow_cut_after_any_write_reads_as_the_old_table_or_the_new_one() {
 #[test]
 fn a_damaged_primary_is_repaired_from_the_backup_when_the_table_is_already_grown() {
     let disk = 2 * DISK;
-    let img = make_gpt_extended("gpt-repair", DISK, disk);
+    let (_dir, img) = make_gpt_extended("gpt-repair", DISK, disk);
     let mut fake = Fake::boot(&img);
     grow(&mut fake).unwrap();
     poke(&img, SECT + 60, &[0xff]); // the primary's header CRC
@@ -1399,7 +1438,7 @@ fn a_damaged_primary_is_repaired_from_the_backup_when_the_table_is_already_grown
 
 #[test]
 fn a_gpt_with_no_readable_copy_is_the_named_unavailable_state_and_nothing_is_written() {
-    let img = make_gpt_extended("gpt-dead", DISK, 2 * DISK);
+    let (_dir, img) = make_gpt_extended("gpt-dead", DISK, 2 * DISK);
     poke(&img, SECT + 60, &[0xff]);
     poke(&img, (2 * DISK - 1) * SECT + 60, &[0xff]);
     let before = snapshot(&img);
@@ -1414,7 +1453,7 @@ fn a_gpt_with_no_readable_copy_is_the_named_unavailable_state_and_nothing_is_wri
 
 #[test]
 fn a_gpt_partition_two_that_is_not_the_last_is_the_named_unavailable_state() {
-    let img = make_gpt_extended("gpt-not-last", DISK, 2 * DISK);
+    let (_dir, img) = make_gpt_extended("gpt-not-last", DISK, 2 * DISK);
     // A used entry 3 starting after partition 2: rewrite the primary array and its header.
     let (mut primary, mut array) = read_table_copy(&img, 1).unwrap();
     let at = 2 * 128;
@@ -1441,7 +1480,8 @@ fn a_gpt_partition_two_that_is_not_the_last_is_the_named_unavailable_state() {
 
 #[test]
 fn a_read_only_data_partition_is_a_named_state_and_nothing_is_written() {
-    let img = make(&dir("read-only").join("disk.img"));
+    let scratch18 = dir("read-only");
+    let img = make(&scratch18.join("disk.img"));
     let before = snapshot(&img);
     let mut fake = Fake::boot(&img);
     fake.read_only = true;
@@ -1456,7 +1496,7 @@ fn a_read_only_data_partition_is_a_named_state_and_nothing_is_written() {
 
 #[test]
 fn the_grow_too_large_info_keys_name_the_state_the_sizes_and_the_reason() {
-    let img = make_disk_bytes("info-keys", 512 << 30);
+    let (_dir, img) = make_disk_bytes("info-keys", 512 << 30);
     let open = {
         let img = img.clone();
         move || -> Result<Box<dyn Disk + Send>, String> {

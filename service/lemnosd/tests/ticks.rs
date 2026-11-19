@@ -78,7 +78,16 @@ impl Ticking for Ticker {
     }
 }
 
-fn start(period_ns: u64) -> (Service, std::path::PathBuf) {
+/// A directory under TMPDIR, removed when the guard drops, pass or panic.
+struct Dir(std::path::PathBuf);
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn start(period_ns: u64) -> (Service, Dir, std::path::PathBuf) {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "lemnosd-ticks-{}-{}",
@@ -86,6 +95,7 @@ fn start(period_ns: u64) -> (Service, std::path::PathBuf) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let guard = Dir(dir.clone());
     let socket = dir.join("sock");
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
@@ -100,12 +110,12 @@ fn start(period_ns: u64) -> (Service, std::path::PathBuf) {
         options: Options::default(),
     })
     .unwrap();
-    (service, socket)
+    (service, guard, socket)
 }
 
 #[test]
 fn a_periodic_driver_keeps_being_ticked() {
-    let (_service, socket) = start(2_000_000);
+    let (_service, _dir, socket) = start(2_000_000);
     let client = Client::connect(&socket, "test").unwrap();
     let mut ticker = client.open::<dyn Ticking>("t").unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -119,7 +129,7 @@ fn a_periodic_driver_keeps_being_ticked() {
 /// cut that short. The count is read outside the driver, because any call would tick it.
 #[test]
 fn a_call_that_starts_timed_work_wakes_the_sleeping_loop() {
-    let (_service, socket) = start(0);
+    let (_service, _dir, socket) = start(0);
     let client = Client::connect(&socket, "test").unwrap();
     let mut ticker = client.open::<dyn Ticking>("t").unwrap();
     let mut took = Vec::new();

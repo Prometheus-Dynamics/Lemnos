@@ -7,7 +7,7 @@
 #![allow(clippy::print_stderr)]
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -46,12 +46,28 @@ const SETTLE: Duration = Duration::from_millis(2500);
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 /// A fresh directory for one test. Unix socket paths are short, so the name is short.
-fn dir(test: &str) -> PathBuf {
+/// A scratch directory under TMPDIR, removed when the test ends, whether it passed or panicked.
+struct Scratch(std::path::PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn dir(test: &str) -> Scratch {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("lo-{test}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("test directory");
-    dir
+    Scratch(dir)
 }
 
 /// Orion node logic in a thread of its own, until dropped.

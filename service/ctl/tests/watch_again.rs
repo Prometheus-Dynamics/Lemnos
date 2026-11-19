@@ -4,6 +4,9 @@
 //! long after the bind, as a sensor powering up) and `again_from_ms` (AGAIN from then on, as a
 //! sensor that stops answering) make each case; the bounds are short so the tests are fast.
 
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -18,16 +21,17 @@ use lemnosd::{Config, Service};
 struct Running {
     _service: Service,
     socket: PathBuf,
+    _dir: Scratch,
 }
 
 /// A service with one fake counter per `(name, config)` line.
 fn start(devices: &[(&str, &str)]) -> Running {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = Scratch(std::env::temp_dir().join(format!(
         "lemnos-watch-again-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
     let socket = dir.join("sock");
     let mut text =
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n".to_string();
@@ -46,6 +50,7 @@ fn start(devices: &[(&str, &str)]) -> Running {
     };
     let service = Service::start(config).unwrap();
     Running {
+        _dir: dir,
         _service: service,
         socket,
     }

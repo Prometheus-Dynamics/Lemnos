@@ -76,11 +76,27 @@ impl Drop for Core {
 /// How long a test waits for the worker to connect before it looks at the answers.
 const CONNECT_WAIT: Duration = Duration::from_secs(20);
 
-fn dir(name: &str) -> PathBuf {
+/// A scratch directory under TMPDIR, removed when the test ends, whether it passed or panicked.
+struct Scratch(std::path::PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn dir(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("lo-precheck-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("test directory");
-    dir
+    Scratch(dir)
 }
 
 /// The driver, started with the comm core at `socket` (its `address` setting).

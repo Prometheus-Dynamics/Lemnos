@@ -4,7 +4,23 @@ use super::*;
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
-fn dir() -> PathBuf {
+/// A scratch directory under TMPDIR, removed when the test ends, whether it passed or panicked.
+struct Scratch(std::path::PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn dir() -> Scratch {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("lo-files-{}-{n}", std::process::id()));
     // Whatever is at the name is not ours to keep: a file left there would stop the directory.
@@ -14,7 +30,7 @@ fn dir() -> PathBuf {
         let _ = fs::remove_file(&dir);
     }
     fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 fn sha(bytes: &[u8]) -> [u8; 32] {

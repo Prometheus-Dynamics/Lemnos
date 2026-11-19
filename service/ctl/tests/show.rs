@@ -1,6 +1,9 @@
 //! `lemnos-ctl show` on the simulated board: a device as a panel, from its description, and the
 //! panel code holds no name of a driver or a contract.
 
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -24,16 +27,17 @@ config = { chip = \"ina226\", shunt_ohms = 0.01, max_current_a = 8.192 }\n\
 struct Running {
     _service: Service,
     socket: PathBuf,
+    _dir: Scratch,
 }
 
 fn start() -> Running {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = Scratch(std::env::temp_dir().join(format!(
         "lemnos-show-test-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    )));
+    std::fs::create_dir_all(&*dir).unwrap();
     let socket = dir.join("sock");
     let board = SimBoard::new();
     board.add_line("gpio-power");
@@ -67,6 +71,7 @@ fn start() -> Running {
     };
     let service = Service::start(config).unwrap();
     Running {
+        _dir: dir,
         _service: service,
         socket,
     }
