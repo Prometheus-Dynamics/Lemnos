@@ -110,13 +110,31 @@ the SoC resets at once; the run does not go on.
 happens between the last check and the write. The window is the code that runs between those two points. A hardware
 guard would close it; see the PMP note below.
 
-**PMP (not read).** A PMP region below the stack would fault an overflow at the store itself. The image does not
-configure PMP, and it does not read `pmpcfg0` or `pmpaddr0` either. A read of a PMP CSR on a core without PMP is an
-illegal-instruction trap, and the boot ROM's trap handler is not known: the one trap the board has shown printed
-`CPU Exception: NO.2` and the board did not answer identify again (testing/board-runs/K230-USB.md, the run-L2 entry).
-The only way to read safely would be to install a trap vector of our own first, and that vector would then be
-untested on the board. So the entry prints `pmp: not read (...)` and nothing else. The first board run may test the
-read by hand, on a scratch image, with the trap handler under its control.
+**PMP (read, through a trap vector of our own).** The entry reads `pmpcfg0` and `pmpaddr0` and prints either
+`pmp: cfg0=0x.. addr0=0x..` or `pmp: trapped mcause=0x.. (no PMP)`. A read of a PMP CSR on a core without PMP is an
+illegal-instruction trap, and the boot ROM's trap handler is not known (its one observed trap printed
+`CPU Exception: NO.2` and the board did not answer identify again; testing/board-runs/K230-USB.md). So the reads run in
+a window of their own (`drivers/k230-usbboot-sys/src/pmp.rs`):
+1. `mstatus.MIE` is saved and cleared, so no interrupt can reach the vector;
+2. `mtvec` is saved and pointed at `lemnos_pmp_handler`, which records the first `mcause`, steps `mepc` past the
+   4-byte read, and returns;
+3. the two reads run; 4. `mtvec` is restored, then `mstatus.MIE`.
+Nothing else runs in the window: no stack, no card or USB I/O. The handler touches only `t0` to `t3`.
+
+The mode: the window writes `mtvec` and `mstatus`, which only machine mode may do. No instruction tells machine mode
+from supervisor mode without trapping, so the entry relies on the handover being machine mode (the trap capture's mode
+in testing/board-runs/K230-USB.md). That is a contract, not a check.
+
+**Rehearsal (qemu-system-riscv64 10.2.2, virt, rv64, from reset in machine mode).** `drivers/k230-usbboot-image/pmp-rehearsal/run.sh`
+builds the probe's own code into a bare-metal program and runs four cases; each case also prints `mtvec` before and
+after the probe, and passes only if they are equal (the harness sets its own vector first, so the equality is a test):
+- `pmp-true`: `pmp: cfg0=0x00000000 addr0=0x00000000`, `mtvec` restored, `identify: K230`. PASS.
+- `pmp-false`: `pmp: trapped mcause=0x00000002 (no PMP)`, `mtvec` restored, `identify: K230`. PASS.
+- `fail-naive` (the reads with no vector, the fail-before): no identify; the run times out. CAUGHT.
+- `fail-broken` (the vector without the `mepc` step): the trapping read runs again; no identify. CAUGHT.
+
+**Status: rehearsed on qemu only. Untested on the board.** The board's trap behaviour, the ROM's handler and the
+machine mode at the entry are not exercised by the rehearsal.
 
 **Below the guard (the RAM under the image).** The entry paints `0x80340000`..`0x8035bf00` (113,408 bytes, from 128 KiB below the load address up to the
 guard) with `0x3c3c3c3c`. Each end scans it and prints `below-guard: unchanged`, or

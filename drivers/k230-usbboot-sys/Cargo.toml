@@ -35,3 +35,7 @@ lemnos-flash-wire = { path = "../flash-wire" }
 b2 = ["ep0-trace"]
 # The endpoint 0 trace (dwc2::Trace): kept by the B2 build and the PC rehearsal, not by the card build.
 ep0-trace = []
+# The qemu rehearsal of the PMP read (drivers/k230-usbboot-image/pmp-rehearsal): `pmp-naive` reads with no vector of
+# ours, `pmp-broken` has a vector that does not step past the trapping read. The card image builds with neither.
+pmp-naive = []
+pmp-broken = []

@@ -399,30 +399,27 @@ fn word_at(base: usize, i: usize) -> u32 {
 /// The reserve's word `i`, counted from its bottom.
 fn stack_word(i: usize) -> u32 {
     // SAFETY: `i` is below `stack_words()`; see `word_at`.
-    word_at(unsafe { &raw const lemnos_stack_bottom as usize }, i)
+    word_at(&raw const lemnos_stack_bottom as usize, i)
 }
 
 /// The guard band's word `i`, counted from its bottom.
 fn guard_word(i: usize) -> u32 {
     // SAFETY: `i` is below `guard_words()`; see `word_at`.
-    word_at(unsafe { &raw const lemnos_guard_bottom as usize }, i)
+    word_at(&raw const lemnos_guard_bottom as usize, i)
 }
 
 /// The reserve's size in words.
 fn stack_words() -> usize {
-    // SAFETY: the two addresses are the linker's symbols; only their addresses are taken.
-    let bytes = unsafe {
-        (&raw const lemnos_stack_top as usize) - (&raw const lemnos_stack_bottom as usize)
-    };
+    // The two addresses are the linker's symbols; only their addresses are taken, so no access is made.
+    let bytes = (&raw const lemnos_stack_top as usize) - (&raw const lemnos_stack_bottom as usize);
     bytes / 4
 }
 
 /// The guard band's size in words.
 fn guard_words() -> usize {
-    // SAFETY: the two addresses are the linker's symbols; only their addresses are taken.
-    let bytes = unsafe {
-        (&raw const lemnos_stack_bottom as usize) - (&raw const lemnos_guard_bottom as usize)
-    };
+    // The two addresses are the linker's symbols; only their addresses are taken, so no access is made.
+    let bytes =
+        (&raw const lemnos_stack_bottom as usize) - (&raw const lemnos_guard_bottom as usize);
     bytes / 4
 }
 
@@ -442,15 +439,15 @@ pub fn before_card_write() {
     stack_guard();
 }
 
-/// The PMP line. The image does not read `pmpcfg0` and `pmpaddr0`: a read of a PMP CSR the core does not have is an
-/// illegal-instruction trap, and the boot ROM's trap handler is not known (its one observed use printed
-/// `CPU Exception: NO.2` and the board did not answer again: testing/board-runs/K230-USB.md). Recorded in
-/// docs/k230-flash-extent.md, "PMP".
+/// The PMP line (FLASH-EXTENT): `pmp: cfg0=0x.. addr0=0x..`, or `pmp: trapped mcause=0x.. (no PMP)`. The read is
+/// through the trap vector of `pmp::probe`, in a window of its own (`pmp.rs` says why the mode is taken as machine).
 fn pmp_note<R: RegAccess>(regs: &mut R) {
-    say(
-        regs,
-        "pmp: not read (a read of an absent PMP CSR traps, and the boot ROM's trap handler is not known)",
-    );
+    let outcome = crate::pmp::probe();
+    let mut line = [0u8; lemnos_k230_usbboot_stage::pmp::LINE_LEN];
+    let n = lemnos_k230_usbboot_stage::pmp::put_line(outcome, &mut line);
+    // SAFETY: `put_line` writes only ASCII, so the bytes are valid UTF-8.
+    let text = unsafe { core::str::from_utf8_unchecked(&line[..n]) };
+    gave_up(uart::write_line(regs, text));
 }
 
 /// The first address of the RAM span below the guard that the entry paints (`image.ld` places the guard at
@@ -469,7 +466,7 @@ fn below_word(i: usize) -> u32 {
 /// The span's size in words: from `BELOW_BASE` up to the guard band.
 fn below_words() -> usize {
     // SAFETY: the guard's address from the linker script; only its address is taken.
-    let bytes = unsafe { (&raw const lemnos_guard_bottom as usize) - BELOW_BASE };
+    let bytes = (&raw const lemnos_guard_bottom as usize) - BELOW_BASE;
     bytes / 4
 }
 
@@ -484,31 +481,28 @@ fn below_guard_report() {
         match lemnos_k230_usbboot_stage::stack::changed_span(below_words(), below_word) {
             None => b"below-guard: unchanged",
             Some((first, count)) => {
-                for text in [b"below-guard: changed at 0x".as_slice()] {
-                    line[at..at + text.len()].copy_from_slice(text);
-                    at += text.len();
-                }
+                at = put(&mut line, at, b"below-guard: changed at 0x");
                 at = lemnos_k230_usbboot_stage::stack::put_hex32(
                     &mut line,
                     at,
                     (BELOW_BASE + 4 * first) as u32,
                 );
-                for text in [b", ".as_slice()] {
-                    line[at..at + text.len()].copy_from_slice(text);
-                    at += text.len();
-                }
+                at = put(&mut line, at, b", ");
                 at = lemnos_k230_usbboot_stage::stack::put_decimal(&mut line, at, count as u32);
                 b" words"
             }
         };
-    for text in [head] {
-        line[at..at + text.len()].copy_from_slice(text);
-        at += text.len();
-    }
+    at = put(&mut line, at, head);
     // SAFETY: the buffer holds only ASCII (the words above, hex digits and digits), so it is valid UTF-8.
     let text = unsafe { core::str::from_utf8_unchecked(&line[..at]) };
     let mut regs = Mmio;
     gave_up(uart::write_line(&mut regs, text));
+}
+
+/// Copies `text` into `line` at `at`, and returns the new end.
+fn put(line: &mut [u8], at: usize, text: &[u8]) -> usize {
+    line[at..at + text.len()].copy_from_slice(text);
+    at + text.len()
 }
 
 /// The stack check at an end: the guard, then the high-water line `stack: <used> of <reserved> bytes`. One copy, out
@@ -521,20 +515,11 @@ fn stack_check() {
     // The line is built in one buffer and written with the one-string writer: `stack: <used> of <reserved> bytes`.
     let mut line = [0u8; 40];
     let mut at = 0;
-    for text in [b"stack: ".as_slice()] {
-        line[at..at + text.len()].copy_from_slice(text);
-        at += text.len();
-    }
+    at = put(&mut line, at, b"stack: ");
     at = lemnos_k230_usbboot_stage::stack::put_decimal(&mut line, at, used as u32);
-    for text in [b" of ".as_slice()] {
-        line[at..at + text.len()].copy_from_slice(text);
-        at += text.len();
-    }
+    at = put(&mut line, at, b" of ");
     at = lemnos_k230_usbboot_stage::stack::put_decimal(&mut line, at, (words * 4) as u32);
-    for text in [b" bytes".as_slice()] {
-        line[at..at + text.len()].copy_from_slice(text);
-        at += text.len();
-    }
+    at = put(&mut line, at, b" bytes");
     // SAFETY: the buffer holds only ASCII (the words above and digits), so it is valid UTF-8.
     let text = unsafe { core::str::from_utf8_unchecked(&line[..at]) };
     let mut regs = Mmio;

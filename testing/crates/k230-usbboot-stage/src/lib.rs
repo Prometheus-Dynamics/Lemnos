@@ -22,6 +22,7 @@ pub mod image;
 pub mod medium;
 pub mod pads;
 pub mod piece;
+pub mod pmp;
 pub mod probe;
 pub mod ram;
 pub mod report;

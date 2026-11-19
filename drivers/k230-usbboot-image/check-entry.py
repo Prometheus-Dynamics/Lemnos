@@ -23,6 +23,8 @@ LOAD = 0x8036_0000
 CSR_ALLOWED = {
     "mstatus", "mtvec", "mepc", "mcause", "mtval", "mie", "mip", "mscratch",
     "time", "cycle", "instret",
+    # The PMP read (drivers/k230-usbboot-sys/src/pmp.rs): two reads, under the vector the window installs.
+    "pmpcfg0", "pmpaddr0",
 }
 BRANCHES = {"beq", "bne", "blt", "bge", "bltu", "bgeu", "beqz", "bnez", "bgez", "bltz",
             "blez", "bgtz", "j", "jal", "c.j", "c.jal", "call", "tail"}
@@ -53,9 +55,12 @@ def check(rows, load=LOAD):
             refusals.append(f"floating-point instruction (no F or D in the image): {line}")
         if mnem.startswith("csr") or mnem in ("csrr", "csrw", "csrs", "csrc", "csrrw", "csrrs", "csrrc",
                                               "csrrwi", "csrrsi", "csrrci", "csrwi", "csrsi", "csrci"):
-            name = operands.split(",")[0].split()[-1] if operands else ""
-            csr = operands.split(",")[-1].strip() if "," in operands else name
-            if csr not in CSR_ALLOWED and name not in CSR_ALLOWED:
+            # The CSR operand by instruction form: `csrr rd, csr`, `csrrw/csrrs/csrrc[i] rd, csr, src` take it second;
+            # `csrw/csrs/csrc[i] csr, src` take it first.
+            ops = [o.strip() for o in operands.split(",")] if operands else []
+            second_forms = ("csrr", "csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci")
+            csr = ops[1] if mnem in second_forms and len(ops) > 1 else (ops[0] if ops else "")
+            if csr not in CSR_ALLOWED:
                 refusals.append(f"CSR access to a name the image does not use: {line}")
         if mnem in BRANCHES:
             m = re.search(r"0x([0-9a-f]+)", operands)
@@ -71,6 +76,10 @@ SELF_TESTS = [
     ("vector", "80360000:\tauipc\tt6, 0xc\n80360004:\tvsetvli\tt0, zero, e8, m1\n", False),
     ("float", "80360000:\tauipc\tt6, 0xc\n80360004:\tfld\tft0, 0(t6)\n", False),
     ("csr", "80360000:\tcsrw\tsatp, zero\n", False),
+    ("csr read of a name the image does not use", "80360000:\tcsrr\tt0, satp\n", False),
+    ("csrrci of an allowed name", "80360000:\tcsrrci\ta3, mstatus, 0x8\n", True),
+    ("csrrci of a name not allowed", "80360000:\tcsrrci\ta3, satp, 0x8\n", False),
+    ("pmp read (allowed for the probe)", "80360000:\tcsrr\ta0, pmpcfg0\n80360004:\tcsrr\ta1, pmpaddr0\n", True),
     ("mid-instruction branch", "80360000:\tj\t0x80360006 <x>\n80360004:\taddi\tt6, t6, -1\n80360008:\taddi\tt0, t0, 1\n", False),
     ("fence is not float", "80360000:\tfence\n80360004:\tfence.i\n", True),
 ]

@@ -1642,3 +1642,18 @@ UART captures on both ports, and the reset each return took. Written to NVMe, no
 - **Status:** UNKNOWN. The image paints `0x80340000..0x8035bf00` with `0x3c3c3c3c` at entry and prints
   `below-guard: unchanged` or `below-guard: changed at 0x<addr>, <count> words` at each end. The first board run reports
   that line. A `changed` line means the stack placement must be revisited before any flash use.
+
+## FLASH-EXTENT PMP read: the trapped path rehearsed on qemu, untested on board
+
+- **What the image does at entry (run_piece and run_report):** saves `mstatus.MIE` and clears it, saves `mtvec` and points
+  it at `lemnos_pmp_handler` (records the first `mcause`, steps `mepc` past the read, returns), reads `pmpcfg0` and
+  `pmpaddr0`, restores `mtvec`, then `mstatus.MIE`. It prints `pmp: cfg0=0x.. addr0=0x..` or
+  `pmp: trapped mcause=0x.. (no PMP)`. Source: `drivers/k230-usbboot-sys/src/pmp.rs`.
+- **Mode:** the window writes `mtvec` and `mstatus`, so the entry must be in machine mode. No instruction tests that
+  without a trap, so this is the handover contract, as the trap capture above shows machine mode. Not checked on the board.
+- **Rehearsal on qemu-system-riscv64 10.2.2 (virt, rv64):** `drivers/k230-usbboot-image/pmp-rehearsal/run.sh all`
+  passes `pmp-true` (cfg0 and addr0 read as 0) and `pmp-false` (trap, mcause 2, then identify), with `mtvec` equal
+  before and after. Both negative controls fail as they must: `fail-naive` (no vector) and `fail-broken` (no `mepc`
+  step) never reach identify.
+- **Status: rehearsed on qemu; untested on the board.** The first board run must read the line, and must record whether
+  the trap path returns (the `mepc` step) on the real core.

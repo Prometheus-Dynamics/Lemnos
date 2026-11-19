@@ -1,0 +1,22 @@
+# The qemu rehearsal of the card image's PMP read (FLASH-EXTENT). Not a workspace member: it is a bare-metal riscv
+# binary, built on its own by run.sh. It links the image's own probe (lemnos-driver-k230-usbboot-sys::pmp), so the
+# code that is rehearsed is the code the image runs.
+[package]
+name = "k230-pmp-rehearsal"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+lemnos-driver-k230-usbboot-sys = { path = "../../k230-usbboot-sys" }
+lemnos-k230-usbboot-stage = { path = "../../../testing/crates/k230-usbboot-stage" }
+
+[features]
+pmp-naive = ["lemnos-driver-k230-usbboot-sys/pmp-naive"]
+pmp-broken = ["lemnos-driver-k230-usbboot-sys/pmp-broken"]
+
+[profile.release]
+panic = "abort"
+debug = false

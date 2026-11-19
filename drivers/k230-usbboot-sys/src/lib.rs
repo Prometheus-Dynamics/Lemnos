@@ -19,6 +19,7 @@ pub mod dwc2;
 pub mod dwc2_legacy;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod image;
+pub mod pmp;
 pub mod sdhci;
 
 use lemnos_k230_usbboot_stage::sysctl;
