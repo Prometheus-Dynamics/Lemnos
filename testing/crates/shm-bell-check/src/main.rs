@@ -10,8 +10,16 @@
 //! 2. Latency: the consumer sleeps on its doorbell and reads every frame as it arrives. A frame's
 //!    latency is from the module's publish time (CLOCK_MONOTONIC) to the read. The same stream is
 //!    then read by a 1 ms poll, for comparison. QEMU numbers are for the regression check only:
-//!    the bell's median must beat the poll's, no frame may wait out the timeout, and none may be
-//!    skipped.
+//!    the bell's median must beat the poll's, and no frame may wait out the timeout.
+//! 3. Losses: every frame is either read or counted as skipped, the reader's count of what it
+//!    skipped is exactly the frames missing from the sequence it read, and a skip comes only when
+//!    the ring had run more than its window past the reader (docs/streams.md, "Waiting on the
+//!    doorbell"; shm/README.md, "Reading"). A reader that is not run for longer than the window
+//!    (16 frames, 32 ms here) loses frames, counted: the guest's vCPUs are host threads, and on a
+//!    loaded host one can be off for that long. So the check holds the ring to its count, not the
+//!    guest to a schedule. The reader's time on the guest's run queue and the guest's steal time
+//!    are printed, to tell a guest that did not run the reader from a host that did not run the
+//!    guest.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -163,27 +171,119 @@ fn attach_bell(fx: &Fixture) -> Result<Doorbell, String> {
     Ok(doorbell)
 }
 
-/// Reads every sample the reader has, from `consumed` on. A sample's latency is from its publish
-/// time to now, in nanoseconds; a gap in the sequence is a skip.
-fn drain(
-    reader: &mut Reader<Words<'_>>,
-    consumed: &mut u64,
-    latencies: &mut Vec<u64>,
-    skipped: &mut u64,
-) {
-    loop {
-        match reader.next() {
+/// What a reader saw of a stream, kept two ways: what the reader said it skipped, and what is
+/// missing from the sequence numbers of the samples it read.
+#[derive(Default)]
+struct Tally {
+    /// Each read sample's latency, from its publish time to the read, in nanoseconds.
+    latencies: Vec<u64>,
+    /// The sequence the reader wants next: one past the last it read.
+    consumed: u64,
+    /// The sum of the reader's `Skipped(n)` reports.
+    reported: u64,
+    /// Sequence numbers passed over between samples read.
+    missed: u64,
+    /// Samples read out of order (a sequence number at or below one already read).
+    backwards: u64,
+    /// Skips reported while the ring had not run the reader's window past it.
+    early: u64,
+}
+
+impl Tally {
+    /// One `next` result. `window` is the ring's, `head` the ring's head word read after the call.
+    fn take(&mut self, next: Next<'_>, window: u64, head: impl FnOnce() -> u64) -> bool {
+        match next {
             Next::Sample(sample) => {
-                if sample.seq > *consumed {
-                    *skipped += sample.seq - *consumed;
-                }
-                *consumed = sample.seq + 1;
-                latencies.push(SampleTime::now().saturating_since(sample.time));
+                self.sample(sample.seq);
+                self.latencies
+                    .push(SampleTime::now().saturating_since(sample.time));
+                true
             }
-            Next::Skipped(_) => *skipped += 1,
-            Next::Empty => return,
+            Next::Skipped(n) => {
+                self.skipped(n, window, head());
+                true
+            }
+            Next::Empty => false,
         }
     }
+
+    fn sample(&mut self, seq: u64) {
+        if seq < self.consumed {
+            self.backwards += 1;
+            return;
+        }
+        self.missed += seq - self.consumed;
+        self.consumed = seq + 1;
+    }
+
+    /// A reported skip of `n` from `consumed`, with the ring's head at `head` after the report.
+    /// The reader skips past the window (head - consumed > window, so head >= consumed + window +
+    /// n), or past slots the writer has overwritten, the newest of them perhaps still being
+    /// written (head >= consumed + window + n - 1). Anything less lost a sample the ring still had.
+    fn skipped(&mut self, n: u64, window: u64, head: u64) {
+        self.reported += n;
+        if head + 1 < self.consumed + window + n {
+            self.early += 1;
+        }
+    }
+
+    /// Each of `frames` read or missing from the sequence, once and in order.
+    fn whole(&self, frames: u64) -> bool {
+        self.consumed == frames
+            && self.latencies.len() as u64 + self.missed == frames
+            && self.backwards == 0
+    }
+
+    /// The reader's own count of its losses is the frames missing, and each skip was one the ring
+    /// forced.
+    const fn honest(&self) -> bool {
+        self.reported == self.missed && self.early == 0
+    }
+}
+
+/// Reads every sample the reader has, from `tally.consumed` on.
+fn drain(reader: &mut Reader<Words<'_>>, fx: &Fixture, tally: &mut Tally) {
+    let window = reader.geometry().window();
+    while tally.take(reader.next(), window, || head(fx)) {}
+}
+
+/// Checks a run's tally against the `FRAMES` the source published.
+fn account(name: &str, tally: &Tally, report: &mut Report) {
+    let read = tally.latencies.len();
+    report.check(
+        tally.whole(FRAMES),
+        format_args!(
+            "{name}: every frame read or skipped ({read} read, {} missing from the sequence, \
+             {} out of order, of {FRAMES})",
+            tally.missed, tally.backwards
+        ),
+    );
+    report.check(
+        tally.honest(),
+        format_args!(
+            "{name}: the reader counted each frame it lost, and lost none the ring still held \
+             ({} reported skipped, {} missing, {} skip(s) inside the window)",
+            tally.reported, tally.missed, tally.early
+        ),
+    );
+}
+
+/// This process's time on the run queue, runnable and not run, in nanoseconds
+/// (`/proc/self/schedstat`, its second number). 0 where the kernel doesn't keep it.
+fn run_delay() -> u64 {
+    std::fs::read_to_string("/proc/self/schedstat")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The guest's steal time over all its CPUs, in clock ticks (`/proc/stat`, the eighth number of
+/// the `cpu` line): time a vCPU wanted to run and the host ran something else.
+fn steal_ticks() -> u64 {
+    std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| s.lines().next()?.split_whitespace().nth(8)?.parse().ok())
+        .unwrap_or(0)
 }
 
 /// The first wait with frames already published.
@@ -206,11 +306,10 @@ fn first_wait(node: &str, block: &str, heap: &str, report: &mut Report) -> Resul
         Reader::over_from_start(words(&fx.ring)),
     )?;
     let mut doorbell = attach_bell(&fx)?;
-    let mut consumed = 0_u64;
     let started = Instant::now();
     let wake = step(
         "the first wait",
-        doorbell.wait(Some(WAIT), || head(&fx) > consumed),
+        doorbell.wait(Some(WAIT), || head(&fx) > 0),
     )?;
     let waited = started.elapsed();
     report.check(
@@ -222,24 +321,29 @@ fn first_wait(node: &str, block: &str, heap: &str, report: &mut Report) -> Resul
         format_args!("first wait returned in {waited:?}, not a frame period later"),
     );
 
-    let mut latencies = Vec::new();
-    let mut skipped = 0_u64;
-    drain(&mut reader, &mut consumed, &mut latencies, &mut skipped);
+    let mut tally = Tally::default();
+    drain(&mut reader, &fx, &mut tally);
+    let consumed = tally.consumed;
     // The source goes on publishing, one frame every 20 ms, while this process attaches and
     // reads, and it may not be run for several of those periods. So the count read is bounded by
     // what the ring says, not by a guess at how long the attach took: every frame published
     // before the wait was read, and nothing was read that the ring had not published by the end.
     let published_after = head(&fx);
     report.check(
-        !latencies.is_empty() && first_wait_read_all(published, consumed, published_after),
+        !tally.latencies.is_empty() && first_wait_read_all(published, consumed, published_after),
         format_args!(
             "the first wait read {consumed} sample(s): the {published} published before it, \
              and no more than the {published_after} published by the end of the read"
         ),
     );
+    // The first wait reads from the start: its earliest frame is the point (20 ms a frame, with a
+    // 16-frame window). A skip there is the earliest frame lost, whatever the count.
     report.check(
-        skipped == 0,
-        format_args!("first wait: no samples skipped ({skipped})"),
+        tally.reported == 0 && tally.missed == 0,
+        format_args!(
+            "first wait: no samples skipped ({} reported, {} missing)",
+            tally.reported, tally.missed
+        ),
     );
     Ok(())
 }
@@ -250,19 +354,32 @@ fn first_wait_read_all(before: u64, consumed: u64, after: u64) -> bool {
     before >= 1 && consumed >= before && consumed <= after
 }
 
+/// What the bell run saw: its tally, the waits that timed out, and what the guest did meanwhile.
+struct BellRun {
+    tally: Tally,
+    timeouts: u32,
+    /// The reader's time on the guest's run queue, nanoseconds.
+    run_delay: u64,
+    /// The guest's steal time, clock ticks.
+    steal: u64,
+}
+
 /// Reads every frame of the stream as it arrives, sleeping on the doorbell between them.
-fn bell_run(fx: &Fixture) -> Result<(Vec<u64>, u32, u64), String> {
+fn bell_run(fx: &Fixture) -> Result<BellRun, String> {
     let mut reader = step(
         "attach to the ring",
         Reader::over_from_start(words(&fx.ring)),
     )?;
     let mut doorbell = attach_bell(fx)?;
-    let mut latencies = Vec::with_capacity(FRAMES as usize);
-    let mut consumed = 0_u64;
-    let mut skipped = 0_u64;
+    let mut tally = Tally {
+        latencies: Vec::with_capacity(FRAMES as usize),
+        ..Tally::default()
+    };
     let mut timeouts = 0_u32;
+    let (delay_before, steal_before) = (run_delay(), steal_ticks());
     let deadline = Instant::now() + WAIT;
-    while consumed < FRAMES && Instant::now() < deadline {
+    while tally.consumed < FRAMES && Instant::now() < deadline {
+        let consumed = tally.consumed;
         let wake = step(
             "the wait",
             doorbell.wait(Some(TIMEOUT), || head(fx) > consumed),
@@ -270,26 +387,32 @@ fn bell_run(fx: &Fixture) -> Result<(Vec<u64>, u32, u64), String> {
         if wake == Wake::TimedOut {
             timeouts += 1;
         }
-        drain(&mut reader, &mut consumed, &mut latencies, &mut skipped);
+        drain(&mut reader, fx, &mut tally);
     }
-    Ok((latencies, timeouts, skipped))
+    Ok(BellRun {
+        tally,
+        timeouts,
+        run_delay: run_delay().saturating_sub(delay_before),
+        steal: steal_ticks().saturating_sub(steal_before),
+    })
 }
 
 /// Reads the same stream with a 1 ms poll, for comparison.
-fn poll_run(fx: &Fixture) -> Result<(Vec<u64>, u64), String> {
+fn poll_run(fx: &Fixture) -> Result<Tally, String> {
     let mut reader = step(
         "attach to the ring",
         Reader::over_from_start(words(&fx.ring)),
     )?;
-    let mut latencies = Vec::with_capacity(FRAMES as usize);
-    let mut consumed = 0_u64;
-    let mut skipped = 0_u64;
+    let mut tally = Tally {
+        latencies: Vec::with_capacity(FRAMES as usize),
+        ..Tally::default()
+    };
     let deadline = Instant::now() + WAIT;
-    while consumed < FRAMES && Instant::now() < deadline {
+    while tally.consumed < FRAMES && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
-        drain(&mut reader, &mut consumed, &mut latencies, &mut skipped);
+        drain(&mut reader, fx, &mut tally);
     }
-    Ok((latencies, skipped))
+    Ok(tally)
 }
 
 /// The value at quantile `q` (0 to 1) of sorted `values`; 0 for none.
@@ -337,29 +460,33 @@ fn latency(node: &str, block: &str, heap: &str, report: &mut Report) -> Result<(
         poll_run(&fx)?
     };
 
-    let (bell_p50, bell_line) = describe("bell", &bell.0);
-    let (poll_p50, poll_line) = describe("poll (1 ms)", &poll.0);
+    let (bell_p50, bell_line) = describe("bell", &bell.tally.latencies);
+    let (poll_p50, poll_line) = describe("poll (1 ms)", &poll.latencies);
     let _ = writeln!(std::io::stdout(), "{bell_line}");
     let _ = writeln!(std::io::stdout(), "{poll_line}");
     let _ = writeln!(
         std::io::stdout(),
         "bell: waits that timed out {}, samples skipped {}; poll: samples skipped {}",
-        bell.1,
-        bell.2,
-        poll.1
+        bell.timeouts,
+        bell.tally.reported,
+        poll.reported
+    );
+    let _ = writeln!(
+        std::io::stdout(),
+        "bell: the reader was runnable and not run for {} us in the guest; the guest's vCPUs were \
+         not run by the host for {} tick(s) (steal)",
+        bell.run_delay / 1000,
+        bell.steal
     );
 
+    account("bell", &bell.tally, report);
+    account("poll (1 ms)", &poll, report);
     report.check(
-        bell.0.len() as u64 == FRAMES,
-        format_args!("bell: every frame read ({} of {FRAMES})", bell.0.len()),
-    );
-    report.check(
-        bell.1 == 0,
-        format_args!("bell: no wait timed out ({} did: a lost bell)", bell.1),
-    );
-    report.check(
-        bell.2 == 0,
-        format_args!("bell: no frame skipped ({})", bell.2),
+        bell.timeouts == 0,
+        format_args!(
+            "bell: no wait timed out ({} did: a lost bell)",
+            bell.timeouts
+        ),
     );
     report.check(
         bell_p50 < poll_p50,
@@ -400,7 +527,76 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::first_wait_read_all;
+    use super::{Tally, first_wait_read_all};
+
+    const WINDOW: u64 = 16;
+
+    /// A run of `frames` in which the reader reads `0..at`, is not run while the ring goes `late`
+    /// past it, is told it skipped `told`, and reads the rest.
+    fn late_reader(frames: u64, at: u64, late: u64, told: u64) -> Tally {
+        let mut t = Tally::default();
+        for seq in 0..at {
+            t.sample(seq);
+            t.latencies.push(0);
+        }
+        let lost = late.saturating_sub(WINDOW);
+        if told > 0 {
+            t.skipped(told, WINDOW, at + late);
+        }
+        for seq in at + lost..frames {
+            t.sample(seq);
+            t.latencies.push(0);
+        }
+        t
+    }
+
+    #[test]
+    fn a_reader_that_keeps_up_reads_every_frame() {
+        let t = late_reader(2000, 1000, 10, 0);
+        assert!(t.whole(2000) && t.honest());
+        assert_eq!((t.latencies.len(), t.missed), (2000, 0));
+    }
+
+    #[test]
+    fn a_reader_not_run_past_the_window_loses_frames_and_counts_them() {
+        // The red this replaces: two frames lost, the reader said 2, the old count said 3.
+        let t = late_reader(2000, 1000, WINDOW + 2, 2);
+        assert!(t.whole(2000) && t.honest());
+        assert_eq!((t.latencies.len(), t.missed, t.reported), (1998, 2, 2));
+    }
+
+    #[test]
+    fn a_frame_lost_and_not_counted_fails() {
+        let t = late_reader(2000, 1000, WINDOW + 2, 1);
+        assert!(t.whole(2000) && !t.honest());
+        let t = late_reader(2000, 1000, WINDOW + 2, 0);
+        assert!(t.whole(2000) && !t.honest());
+    }
+
+    #[test]
+    fn a_skip_the_ring_did_not_force_fails() {
+        // Told of a skip while the ring was only 3 ahead: a frame the ring still held was lost.
+        let mut t = Tally::default();
+        t.sample(0);
+        t.skipped(1, WINDOW, 4);
+        t.sample(2);
+        assert!(!t.honest());
+        // The slot overwritten by a publish still in progress: the head is one short of it.
+        let mut t = Tally::default();
+        t.sample(0);
+        t.skipped(1, WINDOW, 1 + WINDOW);
+        t.sample(2);
+        assert!(t.honest());
+    }
+
+    #[test]
+    fn a_short_run_or_one_read_twice_is_not_whole() {
+        let t = late_reader(2000, 1000, 0, 0);
+        assert!(!t.whole(2001));
+        let mut t = late_reader(10, 5, 0, 0);
+        t.sample(3);
+        assert!(!t.whole(10));
+    }
 
     #[test]
     fn frames_published_while_the_reader_attached_are_read_too() {

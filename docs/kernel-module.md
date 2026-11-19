@@ -114,8 +114,13 @@ eventfd once for that sleep. A sleeping consumer arms the page, looks for sample
 sleeps, so a frame published before its wait is still read without a sleep, and a frame published
 during the arm is seen by the look. `testing/crates/shm-bell-check` proves both on the pinned kernel:
 the first wait returns at once with frames published before it, and a consumer that sleeps on the
-bell reads 2000 frames at a 2 ms period, with the bell's median latency below a 1 ms poll's (QEMU
-numbers; the regression check only).
+bell follows 2000 frames at a 2 ms period with no wait timing out (a lost bell), with the bell's
+median latency below a 1 ms poll's (QEMU numbers; the regression check only). The bell promises a
+wake, not that the woken consumer is run: a consumer not run for longer than the ring's window (16
+frames there) loses the oldest frames, and the check holds the ring to its count of them instead
+(docs/streams.md, "Waiting on the doorbell"): each frame is read or reported skipped, the count is
+exactly the frames missing from the sequence, and a skip comes only once the ring has run its
+window past the reader. A QEMU guest's vCPU can be left unrun that long on a loaded host.
 
 The job block follows the pool page, from its control words (`control` = the pool page's start + 8 +
 buffers + 64 reader cut-off words): word `control + 2` the jobs posted (the consumer's), `control + 3`
