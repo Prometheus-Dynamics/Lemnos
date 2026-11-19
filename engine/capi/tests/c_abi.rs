@@ -239,6 +239,20 @@ fn stream_open(
     unsafe { s::lemnos_stream_open(client, device, name.as_ptr(), flags, stream, sink) }.0
 }
 
+fn stream_open_held(
+    client: Handle,
+    device: u32,
+    name: &CStr,
+    hold: u32,
+    flags: u32,
+    stream: &mut Handle,
+    sink: MessageSink,
+) -> i32 {
+    // SAFETY: `name` is NUL-terminated for the call; `stream` is valid for a write.
+    unsafe { s::lemnos_stream_open_held(client, device, name.as_ptr(), hold, flags, stream, sink) }
+        .0
+}
+
 fn stream_info(client: Handle, stream: Handle, info: &mut StreamInfo) -> i32 {
     // SAFETY: `info` is valid for a write for its whole size.
     unsafe { s::lemnos_stream_info(client, stream, info) }.0
@@ -1046,4 +1060,51 @@ fn shared_library() -> PathBuf {
 #[cfg(feature = "shared")]
 fn shared_library() -> PathBuf {
     Path::new(env!("LEMNOS_CAPI_SHARED_DIR")).join("liblemnos_capi.so.1")
+}
+
+/// A consumer declares its hold through the C surface. On the four-buffer stream a declaration of 2
+/// fits, and a declaration of 3 is refused as BUSY with its reason in the sink, and nothing is
+/// attached: a plain open of the same stream then succeeds. Flags other than none are EINVAL.
+#[test]
+fn a_consumer_declares_its_hold_through_the_c_surface() {
+    let streams = stream_service();
+    let client = open(&streams.socket);
+    let frames = c"frames";
+
+    let mut sink = Sink::new();
+    let mut stream = Handle(0);
+    assert_eq!(
+        stream_open_held(client, 0, frames, 2, 1 << 1, &mut stream, sink.raw()),
+        EINVAL,
+        "an unmapped declared open is not offered"
+    );
+
+    let mut refused = Handle(0);
+    let mut sink = Sink::new();
+    assert_eq!(
+        stream_open_held(client, 0, frames, 3, 0, &mut refused, sink.raw()),
+        EBUSY,
+        "a declaration of 3 on 4 buffers does not fit"
+    );
+    assert!(sink.said().contains("declares 3"), "{}", sink.said());
+
+    let mut sink = Sink::new();
+    let mut held = Handle(0);
+    assert_eq!(
+        stream_open_held(client, 0, frames, 2, 0, &mut held, sink.raw()),
+        OK,
+        "{}",
+        sink.said()
+    );
+    assert_eq!(stream_close(client, held, MessageSink::NONE), OK);
+    // Once that stream is given up, a writer declares the same way.
+    let mut sink = Sink::new();
+    let mut writer = Handle(0);
+    assert_eq!(
+        stream_open_held(client, 0, frames, 2, 1 << 0, &mut writer, sink.raw()),
+        OK,
+        "{}",
+        sink.said()
+    );
+    assert_eq!(stream_close(client, writer, MessageSink::NONE), OK);
 }

@@ -160,6 +160,13 @@ impl Client {
             Frame::StreamOpenHandles { id, device, name } => {
                 self.stream_open(id, device, name, true)
             }
+            Frame::StreamOpenHeld {
+                id,
+                device,
+                name,
+                hold,
+                handles,
+            } => self.stream_open_as(id, device, name, handles, Some(hold)),
             Frame::StreamClose { id, device, name } => self.stream_close(id, device, name),
             Frame::StreamTicket {
                 id,
@@ -520,6 +527,20 @@ impl Client {
     /// `takes_handles` is whether the client asked in the way that says it can take one
     /// descriptor per buffer for an answer.
     fn stream_open(&self, id: u32, device: u32, name: &str, takes_handles: bool) -> Keep {
+        self.stream_open_as(id, device, name, takes_handles, None)
+    }
+
+    /// As [`stream_open`](Self::stream_open). `hold` is the consumer's declared hold, when it made
+    /// one: the host reserves that many buffers for it, and a declaration that does not fit is
+    /// refused with its reason.
+    fn stream_open_as(
+        &self,
+        id: u32,
+        device: u32,
+        name: &str,
+        takes_handles: bool,
+        hold: Option<u32>,
+    ) -> Keep {
         let Some(memory) = self.core.host.stream_memory(device, name) else {
             return self.refuse(id, Status::NOT_FOUND, "can't open the stream");
         };
@@ -533,13 +554,29 @@ impl Client {
                 "the stream's buffers are dma-bufs, which this client can't take",
             );
         }
-        let lease = match self.core.host.stream_attach(device, name, self.conn.id) {
+        let attached = match hold {
+            None => self
+                .core
+                .host
+                .stream_attach(device, name, self.conn.id)
+                .map_err(|status| (status, String::from("can't open the stream"))),
+            Some(hold) => self
+                .core
+                .host
+                .stream_attach_declared(device, name, self.conn.id, hold)
+                .map_err(|refused| (refused.status, refused.text)),
+        };
+        let lease = match attached {
             Ok(lease) => lease,
-            Err(Status::BUSY) => return self.refuse(id, Status::BUSY, "can't open the stream"),
-            Err(status) if dma_bufs => {
+            // A declared hold is refused with its reason, never as a bare status.
+            Err((status, text)) if hold.is_some() => return self.refuse(id, status, &text),
+            Err((Status::BUSY, _)) => {
+                return self.refuse(id, Status::BUSY, "can't open the stream");
+            }
+            Err((status, _)) if dma_bufs => {
                 return self.refuse(id, status, "can't get dma-bufs for the stream");
             }
-            Err(status) => return self.refuse(id, status, "can't open the stream"),
+            Err((status, _)) => return self.refuse(id, status, "can't open the stream"),
         };
         let layout = lease.layout;
         if let Some(handles) = lease.handles {

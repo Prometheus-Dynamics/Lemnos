@@ -1988,7 +1988,42 @@ impl Session {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, Mapping::ReadOnly, platform)
+        self.open_stream_as(device, name, Mapping::ReadOnly, None, platform)
+    }
+
+    /// Takes a stream as [`open_stream`](Self::open_stream) takes one, and declares that this
+    /// consumer holds at most `hold` of the stream's buffers at once. The host reserves exactly
+    /// `hold` for it: the readers it grants share what is left, less the producer's two. This
+    /// consumer's own holds are bounded by it: a frame past `hold` is [`Next::AtLimit`], so the
+    /// consumer gives one back before it reads on.
+    ///
+    /// `hold` must be at least 1 and leave the producer its two of the stream's buffers. A
+    /// declaration that does not fit is refused by name, with the numbers, and nothing is taken.
+    /// A service from before the declaration (no `CONSUMER_HOLD` bit) is refused by name too:
+    /// the declaration is never dropped silently.
+    pub fn open_stream_held(
+        &mut self,
+        device: u32,
+        name: &str,
+        hold: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, Mapping::ReadOnly, Some(hold), platform)
+    }
+
+    /// Takes a stream as [`open_stream_writable`](Self::open_stream_writable) takes one, with the
+    /// declared hold of [`open_stream_held`](Self::open_stream_held). A writer holds the completion
+    /// frames that carry its jobs' results, through the same frame marks a reader does, so the
+    /// declaration bounds them the same way. Its input buffers are not holds: it writes them, posts
+    /// the job, and the driver takes them back on completion.
+    pub fn open_stream_writable_held(
+        &mut self,
+        device: u32,
+        name: &str,
+        hold: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, Mapping::Writable, Some(hold), platform)
     }
 
     /// Takes a stream as [`open_stream`](Self::open_stream) takes one, but maps none of its
@@ -2007,7 +2042,7 @@ impl Session {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, Mapping::Unmapped, platform)
+        self.open_stream_as(device, name, Mapping::Unmapped, None, platform)
     }
 
     /// Takes a stream this consumer fills as well as reads, as [`open_stream`](Self::open_stream)
@@ -2034,7 +2069,7 @@ impl Session {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
-        self.open_stream_as(device, name, Mapping::Writable, platform)
+        self.open_stream_as(device, name, Mapping::Writable, None, platform)
     }
 
     fn open_stream_as(
@@ -2042,12 +2077,13 @@ impl Session {
         device: u32,
         name: &str,
         mapping: Mapping,
+        hold: Option<u32>,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         self.settle()?;
-        let (id, pick) = self.op_open_stream(device, name, &platform)?;
+        let (id, pick) = self.op_open_stream(device, name, hold, &platform)?;
         let ready = self.wait(id, pick);
-        self.finish_open_stream(ready, device, name, mapping, platform)
+        self.finish_open_stream(ready, device, name, mapping, hold, platform)
     }
 
     /// Asks for a stream and starts reading the socket so its descriptors are kept.
@@ -2055,6 +2091,7 @@ impl Session {
         &mut self,
         device: u32,
         name: &str,
+        hold: Option<u32>,
         platform: &Arc<dyn StreamPlatform>,
     ) -> Result<(u32, impl Pick<StreamAnswer> + use<>), Error> {
         let id = self.shared.id();
@@ -2069,10 +2106,30 @@ impl Session {
         // Only a service that said so knows the second way of asking. To any other it is an
         // unknown kind, which ends the connection.
         let asked_handles = self.shared.features & feature::STREAM_HANDLES != 0;
-        if asked_handles {
-            self.queue(&Frame::StreamOpenHandles { id, device, name })?;
-        } else {
-            self.queue(&Frame::StreamOpen { id, device, name })?;
+        match hold {
+            // A declared hold goes only to a service that announced it: any other would take the
+            // frame as an unknown kind, or drop the declaration, and the caller is told so instead.
+            Some(hold) => {
+                if self.shared.features & feature::CONSUMER_HOLD == 0 {
+                    return Err(self.shared.unusable(
+                        feature::CONSUMER_HOLD,
+                        "the service can't take a consumer's declared hold",
+                    ));
+                }
+                self.queue(&Frame::StreamOpenHeld {
+                    id,
+                    device,
+                    name,
+                    hold,
+                    handles: asked_handles,
+                })?;
+            }
+            None if asked_handles => {
+                self.queue(&Frame::StreamOpenHandles { id, device, name })?;
+            }
+            None => {
+                self.queue(&Frame::StreamOpen { id, device, name })?;
+            }
         }
         let connection = self.connection.as_mut().ok_or(Error::Disconnected)?;
         connection.taker = Some(Taker {
@@ -2162,6 +2219,7 @@ impl Session {
         device: u32,
         name: &str,
         mapping: Mapping,
+        hold: Option<u32>,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         let taker = self.connection.as_mut().and_then(|c| c.taker.take());
@@ -2205,7 +2263,7 @@ impl Session {
         let built = FrameStream::new(
             device,
             name,
-            (layout, planes, working, job_driven),
+            (layout, planes, working, job_driven, hold.unwrap_or(0)),
             !handles,
             fds,
             mapping,

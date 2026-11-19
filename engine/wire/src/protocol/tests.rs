@@ -1200,12 +1200,13 @@ mod layout {
                 "packages",
                 "jobs",
                 "shared-rings",
-                "endpoints"
+                "endpoints",
+                "consumer-hold"
             ]
         );
-        assert_eq!(PART_BITS, [1, 2, 4, 8, 16]);
-        assert_eq!(feature::EVERY, 31);
-        assert_eq!(PARTS, 5);
+        assert_eq!(PART_BITS, [1, 2, 4, 8, 16, 32]);
+        assert_eq!(feature::EVERY, 63);
+        assert_eq!(PARTS, 6);
         // The shared-rings part folds the ticket's descriptor order and rights too, not only the rings'.
         assert_ne!(
             crate::ring::fold_shared_rings(0),
@@ -1227,6 +1228,21 @@ mod layout {
         assert_eq!(
             PART_HASHES[index], 0x981c_6833_e833_0a91,
             "the shared-rings part hash moved: {:#018x}",
+            PART_HASHES[index]
+        );
+    }
+
+    /// The consumer-hold part's hash is the value `docs/wire.md` records. A change to its frame moves
+    /// it: update the docs' value with it, and say so in the change.
+    #[test]
+    fn the_consumer_hold_part_hash_is_the_recorded_one() {
+        let index = PART_NAMES
+            .iter()
+            .position(|name| *name == "consumer-hold")
+            .expect("the consumer-hold part");
+        assert_eq!(
+            PART_HASHES[index], 0xcde0_74f0_6510_cd51,
+            "the consumer-hold part hash moved: {:#018x}",
             PART_HASHES[index]
         );
     }

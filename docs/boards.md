@@ -834,8 +834,11 @@ driver = "rp1-csi2"
 link = "cam0-isp"
 config = { device = "1f00110000.csi", embedded_bytes = 256 }
 
+# Six buffers: the consumer declares a hold of 3 (`open_stream_held`), so it keeps 3, one outside
+# reader gets the 1 left over, and the producer keeps 2. Readers slower than two frame intervals
+# are not cut. See docs/streams.md, "The consumer's declared hold".
 [devices.streams.frames]
-buffers = 8
+buffers = 6
 buffer_bytes = 2097152
 memory = "dma-buf"
 heap = "linux,cma"
