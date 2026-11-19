@@ -55,6 +55,7 @@ lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget" }
 lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
 lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 lemnos-driver-indicator = { path = "../../drivers/indicator" }
+lemnos-driver-named-files = { path = "../../drivers/named-files" }
 lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 orion-server = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "8e37a8a4d4aa9e6772d1b7df401cadd71f948a71" }

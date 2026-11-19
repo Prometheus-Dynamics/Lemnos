@@ -7,38 +7,38 @@
 //! The node is reached through [`Node`]. [`Lemnosd`] is the daemon over its client, to the device
 //! named by `LEMNOS_ORION_NAMED_FILES`; tests give a fake.
 //!
-//! ## The offer (not yet switched on)
+//! ## The offer
 //!
-//! Orion serves a prefix through its offer API: `Files::offer(prefix)` gives an offer, whose
-//! `next()` gives each `Asked { name, from }`, answered by `send(source)` or `refuse(why)`. That API
-//! is in Orion's rev R2/R3, not at the pinned rev 455a956e, so the glue is not compiled yet. When it
-//! is, the glue is this loop, and only this loop is new:
-//!
-//! ```text
-//! // ORION-OFFER: serve `lemnos/` through Orion's offer.
-//! let offer = files.offer(PREFIX);
-//! while let Some(asked) = offer.next() {
-//!     match Snapshot::open(Box::new(Lemnosd::connect(socket, device)?), &asked.name)
-//!         .and_then(|s| s.at(asked.from))
-//!     {
-//!         Ok(snapshot) => asked.send(snapshot),
-//!         // The reason is kept in the bridge's state and log; a refusal is never retried silently.
-//!         Err(why) => asked.refuse(why),
-//!     }
-//! }
-//! ```
-//!
-//! Switching it on is that change at the rev move, plus the wiring in `main`. Until then nothing
-//! here runs: the bridge serves no `lemnos/` names over Orion.
+//! Orion serves a prefix through its offer API: `Files::offer(prefix)` (`crates/client/files/src/offer.rs`
+//! at the pinned rev 8e37a8a4) gives an [`Offer`](orion::files::Offer) whose `next` gives each file asked
+//! for, as an [`Asked`](orion::files::Asked). That file is answered with `refuse(why)`, or given with
+//! `give_known` and stepped to its end with `finish`. [`run`] is the loop that connects the offer to these
+//! snapshots. It runs on its own thread with its own Orion session, and it runs only when
+//! `LEMNOS_ORION_NAMED_FILES` names a device (see `main`). A failed or ended offer is taken again on the
+//! bridge's backoff (1 s, doubling, capped at 8 s): nothing gives up, and the reason is kept in
+//! [`Shared::named_files`] and logged.
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::path::Path;
+use std::time::Duration;
 
 use lemnos_client::Client;
+use orion::files::{Asked, Giving, Known};
+use orion::{Address, Options, Orion};
+use sha2::{Digest, Sha256};
+
+use crate::backoff::Backoff;
+use crate::{Shared, log};
 
 /// The prefix the node's names carry.
 pub const PREFIX: &str = "lemnos/";
 /// The environment variable naming the node's named-files device.
 pub const DEVICE_ENV: &str = "LEMNOS_ORION_NAMED_FILES";
+/// The name this thread's Orion session has, and the name its lemnosd connections have.
+pub const CLIENT_NAME: &str = "lemnos-orion-named";
+pub const LEMNOSD_NAME: &str = "orion-named";
+/// How long one look at the offer waits for a file asked for.
+const LOOK: Duration = Duration::from_millis(50);
 
 const TAG: &str = "lemnos.files/1";
 const OPEN: u16 = 2;
@@ -67,6 +67,21 @@ pub struct Lemnosd {
 }
 
 impl Lemnosd {
+    /// A connection to lemnosd for `device`. Each transfer takes its own, so a node that has gone is
+    /// found by the next transfer, not kept as a dead handle.
+    ///
+    /// # Errors
+    ///
+    /// When lemnosd cannot be reached, with the reason as text.
+    pub fn connect(socket: &Path, device: &str) -> Result<Self, String> {
+        let client = Client::connect(socket, LEMNOSD_NAME)
+            .map_err(|e| format!("lemnosd is not there: {e}"))?;
+        Ok(Self {
+            client,
+            device: device.to_owned(),
+        })
+    }
+
     /// The device `LEMNOS_ORION_NAMED_FILES` names, `None` when it is not set.
     pub fn device_from_env() -> Option<String> {
         std::env::var(DEVICE_ENV)
@@ -224,4 +239,208 @@ impl Drop for Snapshot {
     fn drop(&mut self) {
         let _ = self.node.close(self.handle);
     }
+}
+
+/// What the offer's files are answered with: the name asked for, where the client's copy stops, and
+/// how to answer. [`Asked`] is the real one; tests give a fake.
+pub trait Asker {
+    /// The file asked for, as the client named it.
+    fn name(&self) -> &str;
+    /// Where the client already has the file up to, in bytes from its start.
+    fn resume_at(&self) -> u64;
+    /// Does not give the file: the reason goes to the client.
+    fn refuse(self, why: &str) -> Result<(), String>;
+    /// Gives `source` from [`Asker::resume_at`] and waits until the client has answered.
+    fn give(self, source: Snapshot, known: Known) -> Result<Giving, String>;
+}
+
+impl Asker for Asked {
+    fn name(&self) -> &str {
+        Asked::name(self)
+    }
+
+    fn resume_at(&self) -> u64 {
+        Asked::from(self)
+    }
+
+    fn refuse(self, why: &str) -> Result<(), String> {
+        Asked::refuse(self, why).map_err(|e| format!("{e}"))
+    }
+
+    fn give(self, source: Snapshot, known: Known) -> Result<Giving, String> {
+        self.give_known(source, known)
+            .map_err(|e| format!("{e}"))?
+            .finish()
+            .map_err(|e| format!("{e}"))
+    }
+}
+
+/// The digest and size of a snapshot, read from its start. `pump` runs before each read, so the Orion
+/// session is answered while a file is read for its digest, as the client's own pass does.
+///
+/// # Errors
+///
+/// When the snapshot cannot be read, or `pump` fails.
+pub fn digest(
+    snapshot: &mut Snapshot,
+    pump: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<Known, String> {
+    snapshot
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| format!("{e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; PIECE];
+    loop {
+        pump()?;
+        let n = snapshot.read(&mut buf).map_err(|e| format!("{e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(Known {
+        digest: hasher.finalize().into(),
+        size: snapshot.size(),
+    })
+}
+
+/// How one asked file ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    /// Not given, and the client was told why.
+    Refused(String),
+    /// Given, and the client answered: taken or not, and why.
+    Gave(Giving),
+    /// The gift began and then broke. The client is not told by this bridge: the pinned Orion has no
+    /// call that ends a gift already under way, so the client's own silence limit ends it.
+    Broke(String),
+}
+
+/// Answers one asked file: a name outside `lemnos/` is refused before any node is reached; a node that
+/// cannot be reached, a name it refuses, or a read that fails before the gift begins is refused with
+/// its reason; otherwise the file is digested and given from the client's offset.
+pub fn serve<A: Asker>(
+    asked: A,
+    node: impl FnOnce() -> Result<Box<dyn Node>, String>,
+    pump: &mut dyn FnMut() -> Result<(), String>,
+) -> Ended {
+    let name = asked.name().to_owned();
+    if !name.starts_with(PREFIX) {
+        return refused(
+            asked,
+            format!("{name:?} is not a `{PREFIX}` name this bridge serves"),
+        );
+    }
+    let mut snapshot = match node().and_then(|node| Snapshot::open(node, &name)) {
+        Ok(snapshot) => snapshot,
+        Err(why) => return refused(asked, why),
+    };
+    let known = match digest(&mut snapshot, pump) {
+        Ok(known) => known,
+        Err(why) => return refused(asked, why),
+    };
+    match asked.give(snapshot, known) {
+        Ok(giving) => Ended::Gave(giving),
+        Err(why) => Ended::Broke(why),
+    }
+}
+
+fn refused<A: Asker>(asked: A, why: String) -> Ended {
+    if let Err(error) = asked.refuse(&why) {
+        log(&format!(
+            "named files: the refusal of {why:?} did not reach Orion: {error}"
+        ));
+    }
+    Ended::Refused(why)
+}
+
+/// Runs `attempt` until `stopping`. An attempt returns only when it has ended: `Err` with why, when it
+/// could not connect or its offer ended or failed, `Ok` when the service is stopping. Between tries the
+/// bridge's backoff sleeps (1 s, doubling, capped at 8 s, never giving up); an attempt that has an
+/// offer in place resets it, so a later failure starts again at 1 s.
+pub fn keep_offering(
+    backoff: &mut Backoff,
+    mut attempt: impl FnMut(&mut Backoff) -> Result<(), String>,
+    mut sleep: impl FnMut(Duration),
+    stopping: impl Fn() -> bool,
+    mut note: impl FnMut(&str),
+) {
+    while !stopping() {
+        if let Err(why) = attempt(backoff) {
+            let delay = backoff.next_delay();
+            note(&format!("{why}: trying again in {} s", delay.as_secs()));
+            sleep(delay);
+        }
+    }
+}
+
+/// Serves the `lemnos/` names to Orion until the service stops, from `device` on lemnosd at `lemnosd`.
+/// Runs on its own thread; the state and the log say what it is doing.
+pub fn run(address: &Address, lemnosd: &Path, device: &str, shared: &Shared) {
+    let mut backoff = Backoff::new();
+    keep_offering(
+        &mut backoff,
+        |backoff| offer_once(address, lemnosd, device, shared, backoff),
+        std::thread::sleep,
+        || shared.stopping(),
+        |why| {
+            shared.set_named_files(why);
+            log(&format!("named files: {why}"));
+        },
+    );
+}
+
+/// One session to Orion and one offer on it, served until the offer fails or the service stops.
+fn offer_once(
+    address: &Address,
+    lemnosd: &Path,
+    device: &str,
+    shared: &Shared,
+    backoff: &mut Backoff,
+) -> Result<(), String> {
+    let orion = Orion::connect_watching(address, CLIENT_NAME, Options::default(), |status| {
+        if status.failures == 1 {
+            log(&format!(
+                "named files: Orion not available at {address}: waiting for it"
+            ));
+        }
+        !shared.stopping()
+    })
+    .map_err(|e| format!("Orion refused the named-files session: {e}"))?;
+    let mut offer = orion
+        .files()
+        .offer(PREFIX)
+        .map_err(|e| format!("Orion refused the offer of {PREFIX}: {e}"))?;
+    backoff.reset();
+    shared.set_named_files(&format!("offering {PREFIX} from {device}"));
+    while !shared.stopping() {
+        let Some(asked) = offer
+            .next(LOOK)
+            .map_err(|e| format!("Orion lost the offer: {e}"))?
+        else {
+            continue;
+        };
+        let node = || Lemnosd::connect(lemnosd, device).map(|node| Box::new(node) as Box<dyn Node>);
+        let mut pump = || {
+            orion
+                .pump(Duration::ZERO)
+                .map(|_| ())
+                .map_err(|e| format!("{e}"))
+        };
+        let name = asked.name().to_owned();
+        match serve(asked, node, &mut pump) {
+            Ended::Refused(why) => {
+                shared.set_named_files(&format!("refused {name}: {why}"));
+                log(&format!("named files: refused {name}: {why}"));
+            }
+            Ended::Gave(giving) => {
+                log(&format!("named files: {name}: {giving:?}"));
+            }
+            Ended::Broke(why) => {
+                shared.set_named_files(&format!("broke {name}: {why}"));
+                log(&format!("named files: {name} broke: {why}"));
+            }
+        }
+    }
+    Ok(())
 }

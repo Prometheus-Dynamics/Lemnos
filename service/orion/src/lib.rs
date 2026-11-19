@@ -64,6 +64,9 @@ pub struct Shared {
     transferred: Mutex<Option<Instant>>,
     /// Why the publisher stopped for good: a configuration the comm core refuses (see [`Shared::refuse`]).
     refused: Mutex<Option<String>>,
+    /// What the named-files offer (`named.rs`) is doing now, or why it is not: the last reason it
+    /// gave, in words.
+    named_files: Mutex<String>,
     /// Written by the other threads when there is something for the publisher. A byte waiting
     /// there is a wake-up; one is enough, so a full socket is not an error.
     bell: UnixStream,
@@ -86,6 +89,7 @@ impl Shared {
             progress: Mutex::new(Vec::new()),
             transferred: Mutex::new(None),
             refused: Mutex::new(None),
+            named_files: Mutex::new(String::from("not started")),
             bell,
             woken,
             stop: AtomicBool::new(false),
@@ -110,6 +114,22 @@ impl Shared {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// What the named-files offer is doing, or the reason it is not.
+    pub fn named_files(&self) -> String {
+        self.named_files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records what the named-files offer is doing, or why it is not.
+    pub fn set_named_files(&self, state: &str) {
+        *self
+            .named_files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = state.to_owned();
     }
 
     /// A file or stream chunk was accepted now.

@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         }
     };
     let (jobs, queue) = mpsc::channel();
-    let threads = [
+    let mut threads = vec![
         {
             let socket = config.lemnosd_socket.clone();
             let shared = Arc::clone(&shared);
@@ -62,6 +62,18 @@ fn main() -> ExitCode {
                 .spawn(move || files::run(&config, &shared))
         },
     ];
+    // The named files are served only when `LEMNOS_ORION_NAMED_FILES` names their device.
+    if let Some(device) = lemnos_orion::named::Lemnosd::device_from_env() {
+        let (address, socket) = (config.orion.clone(), config.lemnosd_socket.clone());
+        let shared = Arc::clone(&shared);
+        threads.push(
+            std::thread::Builder::new()
+                .name("named".to_owned())
+                .spawn(move || {
+                    lemnos_orion::named::run(&address, &socket, &device, &shared);
+                }),
+        );
+    }
     for thread in threads {
         if let Err(error) = thread {
             log(&format!("cannot start a thread: {error}"));
