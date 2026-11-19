@@ -7,7 +7,11 @@
 //! The kernel crate's `module!` parameters are not readable in sysfs, which the harness and the daemon
 //! read, hence this.
 
-use core::{cell::UnsafeCell, ffi::c_void};
+use core::{
+    cell::UnsafeCell,
+    ffi::c_void,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use kernel::bindings;
 
 /// A parameter's value. The kernel writes it while parsing the module's parameters, before init; every
@@ -17,6 +21,16 @@ pub(crate) struct Value<T>(UnsafeCell<T>);
 
 // SAFETY: written only by the kernel's parameter parser, before init, and only read after.
 unsafe impl<T> Sync for Value<T> {}
+
+impl Value<u64> {
+    /// Sets the value a read of the parameter gives now: the kernel reads it on every read, so this is a
+    /// live counter. One atomic store; the only writer is the code that owns the counter.
+    pub(crate) fn publish(&self, v: u64) {
+        // SAFETY: the cell is a u64 that the kernel reads as a plain word; an atomic store to it is a
+        // valid access, and the parameter is never written by the kernel (0444).
+        unsafe { AtomicU64::from_ptr(self.0.get()) }.store(v, Ordering::Relaxed);
+    }
+}
 
 impl<T: Copy> Value<T> {
     pub(crate) const fn new(v: T) -> Self {
