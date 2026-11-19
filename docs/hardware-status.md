@@ -128,6 +128,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`B8.md`](../testing/board-runs/B8.md) | `bmi088`: bring-up, 200 Hz batches, stamp gaps, read times, an outage |
 | [`B9.md`](../testing/board-runs/B9.md) | `bmm150`: field magnitude, rotation, an outage |
 | [`B10.md`](../testing/board-runs/B10.md) | `orientation`: angles against a reference, rate dependence |
+| [`MAG-GATE.md`](../testing/board-runs/MAG-GATE.md) | `orientation`: a magnetometer field outside 15 to 80 µT is ignored and health says so, and it clears when the source moves: untested on board |
 | [`B11.md`](../testing/board-runs/B11.md) | `ina2xx`: volts, amps and watts against a meter |
 | [`B12.md`](../testing/board-runs/B12.md) | `hwmon-fan`: take-over, release, hand-back on stop, the gap after a kill |
 | [`S1b.md`](../testing/board-runs/S1b.md) | `hw-watchdog` as the daemon's keep-alive: the timeout, the feed while healthy, the stop when not, the restart, a panicking driver, clean shutdown |

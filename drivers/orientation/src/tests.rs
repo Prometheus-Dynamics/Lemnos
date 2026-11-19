@@ -751,3 +751,57 @@ fn a_reseed_after_a_gap_is_a_health_note_until_the_next_read() {
     read_at(b, &mut o, 4_010 * MS, posed(0.4, 0.0), vec3(0.0, 0.0, 0.0));
     assert_eq!(o.health(), Health::Ok);
 }
+
+/// The magnetometer's reading (tesla) of a level board yawed by `psi`, in a field of total `ut` µT
+/// with the Earth's dip. Same convention as `a_magnetometer_sets_the_heading_from_the_field`.
+fn field_at(ut: f32, psi: f32) -> Vector3 {
+    let (h, v) = (ut * DIP.cos(), ut * DIP.sin());
+    vec3(h * psi.cos() * 1e-6, -h * psi.sin() * 1e-6, -v * 1e-6)
+}
+
+#[test]
+fn a_field_of_360_microtesla_from_the_first_read_is_ignored_and_health_says_so() {
+    let b = level_bench();
+    let mut o = driver(b, true, &[("mode", ConfigValue::Str("9axis"))]);
+    for t in regular(10 * MS, 1_000 * MS) {
+        b.set(MAG, Some(field_at(360.0, 0.0)));
+        read_at(b, &mut o, t, vec3(0.0, 0.0, G), vec3(0.0, 0.0, 0.0));
+    }
+    assert_eq!(
+        o.health(),
+        Health::Degraded("magnetometer ignored: field magnitude implausible"),
+        "health with a 360 µT field"
+    );
+}
+
+#[test]
+fn a_strong_field_does_not_move_the_heading_and_a_plausible_one_resumes_it() {
+    let b = level_bench();
+    let mut o = driver(b, true, &[("mode", ConfigValue::Str("9axis"))]);
+    for t in regular(10 * MS, 2_000 * MS) {
+        b.set(MAG, Some(field_at(50.0, 0.0)));
+        read_at(b, &mut o, t, vec3(0.0, 0.0, G), vec3(0.0, 0.0, 0.0));
+    }
+    assert_eq!(o.health(), Health::Ok);
+
+    // 360 µT, turned by 0.5 rad: the heading holds, and health says the field is ignored.
+    for t in regular(10 * MS, 3_000 * MS).into_iter().skip(1) {
+        let t = t + 2_000 * MS;
+        b.set(MAG, Some(field_at(360.0, 0.5)));
+        let r = read_at(b, &mut o, t, vec3(0.0, 0.0, G), vec3(0.0, 0.0, 0.0));
+        assert!(r.z.abs() < 0.02, "heading moved to {} at {t} ns", r.z);
+    }
+    assert!(matches!(o.health(), Health::Degraded(_)));
+
+    // 50 µT turned by 0.5 rad again: used, and the heading follows it.
+    let mut last = vec3(0.0, 0.0, 0.0);
+    for t in regular(10 * MS, 10_000 * MS).into_iter().skip(1) {
+        let t = t + 5_000 * MS;
+        b.set(MAG, Some(field_at(50.0, 0.5)));
+        last = read_at(b, &mut o, t, vec3(0.0, 0.0, G), vec3(0.0, 0.0, 0.0));
+    }
+    // The heading follows the field again. It is slow at this dip (0.28 rad after 10 s, settling
+    // near 0.55 rad over 30 s), so the check is that it has turned toward the new heading.
+    assert!(last.z > 0.2, "heading {} after recovery", last.z);
+    assert_eq!(o.health(), Health::Ok);
+}

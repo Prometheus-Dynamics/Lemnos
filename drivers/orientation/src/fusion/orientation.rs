@@ -103,8 +103,12 @@ pub struct Output {
     pub linear_acceleration: Vec3,
     /// The integral term's gyro bias estimate, rad/s, sensor frame (zero for Madgwick).
     pub gyro_bias: Vec3,
-    /// The magnetometer is not used now: disturbed, untrusted, or absent.
+    /// The magnetometer is not used now: disturbed, untrusted, implausible (outside 15 to 80 µT),
+    /// or absent.
     pub magnetic_disturbance: bool,
+    /// The magnetometer's confidence, permille: 1000 while its field is used, 0 while it is ignored
+    /// or the filter is six-axis.
+    pub magnetometer_confidence: u16,
 }
 
 /// A magnetometer sample is fresh for this long (µs).
@@ -126,6 +130,13 @@ const FIELD_TOL: f32 = 0.15;
 const DIP_TOL: f32 = 0.174_532_93;
 /// EMA weight for the learned field magnitude and dip reference.
 const LEARN_ALPHA: f32 = 0.02;
+/// Magnetic plausibility: a field whose total (µT) is outside this range is not the Earth's, so the
+/// magnetometer is ignored for that sample. The relative check above learns its reference from the
+/// field it sees, so a field that is wrong from the start would be learned as right; this bound does
+/// not learn. Bounds: `dev` `crates/lemnos-fusion/src/calibrate.rs:59` (lower) and
+/// `docs/imu-calibration-fusion.md` (upper, 80 µT).
+const FIELD_MIN_UT: f32 = 15.0;
+const FIELD_MAX_UT: f32 = 80.0;
 
 /// The heading (yaw) of a board at `roll` and `pitch` whose magnetometer reads `m` (sensor frame, µT).
 fn heading(roll: f32, pitch: f32, m: Vec3) -> f32 {
@@ -161,6 +172,8 @@ pub struct Orientation {
     waiting: bool,
     /// The last sample re-seeded the attitude after a gap (cleared by the next normal step).
     reseeded: bool,
+    /// The last magnetometer sample's total was outside 15 to 80 µT (see `FIELD_MIN_UT`).
+    implausible: bool,
     out: Output,
 }
 
@@ -186,6 +199,7 @@ impl Orientation {
             dip_ref: None,
             waiting: false,
             reseeded: false,
+            implausible: false,
             out: Output::default(),
         }
     }
@@ -296,12 +310,14 @@ impl Orientation {
         let mag = norm(field_ut);
         if mag < 1e-6 {
             self.mag_ok = false;
-            self.out.magnetic_disturbance = self.disturbance_flag();
+            self.implausible = true;
+            self.set_mag_status();
             return;
         }
         let n = scale(field_ut, 1.0 / mag);
 
-        let mut disturbed = false;
+        self.implausible = !(FIELD_MIN_UT..=FIELD_MAX_UT).contains(&mag);
+        let mut disturbed = self.implausible;
         if let Some(r) = self.field_ref
             && abs(mag - r) > FIELD_TOL * r
         {
@@ -339,7 +355,7 @@ impl Orientation {
             self.mag_pending = Some(n);
         }
         self.mag_ok = usable;
-        self.out.magnetic_disturbance = self.disturbance_flag();
+        self.set_mag_status();
     }
 
     /// The latest output (cheap: computed on each update).
@@ -357,12 +373,33 @@ impl Orientation {
         self.reseeded
     }
 
+    /// Whether the magnetometer is ignored because its field is outside the Earth's range (and the
+    /// sample is fresh). A disturbed or absent magnetometer is not this.
+    pub fn magnetic_implausible(&self) -> bool {
+        self.implausible && self.mag_fresh()
+    }
+
     fn mag_fresh(&self) -> bool {
         self.mag_seen && self.last_t.saturating_sub(self.mag_t) <= MAG_FRESH_US
     }
 
     fn disturbance_flag(&self) -> bool {
         self.config.mode == Mode::NineAxis && !(self.mag_fresh() && self.mag_ok)
+    }
+
+    /// 1000 while the magnetometer's field is used, else 0.
+    fn magnetometer_confidence(&self) -> u16 {
+        if self.config.mode == Mode::NineAxis && self.mag_fresh() && self.mag_ok {
+            1000
+        } else {
+            0
+        }
+    }
+
+    /// Copies the magnetometer's status into the output (the flag and the confidence).
+    fn set_mag_status(&mut self) {
+        self.out.magnetic_disturbance = self.disturbance_flag();
+        self.out.magnetometer_confidence = self.magnetometer_confidence();
     }
 
     /// Re-seeds the attitude at `t_us` from the sensors, as the first usable sample does: the tilt
@@ -544,6 +581,7 @@ impl Orientation {
             linear_acceleration: math::sub(accel_body, gravity),
             gyro_bias,
             magnetic_disturbance: self.disturbance_flag(),
+            magnetometer_confidence: self.magnetometer_confidence(),
         };
     }
 }
