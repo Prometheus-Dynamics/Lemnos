@@ -1244,6 +1244,116 @@ watchdog counter or another running counter as its clock) before the next run. N
 
 Records: `run1-hypothesis.md`, `run1-dry.log`, `run1-run.log`, `run1-stdout.log` (in the session's K230B2 folder).
 
+### B2 fix after run 1 (rev `959ff98b`): the stage starts the timebase and checks it
+
+**Stand-in first.** The rehearsal's model now has a `time` CSR that reads 0 and never moves until the stage writes the
+system timer's enables (`TimeCsr::StoppedUntilEnabled`, every case's default), plus `time-dead` (never moves) and
+`time-running` (already running). With run 1's stage unchanged, case `time-stopped` failed as the board did: the
+banner, "b2 the watchdog clock could not be measured; no USB bring-up", the zero record, the SoC reset, the ROM back,
+the host GaveUp (`rehearsal-time-stopped-before-fix.log`). It stays as a permanent case.
+
+**Why `time` is stopped, and the vendor's enable** (k230_sdk `7e302f7`):
+
+- `src/little/uboot/arch/riscv/cpu/k230/start.S:142-143`: the SPL calls `harts_early_init` early in start-up; the
+  same file reads `time` at `start.S:44`, before the enable, so nothing in the vendor start-up relies on `time`
+  running in the ROM's state.
+- `src/little/uboot/arch/riscv/cpu/k230/cpu.c:73-79` (`harts_early_init`): writes `1` to `0x91108020` (`:76`, the
+  machine timer clock for CPU0), `1` to `0x91108030` (`:77`, CPU1), and `0x69` to `0x91108000` (`:78-79`, commented
+  "enable stc0").
+- `src/little/uboot/arch/riscv/cpu/k230/platform.h:98`: `SYSCTL_STC_BASE_ADDR` = `0x91108000`.
+- rt-smart agrees: `bsp/maix3/board/board.h:183` (`STC_BASE_ADDR`), `c908/clint.c:52-53` (the same two clock writes).
+- The field layout of `0x69` is in no source read; the stage writes the vendor's value as is.
+
+**Chosen: the vendor enable, not the watchdog-counter fallback**, because the enable is found with file:line, is three
+writes, and keeps the FL1 deadlines on the clock they were written for. It is trusted only after a cross-check:
+
+- `fl1::check::enable_timebase` writes the three pairs in the vendor's order (`sysctl::STC_ENABLES`); the image's bus
+  (`Mmio::write32`) allows exactly those three (address, value) pairs and nothing else in that block.
+- `fl1::check::timebase_runs` then waits for `wdt0`'s counter (armed and shown counting by the entry) to count 7500
+  (10 ms at 750 kHz; bounded by 20,000,000 reads) and requires `time` to have moved over them. If not, the stage
+  prints "b2 the timebase does not move against the watchdog counter after its enable; no USB bring-up" and takes the
+  SoC reset (setup step 5), before USB.
+- The record gains `tb-cross-counts` and `tb-cross-us`; the host checks them against the measured clock (within a
+  quarter) and that the console prints the same.
+
+**Rehearsal fidelity fix found on the way.** The model's watchdog stepped its counter on every CCVR read; in the
+cross-check's tight loop that ran it about 7 times fast, so the host's new check failed the good case. The B2 model's
+watchdogs now count with time only, by whole cycles with the remainder carried (`wdt::Model::timed`,
+`advance_cycles`), as the board's do.
+
+**Rehearsal at `959ff98b`** (the board's bounds, every case as it must): good Passed, rev-420a Passed, no-access
+Stopped, wrong-product Refused, wrong-port Refused, never-enumerates GaveUp, corrupt-out Failed (status 1), corrupt-in
+Failed (host CRC), no-ep0-rearm GaveUp, time-stopped **Passed** (tb-cross 7500 counts in 9997 us), time-dead GaveUp
+(the timebase line at +0.010 s, SoC reset, ROM back), time-running Passed (`rehearsal-*.log`). Tests: the stage
+crate, the image crate, the host crate (15 B2 tests, 3 new), shared flash stage, maskrom rehearsal and the Rockchip
+stage pass; clippy `-D warnings` clean. `check.sh --b2`: "b2: SD symbols 0, SD base loads 0", "image link checks
+hold", raw sha256 `260494e8…6da4` (23,376 bytes; its listing has the three stores in order at `0x80362ae4`, `0x80362ac6` and `0x80362ade`);
+the card build's `check.sh` holds too (`1240091…c654`).
+
+### B2 run 2 (2026-11-18, rev `959ff98b`): the timebase runs; enumeration fails after SET_ADDRESS
+
+Conditions as run 1: lock held by `k230-b2 run` for the whole run (free before and after), port `3-4.2.1.4.1` showed
+`29f1:0230` "K230 USB Boot Device" before the load, product and interface checks before any open, no card code in the
+image, consoles read only. Hypothesis written first (`run2-hypothesis.md`); dry run (`run2-dry.log`): ROM devnum 118,
+access to its node granted, nothing opened. Loaded image sha256 `7c08b17d…6beb9` (mode `check`).
+
+Times from the load (1795054241.847; kernel times from `journalctl -k`):
+
+- 0.000 s: the ROM answered `K230`; load and PROG_START sent ("loaded and started").
+- +0.20 s (console): `!BWKC`, then the banner. No timebase line and no "could not be measured" line followed.
+- +0.229 s: kernel "USB disconnect, device number 118" (the ROM gone).
+- +0.479 s: "new high-speed USB device number 119"; +5.777 s: "device descriptor read/all, error -110".
+- +5.865 s: number 120; +16.016 s: read/all -110; "3-4.2.1.4-port1: attempt power cycle".
+- +16.643 s: number 121; +27.280 s: read/all -110.
+- +27.377 s: number 122; +30.293 s: "device descriptor read/all, error -71"; "unable to enumerate USB device".
+- console, about 30 s after the banner: the record words, "lemnos stage: end", then "flash stage: the host did not
+  configure the device in time" (the shared idle limit) run together with "boot failed with exit code 13" (not
+  attributed: printed after the stage's last line), and the SoC reset.
+- +30.537 s: number 123, `29f1:0230`, "K230 USB Boot Device": the ROM back at the same port. The host logged it at
+  +30.658 s. No `1209:0001` ever showed, so nothing was opened and no EP0 or bulk request was sent.
+
+Record (console only; USB never reached):
+
+| word | value | reading |
+|---|---|---|
+| gsnpsid | `4f54430a` | core v4.30a (the model has 4.20a and its rev_420a case) |
+| ghwcfg3 | `0bc884e8` | DFIFO depth `0x0bc8` words |
+| gahbcfg-found | `00000000` | as the ROM left it |
+| reset-done | `00000002` | core reset done |
+| dsts | `00057800` | enumerated speed 0 (high speed); frame `0x578` |
+| bus-resets / setups | 7 / 11 | four attempts, about three SETUPs each |
+| set-address / dcfg-after-address | `0x11` / `0x110` | address 17 written into DCFG; under xHCI the host controller picks the address, so it is not the kernel's devnum |
+| address-status-in | 1 | the SET_ADDRESS status stage was sent |
+| ep0-status-out | 1 | one OUT status stage completed in four attempts |
+| stalls / configured | 0 / 0 | |
+| out-* / in-* | 0 | no bulk traffic |
+| wdt-first / wdt-last / wdt-elapsed-us | `07fe9691` / `07fe5bf9` / 20000 | 15,000 counts in 20 ms |
+| wdt-hz / wdt-top | 750000 / 10 | as C1b; 89.5 s chosen |
+| ticks-arm-lo / ticks-now-lo | 0 / `3053fc3f` | 810,810,431 ticks at 27 MHz = 30.03 s, matching the console's banner-to-end span |
+| tb-cross-counts / tb-cross-us | 7500 / 10000 | `time` moved 10 ms while the watchdog counted 10 ms at 750 kHz |
+
+**Findings.**
+
+1. The vendor enable starts `time` from the ROM's state, at 27 MHz: the cross-check, the watchdog measurement
+   (750,000 Hz, as C1b) and the 30 s idle limit (ticks against the console's stamps) agree. Run 1's blocker is closed.
+2. The stage's USB device path does not enumerate on this core. Each attempt gets past the bus reset, the first
+   request and SET_ADDRESS (the address is in DCFG, its status IN was sent), then the full device descriptor read at
+   the new address times out (-110); the fourth attempt ends in a protocol error (-71). Only one EP0 OUT status stage
+   completed across four attempts. The PC rehearsal enumerates the same code, so the model differs from the v4.30a
+   core here: per the stand-in rule, the next step is a model case that fails like this before any change to the
+   driver, then the fix, then run 3.
+3. The host's 15 s bound to see the stage ended at 30.658 s, not 15 s: the sysfs scan printed nothing between +0.024
+   s and +30.658 s while the kernel was retrying. Likely cause (not checked): the scan reads attributes of every
+   device on the bus, including the parent hub's, and attributes such as `bConfigurationValue` wait for the device
+   lock the hub's enumeration holds. The board was not at risk (the stage's idle limit reset it, and the watchdog
+   was armed at 89.5 s), but the bound must hold: the scan should read only lock-free attributes until the port's
+   device is the stage.
+4. The record check "set-address equals the kernel's devnum" is wrong under xHCI, where the host controller chooses
+   the address; it must compare with the address the stage is spoken to at, or be dropped.
+
+Records: `run2-hypothesis.md`, `run2-dry.log`, `run2-run.log`, `run2-stdout.log`; rehearsals `rehearsal-*.log`
+(in the session's K230B2 folder). The board is back at the ROM as found; the lock is free.
+
 ## No state only hands can undo
 
 - Steps R1 to R3 write nothing to the card, the boot ROM's settings, or the stored environment.
