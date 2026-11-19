@@ -207,6 +207,16 @@ fn sleep_ms(ms: u64) {
     thread::sleep(Duration::from_millis(ms));
 }
 
+/// Polls `holds` every 1 ms until it holds or `timeout_ms` has run out. The milliseconds waited.
+fn wait_until(timeout_ms: u64, mut holds: impl FnMut() -> bool) -> u128 {
+    let start = Instant::now();
+    let limit = Duration::from_millis(timeout_ms);
+    while !holds() && start.elapsed() < limit {
+        sleep_ms(1);
+    }
+    start.elapsed().as_millis()
+}
+
 /// Runs this process on one CPU; the test source's work runs on the CPU that started it.
 fn pin(cpu: usize) {
     let _ = guest::set_cpu_affinity(Some(cpu));
@@ -1285,8 +1295,10 @@ fn test_own_frames(e: &Env<'_>) {
     let mut seen: u32 = 0;
     let bell_word = BUFFER_BYTES as usize - 8;
 
+    // Three frames are allowed. The source makes two (below) and then keeps running: a drop does not
+    // use up the count (stream_file.rs, source_work), so it goes on dropping until it is stopped.
     check!(
-        run_source(&s, 0, 2) == 0,
+        run_source(&s, 0, 3) == 0,
         "the source runs with no buffer having memory"
     );
     sleep_ms(50);
@@ -1319,13 +1331,16 @@ fn test_own_frames(e: &Env<'_>) {
         wait_frame(&mut s, &mut f, 5000) && f.buffer == 2,
         "the newest, read and let go, is taken back: buffer 2 gets the next frame"
     );
-    // The source keeps running and drops each frame it has no buffer for, counted.
-    sleep_ms(300);
+    // The source keeps running and drops each frame it has no buffer for, counted. Wait for the first
+    // drop as a condition, up to 5000 ms (the bound wait_frame uses): the source's tick may come late.
+    let waited = wait_until(5000, || status(&s).dropped >= 1);
     check!(
         status(&s).dropped >= 1,
-        "frames with no free buffer are dropped and counted ({})",
+        "frames with no free buffer are dropped and counted ({} after {waited} ms)",
         status(&s).dropped
     );
+    // Stop the source before the held frame is let go: a release lets the source take its buffer back.
+    check!(run_source(&s, 0, 0) == 0, "the source stops");
     give_back(&mut s, f.buffer);
 
     for i in 0..BUFFERS {

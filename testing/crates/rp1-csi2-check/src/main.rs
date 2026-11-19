@@ -169,6 +169,15 @@ fn sleep_ms(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
 }
 
+/// Polls `holds` every 1 ms until it holds or `timeout_ms` has run out.
+fn wait_until(timeout_ms: u64, mut holds: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    let limit = Duration::from_millis(timeout_ms);
+    while !holds() && start.elapsed() < limit {
+        sleep_ms(1);
+    }
+}
+
 fn open_rdwr(path: &str) -> Option<OwnedFd> {
     OpenOptions::new()
         .read(true)
@@ -941,7 +950,11 @@ fn test_frame_starts_while_starved(c: &mut Ctx, pool: &OwnedFd) {
     let fs = frame_starts(c);
     check!(fs.valid == 0, "and it stays so while they are held");
     give_back(&mut s, f[0].buffer);
-    sleep_ms(20);
+    // The channel is armed once the count is valid again: wait for that, up to 5000 ms.
+    wait_until(5000, || {
+        let fs = frame_starts(c);
+        fs.valid != 0 && fs.frames == u64::from(BUFFERS)
+    });
     let fs = frame_starts(c);
     check!(
         fs.valid != 0 && fs.frames == u64::from(BUFFERS),
