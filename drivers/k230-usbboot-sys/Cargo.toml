@@ -32,4 +32,6 @@ lemnos-flash-wire = { path = "../flash-wire" }
 [features]
 # The B2 check build: the image runs only the check (fl1::check), and the SD host code is not reached, so
 # the linker drops it. drivers/k230-usbboot-image/check.sh --b2 builds it and checks the image for it.
-b2 = []
+b2 = ["ep0-trace"]
+# The endpoint 0 trace (dwc2::Trace): kept by the B2 build and the PC rehearsal, not by the card build.
+ep0-trace = []

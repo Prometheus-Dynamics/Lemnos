@@ -13,7 +13,7 @@ workspace = true
 lemnos-k230-usbboot-stage = { path = "../k230-usbboot-stage" }
 # The B2 check: the check build's run and its dwc2 driver (run over a register model in the rehearsal),
 # the shared stage's descriptors and the wire's frames.
-lemnos-driver-k230-usbboot-sys = { path = "../../../drivers/k230-usbboot-sys" }
+lemnos-driver-k230-usbboot-sys = { path = "../../../drivers/k230-usbboot-sys", features = ["ep0-trace"] }
 lemnos-flash-stage = { path = "../../../drivers/flash-stage" }
 lemnos-flash-wire = { path = "../../../drivers/flash-wire" }
 sha2 = { version = "0.11", default-features = false }

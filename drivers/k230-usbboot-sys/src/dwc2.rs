@@ -25,7 +25,10 @@
 //! a soft disconnect before the core reset so the host sees the ROM's device leave; the reset's
 //! completion by either bit the core revision uses (CSFTRST clears before 4.20a, CSFTRST_DONE sets
 //! after); the AHB idle wait; device mode forced and waited for; DMA off (the ROM's own setting is
-//! not trusted); endpoint 0's OUT re-armed after every setup and status stage; on a bus reset the
+//! not trusted); endpoint 0 driven stage by stage as Linux's `gadget.c` does in slave mode (OUT armed
+//! for the next setup without clearing NAK; the OUT status stage armed, with CNAK, once DIEPINT0 shows
+//! the IN data stage complete; the next setup armed once a status stage completes; see
+//! `Dwc2::arm_ep0_out`), each step kept in the [`Trace`] when the `ep0-trace` feature is on; on a bus reset the
 //! address cleared and the bulk pair deactivated, then activated again by SET_CONFIGURATION
 //! ([`UsbHw::configure`]); bulk OUT transfers armed in whole packets and continued until a short
 //! packet; bulk IN written one packet at a time as the FIFO has room.
@@ -62,7 +65,9 @@ pub mod reg {
     pub const GRXFSIZ: usize = 0x024;
     pub const GNPTXFSIZ: usize = 0x028;
     pub const GSNPSID: usize = 0x040;
+    pub const GHWCFG2: usize = 0x048;
     pub const GHWCFG3: usize = 0x04c;
+    pub const GHWCFG4: usize = 0x050;
     pub const DPTXFSIZN1: usize = 0x104;
     pub const DCFG: usize = 0x800;
     pub const DCTL: usize = 0x804;
@@ -79,6 +84,12 @@ pub mod reg {
     }
     pub const fn doeptsiz(n: u8) -> usize {
         0xb10 + 0x20 * n as usize
+    }
+    pub const fn diepint(n: u8) -> usize {
+        0x908 + 0x20 * n as usize
+    }
+    pub const fn doepint(n: u8) -> usize {
+        0xb08 + 0x20 * n as usize
     }
     pub const fn dtxfsts(n: u8) -> usize {
         0x918 + 0x20 * n as usize
@@ -120,6 +131,101 @@ pub mod bits {
     pub const PKTSTS_SETUPDONE: u32 = 4;
     pub const PKTSTS_SETUPRX: u32 = 6;
     pub const DOEPTSIZ0_SETUP: u32 = (3 << 29) | (1 << 19) | 64;
+    /// Endpoint 0 OUT for a status stage: one zero-length packet (Linux `dwc2_hsotg_program_zlp`,
+    /// `gadget.c:2047-2079`: `MC(1) | PKTCNT(1) | XFERSIZE(0)`; bits 30:29 are SUPCNT on OUT 0).
+    pub const DOEPTSIZ0_STATUS: u32 = (1 << 29) | (1 << 19);
+    /// Endpoint 0 OUT for a data stage: one packet of at most 64 bytes.
+    pub const DOEPTSIZ0_DATA: u32 = (1 << 29) | (1 << 19) | 64;
+    pub const DXEPINT_XFERCOMPL: u32 = 1 << 0;
+    pub const DXEPINT_SETUP: u32 = 1 << 3;
+}
+
+/// The endpoint 0 trace: what the core showed at each step of a control transfer, kept in RAM from the
+/// core reset on and printed on the console at the end of the run (`b2::end`), so a run that fails to
+/// enumerate still says where. Each entry is four words: the kind and the microframe number
+/// (`DSTS` 21:8) in the first, three register values or setup words after it (see [`trace`]).
+pub struct Trace {
+    words: [AtomicU32; TRACE_LEN * 4],
+    next: AtomicU32,
+}
+
+/// Entries the trace keeps: the first ones (a failing enumeration repeats itself; its first attempt
+/// is the one to read). Later entries are counted, not kept.
+pub const TRACE_LEN: usize = 160;
+
+/// The kinds of trace entry, and what the three words after the kind hold.
+pub mod trace {
+    /// The core reset done: GUSBCFG as found, GHWCFG2, GHWCFG4.
+    pub const CORE: u32 = 1;
+    /// A bus reset seen: GINTSTS, DOEPCTL0, DIEPCTL0 (before the driver's handling).
+    pub const BUS_RESET: u32 = 2;
+    /// The speed handshake ended: DSTS, GUSBCFG, GINTSTS.
+    pub const ENUM_DONE: u32 = 3;
+    /// A setup packet: its bytes 0..4 and 4..8 (little-endian: bmRequestType, bRequest, wValue;
+    /// wIndex, wLength), DOEPCTL0.
+    pub const SETUP: u32 = 4;
+    /// The setup stage's done entry popped: DOEPCTL0, DOEPTSIZ0, DOEPINT0.
+    pub const SETUP_DONE: u32 = 5;
+    /// Endpoint 0 OUT armed (the byte above the kind says for what: 1 setup, 2 status, 3 data):
+    /// DOEPCTL0 before, DOEPTSIZ0 and DOEPCTL0 after.
+    pub const OUT_ARM: u32 = 6;
+    /// An endpoint 0 OUT transfer done entry popped: DOEPCTL0, DOEPTSIZ0, DOEPINT0.
+    pub const OUT_DONE: u32 = 7;
+    /// Endpoint 0 IN armed: the length, DIEPTSIZ0 and DIEPCTL0 after.
+    pub const IN_ARM: u32 = 8;
+    /// Endpoint 0 IN could not start (the previous transfer never ended): DIEPCTL0, DIEPTSIZ0,
+    /// DIEPINT0.
+    pub const IN_BUSY: u32 = 9;
+    /// The endpoint 0 interrupt bits changed: DIEPINT0, DOEPINT0, DIEPTSIZ0.
+    pub const EPINT: u32 = 10;
+    /// Endpoint 0 IN transfer complete seen: DIEPINT0, DIEPTSIZ0, DIEPCTL0.
+    pub const IN_DONE: u32 = 11;
+    /// Endpoint 0 stalled: DIEPCTL0, DOEPCTL0, 0.
+    pub const STALL: u32 = 12;
+    /// SET_ADDRESS taken: the address, DCFG after, 0.
+    pub const ADDRESS: u32 = 13;
+}
+
+impl Trace {
+    /// Empty.
+    pub const fn new() -> Self {
+        Self {
+            words: [const { AtomicU32::new(0) }; TRACE_LEN * 4],
+            next: AtomicU32::new(0),
+        }
+    }
+
+    /// Adds one entry (or only counts it, once the trace is full).
+    pub fn push(&self, head: u32, a: u32, b: u32, c: u32) {
+        let n = self.next.load(Ordering::Relaxed);
+        self.next.store(n.saturating_add(1), Ordering::Relaxed);
+        let at = n as usize;
+        if at < TRACE_LEN {
+            for (i, w) in [head, a, b, c].into_iter().enumerate() {
+                self.words[at * 4 + i].store(w, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The entries pushed, kept or not.
+    pub fn count(&self) -> u32 {
+        self.next.load(Ordering::Relaxed)
+    }
+
+    /// Entry `i` (of the kept ones), or `None` past them.
+    pub fn entry(&self, i: usize) -> Option<[u32; 4]> {
+        if i >= TRACE_LEN || i >= self.count() as usize {
+            return None;
+        }
+        let w = |k: usize| self.words[i * 4 + k].load(Ordering::Relaxed);
+        Some([w(0), w(1), w(2), w(3)])
+    }
+}
+
+impl Default for Trace {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 use bits::*;
@@ -185,7 +291,6 @@ fn in_window(addr: usize) -> bool {
 /// What the bench must see, counted as it happens. The B2 run prints and serves these words
 /// (`lemnos_k230_usbboot_stage::fl1::check::record`, same names). Counts saturate. Each field is the
 /// record word of its name.
-#[derive(Default)]
 #[allow(missing_docs)]
 pub struct Stats {
     pub gsnpsid: AtomicU32,
@@ -222,6 +327,9 @@ pub struct Stats {
     pub in_bytes: AtomicU32,
     /// The most reads one bulk IN packet waited for FIFO room.
     pub in_fifo_waits: AtomicU32,
+    /// The endpoint 0 trace, when this run keeps one (not a record word: the B2 build prints it at the
+    /// end). The card build keeps none: its RAM is not spent on it.
+    pub trace: Option<&'static Trace>,
 }
 
 impl Stats {
@@ -251,7 +359,15 @@ impl Stats {
             in_transfers: AtomicU32::new(0),
             in_bytes: AtomicU32::new(0),
             in_fifo_waits: AtomicU32::new(0),
+            trace: None,
         }
+    }
+
+    /// All zero, keeping the endpoint 0 trace in `trace`.
+    pub const fn traced(trace: &'static Trace) -> Self {
+        let mut stats = Self::new();
+        stats.trace = Some(trace);
+        stats
     }
 
     /// The words of the record this driver owns, by their record names.
@@ -285,6 +401,23 @@ impl Stats {
     }
 }
 
+impl Default for Stats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One trace entry (see [`Dwc2::tr`]); the arguments, register reads included, are not even evaluated
+/// in a build without the `ep0-trace` feature (the card build: its image has no room for them).
+macro_rules! tr {
+    ($dwc2:expr, $($arg:expr),+ $(,)?) => {
+        #[cfg(feature = "ep0-trace")]
+        {
+            $dwc2.tr($($arg),+);
+        }
+    };
+}
+
 /// One plain load and store: the image runs one thread, so no read-modify-write instruction is needed.
 fn bump(counter: &AtomicU32) {
     counter.store(
@@ -295,6 +428,29 @@ fn bump(counter: &AtomicU32) {
 
 fn put(counter: &AtomicU32, value: u32) {
     counter.store(value, Ordering::Relaxed);
+}
+
+/// Where endpoint 0's control transfer is: the stage the driver armed the endpoint for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ep0 {
+    /// Waiting for a setup.
+    Setup,
+    /// An IN data stage is on endpoint 0 IN; its completion arms the OUT status stage.
+    DataIn,
+    /// The OUT status stage is armed.
+    StatusOut,
+    /// An OUT data stage is armed.
+    DataOut,
+    /// The IN status stage (a zero-length packet) is on endpoint 0 IN; its completion arms the next setup.
+    StatusIn,
+}
+
+/// What endpoint 0 OUT is armed for (the trace's flag byte).
+#[derive(Clone, Copy)]
+enum Arm {
+    Setup = 1,
+    Status = 2,
+    Data = 3,
 }
 
 /// The stats a driver without a record writes to.
@@ -318,9 +474,13 @@ pub struct Dwc2<'s, R: Dwc2Regs = Window, B: AsMut<[u8]> + AsRef<[u8]> = [u8; RX
     ep0_rx: usize,
     /// The last setup's next stage is an OUT data stage (see [`UsbHw::stall`]).
     ep0_out_stage: bool,
+    /// Where endpoint 0's control transfer is.
+    ep0: Ep0,
     /// The largest OUT and IN transfer the core's counters take, in whole packets.
     max_xfer: usize,
     configured: bool,
+    /// The endpoint 0 interrupt bits last traced (DIEPINT0, DOEPINT0).
+    last_epint: (u32, u32),
     stats: &'s Stats,
 }
 
@@ -353,8 +513,10 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
             ep0_out: None,
             ep0_rx: 0,
             ep0_out_stage: false,
+            ep0: Ep0::Setup,
             max_xfer: BULK_MPS,
             configured: false,
+            last_epint: (0, 0),
             stats,
         }
     }
@@ -366,6 +528,33 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
 
     fn rd(&self, offset: usize) -> u32 {
         self.regs.read(offset)
+    }
+
+    /// One trace entry: `kind` and `flags` (one byte each) with the microframe number.
+    #[cfg(feature = "ep0-trace")]
+    fn tr(&self, kind: u32, flags: u32, a: u32, b: u32, c: u32) {
+        if let Some(trace) = self.stats.trace {
+            let frame = (self.rd(DSTS) >> 8) & 0x3fff;
+            trace.push(kind | ((flags & 0xff) << 8) | (frame << 16), a, b, c);
+        }
+    }
+
+    /// Traces a change of endpoint 0's interrupt bits, then clears the bits seen (write one to
+    /// clear, as Linux's `dwc2_hsotg_epint` does). Returns DIEPINT0 as seen.
+    fn ep0_ints(&mut self) -> u32 {
+        let di = self.rd(diepint(0));
+        let doi = self.rd(doepint(0));
+        if (di, doi) != self.last_epint && (di | doi) != 0 {
+            tr!(self, trace::EPINT, 0, di, doi, self.rd(dieptsiz(0)));
+        }
+        self.last_epint = (di, doi);
+        if di != 0 {
+            self.wr(diepint(0), di);
+        }
+        if doi != 0 {
+            self.wr(doepint(0), doi);
+        }
+        di
     }
 
     fn wr(&self, offset: usize, value: u32) {
@@ -404,14 +593,33 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
         }
     }
 
-    /// Arms endpoint 0's OUT for a setup or a status stage (three back-to-back setups, one packet). An
-    /// endpoint that is still enabled is left as it is: its size register is not written under it.
-    fn arm_ep0_out(&self) {
-        if self.rd(doepctl(0)) & DXEPCTL_EPENA != 0 {
-            return;
-        }
-        self.wr(doeptsiz(0), DOEPTSIZ0_SETUP);
-        self.set(doepctl(0), DXEPCTL_EPENA | DXEPCTL_CNAK);
+    /// Arms endpoint 0's OUT for `what`, written whether or not the endpoint is still enabled, as Linux
+    /// (`dwc2_hsotg_start_req`, `gadget.c:1186-1191`; `dwc2_hsotg_program_zlp`, `gadget.c:2071-2079`)
+    /// and the vendor's U-Boot (`dwc2_ep0_complete_out`, `dwc2_udc_otg_xfer_dma.c:69-95`) do: a setup
+    /// leaves the endpoint enabled on cores that send no OUT-done for it, and sets its NAK
+    /// (`gadget.c:1189` "clear NAK set by core"), so an arm that waits for the enable to drop never
+    /// clears the NAK and the host's next OUT is NAKed for good (B2 run 2; the rehearsal's `core-430a`).
+    ///
+    /// A setup arm does not clear NAK (setups are taken under NAK; `gadget.c:1186-1187`); a status or
+    /// data arm does. The stall bit is never written back (the core clears it at a setup).
+    fn arm_ep0_out(&self, what: Arm) {
+        let before = self.rd(doepctl(0));
+        let (size, nak) = match what {
+            Arm::Setup => (DOEPTSIZ0_SETUP, 0),
+            Arm::Status => (DOEPTSIZ0_STATUS, DXEPCTL_CNAK),
+            Arm::Data => (DOEPTSIZ0_DATA, DXEPCTL_CNAK),
+        };
+        self.wr(doeptsiz(0), size);
+        let keep = before & !(DXEPCTL_STALL | DXEPCTL_SNAK | DXEPCTL_CNAK | DXEPCTL_EPDIS);
+        self.wr(doepctl(0), keep | DXEPCTL_EPENA | DXEPCTL_USBACTEP | nak);
+        tr!(
+            self,
+            trace::OUT_ARM,
+            what as u32,
+            before,
+            self.rd(doeptsiz(0)),
+            self.rd(doepctl(0)),
+        );
     }
 
     /// Arms bulk OUT endpoint 1 for the rest of the frame: whole packets, at most the core's counters
@@ -449,6 +657,14 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
 
     /// A bus reset: address 0, the bulk pair off, endpoint 0 ready for the next setup.
     fn bus_reset(&mut self) {
+        tr!(
+            self,
+            trace::BUS_RESET,
+            0,
+            self.rd(GINTSTS),
+            self.rd(doepctl(0)),
+            self.rd(diepctl(0)),
+        );
         self.wr(GINTSTS, GINTSTS_USBRST);
         bump(&self.stats.bus_resets);
         self.clear(DCFG, DCFG_DEVADDR_MASK);
@@ -456,7 +672,8 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
         self.setup = None;
         self.ep0_out = None;
         self.ep0_rx = 0;
-        self.arm_ep0_out();
+        self.ep0 = Ep0::Setup;
+        self.arm_ep0_out(Arm::Setup);
     }
 
     /// Pops one entry of the receive FIFO: its data goes to the frame (endpoint 1), the setup
@@ -476,13 +693,37 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
                 // A later setup replaces an earlier one the device has not handled (the last
                 // back-to-back setup is the one the host means).
                 self.setup = Some(setup);
+                tr!(
+                    self,
+                    trace::SETUP,
+                    0,
+                    u32::from_le_bytes([setup[0], setup[1], setup[2], setup[3]]),
+                    u32::from_le_bytes([setup[4], setup[5], setup[6], setup[7]]),
+                    self.rd(doepctl(0)),
+                );
                 // The direction of the stage after this setup: OUT only for a request with an OUT
                 // data stage; every other request's next stage (data or status) is IN.
                 self.ep0_out_stage =
                     setup[0] & 0x80 == 0 && u16::from_le_bytes([setup[6], setup[7]]) > 0;
+                // A setup starts a new control transfer, whatever the last one was doing.
+                self.ep0 = Ep0::Setup;
                 bump(&self.stats.setups);
             }
-            PKTSTS_SETUPDONE => self.arm_ep0_out(),
+            PKTSTS_SETUPDONE => {
+                tr!(
+                    self,
+                    trace::SETUP_DONE,
+                    0,
+                    self.rd(doepctl(0)),
+                    self.rd(doeptsiz(0)),
+                    self.rd(doepint(0)),
+                );
+                // An OUT data stage is armed now; an IN data or status stage is armed by the reply.
+                if self.ep0_out_stage {
+                    self.ep0 = Ep0::DataOut;
+                    self.arm_ep0_out(Arm::Data);
+                }
+            }
             PKTSTS_OUTRX if ep == BULK_OUT & 0x0f => {
                 let cap = self.rx.as_ref().len();
                 let mut left = bytes;
@@ -528,9 +769,20 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
                 }
             }
             PKTSTS_OUTDONE if ep == 0 => {
+                tr!(
+                    self,
+                    trace::OUT_DONE,
+                    0,
+                    self.rd(doepctl(0)),
+                    self.rd(doeptsiz(0)),
+                    self.rd(doepint(0)),
+                );
                 self.ep0_out = Some(core::mem::take(&mut self.ep0_rx));
-                bump(&self.stats.ep0_status_out);
-                self.arm_ep0_out();
+                if self.ep0 == Ep0::StatusOut {
+                    bump(&self.stats.ep0_status_out);
+                    self.ep0 = Ep0::Setup;
+                    self.arm_ep0_out(Arm::Setup);
+                }
             }
             _ => {}
         }
@@ -545,10 +797,30 @@ impl<'s, R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> Dwc2<'s, R, B> {
         // The previous transfer ends when the host has taken it: the same host-paced wait as the
         // FIFO room's.
         if !(0..IN_SPIN).any(|_| self.rd(diepctl(n)) & DXEPCTL_EPENA == 0) {
+            if n == 0 {
+                tr!(
+                    self,
+                    trace::IN_BUSY,
+                    0,
+                    self.rd(diepctl(0)),
+                    self.rd(dieptsiz(0)),
+                    self.rd(diepint(0)),
+                );
+            }
             return Err(HwError::Timeout);
         }
         self.wr(dieptsiz(n), (packets << 19) | data.len() as u32);
         self.set(diepctl(n), DXEPCTL_EPENA | DXEPCTL_CNAK);
+        if n == 0 {
+            tr!(
+                self,
+                trace::IN_ARM,
+                0,
+                data.len() as u32,
+                self.rd(dieptsiz(0)),
+                self.rd(diepctl(0)),
+            );
+        }
         for packet in data.chunks(mps) {
             let words = packet.len().div_ceil(4) as u32;
             let waited = self.wait_room(n, words)?;
@@ -606,6 +878,14 @@ impl<R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> UsbHw for Dwc2<'_, R, B> {
         let hwcfg3 = self.rd(GHWCFG3);
         put(&self.stats.ghwcfg3, hwcfg3);
         put(&self.stats.gahbcfg_found, self.rd(GAHBCFG));
+        tr!(
+            self,
+            trace::CORE,
+            0,
+            self.rd(GUSBCFG),
+            self.rd(GHWCFG2),
+            self.rd(GHWCFG4),
+        );
         // Slave mode: DMA off, the global interrupt off (this driver polls).
         self.wr(GAHBCFG, 0);
         self.wr(
@@ -635,8 +915,11 @@ impl<R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> UsbHw for Dwc2<'_, R, B> {
         // High speed, address 0; nothing pending; endpoint 0 at 64 bytes and ready for a setup.
         self.wr(DCFG, 0);
         self.wr(GINTSTS, 0xffff_ffff);
+        self.wr(diepint(0), 0xffff_ffff);
+        self.wr(doepint(0), 0xffff_ffff);
         self.wr(diepctl(0), 0);
-        self.arm_ep0_out();
+        self.ep0 = Ep0::Setup;
+        self.arm_ep0_out(Arm::Setup);
         self.clear(DCTL, DCTL_SFTDISCON);
         Ok(())
     }
@@ -652,10 +935,44 @@ impl<R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> UsbHw for Dwc2<'_, R, B> {
             let dsts = self.rd(DSTS);
             put(&self.stats.dsts, dsts);
             put(&self.stats.speed, (dsts >> 1) & 0x3);
-            self.arm_ep0_out();
+            self.ep0 = Ep0::Setup;
+            tr!(
+                self,
+                trace::ENUM_DONE,
+                0,
+                dsts,
+                self.rd(GUSBCFG),
+                self.rd(GINTSTS),
+            );
+            self.arm_ep0_out(Arm::Setup);
         }
         if status & GINTSTS_RXFLVL != 0 {
             self.take_packet();
+        }
+        let di = self.ep0_ints();
+        if di & DXEPINT_XFERCOMPL != 0 {
+            tr!(
+                self,
+                trace::IN_DONE,
+                0,
+                di,
+                self.rd(dieptsiz(0)),
+                self.rd(diepctl(0)),
+            );
+            // The IN stage went out: the OUT status stage follows a data stage (Linux
+            // `dwc2_hsotg_complete_in` -> `dwc2_hsotg_ep0_zlp(hsotg, false)`, `gadget.c:2763-2767`),
+            // the next setup follows a status stage (`gadget.c:2696-2715`).
+            match self.ep0 {
+                Ep0::DataIn => {
+                    self.ep0 = Ep0::StatusOut;
+                    self.arm_ep0_out(Arm::Status);
+                }
+                Ep0::StatusIn => {
+                    self.ep0 = Ep0::Setup;
+                    self.arm_ep0_out(Arm::Setup);
+                }
+                _ => {}
+            }
         }
         if let Some(setup) = self.setup.take() {
             return Event::Setup(setup);
@@ -704,6 +1021,12 @@ impl<R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> UsbHw for Dwc2<'_, R, B> {
             if data.len() > EP0_MPS {
                 return Err(HwError::Overrun);
             }
+            // The stage is set before the transfer starts: its completion is seen by `poll`.
+            self.ep0 = if data.is_empty() {
+                Ep0::StatusIn
+            } else {
+                Ep0::DataIn
+            };
             self.in_transfer(0, data)?;
             if data.is_empty() && self.stats.set_address.load(Ordering::Relaxed) != 0 {
                 put(&self.stats.address_status_in, 1);
@@ -741,6 +1064,14 @@ impl<R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> UsbHw for Dwc2<'_, R, B> {
         let n = ep & 0x0f;
         bump(&self.stats.stalls);
         if n == 0 {
+            tr!(
+                self,
+                trace::STALL,
+                0,
+                self.rd(diepctl(0)),
+                self.rd(doepctl(0)),
+                0
+            );
             // The half that carries the request's next stage stalls, as Linux's
             // `dwc2_hsotg_stall_ep0` does: IN for a request with an IN data stage or none (its
             // status stage is IN), OUT for one with an OUT data stage. The core clears it at the
@@ -755,6 +1086,8 @@ impl<R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> UsbHw for Dwc2<'_, R, B> {
                 },
                 DXEPCTL_STALL,
             );
+            // The transfer is over; the next setup is taken whatever the endpoint's state.
+            self.ep0 = Ep0::Setup;
             return;
         }
         let offset = if ep & 0x80 != 0 {
@@ -772,6 +1105,14 @@ impl<R: Dwc2Regs, B: AsMut<[u8]> + AsRef<[u8]>> UsbHw for Dwc2<'_, R, B> {
         self.wr(DCFG, dcfg | (u32::from(address & 0x7f) << 4));
         put(&self.stats.set_address, u32::from(address));
         put(&self.stats.dcfg_after_address, self.rd(DCFG));
+        tr!(
+            self,
+            trace::ADDRESS,
+            0,
+            u32::from(address),
+            self.rd(DCFG),
+            0
+        );
         put(&self.stats.address_status_in, 0);
     }
 

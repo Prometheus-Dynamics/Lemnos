@@ -17,6 +17,11 @@ out="${CARGO_TARGET_DIR:-$repo/target}"
 b2=0
 [ "${1:-}" = "--b2" ] && b2=1
 cd "$repo"
+# One codegen unit: with the default sixteen, how LLVM splits the driver crate decides what is inlined where,
+# so a change to code the card build never calls (the B2 build's endpoint 0 trace) moved the card image by
+# 1.6 KiB and past 0x80380000, which it clears by a few hundred bytes. With one unit the card image is the
+# same size with or without that code (64824 bytes both, measured), and smaller than with sixteen.
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 if [ "$b2" = 1 ]; then
   # Its own target subdirectory, so the two builds' libraries never overwrite each other.
   out="$out/b2"

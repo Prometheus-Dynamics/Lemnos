@@ -2,18 +2,35 @@
 //! `access(2)` on the node (opens nothing; the kernel's own check, ACLs included), and the open and claim
 //! through libusb, made only when [`super::run`] gets that far.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use rusb::{Context, DeviceHandle, UsbContext};
 
 use super::{Access, Board, Link, LinkError, Seen};
-use lemnos_flash_wire::usb::{BULK_IN, BULK_OUT};
+use crate::bootrom::{DOWNLOAD_PID, DOWNLOAD_VID};
+use lemnos_flash_wire::usb::{BULK_IN, BULK_OUT, PRODUCT_ID, VENDOR_ID};
 
 /// The bus as sysfs states it.
+///
+/// The scan must not block: while the kernel enumerates a device on a hub's port it holds that hub's
+/// device lock, and the string and configuration attributes take the device lock before they answer
+/// (Linux `drivers/usb/core/sysfs.c` at the k230_sdk's 5.10 tree: `usb_string_attr` :123-140 for
+/// `product`, `usb_actconfig_show` :24-45,90 for `bConfigurationValue`). B2 run 2's 15 s bound ended at
+/// 30.7 s on such reads. So every device is scanned by the lock-free attributes only (`idVendor`,
+/// `idProduct` :709-723, `busnum`, `devnum` :199-215), and the locking ones are read only for a device
+/// with the stage's or the boot ROM's ids, each on its own thread with a bound ([`ATTR_BOUND`]): a read
+/// that does not answer in time leaves that field unknown for this scan and is picked up by a later one.
 pub struct Sysfs {
     root: PathBuf,
+    /// Reads still running, by path and the device number they were started for.
+    pending: HashMap<(PathBuf, u32), Receiver<Option<String>>>,
 }
+
+/// How long one locking attribute read may take before the scan goes on without it.
+pub const ATTR_BOUND: Duration = Duration::from_millis(100);
 
 impl Default for Sysfs {
     fn default() -> Self {
@@ -22,7 +39,11 @@ impl Default for Sysfs {
 }
 
 fn read(dir: &Path, name: &str) -> Option<String> {
-    std::fs::read_to_string(dir.join(name))
+    read_path(&dir.join(name))
+}
+
+fn read_path(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
 }
@@ -30,25 +51,68 @@ fn read(dir: &Path, name: &str) -> Option<String> {
 impl Sysfs {
     /// The bus under `root` (a test's copy of the tree, or the real one).
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            pending: HashMap::new(),
+        }
+    }
+
+    /// One locking attribute of device `devnum`, read on a thread for at most [`ATTR_BOUND`]. A read
+    /// still running from an earlier scan of the same device is waited on again, never doubled; one
+    /// started for an earlier device at the same path is dropped.
+    fn bounded(&mut self, path: PathBuf, devnum: u32) -> Option<String> {
+        self.pending.retain(|(p, n), _| *p != path || *n == devnum);
+        let key = (path, devnum);
+        let rx = match self.pending.remove(&key) {
+            Some(rx) => rx,
+            None => {
+                let (tx, rx) = mpsc::channel();
+                let at = key.0.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(read_path(&at));
+                });
+                rx
+            }
+        };
+        match rx.recv_timeout(ATTR_BOUND) {
+            Ok(value) => value,
+            Err(RecvTimeoutError::Timeout) => {
+                self.pending.insert(key, rx);
+                None
+            }
+            Err(RecvTimeoutError::Disconnected) => None,
+        }
     }
 
     /// One device's view, or `None` when `port` is not a device (an interface, a root hub's name).
-    pub fn seen(&self, port: &str) -> Option<Seen> {
+    /// The locking attributes are read (bounded) only for the stage's or the boot ROM's ids.
+    pub fn seen(&mut self, port: &str) -> Option<Seen> {
         let dir = self.root.join(port);
         let vid = u16::from_str_radix(&read(&dir, "idVendor")?, 16).ok()?;
         let pid = u16::from_str_radix(&read(&dir, "idProduct")?, 16).ok()?;
-        Some(Seen {
+        let mut seen = Seen {
             port: port.to_string(),
             vid,
             pid,
-            product: read(&dir, "product"),
-            interface: read(&dir.join(format!("{port}:1.0")), "interface"),
-            speed: read(&dir, "speed"),
-            configuration: read(&dir, "bConfigurationValue").and_then(|v| v.parse().ok()),
+            product: None,
+            interface: None,
+            speed: None,
+            configuration: None,
             busnum: read(&dir, "busnum")?.parse().ok()?,
             devnum: read(&dir, "devnum")?.parse().ok()?,
-        })
+        };
+        let ours =
+            (vid, pid) == (VENDOR_ID, PRODUCT_ID) || (vid, pid) == (DOWNLOAD_VID, DOWNLOAD_PID);
+        if ours {
+            let n = seen.devnum;
+            seen.speed = read(&dir, "speed");
+            seen.interface = read(&dir.join(format!("{port}:1.0")), "interface");
+            seen.product = self.bounded(dir.join("product"), n);
+            seen.configuration = self
+                .bounded(dir.join("bConfigurationValue"), n)
+                .and_then(|v| v.parse().ok());
+        }
+        Some(seen)
     }
 }
 
