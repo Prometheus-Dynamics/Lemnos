@@ -3,6 +3,7 @@
 
   trigger REPO BASE CAND NAMES...  which consumers a change can break; TRIGGER / AFFECT / RESULT yes|no lines
   locknames LOCKFILE               Lemnos-sourced packages of a Cargo.lock: "name<TAB>version"
+  sync SRC DST                     make DST equal SRC, rewriting only files whose content differs
   shim TREE SHIMS                  add the features named in SHIMS ("package<TAB>feature") where missing (idempotent)
   prepare PRISTINE WORK MDIR TREE LOCKNAMES STUBS
                                    copy a consumer (changed files only) and write its [patch] block for Lemnos
@@ -542,6 +543,8 @@ def main(argv):
         cmd_trigger(a[0], a[1], a[2], a[3:])
     elif cmd == "locknames" and len(a) == 1:
         cmd_locknames(a[0])
+    elif cmd == "sync" and len(a) == 2:
+        sync(a[0], a[1])
     elif cmd == "shim" and len(a) == 2:
         cmd_shim(a[0], a[1])
     elif cmd == "prepare" and len(a) == 6:
