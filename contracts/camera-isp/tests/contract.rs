@@ -455,5 +455,8 @@ fn a_reader_from_before_the_inode_field_decodes_counters_and_a_new_one_defaults_
     let mut reader = Reader::new(&buffer[..used]);
     let back = Counters::decode(&mut reader).unwrap();
     assert_eq!(back.lent, 4);
-    assert_eq!(back.last_lent_inode, 0, "a reader from before the field gets 0");
+    assert_eq!(
+        back.last_lent_inode, 0,
+        "a reader from before the field gets 0"
+    );
 }
