@@ -57,9 +57,11 @@ uses = { function = "udc:dummy_udc.0" }
 config = { manufacturer = "Lemnos", product_name = "Gadget check", identity = "identity" }
 "#;
 
-/// Where the board file is written, and the daemon's socket beside it (the daemon makes its
-/// socket's directory in its privileged start).
-const BOARD_PATH: &str = "/run/lemnos-check/board.toml";
+/// Where the board file is written, and the daemon's socket (the daemon makes its socket's
+/// directory in its privileged start). The board file is outside that directory, as a board's is
+/// (/etc/lemnos): once the directory is the daemon's at 0750, a root phase under the unit's bounding
+/// set (no CAP_DAC_OVERRIDE) cannot read inside it when the daemon starts again.
+const BOARD_PATH: &str = "/run/lemnos-check-board.toml";
 const SOCKET: &str = "/run/lemnos-check/lemnosd.sock";
 
 /// The serial the command line gives, and the addresses it derives for board `lemnos-qemu`.

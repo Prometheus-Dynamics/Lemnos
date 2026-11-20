@@ -1452,6 +1452,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-daemon-ready"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-devtree"
 version = "2.0.1-dev"
 dependencies = [
@@ -3052,6 +3056,15 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
  "libc",
+]
+
+[[package]]
+name = "lemnos-unit-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-daemon-ready",
+ "lemnos-linux-sys",
 ]
 
 [[package]]

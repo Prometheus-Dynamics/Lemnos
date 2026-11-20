@@ -1,0 +1,15 @@
+[package]
+name = "lemnos-unit-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Board-check in the QEMU harness: lemnosd's privileged start under the packaged unit's capability bounding set and no_new_privs, on a runtime directory made as the service manager makes it, reached by the daemon's user and group"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-client = { path = "../../../engine/client" }
+lemnos-daemon-ready = { path = "../daemon-ready" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }

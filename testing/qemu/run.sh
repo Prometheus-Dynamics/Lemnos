@@ -123,9 +123,10 @@ link_check_features=()
 if [[ "${LINK_CHECK_TRACE:-0}" == 1 ]]; then
   link_check_features=(--features lemnos-orion-link-check/trace)
 fi
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check -p lemnos-board-check -p lemnos-check-main -p lemnos-regjob-check -p lemnos-regjob-isp-check -p lemnos-pio-check -p lemnos-lend-check -p lemnos-pisp-be-check -p lemnos-pisp-be-version-check -p lemnos-pisp-fe-check -p lemnos-stream-check -p lemnos-gsdma-check -p lemnos-vip-check -p lemnos-rp1-csi2-check -p lemnos-init --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnos-unit-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-shm-bell-check -p lemnos-nand-check -p lemnos-orion-link-check -p lemnos-orion -p lemnos-claim-check -p lemnos-unbind-check -p lemnos-gpio-check -p lemnos-power-check -p lemnos-irq-check -p lemnos-bus-check -p lemnos-board-check -p lemnos-check-main -p lemnos-regjob-check -p lemnos-regjob-isp-check -p lemnos-pio-check -p lemnos-lend-check -p lemnos-pisp-be-check -p lemnos-pisp-be-version-check -p lemnos-pisp-fe-check -p lemnos-stream-check -p lemnos-gsdma-check -p lemnos-vip-check -p lemnos-rp1-csi2-check -p lemnos-init --target "$target" ${link_check_features[@]+"${link_check_features[@]}"})
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-unit-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-stream-compose-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-shm-ring-check" "$root/"
@@ -204,7 +205,7 @@ esac
 # The Rust checks (CZ-GUEST-2) are static binaries with debug info, about 5 MB each unstripped. No check reads
 # their symbols or line tables (they compare output lines), so they are stripped here to keep the initramfs
 # within the guest's memory. The workspace's debug profile is unchanged.
-for guest in init lemnos_pisp_be_version_check lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check lemnos_pisp_be_check lemnos_pisp_fe_check lemnos_stream_check lemnos_gsdma_check lemnos_vip_check lemnos_rp1_csi2_check; do
+for guest in init lemnos-unit-check lemnos_pisp_be_version_check lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check lemnos_pisp_be_check lemnos_pisp_fe_check lemnos_stream_check lemnos_gsdma_check lemnos_vip_check lemnos_rp1_csi2_check; do
   strip "$root/$guest"
 done
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"

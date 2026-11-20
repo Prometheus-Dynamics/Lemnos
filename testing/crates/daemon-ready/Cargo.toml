@@ -1,0 +1,10 @@
+[package]
+name = "lemnos-daemon-ready"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "For the QEMU harness checks that start lemnosd: wait until the daemon says it is ready (READY=1 on the NOTIFY_SOCKET the check gives it), not until its socket file exists"
+
+[lints]
+workspace = true

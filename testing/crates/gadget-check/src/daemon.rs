@@ -41,7 +41,11 @@ impl Lemnosd {
         // The socket is the one this check's last daemon made, and that daemon is gone (or killed):
         // the new daemon binds the path itself.
         let _ = fs::remove_file(&self.socket);
-        let child = Command::new(&self.program)
+        // Started as the packaged unit with the gadget drop-in starts it: root, with only the
+        // unit's bounding set and no_new_privs (testing/crates/unit-check, its `exec` role).
+        let child = Command::new(self.program.with_file_name("lemnos-unit-check"))
+            .args(["exec", "--with", "gadget", "--"])
+            .arg(&self.program)
             .arg("--board")
             .arg(&self.board)
             .arg("--socket")
