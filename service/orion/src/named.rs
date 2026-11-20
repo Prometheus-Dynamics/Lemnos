@@ -311,14 +311,19 @@ pub enum Ended {
     Refused(String),
     /// Given, and the client answered: taken or not, and why.
     Gave(Giving),
-    /// The gift began and then broke. The client is not told by this bridge: the pinned Orion has no
-    /// call that ends a gift already under way, so the client's own silence limit ends it.
+    /// The gift began and then broke. A read of the node that fails during the gift is the source's
+    /// error: at the pinned revision (927f704a, I43) Orion tells the client at once that the file
+    /// `Aborted`, with this reason, so the client does not wait out its silence limit. A broken
+    /// connection cannot be told, and the client's own silence limit ends that transfer.
     Broke(String),
 }
 
 /// Answers one asked file: a name outside `lemnos/` is refused before any node is reached; a node that
 /// cannot be reached, a name it refuses, or a read that fails before the gift begins is refused with
-/// its reason; otherwise the file is digested and given from the client's offset.
+/// its reason; otherwise the file is digested and given from the client's offset. A read that fails
+/// once the gift has begun is returned by the source as an error, so Orion aborts the gift with it
+/// (`Broke`); a read that returns nothing where the snapshot has bytes is an error too, never a short
+/// success.
 pub fn serve<A: Asker>(
     asked: A,
     node: impl FnOnce() -> Result<Box<dyn Node>, String>,
