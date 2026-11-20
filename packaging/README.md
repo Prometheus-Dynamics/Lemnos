@@ -11,7 +11,8 @@ its source, the path it installs to, its mode, and when (`always`, `systemd`, `b
 `gadget`, `kmod`, `uboot`, `ubi`), or `never` for the documents and the lists themselves. A packager reads that
 list and nothing else for the files. The programs are in [`shipped.txt`](shipped.txt). The gate's
 `scripts/check-packaging-files.py` fails when a file under this directory is not listed, when a listed file is
-missing, or when a condition is not in the vocabulary, so the list cannot fall behind the files.
+missing, or when a condition is not in the vocabulary, so the list cannot fall behind the files. The SoC maps under `socs/` are listed there too: every image installs each at
+`/usr/share/lemnos/socs/<soc>.toml`, where lemnosd reads its board's map to check the live device tree.
 
 One file a packager installs is generated rather than copied from here: `lemnos-ctl tree BOARD --udev FILE` writes the
 board's own device-node rules, for `/usr/lib/udev/rules.d/71-lemnos-board.rules`, beside `70-lemnos.rules`.
