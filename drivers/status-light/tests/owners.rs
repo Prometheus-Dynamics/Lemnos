@@ -41,14 +41,15 @@ fn rgb(colour: u32) -> [u8; 4] {
 fn two_owners_at_different_priorities_share_the_ring_led_by_led() {
     let fake = FakePixels::leak(4);
     let mut light = driver(fake, &plain(4));
-    // Caller 5 owns LEDs 0 to 2 at priority 1; caller 7 owns LEDs 2 and 3 at priority 2.
+    // Caller 5 owns LEDs 0 to 2 at priority 1, on the higher layer; caller 7 owns LEDs 2 and 3 at
+    // priority 2, on the lower layer. Priority decides, so the layer order must not.
     by(&mut light, 5);
     light
-        .show_frame(0, 1, &frame(&[(0, RED), (1, RED), (2, RED)]))
+        .show_frame(1, 1, &frame(&[(0, RED), (1, RED), (2, RED)]))
         .unwrap();
     by(&mut light, 7);
     light
-        .show_frame(1, 2, &frame(&[(2, BLUE), (3, BLUE)]))
+        .show_frame(0, 2, &frame(&[(2, BLUE), (3, BLUE)]))
         .unwrap();
     settle(&mut light, 0, 1_000);
     // LED 2 is the higher owner's; LEDs 0 and 1 are the lower's, where the higher did not set.
