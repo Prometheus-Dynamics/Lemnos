@@ -396,6 +396,21 @@ unsafe fn tcsi_deliver(status_bits: u32, ints_bits: u32) {
     unsafe { wr(cfg, R_INTS, saved) };
 }
 
+/// The FORCE in `ctrl` has had its frame end, or never will: latched, and the FE_ACK enable taken out
+/// of the register, so the next stop's write of the enable is a change the tick sees (see `tcsi_tick`).
+/// FAKE-ONLY ASSUMPTION: the hardware keeps the word as written; nothing reads the enable back.
+///
+/// # Safety
+///
+/// `dma` is the mapped DMA window, and `TCSI_LOCK` is held.
+unsafe fn settle_force(dma: *mut u8, ctrl: u32) {
+    let settled = ctrl & !TCSI_IRQ_EN_FE_ACK;
+    // SAFETY: the caller's: the window is mapped, and the offset is its control register.
+    unsafe { wr(dma, R_CTRL, settled) };
+    TCSI_LAST_CTRL.store(settled, Ordering::Relaxed);
+    TCSI_ACKED.store(true, Ordering::Relaxed);
+}
+
 /// The hard timer: counts the lines a FORCE has left to write, delivers a FORCE's frame end once its busy
 /// window is over, and keeps the lines the counter does not move for.
 ///
@@ -450,6 +465,14 @@ unsafe extern "C" fn tcsi_tick(t: *mut bindings::hrtimer) -> bindings::hrtimer_r
     // stop that got no acknowledgement (FORCE alone drops the enable) can't swallow the next stop's. A stop
     // with nothing in flight is acknowledged; the latch is set only when an acknowledgement is actually
     // delivered. FAKE-ONLY ASSUMPTION.
+    //
+    // The register is memory, so the tick sees values, not writes. Every stop writes the same word
+    // (FORCE with the FE_ACK enable), and a START and the stop after it can both land between two
+    // ticks (a tick held off by a busy host): the value is then what the last stop left, and that
+    // stop's latch would swallow this one's frame end. So an acknowledgement settles the FORCE in
+    // the register too (`settle_force`): the enable is taken out of the word, and the next stop's
+    // write puts it back, which is always a change. Nothing reads the enable back after a stop: the
+    // driver writes the word whole at every START and stop.
     let mut ack = false;
     if ctrl != TCSI_LAST_CTRL.load(Ordering::Relaxed) {
         TCSI_LAST_CTRL.store(ctrl, Ordering::Relaxed);
@@ -461,7 +484,8 @@ unsafe extern "C" fn tcsi_tick(t: *mut bindings::hrtimer) -> bindings::hrtimer_r
         && !TCSI_ACKED.load(Ordering::Relaxed)
         && (ctrl & TCSI_IRQ_EN_FE_ACK) != 0
     {
-        TCSI_ACKED.store(true, Ordering::Relaxed);
+        // SAFETY: the DMA window is mapped, and the lock is held.
+        unsafe { settle_force(dma, ctrl) };
         ack = true;
     }
     // SAFETY: the lock taken above, with the flags it saved.
@@ -736,7 +760,8 @@ unsafe fn tcsi_cmd(cmd: c_uint, arg: c_ulong) -> kernel::error::Result<c_long> {
                     TCSI_LATE.store(0, Ordering::Relaxed);
                     late_ack = true;
                 }
-                TCSI_ACKED.store(true, Ordering::Relaxed);
+                // SAFETY: the DMA window is mapped (the caller's promise), and the lock is held.
+                unsafe { settle_force(dma, dr(R_CTRL)) };
             }
             TCSI_BUSY.store(lines, Ordering::Relaxed);
             // SAFETY: the lock taken above, with the flags it saved.

@@ -1312,6 +1312,38 @@ fn test_stop_nothing_in_flight(c: &mut Ctx, pool: &OwnedFd) {
     stream_close(s);
 }
 
+/// START and STOP back to back, nothing between them, many times: each stop gets its frame end, and
+/// the receiver never wedges. The stop writes the same control word every time, so a START and the
+/// STOP after it can leave the register as the last stop left it between two looks of the fake's
+/// line timer; that stop is still a new FORCE and the hardware ends it.
+fn test_stop_right_after_start(c: &mut Ctx, pool: &OwnedFd) {
+    const PAIRS: u32 = 200;
+    let mut failed: Option<String> = None;
+    for n in 0..PAIRS {
+        let Ok(s) = stream_open(c, Some(pool)) else {
+            failed = Some(format!("pair {n}: no stream"));
+            break;
+        };
+        let a = good_start(s.fd.as_raw_fd());
+        // Nothing between the two: no print, no read.
+        let started = start(c, &a);
+        let stopped = stop(c);
+        stream_close(s);
+        let wedged = info(c).flags & INFO_WEDGED != 0;
+        if started != 0 || stopped != 0 || wedged {
+            failed = Some(format!(
+                "pair {n}: START {started}, STOP {stopped}, wedged {wedged}"
+            ));
+            break;
+        }
+    }
+    check!(
+        failed.is_none(),
+        "back to back: {PAIRS} STOPs right after their START each end the DMA ({})",
+        failed.as_deref().unwrap_or("all")
+    );
+}
+
 /// Closing the node with a frame in flight: a second file may open it but not drive the receiver;
 /// the close waits for the DMA; the node reopens and the stream stays open.
 fn test_close_node(c: &mut Ctx, node: &str, pool: &OwnedFd) {
@@ -2120,6 +2152,7 @@ fn main() -> ExitCode {
     test_embedded(&mut c, &pool, heap);
     test_stop_waits(&mut c, &pool);
     test_stop_nothing_in_flight(&mut c, &pool);
+    test_stop_right_after_start(&mut c, &pool);
     test_window(&mut c, &pool);
     test_close_node(&mut c, &node, &pool);
     test_unbind(&mut c, &node, unbind, dev, &pool);
