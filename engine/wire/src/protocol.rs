@@ -224,6 +224,18 @@ pub mod health {
     }
 }
 
+/// A device's last stall in a [`Frame::Device`]: whether there is one, and whether it stands.
+pub mod stall {
+    // Plain constants, not `constants!`: this field is added after the core frames, so its values
+    // are left out of the core hash (see docs/wire.md, "added").
+    /// The device's streams never stalled, or the host is older than the field.
+    pub const NONE: u8 = 0;
+    /// The stall stands: the device has not recovered yet.
+    pub const STANDING: u8 = 1;
+    /// The stall ended: the device recovered, and the stall is kept for reading.
+    pub const ENDED: u8 = 2;
+}
+
 /// Text appended to a frame after the frame's first form: a [`Tail`] of text. A peer from before
 /// the addition doesn't send it, and then it reads as empty. It can only be a frame's last field.
 pub type Appended<'a> = Tail<&'a str>;
@@ -481,6 +493,17 @@ frames! {
             /// Why the device waits, as [`refusal`] numbers it. Trailing: a host from before it sends
             /// none, which reads as [`refusal::NONE`].
             refusal: Tail<u8>,
+            /// The device's last stall, kept after it ends (see [`stall`]): none, standing or
+            /// ended. Trailing, as are the three after it: a host from before them sends none,
+            /// which reads as [`stall::NONE`].
+            stall: Tail<u8>,
+            /// When the last stall began, on the host's clock: what a stream that stalled for it
+            /// reported as its producer's `since_ns`. Zero with no stall.
+            stall_since: Tail<u64>,
+            /// When the last stall ended, on the host's clock. Zero unless it ended.
+            stall_ended: Tail<u64>,
+            /// Why the last stall happened. Empty with no stall.
+            stall_reason: Appended<'a>,
         }
         5 ListDone { id: u32 }
         /// An empty `device` means any device providing `tag`.

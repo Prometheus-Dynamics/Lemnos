@@ -69,6 +69,10 @@ What a client can do:
 
 - **`list`, `find`**: the devices, and the first device with a tag. Each entry has the device's
   name, driver, tags, state, health, reason and `link`. `follow` walks the links.
+- **`last_stalls`**: each device's last stall (when it began and ended, and why), kept after the
+  device recovers and its reason is cleared, so a stream's `Next::Stalled` can be explained after
+  the fact ([streams](streams.md)). Only devices that stalled are listed; a service from before it
+  lists none.
 - **`open::<dyn Contract>(name)`**: a typed handle. Its methods are the contract's own. An empty
   name means any device that provides the contract. The contract traits are the crates in
   `contracts/`.
