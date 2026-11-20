@@ -5,7 +5,7 @@
 #
 # One line per file, four whitespace-separated fields:
 #   <source>  <install path>  <mode>  <when>
-# source        a path under packaging/, relative to the repository root.
+# source        a path under packaging/, or a SoC map under socs/, relative to the repository root.
 # install path  where the image puts it: an absolute path, or BOOT/<name> for the root of the boot medium
 #               (the built U-Boot script). `-` only for a file that is never installed.
 # mode          0644 or 0755 for a file copied in with that mode; `append` for a fragment appended to the
@@ -46,3 +46,13 @@ packaging/init/S51lemnos-orion                   /etc/init.d/S51lemnos-orion    
 packaging/init/mdev.conf.fragment                /etc/mdev.conf                                 append busybox
 packaging/uboot/boot.cmd                         BOOT/boot.scr                                  0644  uboot
 packaging/uboot/boot-ubi.cmd                     BOOT/boot.scr                                  0644  ubi
+
+# The SoC maps: lemnosd reads the board's (`[board] soc`) at start to check the live device tree against
+# the board file, and says "live tree not checked" without it. Every image ships every map.
+socs/bcm2712-rp1.toml                            /usr/share/lemnos/socs/bcm2712-rp1.toml        0644  always
+socs/k230.toml                                   /usr/share/lemnos/socs/k230.toml               0644  always
+socs/rk3566.toml                                 /usr/share/lemnos/socs/rk3566.toml             0644  always
+socs/rk3576.toml                                 /usr/share/lemnos/socs/rk3576.toml             0644  always
+socs/rk3588.toml                                 /usr/share/lemnos/socs/rk3588.toml             0644  always
+socs/rv1126b.toml                                /usr/share/lemnos/socs/rv1126b.toml            0644  always
+socs/sun60i-a733.toml                            /usr/share/lemnos/socs/sun60i-a733.toml        0644  always
