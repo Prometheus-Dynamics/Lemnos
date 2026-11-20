@@ -488,6 +488,33 @@ impl Board {
         board
     }
 
+    /// What the slot's root holds for lemnosd to start (`root_check`): the daemon, its user and group,
+    /// and its unit enabled. The fake mount leaves `newroot` as these files.
+    fn slot_root(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        self.write("newroot/usr/bin/lemnosd", b"");
+        fs::set_permissions(
+            self.env.at("newroot/usr/bin/lemnosd"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        self.write("newroot/etc/passwd", b"lemnos:x:990:990::/:/sbin/nologin\n");
+        self.write("newroot/etc/group", b"lemnos:x:990:\n");
+        self.write(
+            "newroot/usr/lib/systemd/system/lemnosd.service",
+            b"[Unit]\n",
+        );
+        let wants = self
+            .env
+            .at("newroot/etc/systemd/system/multi-user.target.wants");
+        fs::create_dir_all(&wants).unwrap();
+        std::os::unix::fs::symlink(
+            "/usr/lib/systemd/system/lemnosd.service",
+            wants.join("lemnosd.service"),
+        )
+        .unwrap();
+    }
+
     /// The board around a boot partition image: its devices, the data partition, the command line and
     /// the data partition's state. The slots and pointers are the caller's.
     fn fresh(boot_image: Vec<u8>, uboot: bool) -> Self {
@@ -558,6 +585,7 @@ impl Board {
         }
         board.cmdline("os-2", &hash("os-2"));
         board.write("proc/sys/kernel/osrelease", b"6.12.0-board\n");
+        board.slot_root();
         board.write(
             "data/board/slots/state.env",
             b"DEFAULT=os-2\nPREVIOUS=os-1\nSTATE=confirmed\n",
@@ -1369,6 +1397,51 @@ fn an_image_that_wont_mount_falls_back() {
         &fake,
         "can't mount the root image /dev/dm-0 as erofs, read-only: refused by the test",
     );
+}
+
+/// A root built with no `lemnos` user and lemnosd not enabled. Before, the slot started and the
+/// watchdog reset the board some seconds later with nothing logged. Now it is refused by name, before
+/// the data partition moves, and the board falls back.
+#[test]
+fn a_root_that_cant_start_lemnosd_falls_back_naming_what_is_missing() {
+    let board = Board::new();
+    fs::remove_file(board.env.at("newroot/etc/passwd")).unwrap();
+    fs::remove_file(
+        board
+            .env
+            .at("newroot/etc/systemd/system/multi-user.target.wants/lemnosd.service"),
+    )
+    .unwrap();
+    let (fake, _) = board.boot(&[]);
+    assert_fell_back(
+        &board,
+        &fake,
+        "the slot's root can't start lemnosd, which feeds the watchdog after this: lemnosd.service is not \
+         enabled (no *.wants/lemnosd.service link) and there is no /etc/init.d/S50lemnosd; no user lemnos \
+         in /etc/passwd",
+    );
+    let calls = fake.calls.borrow();
+    assert!(
+        !calls.iter().any(|c| c.starts_with("move data")),
+        "{calls:?}"
+    );
+    assert!(calls.contains(&"umount newroot".to_string()), "{calls:?}");
+}
+
+/// The same root on a trial: the trial ends, and the next start is the default.
+#[test]
+fn a_trial_whose_root_cant_start_lemnosd_restarts_into_the_default() {
+    let board = Board::new();
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    fs::remove_file(board.env.at("newroot/etc/group")).unwrap();
+    let (fake, _) = board.boot(&[]);
+    assert_eq!(fake.last(), "restart");
+    assert_eq!(board.trial(), None);
+    assert_eq!(board.meta("os-2").get("FAILED"), "yes");
+    board.default_kept();
 }
 
 #[test]

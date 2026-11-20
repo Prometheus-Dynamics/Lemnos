@@ -59,6 +59,7 @@ use crate::kernel::{self, Route};
 use crate::machine_id;
 use crate::ops::Ops;
 use crate::partition::{self, Part};
+use crate::root_check;
 
 /// The program the slot's own system starts with.
 pub const INIT: &str = "/sbin/init";
@@ -1441,6 +1442,17 @@ impl Boot<'_> {
             return self.fail(&format!(
                 "can't mount the root image {dm} as erofs, read-only: {error}"
             ));
+        }
+        // lemnosd is the watchdog's next feeder: a root that can't start it would end in a silent
+        // watchdog reset, so it is refused here, by name, like any other bad slot.
+        match root_check::check(&new_root) {
+            Ok(how) => self.log(&format!("the slot's root can start lemnosd ({how})")),
+            Err(missing) => {
+                self.ops.umount(&new_root);
+                return self.fail(&format!(
+                    "the slot's root can't start lemnosd, which feeds the watchdog after this: {missing}"
+                ));
+            }
         }
         let moved_data = new_root.join("data");
         if let Err(error) = self.ops.move_mount(&self.layout.data, &moved_data) {
