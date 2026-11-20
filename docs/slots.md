@@ -2060,7 +2060,8 @@ Nothing in the initramfs makes up for it.
    - a boot file of the slot doesn't match the manifest's hash (see "Boot-file checks" below).
 6. It opens the image through a read-only loop device and dm-verity with the table above, and
    mounts it read-only as EROFS.
-7. It moves `/data` into the new root and writes `board/slots/booted`, plus `trial-started` on a
+7. It checks that the root can start lemnosd, and refuses the slot by name when it can't ("What a slot's root
+   must contain"). It moves `/data` into the new root and writes `board/slots/booted`, plus `trial-started` on a
    trial. It binds the machine id over the new root's `/etc/machine-id` (see "The machine id"; a refusal is
    logged and never stops the boot). Then it feeds the watchdog once more and `switch_root`s into `/sbin/init` (window 4 of "The
    watchdog chain").
@@ -2073,10 +2074,24 @@ nothing else in the root:
 | Path in the slot's root | Kind | Who uses it | When it is missing |
 |---|---|---|---|
 | `/sbin/init` | executable | slot-init `switch_root`s into it (`boot::INIT`) | `switch_root` fails and the boot goes to the rescue path ("When the slot can't come up") |
-| `/data` | empty directory | slot-init moves the data partition onto it; the driver's `data` setting (`/data` by default) names it | the slot is refused: "can't move the data partition into the slot (no /data in the image?)" |
+| `/data` | empty directory | slot-init moves the data partition onto it. The path is fixed: slot-init reads no board file, so on a slot board the `system-slots` setting `data` must be `/data` (its default) | the slot is refused: "can't move the data partition into the slot (no /data in the image?)" |
+| `/usr/bin/lemnosd` | executable file | the unit and the init script start it | the slot is refused (below) |
+| `lemnosd.service` enabled | a `*.wants/lemnosd.service` link in `/etc/systemd/system` or `/usr/lib/systemd/system` to the unit file, and the unit not masked; or, under BusyBox init, an executable `/etc/init.d/S50lemnosd` | lemnosd starts at boot | the slot is refused (below) |
+| user `lemnos` in `/etc/passwd`, group `lemnos` in `/etc/group` | entries | lemnosd starts as root and drops to them (`--user lemnos --group lemnos` in both units) | the slot is refused (below) |
 | `/etc/machine-id` | plain file (empty is fine) | slot-init binds the derived id over it ("The machine id") | the refusal is logged and the boot goes on, with systemd taking a random id |
 
 The root image is read-only (EROFS behind dm-verity), so slot-init creates none of these.
+
+**Why lemnosd's pieces are checked.** slot-init arms the hardware watchdog, and after its exec
+lemnosd's `hw-watchdog` driver is the watchdog's only feeder ("The watchdog chain"). A root that can't
+start lemnosd therefore always ends in a watchdog reset some seconds later, with nothing in the log
+saying why. So before `switch_root` slot-init checks the three rows above (`service/slot-init/src/root_check.rs`)
+and, when one fails, refuses the slot like any other bad slot. The refusal names every missing piece:
+"the slot's root can't start lemnosd, which feeds the watchdog after this: ...". A trial then ends and the
+board starts the default. Links in the root are followed inside the root (`/usr/...` is the root's own). The
+user and group names are part of the contract. A drop-in that starts lemnosd as another user isn't
+supported, and a test ties the names to `packaging/`. There is no opt-out: lemnosd is the watchdog's only
+owner after slot-init, by design.
 
 **The boot partition at run time.** Neither slot-init nor lemnosd needs the boot partition mounted on the
 `tryboot` form. Confirming a trial, arming one, and `previous` are raw sector writes on the partition's

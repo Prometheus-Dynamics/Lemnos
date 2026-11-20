@@ -13,6 +13,7 @@ mod kernel;
 mod machine_id;
 mod ops;
 mod partition;
+mod root_check;
 mod sys;
 
 use std::time::Duration;
