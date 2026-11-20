@@ -16,7 +16,7 @@ use lemnos_orion::backoff::Backoff;
 use lemnos_orion::named::{Asker, Ended, Node, Snapshot, digest, keep_offering, serve};
 use lemnos_sim::SimBoard;
 use lemnosd::{Config as LemnosdConfig, Service};
-use orion::files::{FileState, Giving, Known};
+use orion::files::{FileState, Giving, Known, Step};
 use orion::{Address, Options, Orion};
 use orion_node_app::{Node as NodeApp, NodeSettings};
 use orion_stubs::Board;
@@ -458,6 +458,11 @@ struct Setup {
 }
 
 fn setup(test: &str, overlay: &Path) -> Setup {
+    setup_with(test, overlay, Options::default().max_frame)
+}
+
+/// As [`setup`], with the dashboard taking frames of at most `max_frame` bytes.
+fn setup_with(test: &str, overlay: &Path, max_frame: u32) -> Setup {
     let dir = scratch(test);
     let socket = dir.join("lemnosd.sock");
     let board = Board::start_for_node(&dir);
@@ -496,7 +501,10 @@ fn setup(test: &str, overlay: &Path) -> Setup {
         Orion::connect_once(
             &Address::Local(board.socket().to_path_buf()),
             "dashboard",
-            Options::default(),
+            Options {
+                max_frame,
+                ..Options::default()
+            },
         )
         .ok()
     });
@@ -585,4 +593,79 @@ fn an_unknown_name_is_refused_end_to_end_with_its_reason() {
     assert_eq!(transfer.state, FileState::Rejected);
     assert!(transfer.detail.contains("no-such-file"), "{transfer:?}");
     assert!(into.into_inner().is_empty());
+}
+
+// The time the abort took is printed as the evidence of the run (`--nocapture`), as the board runs do.
+#[allow(clippy::print_stderr)]
+#[test]
+fn a_node_that_goes_mid_gift_aborts_the_fetch_at_once_with_why() {
+    let dir = scratch("e2e-abort");
+    // Orion's giver reads ahead of the fetcher's answers by a window of chunks (8 at 927f704a), and a
+    // chunk is sized to the fetcher's frame. The fetch below answers once per step, so when the first
+    // progress is seen the giver has read at most two windows. A 4 KiB frame makes that about 64 KB
+    // of this file: lemnosd goes with reads still to make. With the default frame (32 KiB chunks)
+    // the whole file can be read before the stop, and the fetch commits instead.
+    let size = 200_000;
+    let overlay = dir.join("overlay.dts");
+    std::fs::write(&overlay, content(size)).expect("overlay");
+    let Setup {
+        dashboard,
+        _bridge,
+        _service,
+        _logic,
+        _board,
+        _dir,
+    } = setup_with("e2e-abort", &overlay, 4096);
+    wait_for("the offer is up", || {
+        let mut into = Cursor::new(Vec::new());
+        let transfer = dashboard
+            .files()
+            .fetch("lemnos/tree/overlay.dts", &mut into, 0, |_, _| {})
+            .ok()?;
+        (transfer.state == FileState::Committed).then_some(())
+    });
+    // The fetcher's own silence limit: with the fix it never comes into play; without it, it ends the
+    // fetch as rejected, which the test reports as the failure.
+    let silence_limit = Duration::from_secs(10);
+    let mut into = Cursor::new(Vec::new());
+    let mut fetch = dashboard
+        .files()
+        .start_fetch("lemnos/tree/overlay.dts", &mut into, 0)
+        .expect("the fetch starts")
+        .give_up_after(silence_limit);
+    // lemnosd is the node's device: it goes once a piece has arrived, so the gift's next read fails.
+    let mut lemnosd = Some(_service);
+    let mut gone_at = None;
+    let transfer = loop {
+        match fetch
+            .step(Duration::from_millis(50))
+            .expect("the fetch steps")
+        {
+            Step::Done(transfer) => break transfer,
+            Step::Progress { received, .. } if received > 0 && gone_at.is_none() => {
+                if let Some(service) = lemnosd.take() {
+                    service.stop();
+                }
+                gone_at = Some(Instant::now());
+            }
+            Step::Waiting | Step::Stalled { .. } | Step::Progress { .. } => {}
+        }
+    };
+    let gone_at = gone_at.expect("the node went away mid-transfer");
+    let took = gone_at.elapsed();
+    eprintln!(
+        "e2e-abort: node gone -> fetch ended {:?} after {took:?}, {} of {size} bytes here: {}",
+        transfer.state, transfer.received, transfer.detail
+    );
+    assert_eq!(transfer.state, FileState::Aborted, "{transfer:?}");
+    assert!(
+        transfer.detail.contains("could not be read"),
+        "{transfer:?}"
+    );
+    assert!(transfer.detail.contains("lemnosd"), "{transfer:?}");
+    assert!(
+        took < silence_limit / 2,
+        "the abort took {took:?}: {transfer:?}"
+    );
+    assert!(transfer.received < size as u64, "{transfer:?}");
 }

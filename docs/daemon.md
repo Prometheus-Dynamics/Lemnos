@@ -661,8 +661,9 @@ The bridge offers the `lemnos/` prefix to Orion with `Files::offer` (at the pinn
 serves each file asked for from a snapshot. A name outside `lemnos/` is refused before lemnosd is reached.
 A name the node refuses, or a node that cannot be reached before the file begins, is refused to the client
 with its reason. A file that is given is digested first and then given from the client's offset. If the
-node fails once the gift has begun, the bridge logs it and the client's own silence limit ends the transfer,
-because the pinned Orion has no call that ends a gift already under way. A failed or ended offer is taken
+node fails once the gift has begun, the read returns an error, Orion aborts the gift and the client's
+fetch ends at once as `Aborted`, with the reason (the pinned revision 927f704a, I43). The bridge logs it. Only a
+broken connection is left to the client's own silence limit, since it cannot be told. A failed or ended offer is taken
 again on the bridge's backoff (1 s, doubling, capped at 8 s); nothing gives up, and the state and the log
 keep the reason.
 
