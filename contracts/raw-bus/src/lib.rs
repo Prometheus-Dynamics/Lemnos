@@ -89,6 +89,104 @@ pub trait RawBus {
     #[method(9)]
     #[added]
     fn spi_transfers(&mut self, transfers: &[u8], #[out] into: &mut [u8]) -> Result<usize>;
+    /// Takes the device for the calling client alone. While it holds the claim, every other caller's
+    /// call that drives or uses the device is `BUSY`; reading the line (`line_get`) and its edges
+    /// (`read_edges`) stay open to everyone. A claim ends with [`RawBus::release`] or when its
+    /// caller goes, and then the line and the PWM channel are put in the device's safe state (the
+    /// board file's `line_safe` and `pwm_safe`). Claiming again while holding is `OK`. Another
+    /// caller's claim is `BUSY`. A call made by Lemnos itself, not by a client, can't claim
+    /// (`NOT_PERMITTED`).
+    #[method(10)]
+    #[added]
+    fn claim(&mut self) -> Result<()>;
+    /// Ends the caller's claim and puts the device in its safe state. `FAILED_PRECONDITION` when the
+    /// caller holds no claim.
+    #[method(11)]
+    #[added]
+    fn release(&mut self) -> Result<()>;
+    /// Configures the line, for the caller that holds the claim (`FAILED_PRECONDITION` without
+    /// one). `direction` is [`LINE_INPUT`] or [`LINE_OUTPUT`]; `initial` is an output's first
+    /// logical value; `bias`, `drive` and `edge` are the `BIAS_*`, `DRIVE_*` and `EDGE_*` values;
+    /// `debounce_us` is an input's debounce (0: none). An output needs the device's `writes`
+    /// (`NOT_PERMITTED` otherwise). An unknown value is `INVALID_ARGUMENT`.
+    #[method(12)]
+    #[added]
+    #[allow(clippy::too_many_arguments)]
+    fn line_configure(
+        &mut self,
+        direction: u8,
+        initial: bool,
+        active_low: bool,
+        bias: u8,
+        drive: u8,
+        edge: u8,
+        debounce_us: u32,
+    ) -> Result<()>;
+    /// The line's most recent edges, oldest first, [`EDGE_BYTES`] each (see [`decode_edge`]); the
+    /// number of bytes is returned. Reading doesn't consume them: the device keeps the last
+    /// [`MAX_EDGES`], and a caller keeps the last sequence number it saw. A gap in the sequence
+    /// numbers is edges that were lost (the device's ring or the kernel's queue overflowed). Edges
+    /// come only while the line is configured with an `edge` other than [`EDGE_NONE`]. `into`
+    /// takes as many whole edges as fit, the newest ones. Subscribe to it to be told of new edges.
+    #[method(13, reading = events)]
+    #[added]
+    fn read_edges(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+}
+
+/// `line_configure` directions.
+pub const LINE_INPUT: u8 = 0;
+pub const LINE_OUTPUT: u8 = 1;
+/// `line_configure` bias: as left, pull-up, pull-down, none.
+pub const BIAS_AS_IS: u8 = 0;
+pub const BIAS_PULL_UP: u8 = 1;
+pub const BIAS_PULL_DOWN: u8 = 2;
+pub const BIAS_DISABLED: u8 = 3;
+/// `line_configure` drive: push-pull, open-drain, open-source.
+pub const DRIVE_PUSH_PULL: u8 = 0;
+pub const DRIVE_OPEN_DRAIN: u8 = 1;
+pub const DRIVE_OPEN_SOURCE: u8 = 2;
+/// `line_configure` edges that produce events.
+pub const EDGE_NONE: u8 = 0;
+pub const EDGE_RISING: u8 = 1;
+pub const EDGE_FALLING: u8 = 2;
+pub const EDGE_BOTH: u8 = 3;
+
+/// The edges a device keeps for `read_edges`.
+pub const MAX_EDGES: usize = 32;
+/// Bytes one edge takes in `read_edges`: rising (1), three zero bytes, sequence number (4) and
+/// timestamp in monotonic nanoseconds (8), little-endian.
+pub const EDGE_BYTES: usize = 16;
+
+/// One edge of `read_edges`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineEdge {
+    /// Logical low to high (`false`: high to low).
+    pub rising: bool,
+    /// The line's sequence number of the edge.
+    pub seq: u32,
+    /// When it happened, monotonic nanoseconds (the kernel's `CLOCK_MONOTONIC` on Linux).
+    pub timestamp_ns: u64,
+}
+
+/// Writes one edge into `out`, which must hold [`EDGE_BYTES`].
+pub fn encode_edge(edge: &LineEdge, out: &mut [u8; EDGE_BYTES]) {
+    *out = [0; EDGE_BYTES];
+    out[0] = u8::from(edge.rising);
+    out[4..8].copy_from_slice(&edge.seq.to_le_bytes());
+    out[8..16].copy_from_slice(&edge.timestamp_ns.to_le_bytes());
+}
+
+/// Reads one edge; `None` when `bytes` isn't one.
+pub fn decode_edge(bytes: &[u8]) -> Option<LineEdge> {
+    let bytes: &[u8; EDGE_BYTES] = bytes.try_into().ok()?;
+    if bytes[0] > 1 || bytes[1..4] != [0; 3] {
+        return None;
+    }
+    Some(LineEdge {
+        rising: bytes[0] == 1,
+        seq: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+        timestamp_ns: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+    })
 }
 
 /// The longest `uart_read` waits, in milliseconds: half the host's call deadline.

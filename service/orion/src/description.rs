@@ -297,6 +297,7 @@ fn item_record(item: &OwnedItem) -> Result<String, String> {
         Some(Reading::Text) => "text",
         Some(Reading::ColourArray) => "colour_array",
         Some(Reading::ThreeAxes) => "three_axes",
+        Some(Reading::Events) => "events",
         None => "unknown",
     };
     let mut out = format!(

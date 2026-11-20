@@ -56,6 +56,7 @@ const READINGS: &[(&str, &str)] = &[
     ("text", "Text"),
     ("colour_array", "ColourArray"),
     ("three_axes", "ThreeAxes"),
+    ("events", "Events"),
 ];
 
 struct Param {
@@ -296,7 +297,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
                 .ok_or_else(|| {
                     Error::new(
                         word.span(),
-                        "expected a reading: number, range, switch, text, colour_array or three_axes",
+                        "expected a reading: number, range, switch, text, colour_array, three_axes or events",
                     )
                 })?;
             Some(format_ident!("{}", variant))

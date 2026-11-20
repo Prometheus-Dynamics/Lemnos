@@ -100,7 +100,7 @@ What a client can do:
   refused for good. Refusals are remembered up to 64, the oldest going first.
 
   A subscription to a method with no arguments, or with an out buffer and a reading (a colour array,
-  such as a light's `current`), is served. A colour array is granted no faster than 20 ms, whatever
+  such as a light's `current`, or events, such as a raw device's `read_edges`), is served. A colour array is granted no faster than 20 ms, whatever
   period is asked. Its values are the newest reading each time, so a slow subscriber gets the latest
   frame, and a method that changes often is never queued.
 

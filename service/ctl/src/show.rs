@@ -165,6 +165,7 @@ fn reading_name(reading: lemnos_core::Reading) -> &'static str {
         Reading::Text => "text",
         Reading::ColourArray => "colour array",
         Reading::ThreeAxes => "three axes",
+        Reading::Events => "events",
     }
 }
 

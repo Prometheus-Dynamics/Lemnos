@@ -19,6 +19,20 @@
 //!   Without `uart_baud` the port is left as the backend opened it, and the other two may not be
 //!   given. Setting the frame sends nothing, so it needs no `writes`.
 //!
+//! Claims. A client may `claim` the device for itself alone. While it holds the claim, every other
+//! caller's call that drives or uses the device is `BUSY`; reading the line and its edges stays open
+//! to everyone (Lemnos's own subscription reads among them). Only the holder configures the line
+//! (`line_configure`). The claim ends with `release` or when its caller goes (`caller_gone`), and the
+//! device is put in its safe state: the line in `line_safe` (`input`, `low`, `high` or `keep`; without
+//! it, the line settings above, else an input with no bias; `low` and `high` need `writes`) and the
+//! PWM channel in `pwm_safe` (`off`, the default, or `keep`). A safe state that can't be set is owed:
+//! health says so, and every call tries it again first. Nothing becomes raw at run time: a claim is
+//! only ever of what the board bound to this device.
+//!
+//! Edges. The line's edges are moved from the kernel's queue into a ring of the last `MAX_EDGES` on
+//! every `line_get` and `read_edges`. A read doesn't consume them, so any number of readers see the
+//! same edges; each edge's sequence number shows a gap when edges were lost.
+//!
 //! A UART is a stream of bytes with no transactions: `uart_read` hands on what has arrived, which
 //! may be part of a message or more than one, and the caller frames it. Bytes that arrive while no
 //! one reads wait in the port's own buffer.
@@ -36,17 +50,22 @@
 mod policy;
 
 use core::time::Duration;
+use lemnos_contract_raw_bus as raw;
 use lemnos_contract_raw_bus::RawBus as RawBusContract;
 
 use lemnos_contract_raw_bus::{
-    I2cOp, I2cOps, MAX_I2C_OPS, MAX_SPI_TRANSFERS, SpiTransfers, UART_MAX_WAIT_MS,
+    EDGE_BYTES, I2cOp, I2cOps, LineEdge, MAX_EDGES, MAX_I2C_OPS, MAX_SPI_TRANSFERS, SpiTransfers,
+    UART_MAX_WAIT_MS, encode_edge,
 };
 use lemnos_core::{
-    Config, ConfigError, ConfigValue, Health, I2c, Key, Kind, Lifecycle, Line, Pwm, RawSpiBus,
-    Result, Spi, Status, Uart, driver, status_of,
+    CallerId, Config, ConfigError, ConfigValue, Health, I2c, Key, Kind, Lifecycle, Line, Pwm,
+    RawSpiBus, Result, Spi, Status, Uart, driver, status_of,
 };
 use lemnos_hal::i2c::{I2c as HalI2c, Operation as I2cOperation};
-use lemnos_hal::raw::{Direction, LineConfig, Polarity, PwmConfig, SpiConfig, SpiMode, SpiSegment};
+use lemnos_hal::raw::{
+    Bias, Direction, Drive, EdgeDetect, LineConfig, Polarity, PwmConfig, SafeState, SpiConfig,
+    SpiMode, SpiSegment,
+};
 use lemnos_hal::spi::{Operation as SpiOperation, SpiDevice};
 use lemnos_hal::{Parity, StopBits, UartFormat};
 
@@ -56,7 +75,7 @@ const FAILED: &str = "the last bus call failed; the next call tries again";
 
 /// The settings a board file gives the device. `allow_i2c` is an integer or a string, and a key
 /// takes one kind, so the table is built for the kind the board's value has.
-const fn keys(allow_i2c: Kind) -> [Key; 9] {
+const fn keys(allow_i2c: Kind) -> [Key; 11] {
     [
         Key::optional("writes", Kind::Bool),
         Key::optional("allow_i2c", allow_i2c),
@@ -67,10 +86,15 @@ const fn keys(allow_i2c: Kind) -> [Key; 9] {
         Key::optional("uart_baud", Kind::Int),
         Key::optional("uart_parity", Kind::Str),
         Key::optional("uart_stop_bits", Kind::Int),
+        Key::optional("line_safe", Kind::Str),
+        Key::optional("pwm_safe", Kind::Str),
     ]
 }
-const KEYS_TEXT: [Key; 9] = keys(Kind::Str);
-const KEYS_NUMBER: [Key; 9] = keys(Kind::Int);
+const KEYS_TEXT: [Key; 11] = keys(Kind::Str);
+const KEYS_NUMBER: [Key; 11] = keys(Kind::Int);
+
+const SAFE_FAILED: &str =
+    "the safe state at the end of a claim could not be set; the next call tries again";
 
 /// A device with any of an I2C bus, an SPI device, a GPIO line, a PWM channel and a UART.
 #[driver("raw-bus", provides = [RawBusContract])]
@@ -93,6 +117,20 @@ pub struct RawBus {
     pwm_polarity: Polarity,
     /// Whether the last bus call failed.
     failed: bool,
+    /// The caller of the call being run (the host says it before each call).
+    calling: CallerId,
+    /// The caller that holds the device's claim.
+    holder: Option<CallerId>,
+    /// What the line is put in when a claim ends (`None`: left as it is).
+    line_safe: Option<LineConfig>,
+    /// Whether the PWM channel is turned off when a claim ends.
+    pwm_safe_off: bool,
+    /// A claim ended and its safe state isn't set yet: every call tries again first.
+    safe_pending: bool,
+    /// The line's last edges, a ring: `edges[(edge_start + i) % MAX_EDGES]` for `i < edge_count`.
+    edges: [LineEdge; MAX_EDGES],
+    edge_start: usize,
+    edge_count: usize,
 }
 
 impl Lifecycle for RawBus {
@@ -143,7 +181,41 @@ impl Lifecycle for RawBus {
         {
             return Err(ConfigError::new("uart_stop_bits", "must be 1 or 2"));
         }
+        if let Some(safe) = cfg.str("line_safe") {
+            match SafeState::parse(safe) {
+                None => {
+                    return Err(ConfigError::new(
+                        "line_safe",
+                        "must be input, low, high or keep",
+                    ));
+                }
+                Some(SafeState::Low | SafeState::High) if !cfg.bool("writes").unwrap_or(false) => {
+                    return Err(ConfigError::new(
+                        "line_safe",
+                        "drives the line, so it needs writes = true",
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(safe) = cfg.str("pwm_safe")
+            && !matches!(safe, "off" | "keep")
+        {
+            return Err(ConfigError::new("pwm_safe", "must be off or keep"));
+        }
         Ok(())
+    }
+
+    const TRACKS_CALLERS: bool = true;
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        if self.holder == Some(caller) {
+            self.end_claim();
+        }
     }
 
     fn start(needs: RawBusNeeds, cfg: &Config<'_>) -> Result<Self> {
@@ -163,7 +235,21 @@ impl Lifecycle for RawBus {
             Polarity::Normal
         };
         let mut line = needs.line;
-        if let Some(config) = line_config(cfg)? {
+        let bind_config = line_config(cfg)?;
+        let line_safe = match cfg.get("line_safe") {
+            Some(ConfigValue::Str(text)) => SafeState::parse(text)
+                .ok_or(Status::INVALID_ARGUMENT)?
+                .config(),
+            Some(_) => return Err(Status::INVALID_ARGUMENT),
+            // The line as the board set it at bind, else an input with no bias.
+            None => Some(bind_config.unwrap_or(LineConfig::high_impedance())),
+        };
+        let pwm_safe_off = match cfg.get("pwm_safe") {
+            None | Some(ConfigValue::Str("off")) => true,
+            Some(ConfigValue::Str("keep")) => false,
+            Some(_) => return Err(Status::INVALID_ARGUMENT),
+        };
+        if let Some(config) = bind_config {
             let line = line.as_mut().ok_or(Status::NOT_FOUND)?;
             line.configure(&config).map_err(status_of)?;
         }
@@ -182,10 +268,21 @@ impl Lifecycle for RawBus {
             policy,
             pwm_polarity,
             failed: false,
+            calling: CallerId::LOCAL,
+            holder: None,
+            line_safe,
+            pwm_safe_off,
+            safe_pending: false,
+            edges: [NO_EDGE; MAX_EDGES],
+            edge_start: 0,
+            edge_count: 0,
         })
     }
 
     fn health(&self) -> Health {
+        if self.safe_pending {
+            return Health::Failed(SAFE_FAILED);
+        }
         if self.failed {
             return Health::Failed(FAILED);
         }
@@ -201,6 +298,7 @@ impl RawBusContract for RawBus {
         read_len: u32,
         into: &mut [u8],
     ) -> Result<usize> {
+        self.control()?;
         let address = u8::try_from(address)
             .ok()
             .filter(|address| *address <= 0x7f)
@@ -223,6 +321,7 @@ impl RawBusContract for RawBus {
     }
 
     fn spi_transfer(&mut self, write: &[u8], read_len: u32, into: &mut [u8]) -> Result<usize> {
+        self.control()?;
         let read = read_len_of(read_len, into, write.is_empty())?;
         self.policy.admit_spi(read > 0)?;
         let spi = self.spi.as_mut().ok_or(Status::NOT_SUPPORTED)?;
@@ -251,6 +350,7 @@ impl RawBusContract for RawBus {
     }
 
     fn i2c_transactions(&mut self, address: u16, ops: &[u8], into: &mut [u8]) -> Result<usize> {
+        self.control()?;
         let address = u8::try_from(address)
             .ok()
             .filter(|address| *address <= 0x7f)
@@ -283,6 +383,7 @@ impl RawBusContract for RawBus {
     }
 
     fn spi_transfers(&mut self, transfers: &[u8], into: &mut [u8]) -> Result<usize> {
+        self.control()?;
         let list = SpiTransfers::parse(transfers, into.len())?;
         self.policy.admit_spi(!list.needs_writes())?;
         let bus = self.raw_spi.as_mut().ok_or(Status::NOT_SUPPORTED)?;
@@ -333,6 +434,8 @@ impl RawBusContract for RawBus {
     }
 
     fn line_get(&mut self) -> Result<bool> {
+        self.settle();
+        self.pull_edges();
         let line = self.line.as_mut().ok_or(Status::NOT_SUPPORTED)?;
         let result = line.get();
         self.failed = result.is_err();
@@ -340,6 +443,7 @@ impl RawBusContract for RawBus {
     }
 
     fn line_set(&mut self, value: bool) -> Result<()> {
+        self.control()?;
         self.policy.admit_line_set()?;
         let line = self.line.as_mut().ok_or(Status::NOT_SUPPORTED)?;
         let result = line.set(value);
@@ -348,6 +452,7 @@ impl RawBusContract for RawBus {
     }
 
     fn pwm_set(&mut self, period_ns: u64, duty_ns: u64, enabled: bool) -> Result<()> {
+        self.control()?;
         self.policy.admit_pwm()?;
         let config = PwmConfig {
             period_ns,
@@ -362,6 +467,7 @@ impl RawBusContract for RawBus {
     }
 
     fn uart_write(&mut self, data: &[u8]) -> Result<u32> {
+        self.control()?;
         if data.is_empty() {
             return Err(Status::INVALID_ARGUMENT);
         }
@@ -374,6 +480,7 @@ impl RawBusContract for RawBus {
     }
 
     fn uart_read(&mut self, max_len: u32, timeout_ms: u32, into: &mut [u8]) -> Result<usize> {
+        self.control()?;
         if timeout_ms > UART_MAX_WAIT_MS {
             return Err(Status::INVALID_ARGUMENT);
         }
@@ -383,6 +490,176 @@ impl RawBusContract for RawBus {
         let result = uart.read(&mut into[..read], wait);
         self.failed = result.is_err();
         Ok(result.map_err(status_of)?.min(read))
+    }
+
+    fn claim(&mut self) -> Result<()> {
+        self.settle();
+        if self.calling == CallerId::LOCAL {
+            return Err(Status::NOT_PERMITTED);
+        }
+        match self.holder {
+            Some(holder) if holder != self.calling => Err(Status::BUSY),
+            _ => {
+                self.holder = Some(self.calling);
+                Ok(())
+            }
+        }
+    }
+
+    fn release(&mut self) -> Result<()> {
+        if self.calling == CallerId::LOCAL || self.holder != Some(self.calling) {
+            return Err(Status::FAILED_PRECONDITION);
+        }
+        self.end_claim();
+        Ok(())
+    }
+
+    fn line_configure(
+        &mut self,
+        direction: u8,
+        initial: bool,
+        active_low: bool,
+        bias: u8,
+        drive: u8,
+        edge: u8,
+        debounce_us: u32,
+    ) -> Result<()> {
+        self.settle();
+        if self.calling == CallerId::LOCAL || self.holder != Some(self.calling) {
+            return Err(Status::FAILED_PRECONDITION);
+        }
+        let config = LineConfig {
+            direction: match direction {
+                raw::LINE_INPUT => Direction::Input,
+                raw::LINE_OUTPUT => Direction::Output,
+                _ => return Err(Status::INVALID_ARGUMENT),
+            },
+            initial,
+            active_low,
+            bias: match bias {
+                raw::BIAS_AS_IS => Bias::AsIs,
+                raw::BIAS_PULL_UP => Bias::PullUp,
+                raw::BIAS_PULL_DOWN => Bias::PullDown,
+                raw::BIAS_DISABLED => Bias::Disabled,
+                _ => return Err(Status::INVALID_ARGUMENT),
+            },
+            drive: match drive {
+                raw::DRIVE_PUSH_PULL => Drive::PushPull,
+                raw::DRIVE_OPEN_DRAIN => Drive::OpenDrain,
+                raw::DRIVE_OPEN_SOURCE => Drive::OpenSource,
+                _ => return Err(Status::INVALID_ARGUMENT),
+            },
+            edge: match edge {
+                raw::EDGE_NONE => EdgeDetect::None,
+                raw::EDGE_RISING => EdgeDetect::Rising,
+                raw::EDGE_FALLING => EdgeDetect::Falling,
+                raw::EDGE_BOTH => EdgeDetect::Both,
+                _ => return Err(Status::INVALID_ARGUMENT),
+            },
+            debounce_us,
+        };
+        if config.direction == Direction::Output {
+            self.policy.admit_line_set()?;
+        }
+        let line = self.line.as_mut().ok_or(Status::NOT_SUPPORTED)?;
+        let result = line.configure(&config);
+        self.failed = result.is_err();
+        result.map_err(status_of)
+    }
+
+    fn read_edges(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.settle();
+        if self.line.is_none() {
+            return Err(Status::NOT_SUPPORTED);
+        }
+        self.pull_edges();
+        let fit = (into.len() / EDGE_BYTES).min(self.edge_count);
+        let skip = self.edge_count - fit;
+        let (records, _) = into.as_chunks_mut::<EDGE_BYTES>();
+        for (n, out) in records.iter_mut().take(fit).enumerate() {
+            encode_edge(&self.edges[(self.edge_start + skip + n) % MAX_EDGES], out);
+        }
+        Ok(fit * EDGE_BYTES)
+    }
+}
+
+/// An empty slot of the edge ring.
+const NO_EDGE: LineEdge = LineEdge {
+    rising: false,
+    seq: 0,
+    timestamp_ns: 0,
+};
+
+/// Edges taken from the line in one call at most: the ring's size twice over. More than that waits
+/// for the next call, so a line that never stops changing can't hold a call.
+const PULL_MAX: usize = 2 * MAX_EDGES;
+
+impl RawBus {
+    /// `BUSY` when another caller holds the claim; any safe state still owed is tried first.
+    fn control(&mut self) -> Result<()> {
+        self.settle();
+        match self.holder {
+            Some(holder) if holder != self.calling => Err(Status::BUSY),
+            _ => Ok(()),
+        }
+    }
+
+    /// Ends the claim and puts the device in its safe state.
+    fn end_claim(&mut self) {
+        self.holder = None;
+        self.safe_pending = true;
+        self.settle();
+    }
+
+    /// Sets the safe state a claim's end owes. A failure leaves it owed: health says so, and the
+    /// next call tries again.
+    fn settle(&mut self) {
+        if !self.safe_pending {
+            return;
+        }
+        let mut ok = true;
+        if let (Some(line), Some(config)) = (self.line.as_mut(), self.line_safe) {
+            ok &= line.configure(&config).is_ok();
+        }
+        if self.pwm_safe_off
+            && let Some(pwm) = self.pwm.as_mut()
+        {
+            let mut config = pwm.config().unwrap_or(PwmConfig {
+                polarity: self.pwm_polarity,
+                ..PwmConfig::default()
+            });
+            config.enabled = false;
+            ok &= pwm.configure(&config).is_ok();
+        }
+        self.safe_pending = !ok;
+        if ok {
+            self.edge_start = 0;
+            self.edge_count = 0;
+        }
+    }
+
+    /// Moves the line's pending edges into the ring, the oldest out first when it is full.
+    fn pull_edges(&mut self) {
+        let Some(line) = self.line.as_mut() else {
+            return;
+        };
+        for _ in 0..PULL_MAX {
+            let Ok(Some(edge)) = line.read_edge() else {
+                break;
+            };
+            let edge = LineEdge {
+                rising: edge.rising,
+                seq: edge.seq,
+                timestamp_ns: edge.timestamp_ns,
+            };
+            if self.edge_count == MAX_EDGES {
+                self.edges[self.edge_start] = edge;
+                self.edge_start = (self.edge_start + 1) % MAX_EDGES;
+            } else {
+                self.edges[(self.edge_start + self.edge_count) % MAX_EDGES] = edge;
+                self.edge_count += 1;
+            }
+        }
     }
 }
 
@@ -474,8 +751,28 @@ mod config_tests {
             ("uart_baud", ConfigValue::Int(115_200)),
             ("uart_parity", ConfigValue::Str("even")),
             ("uart_stop_bits", ConfigValue::Int(2)),
+            ("line_safe", ConfigValue::Str("low")),
+            ("pwm_safe", ConfigValue::Str("keep")),
         ];
         assert!(check(&full).is_ok());
+        let safe = check(&[("line_safe", ConfigValue::Str("high"))]).unwrap_err();
+        assert_eq!(
+            safe.key, "line_safe",
+            "high drives the line, so it needs writes"
+        );
+        assert_eq!(
+            check(&[("line_safe", ConfigValue::Str("float"))])
+                .unwrap_err()
+                .key,
+            "line_safe"
+        );
+        assert!(check(&[("line_safe", ConfigValue::Str("input"))]).is_ok());
+        assert_eq!(
+            check(&[("pwm_safe", ConfigValue::Str("on"))])
+                .unwrap_err()
+                .key,
+            "pwm_safe"
+        );
         assert_eq!(
             check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
             "bogus"

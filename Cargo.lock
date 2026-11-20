@@ -3165,6 +3165,7 @@ dependencies = [
  "lemnos-contract-fan-control",
  "lemnos-contract-light",
  "lemnos-contract-pixels",
+ "lemnos-contract-raw-bus",
  "lemnos-contract-temperature",
  "lemnos-contract-usb-function",
  "lemnos-core",

@@ -115,6 +115,9 @@ pub enum Reading {
     /// One axis of a three-axis vector. The three items share a `group`; each one's `field` is
     /// its axis (`x`, `y` or `z`).
     ThreeAxes,
+    /// Timestamped events in a fixed-size record each, oldest first, each with a sequence number:
+    /// the device keeps its last ones and a reader keeps the last number it saw (a line's edges).
+    Events,
 }
 
 impl Reading {
@@ -127,6 +130,7 @@ impl Reading {
             Self::Text => 3,
             Self::ColourArray => 4,
             Self::ThreeAxes => 5,
+            Self::Events => 6,
         }
     }
 
@@ -139,6 +143,7 @@ impl Reading {
             3 => Self::Text,
             4 => Self::ColourArray,
             5 => Self::ThreeAxes,
+            6 => Self::Events,
             _ => return None,
         })
     }
