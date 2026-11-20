@@ -609,6 +609,7 @@ mod tests {
             jobs: Vec::new(),
             streams: Vec::new(),
             refusal: lemnos_wire::refusal::Refusal::NONE,
+            stream_layouts: Vec::new(),
             contracts: vec![OwnedContract {
                 tag: "imu/1".to_owned(),
                 kind: "sensor".to_owned(),

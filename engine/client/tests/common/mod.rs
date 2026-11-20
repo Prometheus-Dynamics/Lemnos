@@ -343,7 +343,7 @@ fn serve_connection(mut stream: UnixStream, control: Arc<Control>, session: u32)
                         needs: &[],
                         provides: provided,
                     };
-                    let mut bytes = [0; 256];
+                    let mut bytes = [0; 512];
                     let n = encode_description(
                         &manifest,
                         &Description::new(),

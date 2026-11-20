@@ -927,7 +927,11 @@ Declared holds, and what outside readers get with a default request:
 A writer (`open_stream_writable_held`) is bounded the same way. It holds the completion frames of its
 jobs' results through the frame marks a reader uses; its input buffers are not holds, since it writes
 them, posts the job, and the driver takes them back on completion. A main consumer that holds
-`C = B - max(B/2, 2)` (2 of 4, 3 of 6, 4 of 8) is the case the declared rows show. Nothing in this repository makes that declaration for a caller: a caller that does not
+`C = B - max(B/2, 2)` (2 of 4, 3 of 6, 4 of 8) is the case the declared rows show. `B` is read
+before the attach from the device's description (`describe(device)`, `stream_layout(name)`: the
+board's `buffers` and `buffer_bytes`, with nothing attached or allocated); the count is fixed for the
+service's life, and a declaration that no longer fits is refused at attach by name all the same.
+Nothing in this repository makes that declaration for a caller: a caller that does not
 declare still calls `open_stream` and `open_stream_writable`.
 
 ### Which buffers can have readers

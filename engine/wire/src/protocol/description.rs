@@ -183,6 +183,11 @@ pub struct DeviceDescription {
     /// `ABSENT` or `FAILED` for one refused its bind. A number this build does not name is kept as it
     /// came. A host from before it sends none, which reads as `NONE`.
     pub refusal: Refusal,
+    /// The device's streams as the board declares them: each stream's buffer count and buffer size,
+    /// whether or not anything is attached or allocated, so a consumer can size what it declares it
+    /// holds before it opens the stream. Empty when the device has none, and from a host from
+    /// before it. See [`DeviceDescription::stream_layout`].
+    pub stream_layouts: Vec<StreamLayout>,
     pub contracts: Vec<OwnedContract>,
     pub items: Vec<OwnedItem>,
 }
@@ -195,6 +200,59 @@ pub struct StreamStandby {
     pub name: String,
     pub standby: u64,
     pub held: u64,
+}
+
+/// One stream of a device as the board declares it: how many buffers it has and the bytes of each.
+/// The count is the board file's, read when the service starts, so it is what an attach will
+/// find. A declared hold that does not fit it is refused at attach, by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamLayout {
+    pub name: String,
+    pub buffers: u32,
+    pub buffer_bytes: u32,
+}
+
+impl DeviceDescription {
+    /// The layout of the stream called `name`, if the device has one and the host says.
+    #[must_use]
+    pub fn stream_layout(&self, name: &str) -> Option<&StreamLayout> {
+        self.stream_layouts
+            .iter()
+            .find(|layout| layout.name == name)
+    }
+}
+
+/// The stream layouts as the wire carries them: `NAME BUFFERS BUFFER_BYTES` for each, joined by a
+/// space, in the board's order. Its own field, beside the standby text, so a reader of that text
+/// from before it reads it unchanged.
+#[must_use]
+pub fn stream_layout_text(streams: &[(&str, u32, u32)]) -> String {
+    let mut out = String::new();
+    for (name, buffers, bytes) in streams {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("{name} {buffers} {bytes}"));
+    }
+    out
+}
+
+/// [`stream_layout_text`] read back. An entry that does not parse is skipped.
+#[must_use]
+pub fn parse_stream_layouts(text: &str) -> Vec<StreamLayout> {
+    let mut words = text.split_whitespace();
+    let mut out = Vec::new();
+    while let (Some(name), Some(buffers), Some(bytes)) = (words.next(), words.next(), words.next())
+    {
+        if let (Ok(buffers), Ok(buffer_bytes)) = (buffers.parse(), bytes.parse()) {
+            out.push(StreamLayout {
+                name: name.to_string(),
+                buffers,
+                buffer_bytes,
+            });
+        }
+    }
+    out
 }
 
 /// The streams as the wire carries them: `NAME STANDBY HELD` for each, joined by a space, in
@@ -318,6 +376,9 @@ pub struct Identity<'a> {
     pub streams: &'a str,
     /// Why the device waits (see [`DeviceDescription::refusal`]).
     pub refusal: Refusal,
+    /// The device's streams as the board declares them, as [`stream_layout_text`] writes them.
+    /// Empty when there are none.
+    pub stream_layouts: &'a str,
 }
 
 /// A contract's header: its tag, its hash and how many methods follow.
@@ -391,6 +452,9 @@ struct DescIdentity<'a> {
     /// Appended after `streams`: why the device waits, as [`crate::refusal`] numbers it. Absent reads
     /// as `NONE` (0).
     refusal: Tail<u8>,
+    /// Appended after `refusal`: the streams' buffer counts and sizes, as [`stream_layout_text`].
+    /// Absent reads as none.
+    stream_layouts: Tail<&'a str>,
 }
 
 /// One contract's kind, appended after the identity: one per contract, in order.
@@ -736,6 +800,7 @@ pub(crate) fn encode_trailer(
         jobs: identity.jobs,
         streams: identity.streams,
         refusal: Tail(identity.refusal.code()),
+        stream_layouts: Tail(identity.stream_layouts),
     }
     .encode(out)?;
     (manifest.provides.len() as u16).encode(out)?;
@@ -876,6 +941,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
         out.jobs = parse_running_jobs(identity.jobs);
         out.streams = parse_stream_standby(identity.streams);
         out.refusal = Refusal::from_code(identity.refusal.0);
+        out.stream_layouts = parse_stream_layouts(identity.stream_layouts.0);
         for index in 0..usize::from(u16::decode(from)?) {
             let kind = DescContractKind::decode(from)?.kind.to_string();
             if let Some(contract) = out.contracts.get_mut(index) {

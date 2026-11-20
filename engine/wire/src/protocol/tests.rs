@@ -582,9 +582,9 @@ mod description {
     };
 
     use super::{
-        Identity, MAX_RUNNING_JOBS, OwnedShape, RunningJob, StreamStandby, decode_description,
-        encode_description, parse_running_jobs, parse_stream_standby, running_jobs_text,
-        stream_standby_text,
+        Identity, MAX_RUNNING_JOBS, OwnedShape, RunningJob, StreamLayout, StreamStandby,
+        decode_description, encode_description, parse_running_jobs, parse_stream_layouts,
+        parse_stream_standby, running_jobs_text, stream_layout_text, stream_standby_text,
     };
 
     const CONTRACT: ContractInfo = ContractInfo {
@@ -633,6 +633,7 @@ mod description {
             jobs: "",
             streams: "",
             refusal: crate::refusal::Refusal::NONE,
+            stream_layouts: "",
         }
     }
 
@@ -776,6 +777,47 @@ mod description {
         );
         // An entry missing a number is skipped, and so is a garbled one.
         assert_eq!(parse_stream_standby("frames x 1 plain 4"), []);
+    }
+
+    /// Each stream's buffer count and size ride in the identity beside the standby text, which
+    /// reads as it did: a reader of the standby text from before the layouts sees no change.
+    #[test]
+    fn the_stream_layouts_round_trip_beside_the_standby_text() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[],
+        };
+        let mut buf = [0; 512];
+        let standby = stream_standby_text(&[("frames", 0, 0)]);
+        let mut at = |stream_layouts: &str| {
+            let identity = Identity {
+                streams: &standby,
+                stream_layouts,
+                ..identity()
+            };
+            let n =
+                encode_description(&manifest, &Description::new(), &identity, &mut buf).unwrap();
+            decode_description(&buf[..n]).unwrap()
+        };
+        assert_eq!(at("").stream_layouts, []);
+        let text = stream_layout_text(&[("frames", 6, 4096), ("stats", 2, 64)]);
+        assert_eq!(text, "frames 6 4096 stats 2 64");
+        let read = at(&text);
+        assert_eq!(
+            read.stream_layout("frames"),
+            Some(&StreamLayout {
+                name: "frames".to_string(),
+                buffers: 6,
+                buffer_bytes: 4096
+            })
+        );
+        assert_eq!(read.stream_layout("stats").map(|l| l.buffers), Some(2));
+        assert_eq!(read.stream_layout("none"), None);
+        // The standby text is read as before, with the layouts beside it.
+        assert_eq!(read.streams.len(), 1);
+        assert_eq!(read.streams[0].name, "frames");
+        assert_eq!(parse_stream_layouts("frames x 1 stats 2"), []);
     }
 
     #[test]
