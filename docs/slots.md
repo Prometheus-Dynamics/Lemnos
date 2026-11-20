@@ -2065,6 +2065,30 @@ Nothing in the initramfs makes up for it.
    logged and never stops the boot). Then it feeds the watchdog once more and `switch_root`s into `/sbin/init` (window 4 of "The
    watchdog chain").
 
+### What a slot's root must contain
+
+An image builder needs this list. slot-init and the `system-slots` driver rely on these paths and on
+nothing else in the root:
+
+| Path in the slot's root | Kind | Who uses it | When it is missing |
+|---|---|---|---|
+| `/sbin/init` | executable | slot-init `switch_root`s into it (`boot::INIT`) | `switch_root` fails and the boot goes to the rescue path ("When the slot can't come up") |
+| `/data` | empty directory | slot-init moves the data partition onto it; the driver's `data` setting (`/data` by default) names it | the slot is refused: "can't move the data partition into the slot (no /data in the image?)" |
+| `/etc/machine-id` | plain file (empty is fine) | slot-init binds the derived id over it ("The machine id") | the refusal is logged and the boot goes on, with systemd taking a random id |
+
+The root image is read-only (EROFS behind dm-verity), so slot-init creates none of these.
+
+**The boot partition at run time.** Neither slot-init nor lemnosd needs the boot partition mounted on the
+`tryboot` form. Confirming a trial, arming one, and `previous` are raw sector writes on the partition's
+block node. lemnosd finds that node from the boot source and `boot_sources` ("Pointer files, and the
+run-time rule for the boot partition"). The image must carry the pre-created pointer files, records and
+bays. On the `tryboot` form the driver's `boot` setting is read by nothing. Only two forms use the
+mount at that path: `file`, whose `boot-record` file is there, and `ubi`, whose fallback `extlinux` copy
+is there. The `uboot` form writes U-Boot's environment on the boot disk and doesn't use the mount either.
+slot-init mounts the boot partition read-only only where a form needs to read a file there, and unmounts
+it before `switch_root`. A system that mounts `/boot/firmware` for its own use may do so; Lemnos doesn't
+need it.
+
 ### The kernel self-check
 
 Before anything is spent, written or mounted past the data partition, slot-init checks each piece
