@@ -34,6 +34,9 @@ pub(crate) fn pace_for(reading: Option<Reading>) -> DevicePace {
 pub(crate) struct Point {
     pub(crate) device: u32,
     pub(crate) method: MethodId,
+    /// The method fills an out buffer (a reading such as a colour array): each read passes the
+    /// buffer's capacity as its one argument, as a call does.
+    pub(crate) out: bool,
 }
 
 struct State {
@@ -125,6 +128,11 @@ impl Readers {
 
     pub(crate) fn run(&self, host: &Host, clock: &MonotonicClock) {
         let mut scratch = vec![0u8; 64 * 1024];
+        // An out buffer's capacity, the argument a read of an out-buffer method passes. The scratch
+        // is far below a frame's limit, so whatever fills it fits in a value.
+        let capacity = u32::try_from(scratch.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes();
         let mut recipients = Vec::new();
         let mut state = self.lock();
         loop {
@@ -151,7 +159,8 @@ impl Readers {
                     let point = state.points[plan.device as usize];
                     drop(state);
                     let started = clock.now_us();
-                    let result = host.call(point.device, point.method, &[], &mut scratch);
+                    let args: &[u8] = if point.out { &capacity } else { &[] };
+                    let result = host.call(point.device, point.method, args, &mut scratch);
                     let ended = clock.now_us();
                     state = self.lock();
                     state.scheduler.finished(plan.device, started, ended);

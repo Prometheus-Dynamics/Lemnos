@@ -476,6 +476,7 @@ impl Client {
             Point {
                 device,
                 method: target,
+                out: found.has_out_buffer,
             },
             period_us,
             only_changes,
