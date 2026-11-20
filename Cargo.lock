@@ -3102,6 +3102,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-unit-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-daemon-ready",
+ "lemnos-linux-sys",
+]
+
+[[package]]
 name = "lemnos-usb"
 version = "2.0.1-dev"
 dependencies = [

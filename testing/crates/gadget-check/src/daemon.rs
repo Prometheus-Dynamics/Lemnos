@@ -26,8 +26,8 @@ pub struct Lemnosd {
 }
 
 impl Lemnosd {
-    /// Starts the daemon as root, which its privileged start needs, and waits until it says it is
-    /// ready (its socket listens).
+    /// Starts the daemon as root under the unit's capability bounding set, which its privileged
+    /// start needs, and waits until it says it is ready (its socket listens).
     pub fn start(program: &Path, board: &Path, socket: &Path) -> Result<Self, String> {
         let mut daemon = Self {
             program: program.to_path_buf(),
@@ -44,8 +44,12 @@ impl Lemnosd {
         // the new daemon binds the path itself.
         let _ = fs::remove_file(&self.socket);
         let ready = Ready::new()?;
-        let mut command = Command::new(&self.program);
+        // Started as the packaged unit with the gadget drop-in starts it: root, with only the
+        // unit's bounding set and no_new_privs (testing/crates/unit-check, its `exec` role).
+        let mut command = Command::new(self.program.with_file_name("lemnos-unit-check"));
         command
+            .args(["exec", "--with", "gadget", "--"])
+            .arg(&self.program)
             .arg("--board")
             .arg(&self.board)
             .arg("--socket")

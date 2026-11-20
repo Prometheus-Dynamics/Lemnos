@@ -279,14 +279,34 @@ fn cap_name(cap: u32) -> &'static str {
     }
 }
 
+/// The mode of the socket's directory: the daemon's user may write it, its group may open it.
+pub const RUNTIME_DIRECTORY_MODE: u32 = 0o750;
+
+/// Makes the socket's directory, `RUNTIME_DIRECTORY_MODE` and owned by the daemon's ids.
+///
+/// The mode is set while root owns the directory, and only then is it handed over: a change of mode
+/// on a directory root does not own needs `CAP_FOWNER`, which the packaged unit's bounding set does
+/// not give. A directory already owned by someone else with another mode is taken back to root
+/// first (`CAP_CHOWN`, which the root phase has). Nothing is changed that is already right.
 fn runtime_directory(cx: &Context<'_>) -> io::Result<Refusals> {
     use std::os::unix::fs::{PermissionsExt, chown};
     let Some(dir) = cx.socket.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
         return Ok(Vec::new());
     };
     std::fs::create_dir_all(dir)?;
-    chown(dir, Some(cx.uid), Some(cx.gid))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+    let meta = std::fs::metadata(dir)?;
+    let mut owner = (meta.uid(), meta.gid());
+    if meta.mode() & 0o7777 != RUNTIME_DIRECTORY_MODE {
+        let me = lemnos_linux_sys::privilege::observe()?.euid;
+        if owner.0 != me {
+            chown(dir, Some(me), None)?;
+            owner.0 = me;
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(RUNTIME_DIRECTORY_MODE))?;
+    }
+    if owner != (cx.uid, cx.gid) {
+        chown(dir, Some(cx.uid), Some(cx.gid))?;
+    }
     Ok(Vec::new())
 }
 
