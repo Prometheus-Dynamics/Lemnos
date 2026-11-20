@@ -3059,6 +3059,22 @@ name = "lemnos-soc"
 version = "2.0.1-dev"
 
 [[package]]
+name = "lemnos-standin"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-contract-fan",
+ "lemnos-contract-light",
+ "lemnos-contract-raw-bus",
+ "lemnos-contract-temperature",
+ "lemnos-core",
+ "lemnos-hal",
+ "lemnos-host",
+ "lemnos-sim",
+ "lemnosd",
+]
+
+[[package]]
 name = "lemnos-stream-check"
 version = "2.0.1-dev"
 dependencies = [
