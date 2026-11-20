@@ -12,8 +12,8 @@ use tokio::time::{Instant, timeout_at};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{
-    DeviceEntry, Handle, JobEvent, Mode, PackageList, Session, Subscription, SubscriptionState,
-    ValueInfo,
+    DeviceEntry, Handle, JobEvent, Mode, PackageList, Session, Stall, Subscription,
+    SubscriptionState, ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
 use lemnos_wire::ring::Mapping;
@@ -113,6 +113,13 @@ impl AsyncClient {
     pub async fn list(&mut self) -> Result<Vec<DeviceEntry>, Error> {
         self.settle().await?;
         let (id, pick) = self.session.op_list()?;
+        self.wait(id, pick).await
+    }
+
+    /// Each device's last stall, kept after it recovers. See [`Session::last_stalls`].
+    pub async fn last_stalls(&mut self) -> Result<Vec<Stall>, Error> {
+        self.settle().await?;
+        let (id, pick) = self.session.op_last_stalls()?;
         self.wait(id, pick).await
     }
 

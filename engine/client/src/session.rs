@@ -100,6 +100,27 @@ pub struct DeviceEntry {
     pub refusal: Refusal,
 }
 
+/// A device as the list gives it, with its last stall.
+type Listed = (DeviceEntry, Option<Stall>);
+
+/// A device's last stall, kept after it ends, since its reason is cleared when the device works
+/// again ([`Session::last_stalls`]). A stream's [`Next::Stalled`](crate::Next::Stalled) reports
+/// the same `since_ns` ([`ProducerState`](crate::ProducerState)): a stall a linked device caused
+/// is that device's, so look along [`follow`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stall {
+    /// The device, as [`DeviceEntry::index`] and [`DeviceEntry::name`] name it.
+    pub index: u32,
+    pub name: String,
+    /// When it began, on the service's clock: what a stream that stalled for it reported as its
+    /// producer's `since_ns`.
+    pub since_ns: u64,
+    /// When it ended: `None` while it stands.
+    pub ended_ns: Option<u64>,
+    /// Why: the driver's failed health, or why the service waits to bind it again.
+    pub reason: String,
+}
+
 /// The devices `from` leads to through `link`, in order, starting with `from` itself: a sensor,
 /// its receiver, the receiver's ISP. Ends at a device with no `link`, at a `link` naming a
 /// device that isn't in `devices`, and before any device already passed, so a board whose
@@ -1232,6 +1253,24 @@ impl Session {
     }
 
     pub(crate) fn op_list(&mut self) -> Result<(u32, impl Pick<Vec<DeviceEntry>> + use<>), Error> {
+        let (id, mut pick) = self.op_list_all()?;
+        Ok((id, move |frame: Frame<'_>| {
+            pick(frame)
+                .map(|listed| listed.map(|all| all.into_iter().map(|(entry, _)| entry).collect()))
+        }))
+    }
+
+    pub(crate) fn op_last_stalls(&mut self) -> Result<(u32, impl Pick<Vec<Stall>> + use<>), Error> {
+        let (id, mut pick) = self.op_list_all()?;
+        Ok((id, move |frame: Frame<'_>| {
+            pick(frame).map(|listed| {
+                listed.map(|all| all.into_iter().filter_map(|(_, stall)| stall).collect())
+            })
+        }))
+    }
+
+    /// The device list, each entry with its last stall.
+    fn op_list_all(&mut self) -> Result<(u32, impl Pick<Vec<Listed>> + use<>), Error> {
         let id = self.shared.id();
         self.queue(&Frame::List { id })?;
         let mut entries = Vec::new();
@@ -1247,13 +1286,24 @@ impl Session {
                 link,
                 jobs,
                 refusal,
+                stall,
+                stall_since,
+                stall_ended,
+                stall_reason,
                 ..
             } => {
                 let (Some(state), Some(health)) = (device_state(state), device_health(health))
                 else {
                     return Some(Err(Error::Wire(lemnos_wire::WireError::Malformed)));
                 };
-                entries.push(DeviceEntry {
+                let last_stall = (stall.0 != lemnos_wire::stall::NONE).then(|| Stall {
+                    index: device,
+                    name: name.to_string(),
+                    since_ns: stall_since.0,
+                    ended_ns: (stall.0 != lemnos_wire::stall::STANDING).then_some(stall_ended.0),
+                    reason: stall_reason.0.to_string(),
+                });
+                let entry = DeviceEntry {
                     index: device,
                     name: name.to_string(),
                     driver: driver.to_string(),
@@ -1268,7 +1318,8 @@ impl Session {
                     link: (!link.0.is_empty()).then(|| link.0.to_string()),
                     jobs: lemnos_wire::parse_running_jobs(jobs.0),
                     refusal: Refusal::from_code(refusal.0),
-                });
+                };
+                entries.push((entry, last_stall));
                 None
             }
             Frame::ListDone { .. } => Some(Ok(core::mem::take(&mut entries))),
@@ -1594,6 +1645,16 @@ impl Session {
     pub fn list(&mut self) -> Result<Vec<DeviceEntry>, Error> {
         self.settle()?;
         let (id, pick) = self.op_list()?;
+        self.wait(id, pick)
+    }
+
+    /// Each device's last stall, for the devices that have one: when it began and ended, and why.
+    /// It is kept after the device recovers, so a stream's [`Next::Stalled`](crate::Next::Stalled)
+    /// can be explained after the device's own reason is cleared. A service from before it sends
+    /// none, which reads as no stalls.
+    pub fn last_stalls(&mut self) -> Result<Vec<Stall>, Error> {
+        self.settle()?;
+        let (id, pick) = self.op_last_stalls()?;
         self.wait(id, pick)
     }
 

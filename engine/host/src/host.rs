@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
@@ -502,6 +503,21 @@ pub enum DeviceState {
     Off(OffReason),
 }
 
+/// The last time a device held its streams back (their producer read retrying), kept after it
+/// ended, so why a stream stalled can be read after the device recovered: a device's reason is
+/// cleared when it works again. A stream's stall reports `since_ns` as its producer state does, on
+/// the host's clock, so a reader matches the two exactly. A stall that a linked device caused is
+/// that device's (see `docs/streams.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stall {
+    /// When it began, on the host's clock.
+    pub since_ns: u64,
+    /// When it ended: `None` while it stands.
+    pub ended_ns: Option<u64>,
+    /// Why: the driver's failed health, or why the host waits to bind it again.
+    pub reason: Cow<'static, str>,
+}
+
 /// A device as seen from outside.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
@@ -528,6 +544,8 @@ pub struct DeviceInfo {
     /// saw an earlier revision knows what it holds is out of date. It never goes back. Health is
     /// not part of it: see [`Host::look`], which is how a change of health is found.
     pub revision: u64,
+    /// The device's last stall, standing or ended. `None` until its streams first stall.
+    pub last_stall: Option<Stall>,
 }
 
 /// Whether the device's driver needs another device (a `uses` entry), whose health its own health
@@ -585,6 +603,8 @@ struct Slot {
     /// The driver's own health last said failed (its streams read retrying for that reason), so a
     /// tick only tells the streams when it changes.
     stalled: AtomicBool,
+    /// The last stall of this device's streams, kept after it ends (see [`Stall`]).
+    last_stall: Mutex<Option<Stall>>,
     /// A hint has named this running device and its driver has not been ticked since.
     hinted: AtomicBool,
     /// The driver's wait descriptor, as the watcher reads it. See [`Inner::watch_wait`].
@@ -817,6 +837,7 @@ impl Slot {
             running_ok_ns: AtomicU64::new(0),
             short_runs: AtomicU32::new(0),
             stalled: AtomicBool::new(false),
+            last_stall: Mutex::new(None),
             hinted: AtomicBool::new(false),
             wait: Mutex::new(None),
             wait_gen: AtomicU64::new(0),
@@ -1284,6 +1305,12 @@ fn counts_as_gone(status: Status) -> bool {
     status == Status::IO || status == Status::NO_DEVICE || status == Status::TIMED_OUT
 }
 
+/// A stall's reason when a device switched off or on by hand lets go of what a rebind kept.
+const LET_GO: &str = "switched off or on by hand: what the last instance kept was let go";
+
+/// A stall's reason when a new instance did not take up what the last one kept.
+const NOT_TAKEN_UP: &str = "the new instance did not take up what the last one kept";
+
 /// Why the driver wants to be bound again, if it says what it was bound with is dead.
 fn asks_rebind(instance: &dyn Instance) -> Option<&'static str> {
     match instance.health() {
@@ -1297,9 +1324,36 @@ impl Inner {
     /// instance is a fresh start, so a stall that was waiting on the record reads lost.
     fn forget_record(&self, slot: &Slot) {
         if lock(&slot.resume).take().is_some() {
-            self.streams
-                .producer_failed(slot.index, self.clock.now_ns(), true);
+            self.stall(slot, true, || Cow::Borrowed(LET_GO));
         }
+    }
+
+    /// The streams of `slot`'s device stall from now, and of each device that links to it: a
+    /// stall that already stands keeps its start and its reason, as the streams keep theirs.
+    /// `why` is only asked for a new stall. `lost` is as `Streams::producer_failed` takes it.
+    fn stall(&self, slot: &Slot, lost: bool, why: impl FnOnce() -> Cow<'static, str>) {
+        let now = self.clock.now_ns();
+        {
+            let mut last = lock(&slot.last_stall);
+            if !last.as_ref().is_some_and(|stall| stall.ended_ns.is_none()) {
+                *last = Some(Stall {
+                    since_ns: now,
+                    ended_ns: None,
+                    reason: why(),
+                });
+            }
+        }
+        self.streams.producer_failed(slot.index, now, lost);
+    }
+
+    /// `slot`'s device works again: its stall, if one stands, ends now and is kept.
+    fn unstall(&self, slot: &Slot) {
+        if let Some(stall) = lock(&slot.last_stall).as_mut()
+            && stall.ended_ns.is_none()
+        {
+            stall.ended_ns = Some(self.clock.now_ns());
+        }
+        self.streams.producer_back(slot.index);
     }
 
     /// Records that a device's state has just been changed: its revision and the host's count go
@@ -1759,13 +1813,12 @@ impl Inner {
                 self.streams
                     .end_device(slot.index, lemnos_wire::ring::STATE_DEVICE_FAILED);
             }
-            DeviceState::Backoff { .. } => {
+            DeviceState::Backoff { reason, .. } => {
                 // With a record held, the next bind decides whether the stall is lost: it is
                 // `Lost` only if the new instance does not take the record up (see `bind`). Without
                 // one, a new instance is a fresh start from the first failure.
                 let held = lock(&slot.resume).is_some();
-                self.streams
-                    .producer_failed(slot.index, self.clock.now_ns(), !held);
+                self.stall(slot, !held, || Cow::Owned(reason.clone()));
             }
             DeviceState::Running => {}
         }
@@ -2424,8 +2477,7 @@ impl Inner {
                 // The record was for this bind, and is spent either way. One the new instance did
                 // not take up makes the stall a new instance's, so it reads lost.
                 if lock(&slot.resume).take().is_some() && kept == 0 {
-                    self.streams
-                        .producer_failed(slot.index, self.clock.now_ns(), true);
+                    self.stall(&slot, true, || Cow::Borrowed(NOT_TAKEN_UP));
                 }
                 // Before the device shows as running, so a look that finds it running finds the stamp too.
                 if let Some(instance) = lock(&slot.instance).as_ref() {
@@ -2434,7 +2486,7 @@ impl Inner {
                 *lock(&slot.state) = DeviceState::Running;
                 // A new instance starts not stalled: its own first failure is an edge.
                 slot.stalled.store(false, Ordering::Release);
-                self.streams.producer_back(slot.index);
+                self.unstall(&slot);
                 if slot.ticks() {
                     self.set_next_tick(&slot, Some(0));
                     let wait = lock(&slot.instance)
@@ -2504,13 +2556,14 @@ impl Inner {
         }
         // The same instance's own report: failed or gone is a stall that this driver recovers from
         // itself (what it was given is kept); anything else, including degraded, is not one.
-        let failed = matches!(instance.health(), Health::Failed(_) | Health::Gone(_));
-        if slot.stalled.swap(failed, Ordering::AcqRel) != failed {
-            if failed {
-                self.streams
-                    .producer_failed(slot.index, self.clock.now_ns(), false);
-            } else {
-                self.streams.producer_back(slot.index);
+        let failed = match instance.health() {
+            Health::Failed(why) | Health::Gone(why) => Some(why),
+            _ => None,
+        };
+        if slot.stalled.swap(failed.is_some(), Ordering::AcqRel) != failed.is_some() {
+            match failed {
+                Some(why) => self.stall(slot, false, || Cow::Borrowed(why)),
+                None => self.unstall(slot),
             }
         }
         next
@@ -3244,6 +3297,7 @@ impl Host {
             figures: self.inner.device_figures(slot),
             retry: self.inner.device_retry(slot),
             link: slot.spec.link.clone(),
+            last_stall: lock(&slot.last_stall).clone(),
         }
     }
 

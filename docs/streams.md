@@ -590,7 +590,11 @@ while it lasts; `Next::Resumed { state: Carried::Kept | Carried::Lost }` once af
 the first frame after the stall. A stall that begins and ends between two calls of a reader that
 never saw it is not reported. `next_frame` and `is_open` are unchanged: a stall is no frame and
 `next_frame` waits on. The reason text is not in shared memory: the session's device call gives the
-device's state and reason (`Session::list`; `stream.device()` is its index). In C,
+device's state and reason (`Session::list`; `stream.device()` is its index). A device's reason is
+cleared when it recovers, which can be before the list is read, so the host keeps each device's last
+stall (`last_stalls`: start, end, reason). Its `since_ns` is the one `Stalled` reports,
+read from the same producer words that showed the stall: the stall with that start, on whichever
+device along the links it is, says why. In C,
 `lemnos_stream_producer(client, stream, &state, &since_ns)`, `LEMNOS_STREAM_PRODUCER_RUNNING` (0) and
 `_RETRYING` (1), others passed through. A reader that never looks at any of this sees exactly what
 it saw before: silence, then frames.

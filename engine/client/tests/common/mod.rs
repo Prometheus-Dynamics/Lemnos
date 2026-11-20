@@ -263,6 +263,10 @@ fn serve_connection(mut stream: UnixStream, control: Arc<Control>, session: u32)
                             link: Tail("two"),
                             jobs: Tail(""),
                             refusal: Tail(0),
+                            stall: Tail(0),
+                            stall_since: Tail(0),
+                            stall_ended: Tail(0),
+                            stall_reason: Tail(""),
                         },
                         &mut out,
                     );
@@ -279,6 +283,10 @@ fn serve_connection(mut stream: UnixStream, control: Arc<Control>, session: u32)
                             link: Tail(""),
                             jobs: Tail(""),
                             refusal: Tail(0),
+                            stall: Tail(0),
+                            stall_since: Tail(0),
+                            stall_ended: Tail(0),
+                            stall_reason: Tail(""),
                         },
                         &mut out,
                     );

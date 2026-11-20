@@ -90,6 +90,10 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 link: Tail("d"),
                 jobs: Tail("1a:3/4"),
                 refusal: Tail(0),
+                stall: Tail(stall::ENDED),
+                stall_since: Tail(5),
+                stall_ended: Tail(9),
+                stall_reason: Tail("s"),
             },
         ),
         ("list-done", Frame::ListDone { id: 1 }),
@@ -476,9 +480,15 @@ fn a_device_from_before_its_link_reads_as_having_none() {
         link: Tail("d"),
         jobs: Tail("1a:3/4"),
         refusal: Tail(0),
+        stall: Tail(0),
+        stall_since: Tail(0),
+        stall_ended: Tail(0),
+        stall_reason: Tail(""),
     };
-    let mut buf = [0; 64];
-    let n = encode(&with, &mut buf).unwrap();
+    let mut buf = [0; 128];
+    let full = encode(&with, &mut buf).unwrap();
+    // The fields after the refusal byte: the stall's state, its two times and its empty reason.
+    let n = full - STALL_BYTES;
     // What an older host sends: the same frame, ending after `reason` (the refusal byte is last).
     let older = n - 1 - 5 - 10;
     buf[..4].copy_from_slice(&((older - 4) as u32).to_le_bytes());
@@ -1575,4 +1585,52 @@ fn every_refusal_kind_has_its_number_in_the_table() {
         assert!(!refusal.is_none() && !refusal.is_unknown());
     }
     assert_eq!(Refusal::of(None), Refusal::NONE);
+}
+
+/// The bytes of a device frame's stall fields with an empty reason: state, two times, the reason's
+/// length.
+const STALL_BYTES: usize = 1 + 8 + 8 + 4;
+
+#[test]
+fn a_device_from_before_its_stall_reads_as_having_none() {
+    let with = Frame::Device {
+        id: 1,
+        device: 2,
+        name: "a",
+        driver: "b",
+        tags: "c/1",
+        state: state::RUNNING,
+        health: health::OK,
+        reason: "",
+        link: Tail(""),
+        jobs: Tail(""),
+        refusal: Tail(0),
+        stall: Tail(stall::ENDED),
+        stall_since: Tail(7),
+        stall_ended: Tail(11),
+        stall_reason: Tail("no frame"),
+    };
+    let mut buf = [0; 128];
+    let n = encode(&with, &mut buf).unwrap();
+    let (frame, used) = decode(&buf[..n]).unwrap().unwrap();
+    assert_eq!((frame, used), (with, n));
+    // What a host from before the stall sends: the frame ending at the refusal byte.
+    let older = n - STALL_BYTES - "no frame".len();
+    buf[..4].copy_from_slice(&((older - 4) as u32).to_le_bytes());
+    let (frame, used) = decode(&buf[..older]).unwrap().unwrap();
+    assert_eq!(used, older);
+    let Frame::Device {
+        stall,
+        stall_since,
+        stall_ended,
+        stall_reason,
+        ..
+    } = frame
+    else {
+        panic!("{frame:?}");
+    };
+    assert_eq!(
+        (stall, stall_since, stall_ended, stall_reason),
+        (Tail(stall::NONE), Tail(0), Tail(0), Tail(""))
+    );
 }

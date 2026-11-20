@@ -10,7 +10,7 @@ use lemnos_core::{
 };
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, Options, Stall, entry};
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::{Consumer, ProducerWords, STATE_OPEN, producer};
 
@@ -437,4 +437,73 @@ fn a_driver_reporting_failed_is_never_rebound_for_it_so_what_it_holds_is_kept() 
     );
     rig.set_failed(S, false);
     assert_eq!(words(&consumer).recovery, producer::KEPT);
+}
+
+/// The device's last stall, as the host lists it.
+fn last_stall(rig: &Rig, id: &str) -> Option<Stall> {
+    rig.host.device(id).unwrap().last_stall
+}
+
+#[test]
+fn a_stall_is_kept_after_the_device_recovers_with_the_start_the_stream_reported() {
+    // A device's reason is cleared when it recovers. What the stall was is kept, under the start
+    // the stream reported, so a reader that comes after the recovery still finds why.
+    let rig = Rig::new();
+    let consumer = rig.attach(R);
+    assert_eq!(last_stall(&rig, "s"), None, "never stalled");
+    rig.clock.advance(Duration::from_secs(2));
+    rig.set_failed(S, true);
+    let since = words(&consumer).since_ns;
+    let standing = last_stall(&rig, "s").expect("a standing stall");
+    assert_eq!(
+        (standing.since_ns, standing.ended_ns, &*standing.reason),
+        (since, None, "recovering")
+    );
+    // Still failing: the same stall, not a new one.
+    rig.clock.advance(Duration::from_secs(1));
+    rig.settle();
+    assert_eq!(last_stall(&rig, "s"), Some(standing.clone()));
+    // Only the device that failed holds it: the stream's own device did not.
+    assert_eq!(last_stall(&rig, "r"), None);
+
+    rig.clock.advance(Duration::from_secs(1));
+    rig.set_failed(S, false);
+    let info = rig.host.device("s").unwrap();
+    assert_eq!(info.health, lemnos_core::Health::Ok, "recovered");
+    let ended = info.last_stall.expect("kept after the recovery");
+    assert_eq!((ended.since_ns, &*ended.reason), (since, "recovering"));
+    let end = ended.ended_ns.expect("ended");
+    assert!(end > since, "{ended:?}");
+
+    // The next stall replaces it, with its own start.
+    rig.clock.advance(Duration::from_secs(1));
+    rig.set_failed(S, true);
+    let next = last_stall(&rig, "s").unwrap();
+    assert_eq!(
+        (next.since_ns, next.ended_ns),
+        (words(&consumer).since_ns, None)
+    );
+    assert!(next.since_ns > end);
+}
+
+#[test]
+fn a_stall_the_host_backs_off_keeps_the_bind_reason_until_the_device_is_back() {
+    let rig = Rig::new();
+    let consumer = rig.attach(R);
+    rig.clock.advance(Duration::from_secs(1));
+    rig.explode(R);
+    let since = words(&consumer).since_ns;
+    let DeviceState::Backoff { reason, .. } = rig.host.device("r").unwrap().state else {
+        panic!("not backing off");
+    };
+    let standing = last_stall(&rig, "r").expect("a standing stall");
+    assert_eq!(
+        (standing.since_ns, standing.ended_ns, &*standing.reason),
+        (since, None, reason.as_str())
+    );
+    rig.bring_back("r");
+    let ended = last_stall(&rig, "r").expect("kept after the rebind");
+    assert_eq!((ended.since_ns, &*ended.reason), (since, reason.as_str()));
+    assert!(ended.ended_ns.is_some(), "{ended:?}");
+    assert_eq!(words(&consumer).state, producer::RUNNING);
 }

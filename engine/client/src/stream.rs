@@ -262,10 +262,21 @@ pub enum ProducerState {
     /// The device works (or the host says nothing: an older host, or none had a stall to report).
     Running,
     /// The device failed and the host is retrying it. `since_ns` is `CLOCK_MONOTONIC` nanoseconds
-    /// of the failure. Why is the device's reason text, which the session's device call gives.
+    /// of the failure. Why is the stall's reason: the device's reason text while it stands, and
+    /// [`DeviceEntry::last_stall`](crate::DeviceEntry::last_stall) with this `since_ns`, which
+    /// is kept after the device recovers.
     Retrying { since_ns: u64 },
     /// A state this build does not know, passed through as its number: not running.
     Unknown(u32),
+}
+
+/// The producer state a ring's producer words carry.
+fn producer_state(state: u64, since_ns: u64) -> ProducerState {
+    match state {
+        producer::RUNNING => ProducerState::Running,
+        producer::RETRYING => ProducerState::Retrying { since_ns },
+        other => ProducerState::Unknown(other as u32),
+    }
 }
 
 /// Whether what the caller gave the producing device survived its stall.
@@ -653,12 +664,8 @@ impl FrameStream {
     pub fn producer(&self) -> ProducerState {
         self.consumer
             .producer()
-            .map_or(ProducerState::Running, |words| match words.state {
-                producer::RUNNING => ProducerState::Running,
-                producer::RETRYING => ProducerState::Retrying {
-                    since_ns: words.since_ns,
-                },
-                other => ProducerState::Unknown(other as u32),
+            .map_or(ProducerState::Running, |words| {
+                producer_state(words.state, words.since_ns)
             })
     }
 
@@ -870,7 +877,9 @@ impl FrameStream {
                 self.seen_edges = words.edges;
                 if words.state != producer::RUNNING {
                     self.told_stalled = true;
-                    return Ok(Next::Stalled(self.producer()));
+                    // From the words just read, not read again: the producer may be back by now,
+                    // and the stall reported is the one these words show, with its start.
+                    return Ok(Next::Stalled(producer_state(words.state, words.since_ns)));
                 }
                 // A stall that began and ended unseen: nothing to say.
                 self.told_stalled = false;

@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lemnos_client::{Client, FrameStream, HeldFrame, Next};
+use lemnos_client::{Client, FrameStream, HeldFrame, Next, ProducerState, Stall};
 use lemnos_contract_camera_receiver::{CameraReceiver, LinkConfig, MAX_STREAM_NAME, Packing};
 use lemnos_daemon_ready::Ready;
 use lemnos_linux_stream::LinuxStreams;
@@ -116,12 +116,27 @@ impl Watch {
     }
 }
 
-/// The receiver's reason as the daemon lists it now.
-fn reason(client: &Client) -> Result<String, String> {
-    Ok(step("list", client.list())?
-        .into_iter()
-        .find(|d| d.name == DEVICE)
-        .map_or_else(|| "the receiver is not listed".to_owned(), |d| d.reason))
+/// Why the stream stalled: the reason of the stall the daemon kept with the start the stream
+/// reported, on whichever device it was. The device may have recovered by the time the daemon is
+/// asked, and its own reason is then empty: the kept stall is not.
+fn reason(client: &Client, stalled: ProducerState) -> Result<String, String> {
+    let stalls = step("last stalls", client.last_stalls())?;
+    Ok(stall_reason(&stalls, stalled))
+}
+
+/// The reason of the stall in `stalls` that began when the stream says `stalled` did, or what was
+/// found instead.
+fn stall_reason(stalls: &[Stall], stalled: ProducerState) -> String {
+    let ProducerState::Retrying { since_ns } = stalled else {
+        return format!("the stream reported a stall as {stalled:?}");
+    };
+    stalls
+        .iter()
+        .find(|stall| stall.since_ns == since_ns)
+        .map_or_else(
+            || format!("no device kept a stall from {since_ns} ns (kept: {stalls:?})"),
+            |stall| stall.reason.clone(),
+        )
 }
 
 /// The next frame within `timeout`, or `None`. A recovery the stream reports on the way is noted
@@ -137,9 +152,9 @@ fn next(
         let left = deadline.saturating_duration_since(Instant::now());
         match step("next frame", stream.next_or_end(left))? {
             Next::Frame(frame) => return Ok(Some(frame)),
-            Next::Stalled(_) => {
+            Next::Stalled(stalled) => {
                 watch.run += 1;
-                watch.reasons.push(reason(client)?);
+                watch.reasons.push(reason(client, stalled)?);
             }
             Next::Resumed { .. } => watch.resumed += 1,
             Next::TimedOut | Next::Ended(_) => return Ok(None),
@@ -779,6 +794,57 @@ fn consecutive_pairs_step_by_one(frames: &[(u32, u64, u8)]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kept(name: &str, since_ns: u64, ended_ns: Option<u64>, why: &str) -> Stall {
+        Stall {
+            index: 0,
+            name: name.to_owned(),
+            since_ns,
+            ended_ns,
+            reason: why.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_stall_that_ended_before_the_daemon_was_asked_still_gives_its_reason() {
+        // T146: the receiver recovered before the list was read, so its own reason was empty.
+        let stalls = [kept(
+            DEVICE,
+            40,
+            Some(90),
+            "no frame arrived within the bound: x",
+        )];
+        let stalled = ProducerState::Retrying { since_ns: 40 };
+        assert_eq!(
+            stall_reason(&stalls, stalled),
+            "no frame arrived within the bound: x"
+        );
+    }
+
+    #[test]
+    fn a_stall_a_linked_device_caused_is_read_from_that_device() {
+        let stalls = [
+            kept("sensor", 7, Some(9), "the sensor stopped"),
+            kept(DEVICE, 3, Some(5), "no frame arrived within the bound"),
+        ];
+        let reason = stall_reason(&stalls, ProducerState::Retrying { since_ns: 7 });
+        assert_eq!(reason, "the sensor stopped");
+    }
+
+    #[test]
+    fn a_stall_no_device_kept_is_not_taken_for_a_frame_stop() {
+        // An older stall with the frame-stop reason must not stand in for this one.
+        let stalls = [kept(
+            DEVICE,
+            3,
+            Some(5),
+            "no frame arrived within the bound",
+        )];
+        let reason = stall_reason(&stalls, ProducerState::Retrying { since_ns: 8 });
+        assert!(!reason.starts_with(FRAME_STOP), "{reason}");
+        let reason = stall_reason(&stalls, ProducerState::Running);
+        assert!(!reason.starts_with(FRAME_STOP), "{reason}");
+    }
 
     #[test]
     fn a_forced_drop_leaves_a_gap_and_every_frame_still_follows_its_sequence() {

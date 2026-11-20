@@ -240,6 +240,19 @@ impl Client {
     fn list(&self, id: u32) -> Keep {
         for info in self.core.host.devices() {
             let (state, health, reason) = wire_state(&info, self.core.clock.now_ns());
+            let (stall, since, ended, why) = match &info.last_stall {
+                None => (lemnos_wire::stall::NONE, 0, 0, ""),
+                Some(last) => (
+                    if last.ended_ns.is_some() {
+                        lemnos_wire::stall::ENDED
+                    } else {
+                        lemnos_wire::stall::STANDING
+                    },
+                    last.since_ns,
+                    last.ended_ns.unwrap_or(0),
+                    &*last.reason,
+                ),
+            };
             let tags = info
                 .tags
                 .iter()
@@ -258,6 +271,10 @@ impl Client {
                 link: Tail(info.link.as_deref().unwrap_or("")),
                 jobs: Tail(&running_jobs_text(&self.running_jobs(info.index))),
                 refusal: Tail(wire_refusal(&info.state).code()),
+                stall: Tail(stall),
+                stall_since: Tail(since),
+                stall_ended: Tail(ended),
+                stall_reason: Tail(why),
             });
         }
         self.conn.answer(&Frame::ListDone { id });

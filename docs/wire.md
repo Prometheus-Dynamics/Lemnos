@@ -33,7 +33,7 @@ closes the connection on a larger length, without reading it.
 | 1 | Hello | core u64, lemnos name (32 bytes), version u16, name str, events bool, parts (tail) | to host |
 | 2 | Welcome | core u64, lemnos name (32 bytes), version u16, features u64, host str, parts (tail) | to client |
 | 3 | List | id u32 | to host |
-| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str, jobs str, refusal u8 | to client |
+| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str, jobs str, refusal u8, stall u8, stall_since u64, stall_ended u64, stall_reason str | to client |
 | 5 | ListDone | id u32 | to client |
 | 6 | Open | id u32, device str, tag str | to host |
 | 7 | Opened | id u32, device u32, contract u8 | to client |
@@ -84,6 +84,8 @@ receiver's names its ISP, so a client follows a sensor to both through List alon
 appended to Device (rule 8): a host from before it sends Device without it, which reads as empty.
 
 `refusal` in Device, and in Event, is why a device waits to retry: `0` none (running, or switched on), `1` absent (no such device here), `2` failed (present and not working). It is appended after `jobs`, so a host from before it sends none and a reader takes `0`; it moves no hash.
+
+`stall`, `stall_since`, `stall_ended` and `stall_reason` in Device are the device's last stall: the last time its streams read their producer retrying, kept after the device recovers, since its `reason` is cleared then. `stall` is `0` none (never stalled), `1` standing, `2` ended. `stall_since` is when it began on the host's clock, the same number a stream that stalled for it reports as its producer's `since_ns`, so a reader matches the two exactly; a stall a linked device caused is that device's. `stall_ended` is when it ended (`0` unless it did), and `stall_reason` is why: the driver's failed health, or why the host waits to bind it again. A stall that stands keeps its start and its reason until it ends. The four are appended after `refusal`, so a host from before them sends none and a reader takes `0`, `0`, `0` and empty; they move no hash.
 
 `host` in Welcome is the service's name. When bit 7 (`BOARD_ID`, value 128) is set in `features`, it is instead the board file's `[board] id`, the board the service serves. Without the bit a client does not read a board id from `host` and reports `NOT_SUPPORTED` for it. The bit is not a part: it has no hash, and it adds no frame, so it moves no hash. It was added to version 1 after its first form, so a host from before it sends none, and a client from before it ignores it.
 
@@ -790,16 +792,17 @@ af 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00
 
 ### device
 
-`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r", link: "d", jobs: "1a:3/4", refusal: 0 }`
+`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r", link: "d", jobs: "1a:3/4", refusal: 0, stall: 2, stall_since: 5, stall_ended: 9, stall_reason: "s" }`
 
 <!-- vector: device -->
 ```hex
-32 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72 01 00 00 00 64 06 00 00 00 31 61 3a 33 2f 34 00
+48 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72 01 00 00 00 64 06 00 00 00 31 61 3a 33 2f 34 00 02 05 00 00 00 00 00 00 00 09 00 00 00 00 00 00 00 01 00 00 00 73
 ```
 
 A host from before `link` sends the same frame without its last five bytes (length `22`), and a
 client reads that as `link: ""`. A host from before `refusal` sends it without its last byte, and
-a reader takes that as `refusal` `0` (none).
+a reader takes that as `refusal` `0` (none). A host from before the stall sends it without its
+last 22 bytes, and a reader takes that as no stall.
 
 ### list-done
 

@@ -8,8 +8,8 @@ use lemnos_core::{Bound, Caller, Contract, JobId, Status};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{
-    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Subscription, SubscriptionState,
-    UsbEndpoints, UsbEndpointsEnd, ValueInfo,
+    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Stall, Subscription,
+    SubscriptionState, UsbEndpoints, UsbEndpointsEnd, ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
 
@@ -52,6 +52,11 @@ impl Client {
 
     pub fn list(&self) -> Result<Vec<DeviceEntry>, Error> {
         self.lock().list()
+    }
+
+    /// Each device's last stall, kept after it recovers. See [`Session::last_stalls`].
+    pub fn last_stalls(&self) -> Result<Vec<Stall>, Error> {
+        self.lock().last_stalls()
     }
 
     /// What became of the service's driver packages: which were loaded, which refused and why.
