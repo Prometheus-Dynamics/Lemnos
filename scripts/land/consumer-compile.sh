@@ -21,7 +21,11 @@ mkdir -p "$L" "$CACHE/locks" "$CACHE/baseline" "$WORK"/{pristine,trees,stubs,wor
 LOG=$L/consumer-compile.log; : > "$LOG"
 say() { echo "$*" | tee -a "$LOG"; }
 PY=(python3 -I "$HERE/cc.py")
-TOOLH=$(cat "$HERE/cc.py" "$CC/shims.tsv" "$CC/consumers.tsv" "$(readlink -f "$0")" | sha256sum | cut -c1-10)
+# What a compile's result depends on besides the two commits and the consumer's pinned rev (which carries its
+# lock): these scripts, the consumer data (shims, fields, scratch fixes) and the toolchain. A cached result is
+# keyed on all of it.
+TOOLH=$( { cat "$HERE/cc.py" "$CC/shims.tsv" "$CC/consumers.tsv" "$CC/fields.tsv" "$(readlink -f "$0")";
+  cat "$CC"/fixes/*.json 2>/dev/null; "$HOME/.cargo/bin/rustc" -vV; "$HOME/.cargo/bin/cargo" -V; } | sha256sum | cut -c1-10)
 t_start=$(date +%s.%N)
 # One compile at a time: the targets and archives are shared by every train.
 exec 9>"$WORK/lock"; flock 9
@@ -74,27 +78,32 @@ if [ ${#affected[@]} -eq 0 ]; then say "consumer-compile: skipped (the affected 
 if [ -n "${CC_FORCE:-}" ]; then affected=(); for n in "${order[@]}"; do case ",$CC_FORCE," in *",$n,"*) affected+=("$n");; esac; done; say "consumer-compile: CC_FORCE: ${affected[*]}"; fi
 say "consumer-compile: affected consumers: ${affected[*]}"
 
-# A tree of the Lemnos repo at a sha: archived once, its shims applied once (both idempotent by marker).
+# The Lemnos tree at a sha, always at one path ($WORK/trees/live): archived fresh, its shims applied, then
+# synced into the live tree so only the files that differ are rewritten. The path and the unchanged files'
+# mtimes stay, so cargo rebuilds only the crates that changed since the last compile (base to candidate, and
+# one train's candidate to the next train's).
 tree_for() { # <sha>
-  local t=$WORK/trees/${1:0:8}
-  if [ ! -f "$t/.ok" ]; then
-    rm -rf "$t"; mkdir -p "$t"
-    git -C "$REPO" archive "$1" | tar -x -C "$t" || return 1
-    "${PY[@]}" shim "$t" "$CC/shims.tsv" >> "$LOG" || return 1
-    touch "$t/.ok"
-  fi
-  echo "$t"
+  local fresh=$WORK/trees/fresh live=$WORK/trees/live
+  rm -rf "$fresh"; mkdir -p "$fresh"
+  git -C "$REPO" archive "$1" | tar -x -C "$fresh" || return 1
+  "${PY[@]}" shim "$fresh" "$CC/shims.tsv" >> "$LOG" || return 1
+  "${PY[@]}" sync "$fresh" "$live" || return 1
+  rm -rf "$fresh"
+  echo "$live"
 }
 
-# Compiles one consumer on one side (base or cand); the base's error keys are cached per base.
+# Compiles one consumer on one side (base or cand); each side's error keys are cached per commit.
 compile_side() { # <consumer> <side:base|cand> <sha>
   local name=$1 side=$2 sha=$3 full=${FULL_OF[$1]} r8=${R8_OF[$1]} repo=${REPO_OF[$1]}
   local mdir=${MDIR_OF[$1]} nf=${NF_OF[$1]}
-  local bkeys=$CACHE/baseline/$name-$r8-${base:0:8}-$TOOLH.keys
+  # A side's result is kept under its own sha: in a serial lander the candidate that lands is the next
+  # train's base, so the base is found here and not compiled again.
+  # A rerun of the same candidate finds it the same way.
+  local skeys=$CACHE/baseline/$name-$r8-${sha:0:8}-$TOOLH.keys
   local keys=$L/cc-$name-$side.keys
-  if [ "$side" = base ] && [ -f "$bkeys" ]; then
-    say "consumer $name base: baseline cached ($(wc -l < "$bkeys") errors at ${base:0:8})"
-    cp "$bkeys" "$keys"; cp "$bkeys.cov" "$L/cc-$name-base.cov" 2>/dev/null || { say "consumer-compile: $name: cached baseline has no coverage: rerun it"; return 2; }; return 0
+  if [ -f "$skeys" ]; then
+    say "consumer $name $side: result cached ($(wc -l < "$skeys") errors at ${sha:0:8})"
+    cp "$skeys" "$keys"; cp "$skeys.cov" "$L/cc-$name-$side.cov" 2>/dev/null || { say "consumer-compile: $name: cached result has no coverage: rerun it"; return 2; }; return 0
   fi
   local pristine=$WORK/pristine/$name-$r8
   if [ ! -f "$pristine/.ok" ]; then
@@ -103,7 +112,8 @@ compile_side() { # <consumer> <side:base|cand> <sha>
       || { say "consumer-compile: $name: archive of $full failed"; return 2; }
   fi
   local tree; tree=$(tree_for "$sha") || { say "consumer-compile: $name: Lemnos tree ${sha:0:8} failed"; return 2; }
-  local work=$WORK/work/$name-$r8-$side
+  # One work dir per consumer, synced from the pristine copy for each side (its mtimes stay warm).
+  local work=$WORK/work/$name-$r8
   "${PY[@]}" prepare "$pristine" "$work" "$mdir" "$tree" "$nf" "$WORK/stubs" >> "$LOG" \
     || { say "consumer-compile: $name $side: prepare failed"; return 2; }
   # Resolution loop: a Lemnos package a consumer asks a feature of that the tree lacks gets the feature (scratch).
@@ -153,7 +163,7 @@ compile_side() { # <consumer> <side:base|cand> <sha>
   # .cov: line 1 "reached total"; then "masked: <names>" when members are not reached (logged, never a failure by itself)
   awk '/^REACHED/{print $2" "$3} /^NOT-REACHED/{sub(/^NOT-REACHED /,""); print "masked: " $0}' <<<"$cov" > "$L/cc-$name-$side.cov"
   say "consumer $name $side: $n error(s)"
-  if [ "$side" = base ]; then cp "$keys" "$bkeys"; cp "$L/cc-$name-base.cov" "$bkeys.cov"; fi
+  cp "$keys" "$skeys.tmp" && cp "$L/cc-$name-$side.cov" "$skeys.cov" && mv "$skeys.tmp" "$skeys"
   return 0
 }
 

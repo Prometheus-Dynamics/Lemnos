@@ -95,9 +95,16 @@ Exclusions. A consumer whose status is `excluded: pre-port pin` is not checked. 
 are keyed by rev, so stale ones are ignored.
 
 Cache. Under `LAND_CC_CACHE`: `locks/<consumer>-<rev8>.names` (the Lemnos packages per pinned rev) and
-`baseline/<consumer>-<rev8>-<base8>-<tool8>.keys` plus `.cov` (the base's errors and coverage, once per base).
-The `<tool8>` hash covers the driver, `cc.py`, `shims.tsv` and `consumers.tsv`, so a change to any of them
-recomputes the baseline.
+`baseline/<consumer>-<rev8>-<sha8>-<tool8>.keys` plus `.cov`: the errors and coverage of one commit, written
+for both sides. A train's candidate is the next train's base, so in a serial lander the base is always
+found there. A rerun of the same candidate finds its own result there too. The `<tool8>` hash covers the
+driver, `cc.py`, `shims.tsv`, `consumers.tsv`, `fields.tsv`, the `fixes/` files and the toolchain
+(`rustc -vV`, `cargo -V`), so a change to any of them recomputes every result.
+
+Warm builds. Under `LAND_CC_WORK` the Lemnos tree is always at `trees/live` and each consumer's copy at
+`work/<consumer>-<rev8>`. Each compile syncs a fresh archive into them and rewrites only the files that
+differ, so cargo rebuilds only the crates a commit changed.
+The `flock` on `$LAND_CC_WORK/lock` lets one compile run at a time.
 
 Kernel cache. `LAND_QK_DIR` holds QEMU kernel trees keyed by their inputs. A tree is per path: its build
 files carry absolute paths, so a copied tree silently builds against the original. Never copy a kernel cache
