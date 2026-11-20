@@ -629,7 +629,7 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
 - A `u16` contract count, then one block per contract: its `kind` str (`sensor`, `actuator`, ...,
   `other`).
 - A `u16` item count, then one block per item, in the order of the items above: `reading` u8 (0
-  number, 1 range, 2 switch, 3 text, 4 colour array, 5 three axes; the item's own reading, else its
+  number, 1 range, 2 switch, 3 text, 4 colour array, 5 three axes, 6 events; the item's own reading, else its
   method's, else one its shape suggests), `step` (a presence bool, then an i64), `warn_low` and
   `warn_high` (each a presence bool, then an i64), and `group` (a presence bool, then a str: the
   items of one group are one vector, each part named by its `field`), and `unit_state` (a presence

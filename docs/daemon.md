@@ -517,7 +517,8 @@ socket, carries a 1 MiB frame, so the same calls go through there up to that siz
 
 **Watch.** `lemnos-ctl watch` takes a method with no arguments and no out buffer. The daemon serves a
 subscription only to a method with no arguments, and to a method with an out buffer when it declares a
-reading: the buffer is then the value (a colour array, such as a light's `current`). `watch` on a method
+reading: the buffer is then the value (a colour array, such as a light's `current`, or events, such
+as a raw device's `read_edges`). `watch` on a method
 with arguments, or with an out buffer and no reading, is refused by name before it is asked: the method
 takes arguments or an out buffer, so call it instead. A colour array is read at most once per 20 ms
 (`FRAME_PERIOD_US`): a faster period is granted as 20 ms.
@@ -763,7 +764,7 @@ whole. A method whose reply can exceed 60 KiB needs a paged form to be called th
 - A key appears once per record, a record has at most 64 keys, and a line is at most 4096 bytes without its newline.
 - A reader ignores a key it does not know and a record whose word it does not know. Anything else is refused by name, with its line number.
 
-**The values.** A number is bare: decimal, or hex with `0x` (an address and a hash). A real number is its shortest round-trip form (`-1.5`, `-0.0`, `1e300`). A number the device does not give is an absent key, never a placeholder, and a real number that is NaN or infinite is absent too. An enum word is bare: `running`, `retrying`, `off`, `unknown`, `known`, `dimensionless`, `value`, `control`, `action`, `number`, `range`, `switch`, `text`, `colour_array`, `three_axes`, `true`, `false`. A text option the device does not set is the bare word `none`; the quoted `"none"` is the text `none`.
+**The values.** A number is bare: decimal, or hex with `0x` (an address and a hash). A real number is its shortest round-trip form (`-1.5`, `-0.0`, `1e300`). A number the device does not give is an absent key, never a placeholder, and a real number that is NaN or infinite is absent too. An enum word is bare: `running`, `retrying`, `off`, `unknown`, `known`, `dimensionless`, `value`, `control`, `action`, `number`, `range`, `switch`, `text`, `colour_array`, `three_axes`, `events`, `true`, `false`. A text option the device does not set is the bare word `none`; the quoted `"none"` is the text `none`.
 
 **The records.**
 

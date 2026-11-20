@@ -744,7 +744,8 @@ it knows, one `Item` at a time (`engine/core/src/description.rs`):
 | Group | `.group("name")` on each part of a vector, with the axis in `.field(...)` | not a vector |
 
 The readings are `number`, `range` (a settable number within its bounds), `switch`, `text`,
-`colour array` and `three axes`. A contract declares a method's reading with
+`colour array`, `three axes` and `events` (timestamped records with sequence numbers, such as a
+line's edges, kept by the device and not consumed by a read). A contract declares a method's reading with
 `#[method(N, reading = switch)]`, and the kind with `#[contract("tag", version = 1, kind = "sensor")]`
 (`sensor`, `actuator`, `camera`, `power`, `system`, `light`, `bus`, `compute` or `other`). A control's
 `method` is the one that sets it; a value's is the one that reads it. Neither the kind nor the
