@@ -691,6 +691,14 @@ fn the_description_of_each_device_on_the_walk_board_is_measured_against_the_boun
             continue;
         };
         let manifest = host.manifest(info.index).expect("manifest");
+        // The stream layouts as the daemon sends them, so the size measured is the real one.
+        let layouts = lemnos_wire::stream_layout_text(
+            &host
+                .stream_layouts(info.index)
+                .iter()
+                .map(|(name, buffers, bytes)| (name.as_str(), *buffers, *bytes))
+                .collect::<Vec<_>>(),
+        );
         let identity = lemnos_wire::Identity {
             label: &info.label,
             bus: info.bus.as_deref().unwrap_or(""),
@@ -700,6 +708,7 @@ fn the_description_of_each_device_on_the_walk_board_is_measured_against_the_boun
             jobs: "",
             streams: "",
             refusal: lemnos_wire::refusal::Refusal::NONE,
+            stream_layouts: &layouts,
         };
         let mut bytes = vec![0; 1 << 20];
         let len = lemnos_wire::encode_description(&manifest, &description, &identity, &mut bytes)

@@ -627,7 +627,10 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
   last field of the block: a reader from before it skips it, and a host from before it sends none.
   Then `jobs` and `streams`, and `refusal` (a `Tail` u8, the refusal number of the device frame: 0 none,
   1 absent, 2 failed; a host from before it sends none, which reads as 0). `refusal` is a trailing
-  field, so it is left out of the core hash, as the rest of the identity is.
+  field, so it is left out of the core hash, as the rest of the identity is. Then `stream_layouts`
+  (a `Tail` str: `NAME BUFFERS BUFFER_BYTES` for each stream the board declares, joined by a
+  space; a host from before it sends none, which reads as empty). It is beside `streams`, not in
+  it, so a reader of `streams` from before it reads that text as it did; it moves no hash.
 - A `u16` contract count, then one block per contract: its `kind` str (`sensor`, `actuator`, ...,
   `other`).
 - A `u16` item count, then one block per item, in the order of the items above: `reading` u8 (0

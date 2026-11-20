@@ -126,7 +126,9 @@ What a client can do:
 - **`open_stream_held(device, name, hold, platform)`**, and `open_stream_writable_held`: as
   `open_stream` (or `open_stream_writable`), and the consumer declares it holds at most `hold` of the
   stream's buffers at once. The host reserves that many for it and bounds
-  its own holds by it; a declaration that does not fit is refused at attach, by name. It needs the
+  its own holds by it; a declaration that does not fit is refused at attach, by name. The
+  stream's buffer count, to size the declaration from, is in `describe(device)`'s
+  `stream_layouts`, before any attach. It needs the
   service's `consumer-hold` part; an older service is refused by name, never sent the declaration. See
   [The consumer's declared hold](streams.md#the-consumers-declared-hold).
 - **`packages`**: what became of the daemon's driver packages.
@@ -154,6 +156,11 @@ what a generic panel shows, with no code for the device:
   driver names none, the host gives the board's own words for what the device uses, as `role name`
   (`line gpio7`, `pixels light`), joined by commas: the host knows them, the driver need not;
 - `state` (`Option<u8>`: 0 running, 1 retrying, 2 off) and `reason`;
+- `stream_layouts`: each stream the board declares for the device, with its `buffers` and
+  `buffer_bytes` (`stream_layout(name)` finds one). It is the board file's, read when the service
+  starts, and it is there whether or not anything is attached or allocated, and whether or not the
+  device runs: a consumer sizes the hold it declares to `open_stream_held` from it, with one attach.
+  Empty from a host from before it;
 - for each item, `unit_state` (`UnitState`: known, dimensionless or unknown; an empty unit is unknown
   from a host that sends no state), `reading` (`Option<Reading>`), `step`, `warn_low`, `warn_high` and `group`, next to
   its `unit`, `exponent`, `min` and `max`, and `real_min`, `real_max` and `real_step` (`Option<f64>`:

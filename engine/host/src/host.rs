@@ -3351,6 +3351,20 @@ impl Host {
             .collect()
     }
 
+    /// Each stream the board declares for `device`: its name, buffer count and buffer size, as the
+    /// board file gives them. Nothing needs to be attached or allocated. Empty for an unknown device.
+    #[must_use]
+    pub fn stream_layouts(&self, device: u32) -> Vec<(String, u32, u32)> {
+        let Some(slot) = self.inner.slot(device) else {
+            return Vec::new();
+        };
+        slot.spec
+            .streams
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.buffers, spec.buffer_bytes))
+            .collect()
+    }
+
     /// Asks a running device to describe itself. The ask takes its turn on the device's lane like
     /// a call does: while the driver is in a tick or another call it waits, up to the call
     /// deadline, and is never answered `BUSY` for that. A driver that doesn't come back in time

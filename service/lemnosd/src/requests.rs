@@ -13,7 +13,7 @@ use lemnos_wire::{
     CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
     PLANE_LENGTH_BYTES, REPLY_OVERHEAD, RunningJob, Tail, VERSION, WireError, check_parts, decode,
     encode_description, feature, handle_descriptors, package_mode, running_jobs_text,
-    stream_standby_text,
+    stream_layout_text, stream_standby_text,
 };
 
 use crate::Core;
@@ -390,6 +390,15 @@ impl Client {
                     .collect::<Vec<_>>(),
             ),
             refusal: wire_refusal(&info.state),
+            stream_layouts: &stream_layout_text(
+                &self
+                    .core
+                    .host
+                    .stream_layouts(device)
+                    .iter()
+                    .map(|(name, buffers, bytes)| (name.as_str(), *buffers, *bytes))
+                    .collect::<Vec<_>>(),
+            ),
         };
         let mut bytes = vec![0; DESCRIPTION_MAX];
         match encode_description(&manifest, &description, &identity, &mut bytes) {
