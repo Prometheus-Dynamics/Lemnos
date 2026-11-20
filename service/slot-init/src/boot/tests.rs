@@ -2889,3 +2889,65 @@ fn a_bind_that_fails_is_refused_by_name_and_the_boot_completes() {
     );
     assert_eq!(fake.last(), "switch_root newroot");
 }
+
+/// Sets the size in `default.txt`'s directory entry on the board's boot partition to 55 bytes: the
+/// firmware's own file on a partition Lemnos was added to (`--add-to`, Route A), which the add never
+/// replaces. The volume is otherwise whole, so only the records are refused, as on such a disk.
+fn hand_written_default_txt(board: &Board) {
+    let mut image = std::fs::read(board.node()).unwrap();
+    let at = image
+        .windows(11)
+        .position(|w| w == b"DEFAULT TXT")
+        .expect("default.txt's entry");
+    image[at + 28..at + 32].copy_from_slice(&55u32.to_le_bytes());
+    std::fs::write(board.node(), image).unwrap();
+}
+
+/// Route A: the firmware started a trial (its tryboot flag), on a boot partition whose
+/// `default.txt` is the existing system's. The records are refused by name, and the line says what
+/// happens: this boot is the trial, with no attempt taken and no confirm possible, and the next
+/// restart starts the default. Never "booting the default".
+#[test]
+fn a_firmware_trial_on_a_boot_partition_without_our_records_says_it_runs_unconfirmable() {
+    let board = Board::new();
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    hand_written_default_txt(&board);
+    let (fake, _why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert!(
+        logs.contains("the firmware started a trial, and the trial records can't be read"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("record file is 55 bytes, expected 1024: the image is not ours"),
+        "{logs}"
+    );
+    assert!(logs.contains("can't be confirmed"), "{logs}");
+    assert!(
+        logs.contains("the next restart starts the default"),
+        "{logs}"
+    );
+    assert!(
+        !logs
+            .lines()
+            .any(|l| l.contains("can't be read") && l.ends_with("; booting the default")),
+        "{logs}"
+    );
+}
+
+/// With no tryboot flag, unreadable records lose nothing: the default boots, and the line says so.
+#[test]
+fn unreadable_trial_records_with_no_firmware_trial_boot_the_default() {
+    let board = Board::new();
+    hand_written_default_txt(&board);
+    let (fake, _why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert!(
+        logs.contains("the trial records can't be read") && logs.contains("; booting the default"),
+        "{logs}"
+    );
+    assert!(!logs.contains("the firmware started a trial"), "{logs}");
+}

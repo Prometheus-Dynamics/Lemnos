@@ -205,6 +205,22 @@ pub fn boot(ops: &dyn Ops, env: &Env) -> String {
     boot.run(&cmdline)
 }
 
+/// The line for trial records that can't be read. Before the firmware starts a trial nothing is lost:
+/// the default boots. Once it has started one (its tryboot flag is set), this boot is that trial: no
+/// attempt can be taken, and a confirm writes the same records, so the trial can't be confirmed; the
+/// flag lasts one boot, so the next restart starts the default.
+fn unreadable(what: &str, error: &dyn core::fmt::Display, started: bool) -> String {
+    if started {
+        format!(
+            "the firmware started a trial, and {what} can't be read: {error}; it runs with no attempt \
+             taken and can't be confirmed (confirming writes those records); the next restart starts \
+             the default"
+        )
+    } else {
+        format!("{what} can't be read: {error}; booting the default")
+    }
+}
+
 impl Boot<'_> {
     fn log(&self, message: &str) {
         self.ops.log(&format!("slot-init: {message}"));
@@ -974,25 +990,22 @@ impl Boot<'_> {
         if self.layout.ubi.is_some() || self.record_form() != Record::Tryboot || self.held() {
             return None;
         }
+        let flag = fs::read(self.env.at(tryboot::TRIAL_FLAG)).unwrap_or_default();
+        let started = flag == [0, 0, 0, 1];
         let mut raw = match self.open_raw() {
             Ok(raw) => raw,
             Err(error) => {
-                self.log(&format!(
-                    "the trial records can't be read: {error}; booting the default"
-                ));
+                self.log(&unreadable("the trial records", &error, started));
                 return None;
             }
         };
         let trial = match raw.trial() {
             Ok(trial) => trial,
             Err(error) => {
-                self.log(&format!(
-                    "the trial can't be read: {error}; booting the default"
-                ));
+                self.log(&unreadable("the trial", &error, started));
                 return None;
             }
         };
-        let flag = fs::read(self.env.at(tryboot::TRIAL_FLAG)).unwrap_or_default();
         let counter = trial.as_ref().map(|t| t.attempts);
         match tryboot_pass(trial.is_some(), flag == [0, 0, 0, 1], counter) {
             TryPass::Boot => None,

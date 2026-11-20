@@ -1340,6 +1340,13 @@ partition: it adds this system's boot files beside that system's, so a slot can 
 firmware's tryboot, and it changes nothing the existing system boots from. It works on a dump of the
 partition, a regular file. A block device is refused: the caller writes the result back.
 
+A slot started this way runs once and can't be confirmed. Confirming writes the default pointer, and the
+default is the existing system's `default.txt`, which the add never makes ours, so the record write is
+refused by name. On that boot slot-init logs that the firmware started a trial whose records can't be
+read, that no attempt is taken and it can't be confirmed, and that the next restart starts the default.
+To make a slot the board's own, the board gets a full image (`lemnos-ctl boot-partition` without
+`--add-to`).
+
 ```text
 lemnos-ctl boot-partition --add-to DUMP --layout-of BOARD [--socs DIR] --slot ID --payload DIR
     [--firmware DIR] [--set N] [--replace-trial] --out FILE --changed-out LIST --undo-out UNDO

@@ -225,7 +225,8 @@ impl Restarter {
 /// `lemnos-slot-init` takes one from it before each trial boot (see `docs/slots.md`).
 #[derive(Debug, Clone)]
 pub struct Tryboot {
-    /// Where the boot partition is mounted: its boot files are read there.
+    /// The board file's `boot` setting. The tryboot record never reads or writes through a mount:
+    /// its pointers and records are raw sectors on `node`, so the boot partition need not be mounted.
     pub boot: PathBuf,
     /// The boot partition's block node, where the pointers and the trial record are written, one
     /// raw sector at a time: found from the boot chain's source and the board's `boot_sources`
