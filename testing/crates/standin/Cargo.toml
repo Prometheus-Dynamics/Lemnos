@@ -1,0 +1,28 @@
+[package]
+name = "lemnos-standin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "A real lemnosd for a consumer's tests: the service and every built-in driver, in-process, over a simulated board"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The service as it ships, less the Orion precheck: a consumer's tests have no Orion.
+lemnosd = { path = "../../../service/lemnosd", default-features = false }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-sim = { path = "../../../backends/sim" }
+
+[dev-dependencies]
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-contract-raw-bus = { path = "../../../contracts/raw-bus" }
+lemnos-contract-light = { path = "../../../contracts/light" }
+lemnos-contract-fan = { path = "../../../contracts/fan" }
+lemnos-contract-temperature = { path = "../../../contracts/temperature" }
+lemnos-hal = { path = "../../../engine/hal", features = ["std"] }

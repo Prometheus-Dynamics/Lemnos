@@ -73,6 +73,22 @@ through the back end's `input` stream instead, and checks the refusal of one len
 (`bad-config`). `LEMNOS_TEST_NO_DMA_HEAP=1` makes the host look as if it has no usable heap, so a
 dma-heap machine runs the memfd path, as a CI runner without a heap does. Nothing else changes.
 
+### A consumer's tests: `lemnos-standin`
+
+A program that uses Lemnos tests against a real service with `lemnos-standin`
+(`testing/crates/standin`), taken as a dev-dependency at a locked revision. `StandIn::start(devices, sim)`
+starts `lemnosd::Service` in-process, with every built-in driver the daemon ships, over a simulated board
+the test builds (`SimBoard`: lines, PWM channels, buses, streams). `socket()` is where the test's client
+connects. `wait_running` waits for named devices. `restart()` is a lemnosd restart: the same board,
+socket and simulated parts, and nothing the service held. `FakeSys` lays out an hwmon fan and thermal
+zones for the drivers that read `/sys`. `start_in(dir, ...)` puts the socket in a directory the test made,
+next to that tree. What the hardware was told is read back from the simulated parts (`MockLine::level`,
+`MockPwm::current`, `FanFiles::pwm1`). A light's colours are read through the service, with `current`.
+
+It is the real service, so it refuses what a board refuses: a claim another client holds is `BUSY`, and
+an address the board file doesn't allow is `NOT_PERMITTED`. `testing/crates/standin/tests/consumer_shapes.rs`
+shows each use. The Orion precheck is left out (no Orion in a consumer's test).
+
 ### The boundary rules
 
 `scripts/check-boundaries.sh` fails when:
