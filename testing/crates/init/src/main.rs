@@ -1114,7 +1114,14 @@ fn wedge(c: &mut Checks) {
     // The stand-in PIO driver stays: the wedged module above depends on it.
 }
 
-/// The USB gadget end to end: the daemon's root phase, FunctionFS on dummy_hcd, and a host.
+/// The daemon's privileged start under the packaged unit's capability bounding set, on a runtime
+/// directory made as the service manager makes it, reached by its user and group.
+fn unit(c: &mut Checks) {
+    c.check(run(&["/lemnos-unit-check"]) == 0, "lemnos_unit_check");
+}
+
+/// The USB gadget end to end: the daemon's root phase (under the unit's bounding set with the
+/// gadget drop-in), FunctionFS on dummy_hcd, and a host.
 fn gadget(c: &mut Checks) {
     usb_ready(c);
     c.check(run(&["/lemnos-gadget-check"]) == 0, "lemnos_gadget_check");
@@ -1324,6 +1331,12 @@ const STANZAS: &[Stanza] = &[
         block: Some(BLOCK_PLAIN),
         needs: &[],
         run: wedge,
+    },
+    Stanza {
+        name: "unit",
+        block: None,
+        needs: &[],
+        run: unit,
     },
     Stanza {
         name: "gadget",
