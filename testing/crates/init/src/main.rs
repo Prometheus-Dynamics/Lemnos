@@ -661,22 +661,25 @@ fn lend_raw(c: &mut Checks) {
     c.check(bind_block(PISP) == 0, "PiSP block bound for the lend check");
     c.check(bind_csi2() == 0, "receiver bound for the lend check");
     c.check(
-        run(&[
-            "/lemnos-lend-raw-check",
-            "/lemnosd",
-            CSI2,
-            PISP,
-            cma_heap(),
-        ]) == 0,
+        run(&["/lemnos-lend-raw-check", "/lemnosd", CSI2, PISP, cma_heap()]) == 0,
         "lemnos-lend-raw-check",
     );
-    c.check(put(CSI2_UNBIND, CSI2) == 0, "receiver unbound after the lend check");
-    c.check(put(UNBIND, PISP) == 0, "PiSP block unbound after the lend check");
+    c.check(
+        put(CSI2_UNBIND, CSI2) == 0,
+        "receiver unbound after the lend check",
+    );
+    c.check(
+        put(UNBIND, PISP) == 0,
+        "PiSP block unbound after the lend check",
+    );
     c.check(
         forget_override(PISP) == 0 && forget_override(CSI2) == 0,
         "lend check overrides cleared",
     );
-    c.check(unload("lemnos") == 0, "module unloaded after the lend check");
+    c.check(
+        unload("lemnos") == 0,
+        "module unloaded after the lend check",
+    );
 }
 
 /// The receiver's stuck-DMA check.

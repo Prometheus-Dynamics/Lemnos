@@ -28,7 +28,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::thread;

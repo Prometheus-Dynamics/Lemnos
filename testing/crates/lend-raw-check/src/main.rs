@@ -44,7 +44,9 @@ use lemnos_core::{Encode, Writer};
 use lemnos_daemon_ready::Ready;
 use lemnos_driver_pisp::be::BackEnd;
 use lemnos_driver_pisp::format::{compute_stride_align, formats};
-use lemnos_driver_pisp::uapi::{BayerOrder as Order, BeCcmConfig, BeTilesConfig, ImageFormatConfig, Wire};
+use lemnos_driver_pisp::uapi::{
+    BayerOrder as Order, BeCcmConfig, BeTilesConfig, ImageFormatConfig, Wire,
+};
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::dma_buf;
 use lemnos_linux_sys::test_csi2::{FE_ACK, FS, fire};
@@ -96,7 +98,11 @@ struct Report {
 
 impl Report {
     fn check(&mut self, ok: bool, what: impl std::fmt::Display) {
-        let _ = writeln!(std::io::stdout(), "{} {what}", if ok { "ok  " } else { "FAIL" });
+        let _ = writeln!(
+            std::io::stdout(),
+            "{} {what}",
+            if ok { "ok  " } else { "FAIL" }
+        );
         self.failures += u32::from(!ok);
     }
 }
@@ -222,7 +228,10 @@ fn output_for(output: &mut FrameStream, identity: u64) -> Result<HeldFrame, Stri
         if frame.identity() == identity {
             return Ok(frame);
         }
-        step("release an output frame of another job", output.release(frame))?;
+        step(
+            "release an output frame of another job",
+            output.release(frame),
+        )?;
     }
 }
 
@@ -249,7 +258,13 @@ fn configuration(input: ImageFormatConfig) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut Report) -> Result<(), String> {
+fn run(
+    lemnosd: &Path,
+    receiver: &str,
+    back_end: &str,
+    heap: &str,
+    report: &mut Report,
+) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("lemnos-lend-raw-{}", std::process::id()));
     step("make the directory", std::fs::create_dir_all(&dir))?;
     let (daemon, socket) = start_daemon(lemnosd, &dir, &board(heap, receiver, back_end))?;
@@ -265,14 +280,26 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
     let be_index = index(BACK_END)?;
 
     // The receiver makes frames of the layout the link gives.
-    let mut camera = step("open the receiver", client.open::<dyn CameraReceiver>(RECEIVER))?;
-    let layout = step("configure the receiver", camera.configure(LINK, Packing::Packed))?;
-    report.check(layout.size == FRAME_BYTES, format_args!("the receiver's frame is {} bytes", layout.size));
+    let mut camera = step(
+        "open the receiver",
+        client.open::<dyn CameraReceiver>(RECEIVER),
+    )?;
+    let layout = step(
+        "configure the receiver",
+        camera.configure(LINK, Packing::Packed),
+    )?;
+    report.check(
+        layout.size == FRAME_BYTES,
+        format_args!("the receiver's frame is {} bytes", layout.size),
+    );
 
     // The back end takes a lent input, and its output is NV12 at the input's size.
     let mut isp = step("open the back end", client.open::<dyn CameraIsp>(BACK_END))?;
     let info = step("info", isp.info())?;
-    report.check(info.input_lend, "the back end takes a lent input (info.input_lend)");
+    report.check(
+        info.input_lend,
+        "the back end takes a lent input (info.input_lend)",
+    );
     let mut input = ImageFormatConfig {
         width: LINK.width as u16,
         height: LINK.height as u16,
@@ -303,14 +330,20 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
     )?;
     report.check(
         out_layout.size <= OUTPUT_BYTES,
-        format_args!("the output frame is {} bytes, in a {OUTPUT_BYTES}-byte buffer", out_layout.size),
+        format_args!(
+            "the output frame is {} bytes, in a {OUTPUT_BYTES}-byte buffer",
+            out_layout.size
+        ),
     );
 
     // Only the lent input's stream exists: there is no `input` for a copy to go into.
     let no_input = client
         .open_stream_writable(be_index, "input", Arc::new(LinuxStreams))
         .is_err();
-    report.check(no_input, "the back end has no input stream: a copy has nowhere to go");
+    report.check(
+        no_input,
+        "the back end has no input stream: a copy has nowhere to go",
+    );
 
     let platform = Arc::new(LinuxStreams);
     let mut cfg = step(
@@ -325,7 +358,10 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
     let outputs = output.layout().buffers;
     let bytes = configuration(input)?;
     for buffer in 0..configs {
-        step("write a configuration", cfg.write(buffer, 0, &bytes).map_err(|e| format!("{e:?}")))?;
+        step(
+            "write a configuration",
+            cfg.write(buffer, 0, &bytes).map_err(|e| format!("{e:?}")),
+        )?;
     }
     step("start the back end", isp.start())?;
 
@@ -387,7 +423,9 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
     }
     report.check(
         same_inode == LENT_JOBS,
-        format_args!("each lent job queued its frame's own dma-buf, by inode ({same_inode} of {LENT_JOBS})"),
+        format_args!(
+            "each lent job queued its frame's own dma-buf, by inode ({same_inode} of {LENT_JOBS})"
+        ),
     );
     report.check(
         lent_ok == LENT_JOBS,
@@ -397,7 +435,10 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
     let counters = step("counters", isp.counters())?;
     report.check(
         counters.lent >= LENT_JOBS as u64,
-        format_args!("the back end counts {} lent jobs (at least {LENT_JOBS} posted)", counters.lent),
+        format_args!(
+            "the back end counts {} lent jobs (at least {LENT_JOBS} posted)",
+            counters.lent
+        ),
     );
 
     // Phase 2: the consumer holds two frames while more are read, and some of those are lent too.
@@ -439,9 +480,14 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
     }
     report.check(
         refilled == 0,
-        format_args!("no frame was delivered into a buffer the consumer holds ({refilled} into held buffers)"),
+        format_args!(
+            "no frame was delivered into a buffer the consumer holds ({refilled} into held buffers)"
+        ),
     );
-    report.check(ordered, "the frames read while held carry sequences that only go up");
+    report.check(
+        ordered,
+        "the frames read while held carry sequences that only go up",
+    );
     report.check(
         frames.bytes(&held_a) == a_bytes.as_slice() && frames.bytes(&held_b) == b_bytes.as_slice(),
         "the two held frames read back byte for byte as they were taken",
@@ -456,13 +502,21 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
     );
     report.check(
         lent_while_held >= HOLD_READS / 2,
-        format_args!("frames were lent while two were held ({lent_while_held} of {})", HOLD_READS / 2),
+        format_args!(
+            "frames were lent while two were held ({lent_while_held} of {})",
+            HOLD_READS / 2
+        ),
     );
     step("release a held frame", frames.release(held_a))?;
     step("release a held frame", frames.release(held_b))?;
 
     stop.store(true, Ordering::Release);
-    let fired = step("the fire thread", firing.join().map_err(|_| "the fire thread panicked".to_string()))?;
+    let fired = step(
+        "the fire thread",
+        firing
+            .join()
+            .map_err(|_| "the fire thread panicked".to_string()),
+    )?;
     report.check(fired.is_ok(), "the fake receiver fired its frames");
     let _ = camera.stop();
     let _ = isp.stop();
@@ -473,11 +527,20 @@ fn run(lemnosd: &Path, receiver: &str, back_end: &str, heap: &str, report: &mut 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [lemnosd, receiver, back_end, heap] = args.as_slice() else {
-        eprintln!("usage: lemnos-lend-raw-check <lemnosd> <receiver node name> <back end node name> <heap node>");
+        let _ = writeln!(
+            std::io::stderr(),
+            "usage: lemnos-lend-raw-check <lemnosd> <receiver node name> <back end node name> <heap node>"
+        );
         return ExitCode::from(2);
     };
     let mut report = Report { failures: 0 };
-    if let Err(error) = run(Path::new(lemnosd), receiver, back_end, heap_name(heap), &mut report) {
+    if let Err(error) = run(
+        Path::new(lemnosd),
+        receiver,
+        back_end,
+        heap_name(heap),
+        &mut report,
+    ) {
         let _ = writeln!(std::io::stdout(), "FAIL {error}");
         report.failures += 1;
     }
