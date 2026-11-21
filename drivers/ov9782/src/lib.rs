@@ -93,7 +93,9 @@
 //! that cannot count, a read that failed), a receiver that is itself failing, a mode whose frames
 //! come on demand (`ModeEntry::free_running`; every mode here runs free), a stream that has shown no
 //! frame since `start` (a receiver with nothing to write into counts none), or a count that went
-//! down (the receiver started again). The watch reads no register and allocates nothing. A receiver with no
+//! down (the receiver started again). The count the sensor starts from is read as it is programmed, before
+//! its first frame can come, so frames that land before the first watch still count as frames since `start`.
+//! The watch reads no register and allocates nothing. A receiver with no
 //! buffer to receive into answers `None` ("cannot say now"), so a consumer that holds every buffer
 //! is not taken for a silent sensor (`camera.receiver` `frame_starts`).
 //!
@@ -250,6 +252,10 @@ struct Watch {
     due: u64,
     /// The count at the last watch, `None` when there is no baseline.
     last: Option<u64>,
+    /// The count the sensor was started from, read as it is programmed and before it can stream.
+    /// The first watch that sees a count measures it from here, so frames that come before the
+    /// first watch are frames since the start, not a baseline. `None` when the read failed.
+    before: Option<u64>,
     /// When the count last differed from the one before (the watch that saw it), or the baseline.
     since: u64,
     /// The count has moved since the sensor was last programmed: the sensor and the receiver are
@@ -266,8 +272,15 @@ struct Watch {
 
 impl Watch {
     /// One watch of a known count. Returns how long it has stood still, 0 when it moved or
-    /// this is the baseline.
+    /// this is the baseline. The first known count after the sensor was programmed is measured
+    /// from [`Watch::before`] when that was read, so a count that moved before this watch counts.
     fn observe(&mut self, now_ns: u64, count: u64) -> u64 {
+        if self.last.is_none()
+            && let Some(before) = self.before.take()
+        {
+            self.last = Some(before);
+            self.since = now_ns;
+        }
         match self.last {
             Some(last) if count == last => now_ns.saturating_sub(self.since),
             Some(last) if count > last => {
@@ -1227,6 +1240,11 @@ impl Ov9782 {
             return Err(Status::NO_DEVICE);
         }
         self.powered = true;
+        // The count the sensor starts from: read before the first write that can start the stream.
+        self.watch.before = match self.read_starts() {
+            Some(Ok(Some(starts))) => Some(starts.count),
+            _ => None,
+        };
 
         self.reg(MODE_SELECT, STANDBY)?;
         self.reg(

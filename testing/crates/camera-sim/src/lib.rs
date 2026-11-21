@@ -254,6 +254,22 @@ pub fn sensor_step() -> u64 {
     start
 }
 
+/// Makes the simulated sensor stop sending behind its driver: the mode select is written 0 on the
+/// sensor's bus, as a register write from outside the driver would be, and nothing else changes.
+/// The driver keeps its own state, so it still believes the sensor streams. Its silence watch is
+/// what must notice (and restart the sensor). Sensor starts stepped while silent make no frames.
+pub fn silence_sensor() {
+    world(|w| {
+        let target = w
+            .buses
+            .get_mut("i2c-10")
+            .and_then(|bus| bus.targets.get_mut(&0x60))
+            .expect("the simulated sensor is on i2c-10 at 0x60");
+        target.regs.insert(0x0100, 0);
+        w.streaming = false;
+    });
+}
+
 /// The frame period in ns, from the model's registers (at least 1).
 #[must_use]
 pub fn period_ns() -> u64 {

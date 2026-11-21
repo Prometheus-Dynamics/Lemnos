@@ -120,6 +120,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`A25.md`](../testing/board-runs/A25.md) | Hints: a device bound within a second of the kernel announcing it, for each kind of name; a flapping port |
 | [`B18.md`](../testing/board-runs/B18.md) | `raw-bus`: its closed-by-default policy on a real I2C, SPI, GPIO and PWM |
 | [`G9-RAW-CLAIM.md`](../testing/board-runs/G9-RAW-CLAIM.md) | `raw-bus` claims on a real GPIO line and PWM channel: the safe state after a killed client, and kernel line edges read and subscribed to. Untested on board |
+| [`SILENCE.md`](../testing/board-runs/SILENCE.md) | A sensor that stops sending behind its driver is seen silent and restarted: the sim half runs in `chain_silence`; the board step (a write to the sensor's mode select behind the driver) is not built; untested on board |
 | [`G11-BUS-LISTS.md`](../testing/board-runs/G11-BUS-LISTS.md) | `raw-bus` transfer lists on a real I2C bus and SPI device: a repeated start, per-transfer settings and chip select. Untested on board |
 | [`A35.md`](../testing/board-runs/A35.md) | Reading a chip the kernel's own driver holds, with its configuration left unchanged |
 

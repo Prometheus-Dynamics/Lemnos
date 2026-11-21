@@ -70,8 +70,13 @@ struct Rig {
 
 impl Rig {
     fn new(mode: u16) -> Self {
+        Self::starting(mode, 0)
+    }
+
+    /// A sensor started while the receiver's count stands at `count`.
+    fn starting(mode: u16, count: u64) -> Self {
         let rx: &'static Rx = Box::leak(Box::new(Rx {
-            count: AtomicU64::new(0),
+            count: AtomicU64::new(count),
             answer: AtomicU8::new(COUNTING),
             failing: AtomicBool::new(false),
         }));
@@ -310,10 +315,22 @@ fn a_stream_that_has_shown_no_frame_since_start_is_not_judged() {
     // No frame has been counted since the start: a receiver with nothing to write into counts none.
     let mut r = Rig::new(MODE_720);
     assert_eq!(r.until_silent(120_000 * MS), None);
-    // Likewise a count that stands at a value from the first read and never moves.
-    let mut r = Rig::new(MODE_720);
-    r.rx.count.store(40, Ordering::SeqCst);
+    // Likewise a count that stood at 40 when the sensor started and never moves.
+    let mut r = Rig::starting(MODE_720, 40);
     assert_eq!(r.until_silent(120_000 * MS), None);
+}
+
+#[test]
+fn frames_that_come_before_the_first_watch_count_as_frames_since_the_start() {
+    // The sensor starts at a count of 0. Three frames come before the watch's first tick (the sim
+    // makes them straight after the stream starts): they are frames since the start, so the watch
+    // judges the sensor once they stop, not a baseline it can never judge from.
+    let mut r = Rig::new(MODE_720);
+    r.rx.count.store(3, Ordering::SeqCst);
+    assert!(
+        r.until_silent(120_000 * MS).is_some(),
+        "the frames before the first watch were taken for a baseline"
+    );
 }
 
 #[test]

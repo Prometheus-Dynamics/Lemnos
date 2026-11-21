@@ -1399,10 +1399,13 @@ fn streaming_sensor(receiver: Option<Dev<dyn CameraReceiver>>) -> (Ov9782, Bus) 
     (s, bus)
 }
 
-/// A receiver linked to a sensor, answering `frame_starts` from `script`.
+/// A receiver linked to a sensor, answering `frame_starts` from `script`. The sensor's start reads
+/// the count first, before it streams (see `Watch::before`): that read answers "cannot say" here,
+/// so `script` is what the sensor reads after it starts.
 fn counting_receiver(script: Vec<Result<Option<FrameStarts>>>) -> Dev<dyn CameraReceiver> {
+    let answers: std::collections::VecDeque<_> = std::iter::once(Ok(None)).chain(script).collect();
     let router: &'static Starts = Box::leak(Box::new(Starts {
-        script: std::sync::Mutex::new(script.into()),
+        script: std::sync::Mutex::new(answers),
         source: Ok(b"ov9782 10-0036"),
     }));
     lemnos_core::Bound::new(lemnos_core::LocalCaller::new(router, 0, 0))
