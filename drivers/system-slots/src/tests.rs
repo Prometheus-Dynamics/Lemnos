@@ -1368,7 +1368,7 @@ fn keys_are_read_as_the_package_keys_are() {
 /// A fake board tree under `dir` for the boot disk: the SD controller's device-tree node, one whole
 /// disk under it with its partition 1 (the boot partition, holding `image`), and the boot chain's
 /// source. Returns the partition's device node.
-fn boot_tree(dir: &Path, image: &[u8]) -> PathBuf {
+pub(crate) fn boot_tree(dir: &Path, image: &[u8]) -> PathBuf {
     let sys = dir.join("sys");
     let node = sys.join("firmware/devicetree/base/soc/mmc@7e202000");
     fs::create_dir_all(&node).unwrap();
@@ -1392,18 +1392,21 @@ fn boot_tree(dir: &Path, image: &[u8]) -> PathBuf {
     dev.join("mmcblk0p1")
 }
 
-/// The boot roots the driver reads while a test holds them: restored when dropped.
-struct TestRoots;
+/// The boot roots the driver reads while a test holds them: restored when dropped. The roots are
+/// one for the process, so the tests that set them take turns.
+pub(crate) struct TestRoots(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
 impl TestRoots {
-    fn set(dir: &Path) -> Self {
+    pub(crate) fn set(dir: &Path) -> Self {
+        static TURN: Mutex<()> = Mutex::new(());
+        let turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *lemnos_slot_store::boot_node::TEST_ROOTS.lock().unwrap() =
             Some(lemnos_slot_store::boot_node::BootRoots {
                 chosen: dir.join("chosen"),
                 sys: dir.join("sys"),
                 dev: dir.join("dev"),
             });
-        Self
+        Self(turn)
     }
 }
 
@@ -2280,7 +2283,7 @@ fn on_nand_the_uboot_record_is_a_volume_replaced_whole() {
 
 /// A board view the test sets: each device's id, origin, whether it is bound, and its health.
 #[derive(Default)]
-struct View(Vec<(&'static str, Origin, bool, Health)>);
+pub(crate) struct View(pub(crate) Vec<(&'static str, Origin, bool, Health)>);
 
 impl BoardView for View {
     fn each(&self, f: &mut dyn FnMut(BoardDevice<'_>)) {
@@ -4904,7 +4907,8 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "trial_block",
             "trial_block_text",
             "trial_block_detail",
-            "grow_state"
+            "grow_state",
+            "foreign"
         ]
     );
     let a = json.get("last_attempt").unwrap();

@@ -390,6 +390,59 @@ pub fn seeded(seed: u64, len: usize) -> Vec<u8> {
     out
 }
 
+/// The slot [`route_a_system`] adds: an id of ours.
+pub const ROUTE_A_SLOT: &str = "ours-1";
+
+/// [`foreign_system`] with slot [`ROUTE_A_SLOT`] of ours added the way an add to another system's
+/// partition adds it (route A, [`crate::bootadd::add_to`]): our bay set and records are on it, and
+/// its pointers stay the other system's 55-byte `default.txt` and `trial.txt`, so the record writer
+/// finds it is not ours. For the tests of a system started on such a disk.
+pub fn route_a_system() -> Vec<u8> {
+    use crate::bays::Layout;
+    use crate::bootimage::{Family, Fixed, Parts};
+    let parts = Parts {
+        family: Family::Tryboot,
+        layout: Layout::new([11_534_336, 1_048_576, 90_112, 4096, 4096])
+            .expect("the reference board's bays"),
+        root: vec![
+            ("slot-layout.toml", b"version = 5\n".to_vec()),
+            (
+                "config.txt",
+                b"kernel_watchdog_timeout=15\ninclude default.txt\n".to_vec(),
+            ),
+            (
+                "tryboot.txt",
+                b"kernel_watchdog_timeout=15\ninclude trial.txt\n".to_vec(),
+            ),
+        ],
+        fixed: vec![Fixed {
+            path: "overlays/README",
+            bytes: b"Generated: os_prefix applies to overlays.\n".to_vec(),
+            size: 42,
+        }],
+    };
+    let payloads: Vec<Vec<u8>> = (0..parts.layout.count())
+        .map(|i| {
+            let bay = usize::try_from(parts.layout.member_bytes(i)).expect("a bay fits memory");
+            if i == 3 {
+                b"console=serial0,115200 root=lemnos\n".to_vec()
+            } else {
+                seeded(100 + i as u64, bay - bay / 5 - 7)
+            }
+        })
+        .collect();
+    let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+    let request = crate::bootadd::Request {
+        slot: ROUTE_A_SLOT,
+        set: 0,
+        replace_trial: false,
+        payloads: &refs,
+    };
+    crate::bootadd::add_to(&parts, &foreign_system(), &request)
+        .expect("the stand-in takes a slot of ours")
+        .image
+}
+
 /// A stand-in for the boot partition of a board that runs another system, for the tests of adding
 /// to one ([`crate::bootadd`]): the geometry of the reference board's partition (161,792 sectors:
 /// FAT16, 4 sectors per cluster, two FATs of 158 sectors, 512 root entries, 40,360 clusters) holding

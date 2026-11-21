@@ -149,6 +149,10 @@ struct Boot<'a> {
     data: Option<Part>,
     data_mounted: Cell<bool>,
     data_writable: Cell<bool>,
+    /// The firmware started a trial and the boot records can't be read (route A: a slot of ours on
+    /// another system's disk, whose pointers are that system's). Nothing is written under
+    /// `board/slots` this boot: the state there is that system's (see [`Boot::state_writable`]).
+    foreign: Cell<bool>,
     boot_mounted: Cell<bool>,
     log_saved: Cell<bool>,
     /// The board serial the command line names, read once in `run` (see [`crate::machine_id`]).
@@ -198,6 +202,7 @@ pub fn boot(ops: &dyn Ops, env: &Env) -> String {
         data: None,
         data_mounted: Cell::new(false),
         data_writable: Cell::new(false),
+        foreign: Cell::new(false),
         boot_mounted: Cell::new(false),
         log_saved: Cell::new(false),
         serial: OnceCell::new(),
@@ -205,6 +210,11 @@ pub fn boot(ops: &dyn Ops, env: &Env) -> String {
     let cmdline = fs::read_to_string(env.at("proc/cmdline")).unwrap_or_default();
     boot.run(&cmdline)
 }
+
+/// The end of the route-A line: nothing under `board/slots` is written this boot, since the state
+/// there is another system's. Stable: an operator's tooling matches it (`docs/slots.md`).
+pub const STATE_UNTOUCHED: &str =
+    "state dir left untouched: nothing is written under board/slots this boot";
 
 /// The line for trial records that can't be read. Before the firmware starts a trial nothing is lost:
 /// the default boots. Once it has started one (its tryboot flag is set), this boot is that trial: no
@@ -215,7 +225,7 @@ fn unreadable(what: &str, error: &dyn core::fmt::Display, started: bool) -> Stri
         format!(
             "the firmware started a trial, and {what} can't be read: {error}; it runs with no attempt \
              taken and can't be confirmed (confirming writes those records); the next restart starts \
-             the default"
+             the default; {STATE_UNTOUCHED}"
         )
     } else {
         format!("{what} can't be read: {error}; booting the default")
@@ -272,9 +282,15 @@ impl Boot<'_> {
         }
     }
 
+    /// Whether the slots state under `board/slots` may be written: the data partition is writable,
+    /// and the boot records are ours (see [`Boot::foreign`]).
+    fn state_writable(&self) -> bool {
+        self.data_writable.get() && !self.foreign.get()
+    }
+
     /// Writes a marker under `board/slots`; a read-only data partition just logs it.
     fn mark(&self, name: &str, text: &str) {
-        if !self.data_writable.get() {
+        if !self.state_writable() {
             return;
         }
         let _ = fs::create_dir_all(self.layout.state_dir());
@@ -288,7 +304,7 @@ impl Boot<'_> {
             return;
         }
         let text = self.ops.kernel_log();
-        if self.data_mounted.get() && self.data_writable.get() {
+        if self.data_mounted.get() && self.state_writable() {
             let path = self.layout.marker(DATA_LOG);
             let _ = fs::create_dir_all(self.layout.state_dir());
             match store::replace(&path, text.as_bytes()) {
@@ -462,7 +478,7 @@ impl Boot<'_> {
         if !self.data_mounted.get() || !valid_id(slot) {
             return self.rescue(why);
         }
-        if self.data_writable.get() {
+        if self.state_writable() {
             let mut meta = Meta::load(&self.layout, slot);
             let failures = meta.get("FAILURES").parse::<u32>().unwrap_or(0) + 1;
             meta.set("FAILED", "yes");
@@ -519,7 +535,7 @@ impl Boot<'_> {
                     return self.rescue(&format!("{why}; couldn't write the trial: {error}"));
                 }
                 self.mark("fallbacks", &format!("{}\n", fallbacks + 1));
-                if self.data_writable.get() {
+                if self.state_writable() {
                     state.trial = id.clone();
                     state.error = format!("slot {slot} can't start: {why}");
                     let _ = fs::remove_file(self.layout.marker("trial-keeps-default"));
@@ -554,7 +570,7 @@ impl Boot<'_> {
         self.log(&format!(
             "{LOADER_FILES_REASON}: slot {default}; this is slot {slot}, on trial"
         ));
-        if !self.data_writable.get() {
+        if !self.state_writable() {
             return;
         }
         if self.layout.installed(default) {
@@ -895,7 +911,7 @@ impl Boot<'_> {
                 "{why}; couldn't point the default at {previous}: {error}"
             ));
         }
-        if self.data_writable.get() {
+        if self.state_writable() {
             let mut meta = Meta::load(&self.layout, slot);
             meta.set("FAILED", "yes");
             meta.set(
@@ -996,6 +1012,7 @@ impl Boot<'_> {
         let mut raw = match self.open_raw() {
             Ok(raw) => raw,
             Err(error) => {
+                self.foreign.set(started);
                 self.log(&unreadable("the trial records", &error, started));
                 return None;
             }
@@ -1003,6 +1020,7 @@ impl Boot<'_> {
         let trial = match raw.trial() {
             Ok(trial) => trial,
             Err(error) => {
+                self.foreign.set(started);
                 self.log(&unreadable("the trial", &error, started));
                 return None;
             }
@@ -1361,11 +1379,13 @@ impl Boot<'_> {
                 ));
             }
             self.log(&format!("starting the default slot {slot} although it is not signed by a key this board trusts"));
-            let _ = store::replace(
-                &self.layout.marker(BOOT_UNVERIFIED),
-                format!("{slot}\n").as_bytes(),
-            );
-        } else {
+            if self.state_writable() {
+                let _ = store::replace(
+                    &self.layout.marker(BOOT_UNVERIFIED),
+                    format!("{slot}\n").as_bytes(),
+                );
+            }
+        } else if self.state_writable() {
             let _ = fs::remove_file(self.layout.marker(BOOT_UNVERIFIED));
         }
         let manifest_path = self.layout.manifest(&slot);

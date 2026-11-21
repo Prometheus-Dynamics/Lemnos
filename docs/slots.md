@@ -1347,6 +1347,34 @@ read, that no attempt is taken and it can't be confirmed, and that the next rest
 To make a slot the board's own, the board gets a full image (`lemnos-ctl boot-partition` without
 `--add-to`).
 
+**Nothing is written under the other system's `/data/board/slots`.** The slots state on the data
+partition is the existing system's, often in this system's own format (an older build of it), and that
+system reads it on its next boot. So on such a boot:
+
+- slot-init writes no `trial-init`, no `trial-started`, no `booted`, no boot-unverified mark, no meta or
+  state, and on the fail path no `last-failure.log`. Its record goes to the console and the kernel log
+  only. The decision is the fact the line reports: the firmware started a trial (its tryboot flag) and
+  the trial records can't be read. The line ends in fixed words an operator's tooling can match:
+
+  ```text
+  slot-init: the firmware started a trial, and the trial records can't be read: <node>: default.txt record file is 55 bytes, expected 1024: the image is not ours; it runs with no attempt taken and can't be confirmed (confirming writes those records); the next restart starts the default; state dir left untouched: nothing is written under board/slots this boot
+  ```
+
+- the `system-slots` driver decides ownership with the record writer's own test: every record and
+  pointer file is on the boot partition at the size the image builder writes (read only, through the
+  partition's node). A file missing or of another size is another system's partition. While the boot
+  records are not ours the driver writes nothing at start (no `TRIAL_ATTEMPTS` setting, no trial
+  resolution, no boot history, no crash record, no count or grow) and nothing on any tick (no good-boot
+  baseline, no slow boot-file check, no install). Every call that would write (`install`, `accept`,
+  `install-file`, `write`, `set-default`, `trial`, `confirm`, `remove`, `pin`, `set-keep`, and the
+  security switch's `apply`) is refused with `FAILED_PRECONDITION` before it reads or writes anything.
+  Reads still answer. Its health is degraded with the fixed word
+  `foreign: the boot records are not ours; the slots state here is another system's and is left untouched`,
+  `list` and `info` carry the reason as `foreign` (`""` on a board whose records are ours), and the
+  security switch's precondition lists it as `busy`. A partition that can't be read far enough to say
+  (a device fault) is `foreign-unknown`: nothing is written, and it is looked at again every 8 s and on
+  each call.
+
 ```text
 lemnos-ctl boot-partition --add-to DUMP --layout-of BOARD [--socs DIR] --slot ID --payload DIR
     [--firmware DIR] [--set N] [--replace-trial] --out FILE --changed-out LIST --undo-out UNDO

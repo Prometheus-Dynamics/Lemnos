@@ -83,6 +83,16 @@ mod attempt;
 /// The free space a live install keeps back when the board file names no `reserve_mb`.
 pub const DEFAULT_RESERVE: u64 = 2048 << 20;
 
+/// The health word while the boot records are another system's (route A: a slot added to a
+/// disk whose boot partition is the existing system's). Stable: an operator's tooling matches it.
+pub const FOREIGN: &str = "foreign: the boot records are not ours; the slots state here is another system's and is left untouched";
+
+/// The health word while the boot records can't be read far enough to say whose they are.
+pub const OWNER_UNKNOWN: &str = "foreign-unknown: the boot records can't be read to say whose they are; the slots state is left untouched until they can";
+
+/// How often an unknown owner is looked at again: the failure rule's cap.
+const OWNER_RETRY_NS: u64 = 8_000_000_000;
+
 #[cfg(test)]
 mod bay_fixture;
 pub mod boot;
@@ -107,6 +117,8 @@ pub mod uboot;
 #[cfg(test)]
 mod offline_tests;
 #[cfg(test)]
+mod route_a_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fs;
@@ -129,6 +141,7 @@ pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys, signature_check}
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 use json::quoted;
 use lemnos_slot_store::boot_node;
+use lemnos_slot_store::boot_raw::Ownership;
 use lemnos_slot_store::boots;
 use lemnos_slot_store::disk::Table;
 use lemnos_slot_store::security;
@@ -161,6 +174,11 @@ pub struct SystemSlots {
     /// record's own check, `BootRecord::config_refusal`). `None` when it can. The driver still runs: its
     /// health says so, `list` carries it, and the writes that need the file are refused by name.
     config_refusal: Option<&'static str>,
+    /// Whether the boot records are this system's (`BootRecord::ownership`). While they are not, the
+    /// slots state here is another system's: nothing is written at start, on a tick or by a call,
+    /// and every call that would write is refused (see [`SystemSlots::ours`]). `Ours` and `NotOurs`
+    /// are kept; `Unknown` is looked at again on each tick and call.
+    owner: Ownership,
     /// When the record's trial updates are next looked at (monotonic ns), while the board has a record
     /// that can say no.
     trial_watch_ns: u64,
@@ -421,6 +439,10 @@ fn guard_check(
         let mut record = record
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Another system's boot records: its state is never read to move a pointer or written.
+        if record.ownership() != Ownership::Ours {
+            return Ok(None);
+        }
         let note = boot_guard::check(&layout, &node, record.as_mut(), restart)?;
         // The U-Boot form's restart count is cleared before an intended restart too, with a write only
         // when it is not already 0 (see `count`).
@@ -467,6 +489,7 @@ impl SystemSlots {
     ) -> Self {
         let layout_has_ubi = layout.ubi.is_some();
         let config_refusal = record.config_refusal();
+        let owner = record.ownership();
         let mut slots = Self {
             layout,
             record,
@@ -513,8 +536,13 @@ impl SystemSlots {
             grow: None,
             trial_updates: TrialUpdates::Available,
             config_refusal,
+            owner,
             trial_watch_ns: 0,
         };
+        if !slots.ours() {
+            // Another system's state: nothing here is ours to clear.
+            return slots;
+        }
         slots.clear_interrupted();
         // The one thing the board's own record keeps of an install is that a restart cut it short.
         let kept = State::load(&slots.layout);
@@ -524,6 +552,35 @@ impl SystemSlots {
         // What a sender left in `.incoming` belongs to no install now.
         let _ = install::reset_incoming(&slots.layout);
         slots
+    }
+
+    /// Whether the boot records are ours, so the slots state may be written. An unknown answer is
+    /// looked at again each time; `Ours` and `NotOurs` are kept.
+    fn ours(&mut self) -> bool {
+        if matches!(self.owner, Ownership::Unknown(_)) {
+            self.owner = self.record.ownership();
+        }
+        self.owner == Ownership::Ours
+    }
+
+    /// `FAILED_PRECONDITION` while the boot records are not ours: a call that would write the slots
+    /// state is refused before it reads or writes anything.
+    fn writable(&mut self) -> Result<()> {
+        if self.ours() {
+            Ok(())
+        } else {
+            Err(Status::FAILED_PRECONDITION)
+        }
+    }
+
+    /// Why the slots state is not written, `""` when the boot records are ours: `list` and `info`
+    /// carry it as `foreign`.
+    fn foreign_text(&self) -> String {
+        match &self.owner {
+            Ownership::Ours => String::new(),
+            Ownership::NotOurs(why) => format!("{FOREIGN}: {why}"),
+            Ownership::Unknown(why) => format!("{OWNER_UNKNOWN}: {why}"),
+        }
     }
 
     /// An install the service's restart cut short: its work goes, and the board's state says so.
@@ -1111,6 +1168,9 @@ impl SystemSlots {
         // `grown-unconfirmed` (the kernel accepted the resize and its view has not shown it after the
         // bound, with the sizes seen in bytes), or `none` (finished, or `grow_data` is false).
         grow_info(self.grow.as_ref(), &mut out);
+        // Appended last: why the slots state is left untouched, `""` when the boot records are ours.
+        out.push_str(",\"foreign\":");
+        quoted(&self.foreign_text(), &mut out);
         out.push('}');
         out
     }
@@ -1222,6 +1282,7 @@ impl SystemSlots {
             ("state", state.state.as_str()),
             ("error", state.error.as_str()),
             ("config_refusal", self.config_refusal.unwrap_or("")),
+            ("foreign", &self.foreign_text()),
         ] {
             quoted(key, &mut out);
             out.push(':');
@@ -1560,6 +1621,12 @@ impl Lifecycle for SystemSlots {
     /// Down while the firmware refuses to clear the boot count: the words name the wait, and the
     /// driver keeps retrying (see [`count::Uncleared`]). Degraded, not failed: restarts still work.
     fn health(&self) -> Health {
+        // Before all else: while the boot records are another system's, nothing here is written.
+        match self.owner {
+            Ownership::Ours => {}
+            Ownership::NotOurs(_) => return Health::Degraded(FOREIGN),
+            Ownership::Unknown(_) => return Health::Degraded(OWNER_UNKNOWN),
+        }
         // The first word: a config.txt that cannot select the default is the one thing the boot needs.
         if let Some(why) = self.config_refusal {
             return Health::Degraded(why);
@@ -1604,6 +1671,13 @@ impl Lifecycle for SystemSlots {
     /// that waits is looked at again each second, until it is confirmed or falls back. The
     /// indicator is brought up to date on each tick too.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        if !self.ours() {
+            // Another system's state, or one that can't be read yet: nothing is written. An unknown
+            // answer is looked at again at the failure rule's cap.
+            self.indicate();
+            return matches!(self.owner, Ownership::Unknown(_))
+                .then(|| now_ns.saturating_add(OWNER_RETRY_NS));
+        }
         self.pull();
         self.indicate();
         let install = self
@@ -1761,7 +1835,10 @@ impl Lifecycle for SystemSlots {
         if cfg.get("require_signed").is_some() || cfg.get("security_view").is_some() {
             return Err(Status::INVALID_ARGUMENT);
         }
-        slots.report_policy();
+        let ours = slots.ours();
+        if ours {
+            slots.report_policy();
+        }
         if let Some(mb) = cfg.int("reserve_mb") {
             slots.reserve = u64::try_from(mb).map_err(|_| Status::INVALID_ARGUMENT)? << 20;
         }
@@ -1770,12 +1847,14 @@ impl Lifecycle for SystemSlots {
         }
         // The attempts a fallback trial gets are the board's, so the default slot's loader can
         // take them from its own settings.
-        let _ = store::write_setting(
-            &slots.layout,
-            "TRIAL_ATTEMPTS",
-            &slots.policy.attempts.to_string(),
-        );
-        slots.resolve_at_start();
+        if ours {
+            let _ = store::write_setting(
+                &slots.layout,
+                "TRIAL_ATTEMPTS",
+                &slots.policy.attempts.to_string(),
+            );
+            slots.resolve_at_start();
+        }
         if let Some(keep) = cfg.int("boots_keep") {
             slots.boots_keep = usize::try_from(keep).map_err(|_| Status::INVALID_ARGUMENT)?;
         }
@@ -1792,8 +1871,10 @@ impl Lifecycle for SystemSlots {
                 slots.layout.data.clone(),
             ));
         }
-        slots.record_boot();
-        slots.arrive_at_start();
+        if ours {
+            slots.record_boot();
+            slots.arrive_at_start();
+        }
         Ok(slots)
     }
 
@@ -1854,12 +1935,16 @@ impl Lifecycle for SystemSlots {
 /// running slot verified under it.
 impl SecurityPrecondition for SystemSlots {
     fn apply(&mut self, on: bool) -> Result<()> {
+        self.writable()?;
         // The boot side's mark: written durably (the marker is a file and its directory is synced).
         signing::set_security(&self.layout, on).map_err(|_| Status::IO)
     }
 
     fn precondition(&mut self, on: bool, into: &mut [u8]) -> Result<usize> {
         let mut lines = Vec::new();
+        if !self.ours() {
+            lines.push(format!("busy: {}", self.foreign_text()));
+        }
         let state = self.state();
         if self.install.is_some() {
             lines.push("busy: an install is running".to_string());
@@ -1920,10 +2005,12 @@ impl Slots for SystemSlots {
     }
 
     fn install(&mut self, size: u64, pin: bool, keep_old: bool) -> Result<JobId> {
+        self.writable()?;
         self.begin(size, pin, keep_old, None)
     }
 
     fn accept(&mut self, size: u64) -> Result<()> {
+        self.writable()?;
         if self.install.is_some() {
             return Err(Status::BUSY);
         }
@@ -1938,6 +2025,7 @@ impl Slots for SystemSlots {
     }
 
     fn install_file(&mut self, name: &str, pin: bool, keep_old: bool) -> Result<JobId> {
+        self.writable()?;
         if self.install.is_some() {
             return Err(Status::BUSY);
         }
@@ -1952,6 +2040,7 @@ impl Slots for SystemSlots {
     }
 
     fn write(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        self.writable()?;
         let Some(mut install) = self.install.take() else {
             return Err(Status::NOT_FOUND);
         };
@@ -1967,6 +2056,7 @@ impl Slots for SystemSlots {
     }
 
     fn set_default(&mut self, id: &str, force: bool) -> Result<()> {
+        self.writable()?;
         self.installed(id)?;
         self.fits_board(id)?;
         self.fits_signature(id)?;
@@ -1995,6 +2085,7 @@ impl Slots for SystemSlots {
     }
 
     fn trial(&mut self, id: &str, keep_default: bool, keep_old: bool, force: bool) -> Result<()> {
+        self.writable()?;
         self.installed(id)?;
         self.fits_board(id)?;
         self.fits_signature(id)?;
@@ -2043,10 +2134,12 @@ impl Slots for SystemSlots {
     }
 
     fn confirm(&mut self) -> Result<()> {
+        self.writable()?;
         self.confirm_as(resolve::By::Call(self.calling))
     }
 
     fn remove(&mut self, id: &str) -> Result<()> {
+        self.writable()?;
         if !valid_id(id) {
             return Err(Status::INVALID_ARGUMENT);
         }
@@ -2066,6 +2159,7 @@ impl Slots for SystemSlots {
     }
 
     fn pin(&mut self, id: &str, pinned: bool) -> Result<()> {
+        self.writable()?;
         self.installed(id)?;
         let mut meta = Meta::load(&self.layout, id);
         meta.set("PINNED", if pinned { "yes" } else { "no" });
@@ -2073,6 +2167,7 @@ impl Slots for SystemSlots {
     }
 
     fn set_keep(&mut self, keep: u32) -> Result<()> {
+        self.writable()?;
         store::set_keep(&self.layout, keep).map_err(|_| Status::IO)
     }
 }
