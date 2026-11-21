@@ -84,15 +84,26 @@ if [[ "$systemd_major" -ge 254 ]]; then
     echo "$verified" >&2
     exit 1
   }
-  # The base unit with one fragment inserted after its [Service] line: the unit a board with that
-  # fragment runs. Each is checked as one unit, against its additions.
+  # The base unit with one fragment inserted at the end of its [Service] section (before [Install]),
+  # after the base's own settings: a drop-in's `ExecStart=` reset then clears the base's one, as it
+  # does on a board. The unit a board with that fragment runs. Each is checked as one unit, against
+  # its additions.
   for entry in "${fragments[@]}"; do
     fragment="${entry%%|*}"
     combined="${entry#*|}"
     [[ -f "$fragment" ]] || { echo "packaging: $fragment is missing"; exit 1; }
     awk -v frag="$fragment" '
+      function emit(   line) {
+        while ((getline line < frag) > 0) {
+          if (line ~ /^\[Service\]/ || line ~ /^#/) continue
+          sub(/^ExecStart=\/usr\/bin\/[^ ]*/, "ExecStart=/bin/true", line)   # the stand-in, as for the base
+          print line
+        }
+        close(frag)
+      }
+      /^\[Install\]/ && !done { emit(); done = 1 }
       { print }
-      /^\[Service\]/ { while ((getline line < frag) > 0) if (line !~ /^\[Service\]/ && line !~ /^#/) print line }
+      END { if (!done) emit() }
     ' "$work/lemnosd.service" >"$work/$combined"
     sed -i '/^$/d' "$work/$combined"
   done

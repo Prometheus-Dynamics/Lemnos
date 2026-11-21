@@ -110,6 +110,23 @@ match. `scripts/check-packaging-files.py` fails by the board's name when a board
 has a `system-slots` device whose dirs the drop-in does not grant. Without the drop-in, or with the dirs
 still root's, the driver's health says `state-unwritable` and no slot is installed, switched or confirmed.
 
+A board with a PWM channel needs no unit change. The daemon stays `lemnos` under the base unit, unchanged: its
+`ExecStart`, bounding set, capabilities and `ProtectKernelTunables=yes` are as shipped. The PWM channels are granted by
+the root phase instead. Before the drop, lemnosd's `pwm channels` step (`service/lemnosd/src/privilege.rs`,
+`pwm::grant` in `backends/linux/src/pwm.rs`) takes each channel the non-refused devices name: it exports the channel if
+the kernel has not, waits a bounded time for `pwmM`, then gives `period`, `duty_cycle`, `polarity` and `enable` to
+root:`lemnos`, mode 0660. `export` and `unexport` stay root's, so the daemon never exports or unexports, and a channel
+stays exported for the boot. A channel or chip that cannot be granted refuses its device by name in the state; the
+daemon keeps running and the others start. The write that follows is limited by the kernel's permission check on those
+four attributes: the daemon has no `CAP_DAC_OVERRIDE`.
+
+Why no `ReadWritePaths=`: the first design added `ReadWritePaths=-/sys/devices/platform`, on the source reading that
+`ProtectKernelTunables=yes` makes `/sys` read-only. A real systemd 259.10 unit in a QEMU guest (`testing/board-runs/PWM-SYSFS-UNIT.md`)
+mounted `/sys` **rw** with the base unit alone, and the granted write succeeded without any drop-in. The cause is in the
+source: the apivfs `/sys MOUNT_BIND_SYSFS` entry wins the duplicate merge and is skipped when `/sys` is already a mount
+point, so it is never made read-only (`src/core/namespace.c`: `apivfs_table` line 146, `drop_duplicates` 1047,
+`mount_bind_sysfs` 1433, `MOUNT_SKIPPED` 2403, `make_read_only` 2147). systemd 258 has the same code.
+
 The boot partition is reached another way: its node stays root's (group `disk` on a board), and the
 daemon's root phase opens it before the drop. It opens it read-only first and reads whose records are on
 it; only when they are this system's does it open it read-write and keep that descriptor for the driver.

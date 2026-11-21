@@ -247,6 +247,32 @@ impl LinuxBoard {
         self.node(need, I2C)
     }
 
+    /// The root phase's grant for a PWM need (`pwmchipN:CHANNEL` or `pwm:NODE:CHANNEL`), before the
+    /// drop: the channel is exported if needed, and its attributes go to `owner` (see `pwm::grant`).
+    /// `Ok(None)` for a need that is not a PWM channel.
+    ///
+    /// # Errors
+    /// The chip or channel that cannot be granted, by name and reason.
+    pub fn grant_pwm_before_drop(
+        &self,
+        need: &str,
+        owner: (u32, u32),
+    ) -> core::result::Result<Option<String>, String> {
+        let Some((chip, channel)) = self.pwm_node(need) else {
+            return Ok(None);
+        };
+        pwm::grant(&chip, channel, owner)
+            .map(|real| {
+                Some(format!(
+                    "{}: granted to {}:{}",
+                    real.display(),
+                    owner.0,
+                    owner.1
+                ))
+            })
+            .map_err(|e| format!("{}:{channel}: not granted: {e}", chip.display()))
+    }
+
     /// The watchdog node a name means: `watchdog:<node>` by its device-tree node, or the numbered
     /// `watchdogN` as it is. Resolved now, not kept: the kernel may renumber.
     fn watchdog_path(&self, need: &str) -> Option<PathBuf> {

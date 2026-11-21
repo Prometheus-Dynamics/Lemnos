@@ -60,10 +60,49 @@ pub struct Step {
 /// The privileged start's steps, in order. The one built in step makes the socket's directory,
 /// owned by the daemon's user, so the socket is made in it after the drop. The USB gadgets are not
 /// a step: the root phase forks the gadget helper for them, which keeps root (see `gadget::spawn`).
-pub const STEPS: &[Step] = &[Step {
-    name: "runtime directory",
-    run: runtime_directory,
-}];
+pub const STEPS: &[Step] = &[
+    Step {
+        name: "runtime directory",
+        run: runtime_directory,
+    },
+    Step {
+        name: "pwm channels",
+        run: pwm_channels,
+    },
+];
+
+/// The PWM channels the board names, granted before the drop (`pwm::grant`): each channel is
+/// exported if the kernel has not, and its four attributes go to root:`lemnos` mode 0660, so the
+/// daemon's user can write them. Only the channels a non-refused device uses. A channel that cannot
+/// be granted refuses that device by name; the daemon keeps running and the others start.
+fn pwm_channels(cx: &Context<'_>) -> io::Result<Refusals> {
+    use std::io::Write;
+    let linux = lemnos_linux::LinuxBoard::new();
+    let mut refused = Vec::new();
+    for device in cx.board.devices.iter().filter(|d| d.refused.is_none()) {
+        for (need, name) in &device.uses {
+            match linux.grant_pwm_before_drop(name, (0, cx.gid)) {
+                Ok(Some(line)) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "lemnosd: root phase: {}: {need}: {line}",
+                        device.id
+                    );
+                }
+                Ok(None) => {}
+                Err(why) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "lemnosd: root phase: {}: {need}: {why}",
+                        device.id
+                    );
+                    refused.push((device.id.clone(), format!("{need}: {why}")));
+                }
+            }
+        }
+    }
+    Ok(refused)
+}
 
 /// The drivers that take a step as root before the drop, by driver name: each is given its
 /// device's settings and returns one line for the log. The slots and security drivers open the boot

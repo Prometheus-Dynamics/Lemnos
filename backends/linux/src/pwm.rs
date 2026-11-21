@@ -189,6 +189,45 @@ impl RawPwm for SysfsPwm {
     }
 }
 
+/// The attributes of a channel the daemon writes after its drop, and so the ones the root phase
+/// hands to the daemon's group. `export` and `unexport` stay root's: the daemon never exports.
+const GRANTED: [&str; 4] = ["period", "duty_cycle", "polarity", "enable"];
+
+/// The root phase's grant of one channel (`pwmchipN:CHANNEL`), before the drop. Exports it if the
+/// kernel has not, waits for `pwmM` to appear (bounded), then gives the four attributes the daemon
+/// writes to `owner` with mode 0660. Nothing else on the chip is touched. Returns the channel's real
+/// directory, which is where the unit's `ReadWritePaths=` must reach.
+///
+/// # Errors
+///
+/// A chip directory that is not there, an export the kernel refused, a channel that does not
+/// appear within the bound, or an attribute that cannot be handed over. The caller refuses the device
+/// by name; the daemon keeps running.
+pub(crate) fn grant(chip: &Path, channel: u32, owner: (u32, u32)) -> io::Result<PathBuf> {
+    use std::os::unix::fs::{PermissionsExt, chown};
+    if !chip.is_dir() {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    let root = chip.join(format!("pwm{channel}"));
+    if !root.exists() {
+        fs::write(chip.join("export"), channel.to_string())?;
+        let mut tries = 0;
+        while !root.exists() {
+            tries += 1;
+            if tries == EXPORT_TRIES {
+                return Err(io::ErrorKind::NotFound.into());
+            }
+            std::thread::sleep(EXPORT_WAIT);
+        }
+    }
+    for name in GRANTED {
+        let path = root.join(name);
+        chown(&path, Some(owner.0), Some(owner.1))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660))?;
+    }
+    fs::canonicalize(&root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +392,132 @@ mod tests {
         assert_eq!(n, 0);
         drop(pwm);
         std::fs::remove_dir_all(chip).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, symlink};
+
+    /// A scratch directory, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("pwm-grant-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn channel(chip: &Path, n: u32) {
+        let root = chip.join(format!("pwm{n}"));
+        fs::create_dir_all(&root).unwrap();
+        for name in ["period", "duty_cycle", "polarity", "enable", "capture"] {
+            fs::write(root.join(name), "0").unwrap();
+        }
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().mode() & 0o777
+    }
+
+    /// The owner the test runs as: a file the test makes is the user's own, so handing it to that
+    /// owner needs no privilege.
+    fn me(dir: &Path) -> (u32, u32) {
+        let meta = fs::metadata(dir).unwrap();
+        (meta.uid(), meta.gid())
+    }
+
+    #[test]
+    fn the_root_phase_grants_exactly_the_named_channel_and_nothing_else() {
+        let scratch = Scratch::new("exact");
+        let chip = scratch.0.join("pwmchip0");
+        fs::create_dir_all(&chip).unwrap();
+        fs::write(chip.join("export"), "").unwrap();
+        fs::write(chip.join("unexport"), "").unwrap();
+        channel(&chip, 0);
+        channel(&chip, 1);
+        let owner = me(&scratch.0);
+
+        let real = grant(&chip, 1, owner).unwrap();
+        assert_eq!(real, fs::canonicalize(chip.join("pwm1")).unwrap());
+        for name in GRANTED {
+            assert_eq!(mode(&chip.join("pwm1").join(name)), 0o660, "{name}");
+        }
+        // The channel it did not name, and the chip's own files, keep the mode they had.
+        for name in ["period", "duty_cycle", "polarity", "enable", "capture"] {
+            assert_ne!(mode(&chip.join("pwm0").join(name)), 0o660, "pwm0/{name}");
+        }
+        assert_ne!(mode(&chip.join("pwm1").join("capture")), 0o660);
+        assert_ne!(mode(&chip.join("unexport")), 0o660);
+        assert_ne!(mode(&chip.join("export")), 0o660);
+    }
+
+    #[test]
+    fn an_absent_channel_is_exported_then_granted() {
+        let scratch = Scratch::new("export");
+        let chip = scratch.0.join("pwmchip0");
+        fs::create_dir_all(&chip).unwrap();
+        fs::write(chip.join("export"), "").unwrap();
+        // The kernel's export makes pwm2; the test stands in for it after the write.
+        let made = chip.clone();
+        let writer = std::thread::spawn(move || {
+            while fs::read_to_string(made.join("export"))
+                .unwrap_or_default()
+                .is_empty()
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            channel(&made, 2);
+        });
+        let owner = me(&scratch.0);
+        let result = grant(&chip, 2, owner);
+        writer.join().unwrap();
+        result.unwrap();
+        assert_eq!(fs::read_to_string(chip.join("export")).unwrap(), "2");
+        assert_eq!(mode(&chip.join("pwm2/enable")), 0o660);
+    }
+
+    #[test]
+    fn a_channel_the_kernel_never_makes_is_refused_within_the_bound() {
+        let scratch = Scratch::new("never");
+        let chip = scratch.0.join("pwmchip0");
+        fs::create_dir_all(&chip).unwrap();
+        fs::write(chip.join("export"), "").unwrap();
+        let owner = me(&scratch.0);
+        let error = grant(&chip, 5, owner).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_chip_that_is_not_there_is_refused_by_name() {
+        let scratch = Scratch::new("nochip");
+        let owner = me(&scratch.0);
+        let error = grant(&scratch.0.join("pwmchip9"), 1, owner).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn the_grant_reports_the_real_directory_behind_a_chip_symlink() {
+        let scratch = Scratch::new("link");
+        let real = scratch.0.join("devices/platform/soc/pwm/pwm/pwmchip2");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("export"), "").unwrap();
+        channel(&real, 1);
+        let class = scratch.0.join("class");
+        fs::create_dir_all(&class).unwrap();
+        symlink(&real, class.join("pwmchip2")).unwrap();
+        let owner = me(&scratch.0);
+        let found = grant(&class.join("pwmchip2"), 1, owner).unwrap();
+        assert_eq!(found, fs::canonicalize(real.join("pwm1")).unwrap());
     }
 }

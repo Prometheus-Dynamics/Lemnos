@@ -3,10 +3,9 @@
 //! `/proc`, the unit's runtime directory, a private `/tmp` and `/var/tmp` (`PrivateTmp=yes`) and its
 //! `ReadWritePaths=`. With `ProtectKernelTunables=yes`, the paths of systemd's tunables tables are
 //! read-only ([`TUNABLES`]: `/proc/sys` and its neighbours, `/sys/kernel/debug`, `/sys/kernel/tracing`),
-//! each bound onto itself first when it is not a mount, as the service manager does; `/sys` itself is
-//! left as it is mounted, read-write per mount, which is what systemd 259 leaves it (seen on 259.10 and
-//! on the image's systemd: the unit's own mountinfo reads `/sys rw`, `/proc/sys ro`). With
-//! `ProtectControlGroups=yes`, `/sys/fs/cgroup` is read-only.
+//! each bound onto itself first when it is not a mount, as the service manager does. `/sys` itself is left
+//! writable as it is mounted (systemd 258 and 259 skip it; see `writable`). With `ProtectControlGroups=yes`,
+//! `/sys/fs/cgroup` is read-only.
 //!
 //! What it does not carry out: `ProtectHome=` (the guest has no home directories), `ProtectProc=`,
 //! and the other settings that hide rather than make read-only. A write the unit refuses is refused
@@ -87,8 +86,8 @@ fn mounts() -> Result<Vec<(String, String)>, String> {
 }
 
 /// Whether a mount at `point` is left writable: under a writable path, or under `/dev`, `/proc` or
-/// `/sys`, except the tunables table with the tunables protected and `/sys/fs/cgroup` with the
-/// control groups protected.
+/// `/sys`, except the tunables table with the tunables protected, and `/sys/fs/cgroup` with the control
+/// groups protected. `/sys` itself is never made read-only here (see the comment in the body).
 fn writable(point: &str, writable: &[String], tunables: bool, cgroups: bool) -> bool {
     if writable.iter().any(|w| under(point, w)) {
         return true;
@@ -99,6 +98,13 @@ fn writable(point: &str, writable: &[String], tunables: bool, cgroups: bool) -> 
     if under(point, "/sys/fs/cgroup") {
         return !cgroups;
     }
+    // `/sys` is not made read-only under ProtectKernelTunables=yes, in systemd 258 and 259, though its table
+    // names it MOUNT_READ_ONLY. The apivfs table's `/sys MOUNT_BIND_SYSFS` (namespace.c:146) is the one the
+    // duplicate merge keeps (drop_duplicates, namespace.c:1047; mount modes sort by enum, 13 before 16), and
+    // mount_bind_sysfs is a NOP when /sys is already a mount point (namespace.c:1433), which it always is in
+    // the namespace: the entry is MOUNT_SKIPPED (namespace.c:2403), and make_read_only only flips MOUNT_APPLIED
+    // entries (namespace.c:2147). Observed: a real systemd 259.10 unit in a QEMU guest mounts /sys rw under
+    // ProtectKernelTunables=yes (testing/board-runs/PWM-SYSFS-UNIT.md).
     under(point, "/dev") || under(point, "/proc") || under(point, "/sys")
 }
 
@@ -220,10 +226,18 @@ mod tests {
         assert!(writable("/proc", &open, true, true));
         assert!(!writable("/proc/sys", &open, true, true));
         assert!(writable("/proc/sys", &open, false, true));
-        // systemd 259 leaves /sys as mounted under ProtectKernelTunables=yes.
+        // systemd 258 and 259 leave /sys writable under ProtectKernelTunables=yes (see `writable`): the
+        // apivfs MOUNT_BIND_SYSFS entry is skipped when /sys is already a mount point. Observed on 259.10 in a guest.
         assert!(writable("/sys", &open, true, true));
         assert!(writable("/sys/kernel/config", &open, true, true));
-        assert!(writable("/sys/kernel/config/usb_gadget", &open, true, true));
+        assert!(writable(
+            "/sys/devices/platform/x/power/control",
+            &open,
+            true,
+            true
+        ));
+        assert!(writable("/sys", &open, false, true));
+        // The tunables table's own entries are separate mounts, applied and read-only.
         assert!(!writable("/sys/kernel/debug", &open, true, true));
         assert!(!writable("/sys/kernel/tracing", &open, true, true));
         assert!(!writable("/sys/fs/cgroup", &open, true, true));
