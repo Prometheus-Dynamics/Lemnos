@@ -6,7 +6,7 @@ use super::*;
 use lemnos_contract_self_test::SelfTest;
 use lemnos_core::{RefusalKind, RefusalSink};
 use lemnos_measure::test_alloc::{Counting, allocations};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[global_allocator]
@@ -41,6 +41,8 @@ struct Device {
     record: bool,
     /// Every timeout read fails.
     read_fails: bool,
+    /// What the device reports as time left (`timeleft`), if it has the attribute.
+    time_left: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,7 @@ impl Fake {
             now: 0,
             record: true,
             read_fails: false,
+            time_left: None,
         })))
     }
 
@@ -112,7 +115,7 @@ impl RawWatchdog for Fake {
     }
 
     fn time_left(&mut self) -> Option<u32> {
-        None
+        self.with(|d| d.time_left)
     }
 }
 
@@ -589,5 +592,285 @@ fn a_failing_feed_names_its_failed_count_and_the_applied_period() {
     assert_eq!(
         lemnos_core::Lifecycle::figures(&dog),
         lemnos_core::Figures::NONE
+    );
+}
+
+// The open, handover and close paths on the real node, and the feed's retry and deadline rules.
+
+/// A scratch tree under the temp dir, removed on drop: `dev/` for nodes, `sys/` for sysfs.
+struct Tree(PathBuf);
+
+impl Tree {
+    fn new(name: &str) -> Self {
+        let root =
+            std::env::temp_dir().join(format!("hw-watchdog-mut-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("dev")).unwrap();
+        Self(root)
+    }
+    fn dev(&self) -> String {
+        self.0.join("dev").display().to_string()
+    }
+    fn sys(&self) -> String {
+        self.0.join("sys").display().to_string()
+    }
+    fn path(&self, relative: &str) -> PathBuf {
+        self.0.join(relative)
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Starts a driver from `entries` as the daemon does, and returns it with the refusal it gave, if any.
+fn start_from(
+    needs: HwWatchdogNeeds,
+    entries: &[(&str, ConfigValue<'_>)],
+) -> (
+    core::result::Result<HwWatchdog, Status>,
+    Option<(RefusalKind, String)>,
+) {
+    let seen = std::sync::Mutex::new(None);
+    let sink = |kind: RefusalKind, reason: core::fmt::Arguments<'_>| {
+        *seen.lock().unwrap() = Some((kind, reason.to_string()));
+    };
+    let config = Config::new(entries).with_refusals(RefusalSink::new(&sink));
+    let result = HwWatchdog::start(needs, &config);
+    (result, seen.into_inner().unwrap())
+}
+
+#[test]
+fn a_failed_feed_retry_is_held_to_the_timeleft_the_device_reports() {
+    // Every feed fails and the device says 2 s are left. The backoff runs 250 ms, 500 ms, 1 s, then
+    // 2 s and 4 s, but each wait is held to half the 2 s left: 1 s from the third failure on.
+    let fake = Fake::new(15);
+    fake.with(|d| {
+        d.feed_fails_from = Some(0);
+        d.time_left = Some(2);
+    });
+    let mut dog = driver(&fake, 15);
+    let mut at = 0;
+    let mut waits = Vec::new();
+    for _ in 0..5 {
+        let due = tick_at(&fake, &mut dog, at).unwrap();
+        waits.push(due - at);
+        at = due;
+    }
+    assert_eq!(waits, [250 * MS, 500 * MS, S, S, S]);
+}
+
+#[test]
+fn a_failed_feed_retry_is_held_to_the_deadline_of_the_applied_timeout_not_the_requested() {
+    // The device rounds 15 s up to 22 s. The last good feed at 0 sets the deadline at 22 s, and from
+    // 11 s every feed fails. Each wait is the backoff, or half the time left to 22 s when that is less.
+    // Measured from 15 s (the requested timeout) the fourth wait would be 1.125 s, not 2 s.
+    let fake = Fake::new(60);
+    fake.with(|d| d.applies = Some(22));
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    fake.with(|d| d.feed_fails_from = Some(11 * S));
+    let mut at = 11 * S;
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        let due = tick_at(&fake, &mut dog, at).unwrap();
+        waits.push(due - at);
+        at = due;
+    }
+    assert_eq!(
+        waits,
+        [250 * MS, 500 * MS, S, 2 * S, 3_625 * MS, 1_812_500_000],
+    );
+}
+
+#[test]
+fn a_failed_timeout_request_is_not_asked_again_before_its_retry_is_due() {
+    // The first request fails at 0, so its retry waits the 250 ms backoff. A tick at 100 ms asks nothing.
+    let fake = Fake::new(60);
+    fake.with(|d| d.set_failures = 1);
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    tick_at(&fake, &mut dog, 100 * MS);
+    assert_eq!(
+        fake.with(|d| d.sets.len()),
+        1,
+        "no request before the retry is due"
+    );
+}
+
+#[test]
+fn a_failed_timeout_request_waits_the_backoff_for_its_second_retry() {
+    // Fails at 0 and at 250 ms. The second retry waits 500 ms, to 750 ms: a tick at 500 ms asks nothing.
+    let fake = Fake::new(60);
+    fake.with(|d| d.set_failures = 2);
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    tick_at(&fake, &mut dog, 250 * MS);
+    tick_at(&fake, &mut dog, 500 * MS);
+    assert_eq!(
+        fake.with(|d| d.sets.clone()),
+        vec![(0, 15), (250 * MS, 15)],
+        "the third request waits until 750 ms"
+    );
+    tick_at(&fake, &mut dog, 750 * MS);
+    assert_eq!(fake.with(|d| d.sets.len()), 3);
+}
+
+#[test]
+fn opening_an_absent_node_refuses_it_and_creates_nothing() {
+    let tree = Tree::new("absent");
+    let dev = tree.dev();
+    let sys = tree.sys();
+    let entries = [
+        ("device", ConfigValue::Str("watchdog0")),
+        ("dev_root", ConfigValue::Str(&dev)),
+        ("sys_root", ConfigValue::Str(&sys)),
+    ];
+    let (result, refusal) = start_from(HwWatchdogNeeds { watchdog: None }, &entries);
+    assert_eq!(result.err(), Some(Status::NOT_FOUND));
+    assert_eq!(refusal.unwrap().0, RefusalKind::Absent);
+    assert!(
+        !tree.path("dev/watchdog0").exists(),
+        "the node is opened, never created"
+    );
+}
+
+#[test]
+fn opening_a_node_keeps_what_it_holds() {
+    let tree = Tree::new("keep");
+    let dev = tree.dev();
+    let sys = tree.sys();
+    fs::write(tree.path("dev/watchdog0"), b"keep").unwrap();
+    let entries = [
+        ("device", ConfigValue::Str("watchdog0")),
+        ("dev_root", ConfigValue::Str(&dev)),
+        ("sys_root", ConfigValue::Str(&sys)),
+    ];
+    let (result, _) = start_from(HwWatchdogNeeds { watchdog: None }, &entries);
+    assert!(result.is_ok());
+    assert_eq!(fs::read(tree.path("dev/watchdog0")).unwrap(), b"keep");
+}
+
+#[test]
+fn a_node_that_refuses_the_open_for_another_reason_is_refused_as_failed() {
+    // A directory is there under the node's name: opening it for writing fails, and it is not absent.
+    let tree = Tree::new("dir");
+    let dev = tree.dev();
+    let sys = tree.sys();
+    fs::create_dir(tree.path("dev/watchdog0")).unwrap();
+    let entries = [
+        ("device", ConfigValue::Str("watchdog0")),
+        ("dev_root", ConfigValue::Str(&dev)),
+        ("sys_root", ConfigValue::Str(&sys)),
+    ];
+    let (result, refusal) = start_from(HwWatchdogNeeds { watchdog: None }, &entries);
+    assert_eq!(result.err(), Some(Status::IO));
+    assert_eq!(refusal.unwrap().0, RefusalKind::Failed);
+}
+
+#[test]
+fn the_device_range_and_attributes_come_from_the_nodes_own_sysfs_directory() {
+    let tree = Tree::new("sysfs");
+    let dev = tree.dev();
+    let sys = tree.sys();
+    fs::write(tree.path("dev/watchdog0"), b"").unwrap();
+    let class = tree.path("sys/class/watchdog/watchdog0");
+    fs::create_dir_all(&class).unwrap();
+    fs::write(class.join("min_timeout"), "1\n").unwrap();
+    fs::write(class.join("max_timeout"), "60\n").unwrap();
+    fs::write(class.join("timeout"), "15\n").unwrap();
+    fs::write(class.join("timeleft"), "5\n").unwrap();
+    let entries = [
+        ("device", ConfigValue::Str("watchdog0")),
+        ("timeout_s", ConfigValue::Int(120)),
+        ("dev_root", ConfigValue::Str(&dev)),
+        ("sys_root", ConfigValue::Str(&sys)),
+    ];
+    let (result, _) = start_from(HwWatchdogNeeds { watchdog: None }, &entries);
+    let dog = result.ok().unwrap();
+    assert_eq!(
+        dog.timeout_range,
+        (Some(1), Some(60)),
+        "read from the node's own directory"
+    );
+    assert_eq!(
+        dog.wanted_s, 60,
+        "the configured 120 s is held to the device's maximum"
+    );
+    // ATTRIBUTES: identity, timeout, timeleft, bootstatus, state. Only the first is absent.
+    assert_eq!(dog.present, [false, true, true, false, false]);
+}
+
+#[test]
+fn the_timeout_asked_for_by_default_is_15_seconds_and_the_configured_one_is_used() {
+    let fake = Fake::new(60);
+    let (dog, _) = start_from(
+        HwWatchdogNeeds {
+            watchdog: Some(Held::boxed(Box::new(fake.clone()))),
+        },
+        &[("dev_root", ConfigValue::Str("/nonexistent-hw-watchdog-mut"))],
+    );
+    assert_eq!(dog.unwrap().wanted_s, DEFAULT_TIMEOUT_S);
+    assert_eq!(DEFAULT_TIMEOUT_S, 15);
+    let (dog, _) = start_from(
+        HwWatchdogNeeds {
+            watchdog: Some(Held::boxed(Box::new(fake))),
+        },
+        &[("timeout_s", ConfigValue::Int(20))],
+    );
+    assert_eq!(dog.unwrap().wanted_s, 20);
+}
+
+#[test]
+fn a_handed_over_node_is_the_one_used_and_the_device_setting_is_not_opened() {
+    // The device setting names a node that does not exist. The node the host hands over is used:
+    // the driver starts, and its timeout request reaches that node.
+    let fake = Fake::new(60);
+    let entries = [
+        ("device", ConfigValue::Str("absent0")),
+        ("dev_root", ConfigValue::Str("/nonexistent-hw-watchdog-mut")),
+        ("timeout_s", ConfigValue::Int(20)),
+    ];
+    let (result, refusal) = start_from(
+        HwWatchdogNeeds {
+            watchdog: Some(Held::boxed(Box::new(fake.clone()))),
+        },
+        &entries,
+    );
+    assert!(refusal.is_none(), "{refusal:?}");
+    let mut dog = result.ok().unwrap();
+    tick_at(&fake, &mut dog, 0);
+    assert_eq!(fake.with(|d| d.sets.clone()), vec![(0, 20)]);
+}
+
+#[test]
+fn the_real_node_gets_only_feed_bytes_and_is_left_running_when_the_driver_is_dropped() {
+    // The real open node, not the fake: every byte it takes is a feed (zero), and dropping the driver
+    // writes nothing, so the device stays armed.
+    let tree = Tree::new("real");
+    let dev = tree.dev();
+    let sys = tree.sys();
+    fs::write(tree.path("dev/watchdog0"), b"").unwrap();
+    let entries = [
+        ("device", ConfigValue::Str("watchdog0")),
+        ("dev_root", ConfigValue::Str(&dev)),
+        ("sys_root", ConfigValue::Str(&sys)),
+    ];
+    let (result, _) = start_from(HwWatchdogNeeds { watchdog: None }, &entries);
+    let mut dog = result.ok().unwrap();
+    let mut at = 0;
+    for _ in 0..6 {
+        at = dog.tick(at).unwrap();
+    }
+    let before = fs::read(tree.path("dev/watchdog0")).unwrap();
+    assert!(before.len() >= 3, "fed on the real node: {}", before.len());
+    assert!(before.iter().all(|&byte| byte == FEED), "{before:?}");
+    drop(dog);
+    assert_eq!(
+        fs::read(tree.path("dev/watchdog0")).unwrap(),
+        before,
+        "nothing written on drop"
     );
 }
