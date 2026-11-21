@@ -164,6 +164,10 @@ lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --paylo
 lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --verify boot.img
 ```
 
+`lemnos-ctl firmware-check IMAGE --dtb NAME [--trial | --dir PREFIX] [--filter NAME]...` reads any boot
+partition image as the Pi firmware does and prints one `ok`/`BAD` line per rule, then
+`firmware-layout rule N: PASS` or `FAIL (n BAD)` ([Slots](slots.md#firmware-layout-what-the-firmware-loads-checked)).
+
 `boot-partition --add-to DUMP` adds the same files, without `default.txt` and `config.txt`, to a dump of a
 FAT16 boot partition another system boots from, and writes the changed sector ranges and an undo file
 ([Slots](slots.md#adding-to-an-existing-boot-partition)).

@@ -142,11 +142,16 @@ pub enum Node {
     },
 }
 
-/// Whether `name` is a valid 8.3 name (so no long-name entry is needed).
+/// Whether `name` is stored as an 8.3 entry alone, as Linux vfat stores it: it fits 8.3, and its
+/// base and its extension are each one case (all lowercase or all uppercase), so the entry's case
+/// flags ([`case_bits`]) give it back exactly. Any other name gets long-name entries.
 pub(crate) fn is_83(name: &str) -> bool {
     let (base, ext) = match name.rsplit_once('.') {
         Some((b, e)) => (b, e),
         None => (name, ""),
+    };
+    let one_case = |s: &str| {
+        !(s.bytes().any(|b| b.is_ascii_lowercase()) && s.bytes().any(|b| b.is_ascii_uppercase()))
     };
     !base.is_empty()
         && base.len() <= 8
@@ -155,6 +160,30 @@ pub(crate) fn is_83(name: &str) -> bool {
             .bytes()
             .chain(ext.bytes())
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && one_case(base)
+        && one_case(ext)
+}
+
+/// Byte 12 of the 8.3 entry of `name` (an [`is_83`] name), as Windows NT and Linux vfat write it:
+/// 0x08 when the base is lowercase, 0x10 when the extension is. A reader that keeps case shows
+/// `kernel8.img` for `KERNEL8 IMG` with 0x18.
+pub(crate) fn case_bits(name: &str) -> u8 {
+    let (base, ext) = match name.rsplit_once('.') {
+        Some((b, e)) => (b, e),
+        None => (name, ""),
+    };
+    let lower = |s: &str| s.bytes().any(|b| b.is_ascii_lowercase());
+    (if lower(base) { 0x08 } else { 0 }) | (if lower(ext) { 0x10 } else { 0 })
+}
+
+/// The short entry of the name `name` stored as `sfn`: [`short_entry`] with the case flags of an
+/// 8.3 name ([`case_bits`]); a long name's short entry has none.
+pub(crate) fn named_entry(name: &str, sfn: &[u8; 11], attr: u8, first: u32, size: u32) -> [u8; 32] {
+    let mut e = short_entry(sfn, attr, first, size);
+    if is_83(name) {
+        e[12] = case_bits(name);
+    }
+    e
 }
 
 /// The 11-byte short name of `name`: the 8.3 form when it fits, else `BASE~1EXT`.
@@ -283,7 +312,13 @@ impl Filler {
                     if !is_83(name) {
                         entries.extend(long_entries(name, &sfn));
                     }
-                    entries.push(short_entry(&sfn, 0x20, first as u32, data.len() as u32));
+                    entries.push(named_entry(
+                        name,
+                        &sfn,
+                        0x20,
+                        first as u32,
+                        data.len() as u32,
+                    ));
                 }
                 Node::Dir { name, children } => {
                     let c = self.next;
@@ -305,7 +340,7 @@ impl Filler {
                     if !is_83(name) {
                         entries.extend(long_entries(name, &sfn));
                     }
-                    entries.push(short_entry(&sfn, 0x10, c as u32, 0));
+                    entries.push(named_entry(name, &sfn, 0x10, c as u32, 0));
                 }
             }
         }

@@ -385,6 +385,9 @@ pub(crate) struct Listed {
     pub(crate) raw: [u8; 11],
     /// The attribute byte.
     pub(crate) attr: u8,
+    /// Byte 12, where Windows NT and Linux vfat keep the lowercase flags of an 8.3 name (0x08 the
+    /// base, 0x10 the extension).
+    pub(crate) case: u8,
     /// The first cluster.
     pub(crate) first: u64,
     /// The size in bytes.
@@ -562,6 +565,7 @@ pub(crate) fn each_entry(dir: &[u8], mut each: impl FnMut(&Listed) -> bool) {
             short: short_name(e),
             raw,
             attr: e[11],
+            case: e[12],
             first: (hi << 16) | lo,
             size: u32::from_le_bytes([e[28], e[29], e[30], e[31]]),
         };
@@ -585,6 +589,93 @@ pub(crate) fn find_entry(dir: &[u8], want: &str) -> Option<Hit> {
         hit.is_some()
     });
     hit
+}
+
+/// One entry of a directory listing ([`list_dir`]): the names as stored, with no case folding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    /// The long name, when valid long-name entries carry one.
+    pub long: Option<String>,
+    /// The 8.3 name's eleven bytes, as stored.
+    pub raw: [u8; 11],
+    /// Byte 12: the lowercase flags of the 8.3 name (0x08 the base, 0x10 the extension).
+    pub case: u8,
+    /// Whether the entry is a directory.
+    pub dir: bool,
+    /// The size in bytes (0 for a directory).
+    pub size: u32,
+}
+
+impl DirEntry {
+    /// The name a reader that keeps case sees: the long name, or the 8.3 name with its lowercase
+    /// flags applied (`KERNEL8 IMG` with 0x18 reads `kernel8.img`; with 0 it reads `KERNEL8.IMG`).
+    pub fn shown(&self) -> String {
+        if let Some(l) = &self.long {
+            return l.clone();
+        }
+        let part = |b: &[u8], lower: bool| {
+            let t = String::from_utf8_lossy(b).trim_end().to_string();
+            if lower { t.to_ascii_lowercase() } else { t }
+        };
+        let base = part(&self.raw[0..8], self.case & 0x08 != 0);
+        let ext = part(&self.raw[8..11], self.case & 0x10 != 0);
+        if ext.is_empty() {
+            base
+        } else {
+            format!("{base}.{ext}")
+        }
+    }
+
+    /// Whether a lookup of `want` finds this entry: its long or its 8.3 name, ASCII case-insensitive.
+    pub fn is_named(&self, want: &str) -> bool {
+        let short = DirEntry {
+            long: None,
+            case: 0,
+            ..self.clone()
+        }
+        .shown();
+        self.long
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case(want))
+            || short.eq_ignore_ascii_case(want)
+    }
+}
+
+/// Lists the directory at `path` (`/`-separated from the root; `""` is the root), writing nothing.
+/// `.` and `..` are left out.
+///
+/// # Errors
+///
+/// As [`read_file`]: a missing component, a component that is not a directory, or a FAT fault.
+pub fn list_dir<D: ReadAt>(dev: &mut D, path: &str) -> Result<Vec<DirEntry>, Refusal> {
+    let v = volume(dev)?;
+    let mut dir = Dir::Root;
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        let bytes = dir_bytes(dev, &v, dir)?;
+        let hit = find_entry(&bytes, part).ok_or(Refusal::Missing)?;
+        if hit.attr & ATTR_DIR == 0 {
+            return Err(Refusal::Corrupt("a path component is not a directory"));
+        }
+        if hit.first < 2 {
+            return Err(Refusal::Corrupt("a directory entry names no cluster"));
+        }
+        dir = Dir::Cluster(hit.first);
+    }
+    let bytes = dir_bytes(dev, &v, dir)?;
+    let mut out = Vec::new();
+    each_entry(&bytes, |e| {
+        if e.raw[0] != b'.' {
+            out.push(DirEntry {
+                long: e.long.clone(),
+                raw: e.raw,
+                case: e.case,
+                dir: e.attr & ATTR_DIR != 0,
+                size: e.size,
+            });
+        }
+        false
+    });
+    Ok(out)
 }
 
 /// Reads the file at `path` (`/`-separated, relative to the root; a component is a long or short

@@ -21,6 +21,7 @@ mod boot_merge;
 mod boot_partition;
 mod bundle;
 mod data_partition;
+mod firmware_check;
 mod show;
 
 pub const USAGE: &str = "\
@@ -73,6 +74,12 @@ lemnos-ctl [--socket PATH] COMMAND
                                   partition another system boots from (never a device), beside
                                   that system's files, and writes the changed sector ranges and
                                   an undo file; --undo puts those ranges back
+  firmware-check IMAGE --dtb NAME... [--trial | --dir PREFIX] [--filter NAME]... [--kernel NAME]...
+                 [--needs-overlay NAME]... [--boot-count N]
+                                 read a boot partition image as the Pi firmware does, read-only,
+                                 and print one ok/BAD line per rule for every file it loads (exact
+                                 sizes, default names, overlays that apply, case as vfat writes it);
+                                 non-zero exit when any rule fails
   bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE --verity-table FILE
          --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT]
          [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE
@@ -270,6 +277,9 @@ pub fn run_with_stderr(args: &[String], out: &mut dyn Write, err: &mut dyn Write
     }
     if command == "boot-partition" {
         return boot_partition::run(tail, out);
+    }
+    if command == "firmware-check" {
+        return firmware_check::run(tail, out);
     }
     if command == "bundle" {
         return bundle::run(tail, out);
