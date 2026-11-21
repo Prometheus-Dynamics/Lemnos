@@ -82,7 +82,11 @@ fn live(dir: &Path, bundle: &[u8], image: &[u8], time: &str) -> (Status, String)
     slots.running = Some(String::new());
     security::with_enforced(false, || {
         store::with_clock(time, || {
-            let job = slots.install(bundle.len() as u64, false, false).unwrap();
+            // A partition the record writer would refuse is refused at the call, before any byte.
+            let job = match slots.install(bundle.len() as u64, false, false) {
+                Ok(job) => job,
+                Err(status) => return (status, String::new()),
+            };
             for (i, piece) in bundle.chunks(PIECE).enumerate() {
                 if let Err(status) = slots.write((i * PIECE) as u64, piece) {
                     return (status, String::new());

@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use lemnos_slot_store::boot_raw::{Boot, BootRaw, Pointer};
+use lemnos_slot_store::boot_raw::{Boot, BootRaw, Ownership, Pointer};
 use lemnos_slot_store::records;
 
 use crate::store::{Layout, replace, sync_dir};
@@ -63,6 +63,13 @@ pub trait BootRecord: Send {
     /// keeps none). Read only: the driver shows it in its health and `list`.
     fn config_refusal(&self) -> Option<&'static str> {
         None
+    }
+    /// Whether the boot records are this system's (see [`Ownership`]). Read only. Only the `tryboot`
+    /// form can find another system's: its records are files the image builder places, and a
+    /// partition without them at their sizes is another system's. The other forms keep their record
+    /// where only this system writes it, so they are always ours.
+    fn ownership(&self) -> Ownership {
+        Ownership::Ours
     }
     /// Whether a trial can be recorded and started on this board (see [`crate::uboot::TrialUpdates`]).
     /// Only the `uboot` record can say no; the others always can.
@@ -271,6 +278,15 @@ const CONFIG_UNREADABLE: &str = "config.txt cannot be read from the boot partiti
 impl BootRecord for Tryboot {
     fn config_refusal(&self) -> Option<&'static str> {
         self.config_refusal_now()
+    }
+
+    fn ownership(&self) -> Ownership {
+        match &self.node {
+            Ok(node) => lemnos_slot_store::boot_raw::ownership_of(node),
+            Err(why) => {
+                Ownership::Unknown(format!("the boot partition's device isn't known ({why})"))
+            }
+        }
     }
 
     fn set_default(&mut self, id: &str) -> io::Result<()> {

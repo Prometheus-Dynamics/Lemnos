@@ -2889,3 +2889,168 @@ fn a_bind_that_fails_is_refused_by_name_and_the_boot_completes() {
     );
     assert_eq!(fake.last(), "switch_root newroot");
 }
+
+/// Sets the size in `default.txt`'s directory entry on the board's boot partition to 55 bytes: the
+/// firmware's own file on a partition Lemnos was added to (`--add-to`, Route A), which the add never
+/// replaces. The volume is otherwise whole, so only the records are refused, as on such a disk.
+fn hand_written_default_txt(board: &Board) {
+    let mut image = std::fs::read(board.node()).unwrap();
+    let at = image
+        .windows(11)
+        .position(|w| w == b"DEFAULT TXT")
+        .expect("default.txt's entry");
+    image[at + 28..at + 32].copy_from_slice(&55u32.to_le_bytes());
+    std::fs::write(board.node(), image).unwrap();
+}
+
+/// Route A: the firmware started a trial (its tryboot flag), on a boot partition whose
+/// `default.txt` is the existing system's. The records are refused by name, and the line says what
+/// happens: this boot is the trial, with no attempt taken and no confirm possible, and the next
+/// restart starts the default. Never "booting the default".
+#[test]
+fn a_firmware_trial_on_a_boot_partition_without_our_records_says_it_runs_unconfirmable() {
+    let board = Board::new();
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    hand_written_default_txt(&board);
+    let (fake, _why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert!(
+        logs.contains("the firmware started a trial, and the trial records can't be read"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("record file is 55 bytes, expected 1024: the image is not ours"),
+        "{logs}"
+    );
+    assert!(logs.contains("can't be confirmed"), "{logs}");
+    assert!(
+        logs.contains("the next restart starts the default"),
+        "{logs}"
+    );
+    assert!(
+        !logs
+            .lines()
+            .any(|l| l.contains("can't be read") && l.ends_with("; booting the default")),
+        "{logs}"
+    );
+}
+
+/// With no tryboot flag, unreadable records lose nothing: the default boots, and the line says so.
+#[test]
+fn unreadable_trial_records_with_no_firmware_trial_boot_the_default() {
+    let board = Board::new();
+    hand_written_default_txt(&board);
+    let (fake, _why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert!(
+        logs.contains("the trial records can't be read") && logs.contains("; booting the default"),
+        "{logs}"
+    );
+    assert!(!logs.contains("the firmware started a trial"), "{logs}");
+}
+
+/// Every entry under `root`, in path order: its path, whether it is a directory, its mode and bytes.
+fn state_tree(root: &Path) -> Vec<(PathBuf, bool, u32, Vec<u8>)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let meta = fs::symlink_metadata(&path).unwrap();
+        let rel = path.strip_prefix(root).unwrap().to_path_buf();
+        if meta.is_dir() {
+            for entry in fs::read_dir(&path).unwrap() {
+                stack.push(entry.unwrap().path());
+            }
+            out.push((rel, true, meta.mode(), Vec::new()));
+        } else {
+            out.push((rel, false, meta.mode(), fs::read(&path).unwrap()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A route-A board: the firmware started a trial of our slot from another system's disk, whose
+/// `default.txt` is that system's, and whose slots state is that system's own (its default is its
+/// slot, not ours, as an older build of it wrote it).
+fn route_a_board() -> Board {
+    let board = Board::new();
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    hand_written_default_txt(&board);
+    let other = lemnos_slot_store::fatimage::FOREIGN_SLOT;
+    board.write(
+        "data/board/slots/state.env",
+        format!("DEFAULT='{other}'\nPREVIOUS=''\nTRIAL=''\nSTAGED=''\nSTATE='idle'\nERROR=''\nPROGRESS='0'\nSTARTED_BY=''\n").as_bytes(),
+    );
+    board.write("data/board/slots/booted", format!("{other}\n").as_bytes());
+    board.write(
+        "data/board/slots/trial-keeps-default",
+        format!("{other}\n").as_bytes(),
+    );
+    board.write(
+        &format!("data/board/slots/{other}.meta"),
+        b"GOOD=yes\nFAILED=no\nSEQ=1\n",
+    );
+    board
+}
+
+/// Route A writes nothing under the other system's `board/slots`: no `trial-init`, no `booted`
+/// overwrite, no `trial-started`. The record goes to the console and kernel log only, and its line
+/// ends in the stable words that say so.
+#[test]
+fn a_route_a_boot_writes_nothing_under_the_other_systems_state_dir() {
+    let board = route_a_board();
+    let data = board.env.at("data");
+    let before = state_tree(&data);
+    let (fake, why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert_eq!(why, "", "the trial starts: {logs}");
+    assert_eq!(state_tree(&data), before, "{logs}");
+    assert!(
+        !board.env.at("newroot/data/board").exists(),
+        "nothing written after the data partition moved: {logs}"
+    );
+    let line = logs
+        .lines()
+        .find(|l| l.contains("the firmware started a trial"))
+        .unwrap_or_else(|| panic!("no route-A line: {logs}"));
+    assert!(
+        line.starts_with(
+            "slot-init: the firmware started a trial, and the trial records can't be read: "
+        ),
+        "{line}"
+    );
+    assert!(
+        line.contains("default.txt record file is 55 bytes, expected 1024: the image is not ours"),
+        "{line}"
+    );
+    assert!(
+        line.ends_with(&format!(
+            "; it runs with no attempt taken and can't be confirmed (confirming writes those records); the next restart starts the default; {}",
+            crate::boot::STATE_UNTOUCHED
+        )),
+        "{line}"
+    );
+}
+
+/// The fail path on route A keeps no kernel-log file and records no failure there either: the
+/// line names the failure on the console, and the state dir is as it was.
+#[test]
+fn a_route_a_boot_that_fails_keeps_its_log_off_the_other_systems_state_dir() {
+    let board = route_a_board();
+    // The slot's manifest is gone: the slot can't start.
+    fs::remove_file(board.env.at("data/slots/os-2.json")).unwrap();
+    let data = board.env.at("data");
+    let before = state_tree(&data);
+    let (fake, _why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert!(logs.contains("slot os-2 can't start"), "{logs}");
+    assert_eq!(state_tree(&data), before, "{logs}");
+    assert!(!data.join("board/slots").join(DATA_LOG).exists(), "{logs}");
+}

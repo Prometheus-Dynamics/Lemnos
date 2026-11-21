@@ -127,6 +127,10 @@ fi
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-unit-check" "$root/"
+# The route-A check stands the boot chain in with slot-store's `testing` seam: it is built on its own, so
+# the feature never reaches the lemnosd built above.
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-route-a-check --target "$target")
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-route-a-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-stream-compose-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-shm-ring-check" "$root/"
@@ -205,7 +209,7 @@ esac
 # The Rust checks (CZ-GUEST-2) are static binaries with debug info, about 5 MB each unstripped. No check reads
 # their symbols or line tables (they compare output lines), so they are stripped here to keep the initramfs
 # within the guest's memory. The workspace's debug profile is unchanged.
-for guest in init lemnos-unit-check lemnos_pisp_be_version_check lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check lemnos_pisp_be_check lemnos_pisp_fe_check lemnos_stream_check lemnos_gsdma_check lemnos_vip_check lemnos_rp1_csi2_check; do
+for guest in init lemnos-unit-check lemnos-route-a-check lemnos_pisp_be_version_check lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check lemnos_pisp_be_check lemnos_pisp_fe_check lemnos_stream_check lemnos_gsdma_check lemnos_vip_check lemnos_rp1_csi2_check; do
   strip "$root/$guest"
 done
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
