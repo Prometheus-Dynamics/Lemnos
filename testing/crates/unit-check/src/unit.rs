@@ -110,6 +110,91 @@ pub fn bounding_set(files: &[&str]) -> Result<Vec<u32>, String> {
     Ok(set)
 }
 
+/// The system calls the files allow, as names: systemd's `@default` (always allowed), then every
+/// `SystemCallFilter=` assignment, groups expanded as the generated tables give them. `None` when no
+/// filter is set. An empty assignment clears the list; a deny list (`~`) is an error, so the check
+/// never runs under a filter it guessed.
+pub fn system_call_names(files: &[&str]) -> Result<Option<Vec<String>>, String> {
+    let assignments = values(files, "SystemCallFilter");
+    let mut names: Vec<String> = Vec::new();
+    let mut set = false;
+    for value in assignments {
+        if value.is_empty() {
+            names.clear();
+            set = false;
+            continue;
+        }
+        if value.starts_with('~') {
+            return Err(format!(
+                "SystemCallFilter={value}: a deny list is not read here"
+            ));
+        }
+        for item in value.split_whitespace() {
+            expand(item, &mut names, 0)?;
+        }
+        set = true;
+    }
+    if !set {
+        return Ok(None);
+    }
+    expand("@default", &mut names, 0)?;
+    names.sort_unstable();
+    names.dedup();
+    Ok(Some(names))
+}
+
+fn expand(item: &str, out: &mut Vec<String>, depth: u32) -> Result<(), String> {
+    if depth > 8 {
+        return Err(format!("{item}: groups nest too deep"));
+    }
+    if item.starts_with('@') {
+        let (_, members) = crate::filter_tables::GROUPS
+            .iter()
+            .find(|(name, _)| *name == item)
+            .ok_or_else(|| {
+                format!(
+                    "SystemCallFilter: no group {item} in systemd {}",
+                    crate::filter_tables::SYSTEMD
+                )
+            })?;
+        for member in *members {
+            expand(member, out, depth + 1)?;
+        }
+    } else {
+        out.push(item.to_owned());
+    }
+    Ok(())
+}
+
+/// The x86_64 numbers of `names`. Names this architecture has no call for are left out, as
+/// systemd leaves them out.
+pub fn x86_64_numbers(names: &[String]) -> Vec<i64> {
+    let mut numbers: Vec<i64> = names
+        .iter()
+        .filter_map(|name| {
+            crate::filter_tables::X86_64
+                .iter()
+                .find(|(known, _)| known == name)
+                .map(|(_, nr)| i64::from(*nr))
+        })
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+}
+
+/// The errno `SystemCallErrorNumber=` names: `None` when unset (a denied call kills). Only `EPERM`
+/// is read; any other is an error.
+pub fn error_number(files: &[&str]) -> Result<Option<u16>, String> {
+    match last(files, "SystemCallErrorNumber") {
+        None | Some("") => Ok(None),
+        Some("EPERM") => Ok(Some(1)),
+        Some(other) => Err(format!(
+            "SystemCallErrorNumber={other}: only EPERM is read here"
+        )),
+    }
+}
+
 /// The name of capability `cap`.
 pub fn name(cap: u32) -> &'static str {
     NAMES
@@ -152,6 +237,44 @@ mod tests {
         assert_eq!(bounding_set(&["[Service]\n"]).unwrap().len(), NAMES.len());
         assert!(bounding_set(&["[Service]\nCapabilityBoundingSet=~CAP_KILL\n"]).is_err());
         assert!(bounding_set(&["[Service]\nCapabilityBoundingSet=CAP_NOPE\n"]).is_err());
+    }
+
+    #[test]
+    fn the_base_filter_holds_the_root_phase_calls_and_default() {
+        let names = system_call_names(&[BASE]).unwrap().unwrap();
+        for call in [
+            "prctl",
+            "setresuid",
+            "fchownat",
+            "fchmodat",
+            "execve",
+            "socket",
+            "bind",
+        ] {
+            assert!(names.iter().any(|n| n == call), "{call} is allowed");
+        }
+        assert!(
+            !names.iter().any(|n| n == "mount"),
+            "mount comes only with the gadget drop-in"
+        );
+        let gadget = system_call_names(&[BASE, GADGET]).unwrap().unwrap();
+        assert!(gadget.iter().any(|n| n == "mount") && gadget.iter().any(|n| n == "umount2"));
+        assert_eq!(error_number(&[BASE]).unwrap(), Some(1));
+        let numbers = x86_64_numbers(&names);
+        assert!(
+            numbers.len() > 255 && numbers.len() < 1024,
+            "{} calls",
+            numbers.len()
+        );
+    }
+
+    #[test]
+    fn no_filter_and_a_cleared_filter_are_none_and_a_deny_list_is_refused() {
+        assert_eq!(system_call_names(&["[Service]\n"]).unwrap(), None);
+        let cleared = "[Service]\nSystemCallFilter=read\nSystemCallFilter=\n";
+        assert_eq!(system_call_names(&[cleared]).unwrap(), None);
+        assert!(system_call_names(&["[Service]\nSystemCallFilter=~@mount\n"]).is_err());
+        assert!(system_call_names(&["[Service]\nSystemCallFilter=@nope\n"]).is_err());
     }
 
     #[test]
