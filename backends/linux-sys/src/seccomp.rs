@@ -26,6 +26,29 @@ const OFFSET_NR: u32 = 0;
 const OFFSET_ARCH: u32 = 4;
 const RET_KILL_PROCESS: u32 = 0x8000_0000;
 const RET_ALLOW: u32 = 0x7fff_0000;
+/// `SECCOMP_RET_ERRNO`: the call fails with the errno in the low 16 bits.
+const RET_ERRNO: u32 = 0x0005_0000;
+
+/// The most calls a filter allows: two instructions each fit well inside the kernel's 4096.
+const MAX_ALLOWED: usize = 1024;
+
+/// What a call outside the allowlist gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denied {
+    /// The process is killed (`SECCOMP_RET_KILL_PROCESS`, SIGSYS).
+    Kill,
+    /// The call fails with this errno and the process goes on (`SECCOMP_RET_ERRNO`).
+    Errno(u16),
+}
+
+impl Denied {
+    fn ret(self) -> u32 {
+        match self {
+            Self::Kill => RET_KILL_PROCESS,
+            Self::Errno(errno) => RET_ERRNO | u32::from(errno),
+        }
+    }
+}
 
 /// The call numbers a filter can allow, by name: the calls the helper's verbs make. Each constant
 /// is the number of the call of the same name.
@@ -170,31 +193,55 @@ pub fn calls_with_fork(base: &[i64]) -> Vec<i64> {
 ///
 /// # Errors
 ///
-/// The list is too long for a filter (more than 500 calls), or a number does not fit.
+/// The list is too long for a filter (more than 1024 calls), or a number does not fit.
 pub fn program(allowed: &[i64]) -> io::Result<Vec<sock_filter>> {
-    if allowed.len() > 500 {
+    program_denying(allowed, Denied::Kill)
+}
+
+/// The filter program for `allowed`, giving every other call `denied`. A call from another
+/// architecture is always killed.
+///
+/// # Errors
+///
+/// As [`program`].
+pub fn program_denying(allowed: &[i64], denied: Denied) -> io::Result<Vec<sock_filter>> {
+    if allowed.len() > MAX_ALLOWED {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "too many calls to allow",
         ));
     }
-    let mut prog = Vec::with_capacity(allowed.len() + 6);
+    let numbers = allowed
+        .iter()
+        .map(|nr| {
+            u32::try_from(*nr).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "a call number is not a u32")
+            })
+        })
+        .collect::<io::Result<Vec<u32>>>()?;
+    let mut prog = Vec::with_capacity(2 * numbers.len() + 6);
     prog.push(stmt(BPF_LD_W_ABS, OFFSET_ARCH));
     // Another architecture is killed: a call's number means something else there.
     prog.push(jump(BPF_JEQ_K, AUDIT_ARCH, 1, 0));
     prog.push(stmt(BPF_RET_K, RET_KILL_PROCESS));
     prog.push(stmt(BPF_LD_W_ABS, OFFSET_NR));
-    let n = allowed.len();
-    for (i, nr) in allowed.iter().enumerate() {
-        let nr = u32::try_from(*nr).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "a call number is not a u32")
-        })?;
-        // A match jumps over the remaining comparisons, the kill, to the allow at the end.
-        let jt = (n - i) as u8;
-        prog.push(jump(BPF_JEQ_K, nr, jt, 0));
+    let n = numbers.len();
+    if let Ok(last) = u8::try_from(n) {
+        // A match jumps over the remaining comparisons and the denial, to the allow at the end.
+        for (i, nr) in numbers.iter().enumerate() {
+            prog.push(jump(BPF_JEQ_K, *nr, last - i as u8, 0));
+        }
+        prog.push(stmt(BPF_RET_K, denied.ret()));
+        prog.push(stmt(BPF_RET_K, RET_ALLOW));
+    } else {
+        // A jump reaches at most 255 instructions ahead: past that, each comparison has its own
+        // allow right after it, and a miss steps over it to the next comparison.
+        for nr in &numbers {
+            prog.push(jump(BPF_JEQ_K, *nr, 0, 1));
+            prog.push(stmt(BPF_RET_K, RET_ALLOW));
+        }
+        prog.push(stmt(BPF_RET_K, denied.ret()));
     }
-    prog.push(stmt(BPF_RET_K, RET_KILL_PROCESS));
-    prog.push(stmt(BPF_RET_K, RET_ALLOW));
     Ok(prog)
 }
 
@@ -218,7 +265,17 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> sock_filter {
 ///
 /// The program cannot be built, or the kernel refuses the filter.
 pub fn install(allowed: &[i64]) -> io::Result<()> {
-    let prog = program(allowed)?;
+    install_denying(allowed, Denied::Kill)
+}
+
+/// Installs a filter that allows exactly `allowed` for this thread, after setting no-new-privs,
+/// and gives every other call `denied`. Programs started later inherit it.
+///
+/// # Errors
+///
+/// As [`install`].
+pub fn install_denying(allowed: &[i64], denied: Denied) -> io::Result<()> {
+    let prog = program_denying(allowed, denied)?;
     let len = u16::try_from(prog.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the filter is too long"))?;
     // SAFETY: prctl(PR_SET_NO_NEW_PRIVS, 1) takes no pointer; it only sets a flag on this thread.
@@ -357,12 +414,18 @@ mod tests {
         assert_eq!((prog[4].jt, prog[5].jt), (2, 1));
         assert_eq!(prog[6].k, RET_KILL_PROCESS);
         assert_eq!(prog[7].k, RET_ALLOW);
+        let eperm = program_denying(&[nr::READ], Denied::Errno(1)).unwrap();
+        assert_eq!(eperm[eperm.len() - 2].k, RET_ERRNO | 1);
+        assert_eq!(
+            eperm[2].k, RET_KILL_PROCESS,
+            "another architecture is still killed"
+        );
     }
 
     #[test]
     fn a_number_that_is_not_a_u32_is_refused() {
         assert!(program(&[-1]).is_err());
-        assert!(program(&vec![0; 501]).is_err());
+        assert!(program(&vec![0; MAX_ALLOWED + 1]).is_err());
     }
 
     #[test]
@@ -382,5 +445,22 @@ mod tests {
         })
         .unwrap();
         assert_eq!(forbidden, Exit::Signal(libc::SIGSYS));
+    }
+
+    #[test]
+    fn a_long_list_allows_its_last_calls_and_an_errno_filter_fails_the_rest() {
+        // 300 numbers no kernel has, then the calls the child makes: past the reach of one jump.
+        let mut allowed: Vec<i64> = (100_000..100_300).collect();
+        allowed.extend_from_slice(&[nr::EXIT, nr::EXIT_GROUP, nr::WRITE, nr::RT_SIGRETURN]);
+        let prog = program_denying(&allowed, Denied::Errno(1)).unwrap();
+        assert_eq!(prog.len(), 4 + 2 * allowed.len() + 1);
+        // `getpid` is outside the list: it fails with EPERM (-1 from libc) and the child goes on.
+        let ended = run_forked(|| {
+            install_denying(&allowed, Denied::Errno(1)).unwrap();
+            if std::process::id() == u32::MAX { 7 } else { 3 }
+        })
+        .unwrap();
+        assert_eq!(ended, Exit::Code(7));
+        assert!(program_denying(&vec![0; MAX_ALLOWED + 1], Denied::Kill).is_err());
     }
 }
