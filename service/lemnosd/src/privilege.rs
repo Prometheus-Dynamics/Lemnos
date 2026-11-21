@@ -94,47 +94,61 @@ fn driver_root_phases(cx: &Context<'_>) -> io::Result<Refusals> {
     Ok(Vec::new())
 }
 
-/// Holds the nodes of every keep-alive device across the drop (`LinuxBoard::hold_before_drop`): the
-/// watchdog is opened as root and fed at once, so the unfed hand-over from the initramfs ends here,
-/// and its bind takes the held descriptor whatever the node's owner is. Run last before the drop, so
-/// the feed is as late as it can be and the host's start gets the whole period after it. A node that
-/// can't be held is named; its bind then opens it by name, as without this step.
+/// The file descriptor store's name for a held watchdog. A restart is handed back the descriptors
+/// stored under it (`LISTEN_FDNAMES`).
+pub const WATCHDOG_STORE_NAME: &str = "lemnos-watchdog";
+
+/// Takes the watchdog descriptors the service manager kept for this process (`WATCHDOG_STORE_NAME`), as
+/// root before the drop. Any other descriptor the manager passed is closed here.
+fn stored_watchdogs() -> Vec<std::fs::File> {
+    lemnos_linux_sys::listen::take()
+        .into_iter()
+        .filter_map(|(name, fd)| (name == WATCHDOG_STORE_NAME).then(|| std::fs::File::from(fd)))
+        .collect()
+}
+
+/// Holds the nodes of every keep-alive device across the drop (`LinuxBoard::hold_before_drop`), as
+/// root, before the drop. A node is held in one of two ways:
 ///
-/// Only the boot's first start holds ([`first_start`]). Opening a running watchdog feeds it, so a
-/// daemon that died after its root phase, before it is healthy, and was restarted would otherwise feed
-/// the device once a restart for good, and the watchdog would never catch it. A restart opens the node
-/// at its bind, by name, after the drop, as before this step: the udev rule has long applied by then.
-fn hold_keepalive_nodes(board: &BoardFile, linux: &lemnos_linux::LinuxBoard, first: &FirstStart) {
+/// - the first start opens it as root and feeds it once, so the unfed hand-over from the initramfs
+///   ends here, and its bind takes the held descriptor whatever the node's owner is;
+/// - a restart takes the watchdog descriptor the service manager kept in its file descriptor store
+///   (`stored`), as it is, and feeds nothing. Opening a running watchdog feeds it, so a daemon that
+///   died before it was healthy would otherwise be fed by each restart's open, for good.
+///
+/// A stored descriptor that is not a character device with a keep-alive node's device number is
+/// refused by name, and the node is opened as the first start does. Returns the nodes this start
+/// opened and fed: their descriptors are the ones to keep in the store ([`keep_in_store`]).
+fn hold_keepalive_nodes(
+    board: &BoardFile,
+    linux: &lemnos_linux::LinuxBoard,
+    stored: &mut Vec<std::fs::File>,
+) -> Vec<std::path::PathBuf> {
     use std::io::Write;
-    let keepalive: Vec<_> = board
+    let mut fed = Vec::new();
+    for device in board
         .devices
         .iter()
         .filter(|d| d.keepalive && d.refused.is_none())
-        .collect();
-    if keepalive.is_empty() {
-        return;
-    }
-    match first {
-        FirstStart::Restart(dir) => {
-            let _ = writeln!(
-                io::stderr(),
-                "lemnosd: root phase: a restart in this boot ({} is already the daemon's): the keep-alive nodes are not held; their binds open them",
-                dir.display()
-            );
-            return;
-        }
-        FirstStart::First | FirstStart::NoDirectory => {}
-    }
-    for device in keepalive {
+    {
         for (need, name) in &device.uses {
-            match linux.hold_before_drop(name) {
-                Ok(Some(line)) => {
+            match linux.hold_before_drop(name, stored) {
+                Ok(Some(hold)) => {
                     let _ = writeln!(
                         io::stderr(),
-                        "lemnosd: root phase: {}: {need}: {line}",
-                        device.id
+                        "lemnosd: root phase: {}: {need}: {}",
+                        device.id,
+                        hold.line
                     );
-                    crate::start_trace_line(&format!("root phase: {} fed", device.id));
+                    let event = if hold.fed {
+                        format!("root phase: {} fed", device.id)
+                    } else {
+                        format!("root phase: {} adopted, not fed", device.id)
+                    };
+                    crate::start_trace_line(&event);
+                    if hold.fed {
+                        fed.push(hold.path);
+                    }
                 }
                 Ok(None) => {}
                 Err(why) => {
@@ -147,35 +161,42 @@ fn hold_keepalive_nodes(board: &BoardFile, linux: &lemnos_linux::LinuxBoard, fir
             }
         }
     }
+    fed
 }
 
-/// Whether this start is the boot's first, from the owner of the socket's directory.
-#[derive(Debug, PartialEq, Eq)]
-enum FirstStart {
-    /// The directory is not there yet, or is not the daemon's: the boot's first start.
-    First,
-    /// The directory is already the daemon's: a restart.
-    Restart(PathBuf),
-    /// The socket has no directory.
-    NoDirectory,
-}
-
-/// Tells the boot's first start from a restart, as root before the runtime directory step: the
-/// unit's runtime directory is made root's by the service manager and handed to the daemon's user
-/// (`uid`:`gid`) by the first start's root phase, and the unit keeps it across a restart
-/// (`RuntimeDirectoryPreserve=restart`); a stop removes it. So a directory that is already the
-/// daemon's means an earlier start of this boot got as far as its root phase. The owner is read from
-/// the directory itself: root here has no `CAP_DAC_OVERRIDE`, and can't look inside a directory that
-/// is the daemon's (0750).
-fn first_start(socket: &Path, uid: u32, gid: u32) -> FirstStart {
-    let Some(dir) = socket.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
-        return FirstStart::NoDirectory;
-    };
-    match std::fs::metadata(dir) {
-        Ok(meta) if meta.uid() == uid && meta.gid() == gid && uid != 0 => {
-            FirstStart::Restart(dir.to_path_buf())
+/// Keeps the descriptors of the nodes this start fed in the service manager's store, so the next start
+/// takes them back ([`hold_keepalive_nodes`]). Without a manager, nothing is kept and a restart opens
+/// its node by name, as a BusyBox init's does. A store that refuses a descriptor is named, and the
+/// node is then opened by name at a restart, which feeds it.
+fn keep_in_store(fed: &[std::path::PathBuf], notifier: &crate::notify::Notifier) {
+    use std::io::Write;
+    for (path, file) in lemnos_linux::held_watchdogs() {
+        if !fed.contains(&path) {
+            continue;
         }
-        _ => FirstStart::First,
+        match notifier.store(WATCHDOG_STORE_NAME, std::os::fd::AsFd::as_fd(&file)) {
+            Ok(true) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "lemnosd: root phase: {}: kept in the service's descriptor store, for a restart to take back",
+                    path.display()
+                );
+            }
+            Ok(false) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "lemnosd: root phase: {}: not kept: no service manager; a restart opens the node by name",
+                    path.display()
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "lemnosd: root phase: {}: not kept in the service's descriptor store ({error}); a restart opens the node by name",
+                    path.display()
+                );
+            }
+        }
     }
 }
 
@@ -250,6 +271,7 @@ pub fn start(
     socket: &Path,
     helper: bool,
 ) -> Result<Started, String> {
+    use std::io::Write;
     let (uid, gid) = resolve(request)?;
     let cx = Context {
         board,
@@ -257,8 +279,7 @@ pub fn start(
         uid,
         gid,
     };
-    // Before the runtime directory step hands the directory to the daemon's user.
-    let first = first_start(socket, uid, gid);
+    let mut stored = stored_watchdogs();
     let mut refused = run_steps(STEPS, &cx)?;
     let client = if helper {
         let (client, invalid) = crate::gadget::spawn(board, lemnos_linux::Owner { uid, gid })?;
@@ -269,7 +290,15 @@ pub fn start(
     };
     refused
         .extend(driver_root_phases(&cx).map_err(|error| format!("driver root phases: {error}"))?);
-    hold_keepalive_nodes(board, &lemnos_linux::LinuxBoard::new(), &first);
+    let fed = hold_keepalive_nodes(board, &lemnos_linux::LinuxBoard::new(), &mut stored);
+    for file in stored.drain(..) {
+        let _ = writeln!(
+            io::stderr(),
+            "lemnosd: root phase: refused a stored watchdog descriptor: it is not a character device with a keep-alive node's device number; closed, and a node not adopted is opened by name"
+        );
+        drop(file);
+    }
+    keep_in_store(&fed, &crate::notify::Notifier::from_env());
     let plan = Plan {
         uid,
         gid,
@@ -432,37 +461,6 @@ fn runtime_directory(cx: &Context<'_>) -> io::Result<Refusals> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_runtime_directory_already_the_daemons_is_a_restart() {
-        let dir = std::env::temp_dir().join(format!("lemnosd-first-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let socket = dir.join("run/lemnosd.sock");
-        let (uid, gid) = (lemnos_linux_sys::privilege::observe().unwrap().euid, 0);
-        // Not there yet: the first start.
-        assert_eq!(first_start(&socket, uid, gid), FirstStart::First);
-        std::fs::create_dir_all(dir.join("run")).unwrap();
-        let meta = std::fs::metadata(dir.join("run")).unwrap();
-        // Owned by someone else (the service manager's root): the first start.
-        assert_eq!(
-            first_start(&socket, meta.uid() + 1, meta.gid()),
-            FirstStart::First
-        );
-        // Already the daemon's: a restart.
-        assert_eq!(
-            first_start(&socket, meta.uid(), meta.gid()),
-            if meta.uid() == 0 {
-                FirstStart::First
-            } else {
-                FirstStart::Restart(dir.join("run"))
-            }
-        );
-        assert_eq!(
-            first_start(Path::new("lemnosd.sock"), uid, gid),
-            FirstStart::NoDirectory
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn a_group_without_a_user_is_refused() {

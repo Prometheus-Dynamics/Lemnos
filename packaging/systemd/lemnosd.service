@@ -16,6 +16,17 @@ Description=Lemnos hardware daemon
 # The board file is the OS's: /etc/lemnos/board.toml. Without it there is nothing to run.
 ConditionPathExists=/etc/lemnos/board.toml
 StartLimitIntervalSec=0
+# Minimal ordering, in place of the implicit ones (DefaultDependencies=no). The implicit After=basic.target
+# and Requires=sysinit.target would start lemnosd after every sysinit unit, which widens the unfed gap
+# between slot-init's exec and lemnosd's root-phase feed (docs/slots.md, "The watchdog chain", window 4).
+# lemnosd needs only the sysusers step (the `lemnos` user and group) before it starts. It does not wait
+# for local-fs.target: a filesystem check (systemd-fsck) runs before that target, and must never run in the
+# gap. The image mounts what lemnosd uses before switch_root, or without a check pass (docs/slots.md).
+# A stop at shutdown stays as the implicit ordering gave it.
+DefaultDependencies=no
+After=systemd-sysusers.service
+Conflicts=shutdown.target
+Before=shutdown.target
 
 [Service]
 # Type=notify: lemnosd sends READY=1 once every driver is started and the socket listens. The
@@ -29,13 +40,16 @@ EnvironmentFile=-/etc/lemnos/lemnosd.env
 
 # /run/lemnos: systemd makes it (root-owned, as the unit has no User=); the root phase hands it to
 # lemnos:lemnos before the drop. lemnosd makes the socket at start and removes it at stop. Clients in
-# group lemnos may open the directory and connect to the socket.
+# group lemnos may open the directory and connect to the socket. The directory is removed at every stop
+# and start, as RuntimeDirectory= does by default.
 RuntimeDirectory=lemnos
 RuntimeDirectoryMode=0750
-# Kept across a restart, removed at a stop: a directory that is already lemnos's tells the root phase it
-# is a restart, which does not hold the watchdog, so a daemon that dies after its root phase is not fed
-# once a restart for good (docs/slots.md, "The watchdog chain", window 5).
-RuntimeDirectoryPreserve=restart
+# The file descriptor store keeps the hardware watchdog's descriptor across a restart (docs/slots.md,
+# "The watchdog chain", window 5). lemnosd stores the one its root phase opened and fed, and the next start
+# takes it back and feeds nothing: opening a running watchdog feeds it. The store is emptied by a stop, so
+# a start after one is the first start. It is not kept across a failed unit (the watchdog then resets the
+# board). Four is more than any board's keep-alive watchdogs.
+FileDescriptorStoreMax=4
 
 # Stop is for shutdown only. It drops every driver; the hardware watchdog then reboots a board that
 # is still running, so the unit is never stopped on a live board. The stop bound is under the shortest

@@ -350,9 +350,10 @@ watchdog resets the board.
   15 s and feeds it until it hands over (`docs/slots.md`, "The watchdog chain"). The device is never
   unarmed between slot-init and lemnosd: on the boot's first start, lemnosd's root phase opens the
   keep-alive watchdog as root and feeds it once, which ends the unfed hand-over, and the bind takes
-  that descriptor; the next feed is the first healthy tick, within one period. A restart in the same
-  boot (its runtime directory is already the daemon's) holds nothing: opening a running watchdog feeds
-  it, so a daemon that dies after its root phase must not be fed again by its next start.
+  that descriptor; the next feed is the first healthy tick, within one period. A restart takes back the
+  descriptor the service manager kept for it, and feeds nothing: opening a running watchdog feeds it, so a
+  daemon that dies after its root phase must not be fed again by its next start (`docs/slots.md`, "The
+  watchdog chain", and `packaging/README.md`, "The hardware watchdog").
 - **Healthy** means both of these hold. The main loop finished a pass within 10 s. The control
   socket answered a handshake within 5 s; a probe asks it every second, and an answer comes from
   the serving thread, so a wedged socket counts. A driver that panics or hangs does not make the

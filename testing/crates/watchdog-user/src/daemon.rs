@@ -29,9 +29,12 @@
 //!   watchdog by name feeds it as well.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Stdio};
+use std::os::unix::net::UnixDatagram;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -40,6 +43,8 @@ use lemnos_linux_sys::guest;
 use crate::{say, since};
 
 const NODE: &str = "/dev/watchdog0";
+/// The stand-in manager's notification socket: lemnosd's `NOTIFY_SOCKET`.
+const NOTIFY: &str = "/run/fake-manager/notify";
 const BOARD_PATH: &str = "/run/wdt-board.toml";
 const DAEMON: u32 = 999;
 /// How long the guest stays up on lemnosd's feeding: three times the hook's 15 s period.
@@ -89,9 +94,53 @@ fn give_node(uid: u32, gid: u32, mode: u32) -> std::io::Result<()> {
     fs::set_permissions(NODE, fs::Permissions::from_mode(mode))
 }
 
-/// Starts lemnosd as its unit does, with its error output piped.
-fn start_lemnosd() -> std::io::Result<std::process::Child> {
-    Command::new("/sbin/lemnos-unit-check")
+/// The stand-in manager's descriptor store: the watchdog descriptors lemnosd stored (`FDSTORE=1`), kept
+/// until the guest ends, and passed to each start of lemnosd (`LISTEN_FDS`), as systemd's store does
+/// across a restart. There is no systemd in this guest, so this is the store's behaviour and no more.
+type Store = Arc<Mutex<Vec<(String, OwnedFd)>>>;
+
+/// Starts the manager's notification socket and its store. A message with `FDSTORE=1` keeps the
+/// descriptors it carries under its `FDNAME`; any other message is not the manager's to act on.
+fn start_manager() -> io::Result<Store> {
+    let store: Store = Arc::new(Mutex::new(Vec::new()));
+    let _ = fs::create_dir_all("/run/fake-manager");
+    let socket = UnixDatagram::bind(NOTIFY)?;
+    let kept = Arc::clone(&store);
+    thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        let mut fds = Vec::new();
+        loop {
+            fds.clear();
+            let Ok(read) = lemnos_linux_sys::scm::recv_with_fds(socket.as_fd(), &mut buf, &mut fds)
+            else {
+                continue;
+            };
+            let message = String::from_utf8_lossy(&buf[..read]).into_owned();
+            if !message.lines().any(|line| line == "FDSTORE=1") {
+                continue;
+            }
+            let name = message
+                .lines()
+                .find_map(|line| line.strip_prefix("FDNAME="))
+                .unwrap_or("unknown")
+                .to_owned();
+            let count = fds.len();
+            if let Ok(mut kept) = kept.lock() {
+                kept.extend(fds.drain(..).map(|fd| (name.clone(), fd)));
+            }
+            say(&format!(
+                "user: manager: stored {count} descriptor(s) as {name}"
+            ));
+        }
+    });
+    Ok(store)
+}
+
+/// Starts lemnosd as its unit does, with its error output piped. Its notification socket is the
+/// manager's, and it is passed the stored descriptors the way the manager passes them on a restart.
+fn start_lemnosd(store: &Store) -> io::Result<Child> {
+    let mut command = Command::new("/sbin/lemnos-unit-check");
+    command
         .args([
             "exec",
             "--runtime-dir",
@@ -107,19 +156,35 @@ fn start_lemnosd() -> std::io::Result<std::process::Child> {
         ])
         .args(["--user", "999", "--group", "999"])
         .env("LEMNOSD_START_TRACE", "1")
-        .stderr(Stdio::piped())
-        .spawn()
+        .env("NOTIFY_SOCKET", NOTIFY)
+        .stderr(Stdio::piped());
+    let passed = {
+        let kept = store
+            .lock()
+            .map_err(|_| io::Error::other("the store is poisoned"))?;
+        let mut passed = Vec::with_capacity(kept.len());
+        for (name, fd) in kept.iter() {
+            passed.push((name.clone(), fd.try_clone()?));
+        }
+        passed
+    };
+    lemnos_linux_sys::listen::pass_on(&mut command, passed);
+    command.spawn()
 }
 
 /// `daemon-loop`: lemnosd dies at the end of its root phase, every start, and is started again
 /// [`RESTART`] later, as `Restart=always` with `RestartSec=1s` does. Only the boot's first start may
 /// feed (its root phase's hold); a restart must not, so the watchdog resets the guest one period after
 /// that first feed. Never returns.
-fn crash_loop(last: f64) -> ! {
+fn crash_loop(mode: &str, last: f64, store: &Store) -> ! {
     let mut start = 0u32;
+    // The point each start is killed at: after its root phase (`daemon-loop`), or after its watchdog's
+    // bind has ended, healthy or not (`daemon-loop-bind`: the bind may have opened the node by name, and
+    // a restart's open of a running watchdog feeds it).
+    let bind = mode == "daemon-loop-bind";
     loop {
         start += 1;
-        let mut child = match start_lemnosd() {
+        let mut child = match start_lemnosd(store) {
             Ok(child) => child,
             Err(e) => {
                 say(&format!("user: daemon: lemnosd can't be started: {e}"));
@@ -128,6 +193,7 @@ fn crash_loop(last: f64) -> ! {
                 }
             }
         };
+        let pid = i32::try_from(child.id()).unwrap_or(0);
         if let Some(stderr) = child.stderr.take() {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 say(&format!("lemnosd| {line}"));
@@ -137,21 +203,33 @@ fn crash_loop(last: f64) -> ! {
                         since(last)
                     ));
                 }
-                if line.contains(" root phase done") {
+                let ends = if bind {
+                    line.contains(" bind watchdog ok") || line.contains(" bind watchdog failed")
+                } else {
+                    line.contains(" root phase done")
+                };
+                if ends {
+                    // Stopped before the kill, so no first tick can run after the bind has ended.
+                    let _ = guest::kill(pid, libc::SIGSTOP);
                     break;
                 }
             }
         }
         let _ = child.kill();
         let _ = child.wait();
+        let where_ = if bind {
+            "after its watchdog bind"
+        } else {
+            "after its root phase"
+        };
         say(&format!(
-            "user: daemon (daemon-loop): lemnosd start {start} killed after its root phase, {:.3} s after the hook's last feed",
+            "user: daemon ({mode}): lemnosd start {start} killed {where_}, {:.3} s after the hook's last feed",
             since(last)
         ));
         if since(last) > STAY_SECONDS as f64 {
-            say(
-                "user: daemon (daemon-loop): the guest stayed up through the restarts; powering off",
-            );
+            say(&format!(
+                "user: daemon ({mode}): the guest stayed up through the restarts; powering off"
+            ));
             let _ = guest::power_off();
             loop {
                 thread::park();
@@ -170,7 +248,7 @@ pub fn run(mode: &str, last: f64) -> ! {
         }
     }
     let given = match mode {
-        "daemon" => give_node(0, DAEMON, 0o660),
+        "daemon" | "daemon-loop-bind" => give_node(0, DAEMON, 0o660),
         _ => give_node(0, 0, 0o600),
     };
     if let Err(e) = given {
@@ -190,10 +268,21 @@ pub fn run(mode: &str, last: f64) -> ! {
         "user: daemon ({mode}): starting lemnosd under the unit, {:.3} s after the hook's last feed",
         since(last)
     ));
-    if mode == "daemon-loop" {
-        crash_loop(last);
+    let store = match start_manager() {
+        Ok(store) => store,
+        Err(e) => {
+            say(&format!(
+                "user: daemon: the manager's socket can't be made: {e}"
+            ));
+            loop {
+                thread::park();
+            }
+        }
+    };
+    if mode == "daemon-loop" || mode == "daemon-loop-bind" {
+        crash_loop(mode, last, &store);
     }
-    let child = start_lemnosd();
+    let child = start_lemnosd(&store);
     let mut child = match child {
         Ok(child) => child,
         Err(e) => {

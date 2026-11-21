@@ -188,6 +188,29 @@ for unit in packaging/systemd/*.service; do
   fi
 done
 
+# lemnosd's unit keeps its watchdog descriptor in the service manager's store, and orders itself minimally: the
+# store is what a restart takes back (a store kept across a stop, or a runtime directory that marks a restart,
+# would change that), and no ordering waits for local-fs.target, since a filesystem check must not run in the
+# unfed gap (docs/slots.md, "The watchdog chain", window 4; packaging/README.md, "The hardware watchdog").
+echo "==> watchdog store and ordering"
+lemnosd_unit=packaging/systemd/lemnosd.service
+grep -Eq '^FileDescriptorStoreMax=[1-9][0-9]*$' "$lemnosd_unit" || {
+  echo "packaging: lemnosd.service keeps no file descriptor store (FileDescriptorStoreMax)" >&2
+  exit 1
+}
+if grep -Eq '^(FileDescriptorStorePreserve|RuntimeDirectoryPreserve)=' "$lemnosd_unit"; then
+  echo "packaging: lemnosd.service sets FileDescriptorStorePreserve or RuntimeDirectoryPreserve; a restart is told by the store" >&2
+  exit 1
+fi
+grep -Eq '^DefaultDependencies=no$' "$lemnosd_unit" || {
+  echo "packaging: lemnosd.service keeps the implicit dependencies (DefaultDependencies=no is missing)" >&2
+  exit 1
+}
+if grep -Eq '^(After|Requires|Wants|RequiresMountsFor|BindsTo)=.*(local-fs|basic\.target|sysinit\.target)' "$lemnosd_unit"; then
+  echo "packaging: lemnosd.service orders itself after local-fs, basic or sysinit: a filesystem check would run in the unfed gap" >&2
+  exit 1
+fi
+
 # The BusyBox init scripts: parsed, never run. sh is always here; busybox and shellcheck are optional.
 echo "==> init scripts"
 for script in packaging/init/S5*; do

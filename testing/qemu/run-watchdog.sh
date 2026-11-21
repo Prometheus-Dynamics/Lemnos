@@ -35,10 +35,15 @@
 #              daemon hangs before it is healthy. Passes when the guest does not stay up, nothing feeds
 #              after the root phase, and the reset comes within the period of the root phase's feed.
 #   daemon-loop  node root 0600 (only a root-phase hold can feed); lemnosd is killed at the end of its root phase on every start and
-#              started again 1 s later (Restart=always, RestartSec=1s). Only the boot's first start holds
-#              and feeds (a runtime directory already the daemon's is a restart): passes when only one
-#              start fed, a restart said it held nothing, and the reset comes within the period of that feed.
-#
+#              started again 1 s later (Restart=always, RestartSec=1s). The stand-in manager keeps the descriptor lemnosd stores,
+#              and each restart takes it back: passes when only the first start fed, every restart said it adopted the stored
+#              descriptor and fed nothing, and the reset comes within the period of that feed.
+#   daemon-loop-bind  node owner 999 at 0660 (a bind by name can open it, and an open of a running watchdog feeds it), and
+#              lemnosd is killed after its watchdog's bind has ended, every start, before it is healthy: the restarts reach the
+#              bind. Passes when every restart adopted the stored descriptor (its bind took it, no open by name), only the first
+#              start fed, the stored descriptor was kept under its name, and the reset comes within the period of the first feed.
+#              This is the PING-ON-OPEN case: on a tree that opens the node by name at a restart, the restarts feed it for good.
+
 # The normal and stall modes stand in for lemnosd. The daemon modes run the real one, but not the
 # systemd start ahead of it (switch_root to lemnosd's exec): that part is the image's, bounded by its
 # unit ordering (docs/slots.md, "The watchdog chain"), and a board run measures it
@@ -61,7 +66,7 @@
 #   KERNEL  the bootable image of a kernel with CONFIG_I6300ESB_WDT=y (required), e.g. the pinned
 #           modules-off bzImage (tmp/pinned-2026-11-14-d/k-modules-off/build/arch/x86/boot/bzImage)
 #   CARGO   the cargo to build the guests for musl with (default: cargo; the group's e-cargo.sh)
-#   MODES   the modes to run (default: "slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop")
+#   MODES   the modes to run (default: "slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop daemon-loop-bind")
 #   ACCEL   QEMU's accelerator (default: kvm when /dev/kvm is usable, else tcg; tcg for a slow board's timing)
 #   LOGS    where the console logs are kept (default: qemu-watchdog under TMPDIR, or /tmp)
 set -euo pipefail
@@ -70,7 +75,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 KERNEL="${KERNEL:?set KERNEL to the bzImage of a kernel with CONFIG_I6300ESB_WDT=y}"
 CARGO="${CARGO:-cargo}"
-MODES="${MODES:-slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop}"
+MODES="${MODES:-slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop daemon-loop-bind}"
 LOGS="${LOGS:-${TMPDIR:-/tmp}/qemu-watchdog}"
 target=x86_64-unknown-linux-musl
 DOG_SECONDS=15
@@ -126,7 +131,7 @@ run_mode() {
     slot-init) cp "$slot_init" "$root/init" ;;
     normal) cp "$work/watchdog-init" "$root/init"; cp "$work/watchdog-user" "$root/sbin/watchdog-user"; level=2 ;;
     stall) cp "$work/watchdog-init" "$root/init"; cp "$work/watchdog-user" "$root/sbin/watchdog-user"; extra="lemnos.watchdog=stall"; level=2 ;;
-    daemon|daemon-late|daemon-root|daemon-hang|daemon-stop|daemon-loop)
+    daemon|daemon-late|daemon-root|daemon-hang|daemon-stop|daemon-loop|daemon-loop-bind)
       cp "$work/watchdog-init" "$root/init"; cp "$work/watchdog-user" "$root/sbin/watchdog-user"
       cp "$work/lemnosd" "$root/sbin/lemnosd"; cp "$work/lemnos-unit-check" "$root/sbin/lemnos-unit-check"
       mkdir -p "$root"/{run,tmp}
@@ -251,7 +256,8 @@ for mode in $MODES; do
       ;;
     daemon-loop)
       expect "$mode" "$text" "user: daemon (daemon-loop): lemnosd start 2 killed after its root phase"
-      expect "$mode" "$text" 'a restart in this boot'
+      # A restart takes the descriptor the store kept, and does not open the node by name.
+      expect "$mode" "$text" 'root phase: watchdog adopted, not fed'
       if grep -qF "the guest stayed up" "$text"; then fail "daemon-loop: the guest stayed up through the restarts"; fi
       feeds="$(grep -c 'user: piece: root-phase feed' "$text" || true)"
       [[ "$feeds" == 1 ]] || fail "daemon-loop: ${feeds} starts fed the watchdog; only the boot's first may"
@@ -261,6 +267,21 @@ for mode in $MODES; do
       starts="$(grep -c 'killed after its root phase' "$text" || true)"
       echo "qemu-watchdog: daemon-loop: ${starts} starts, one fed; the guest ended ${elapsed} s after that feed (due by ${window} s)" >&2
       awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "daemon-loop: the guest ended ${elapsed} s after the first start's feed, past ${window} s"
+      ;;
+    daemon-loop-bind)
+      # The symptom first: a restart's open of the node by name feeds a lemnosd that never got healthy.
+      if grep -qF "the guest stayed up" "$text"; then fail "daemon-loop-bind: the guest stayed up through the restarts: a restart's open of the node fed it"; fi
+      expect "$mode" "$text" "user: daemon (daemon-loop-bind): lemnosd start 2 killed after its watchdog bind"
+      expect "$mode" "$text" 'user: manager: stored 1 descriptor(s) as lemnos-watchdog'
+      expect "$mode" "$text" 'root phase: watchdog adopted, not fed'
+      feeds="$(grep -c 'user: piece: root-phase feed' "$text" || true)"
+      [[ "$feeds" == 1 ]] || fail "daemon-loop-bind: ${feeds} starts fed the watchdog; only the boot's first may"
+      fedat="$(awk '/user: piece: root-phase feed/ {print $1; exit}' "$work/console-$mode.stamped")"
+      elapsed="$(awk -v a="$fedat" -v b="$end" 'BEGIN{printf "%.1f", b-a}')"
+      window=$((DOG_SECONDS + TIMING_SLACK))
+      starts="$(grep -c 'killed after its watchdog bind' "$text" || true)"
+      echo "qemu-watchdog: daemon-loop-bind: ${starts} starts, one fed; the guest ended ${elapsed} s after that feed (due by ${window} s)" >&2
+      awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "daemon-loop-bind: the guest ended ${elapsed} s after the first start's feed, past ${window} s"
       ;;
   esac
   passed+=("$mode")

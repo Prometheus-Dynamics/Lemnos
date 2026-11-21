@@ -21,6 +21,7 @@ pub mod gpio;
 pub mod guest;
 pub mod i2c;
 pub mod inotify;
+pub mod listen;
 pub mod media;
 pub mod mount;
 // Its table macros and checked requests serve uAPI layouts that arrive with later crates.

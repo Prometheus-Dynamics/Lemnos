@@ -2196,15 +2196,33 @@ off the watchdog's path. Without the hold, a rule that lands late cost its delay
 retry (1 s, 2 s, 4 s, capped at 8 s). A keep-alive device named by its `device` setting instead of `uses` is not
 held: its bind opens the node by name.
 
-Only the boot's first start holds. Opening a running watchdog feeds it, so a lemnosd that died after its root
-phase, before it is healthy, would be fed once a restart (`Restart=always`, `RestartSec=1s`) for good, and the
-watchdog would never catch it. A restart is told by its runtime directory: the service manager makes
-`/run/lemnos` root's, the first start's root phase hands it to the daemon's user, and the unit keeps it across a
-restart (`RuntimeDirectoryPreserve=restart`), so a directory that is already the daemon's means an earlier start
-of this boot got that far. A restart opens the node at its bind, by name, as before the hold. The same holds for
-that open: a lemnosd that dies after its bind and before it is healthy is fed by each restart's bind. That is
-the open's own effect, not the hold's, and it is the case the QEMU check cannot close (`daemon-loop` runs with
-the node root's, so that only a hold could feed).
+A restart does not open the node. Opening a running watchdog feeds it, so a lemnosd that died after its root
+phase, before it was healthy, would be fed by each restart's open, for good, and the watchdog would never catch
+it. So the root phase keeps the descriptor it fed in the service manager's file descriptor store
+(`FDSTORE=1`, `FDNAME=lemnos-watchdog`, `service/lemnosd/src/privilege.rs`, `keep_in_store`), and the next start
+takes it back from `LISTEN_FDS` and feeds nothing (`lemnos_linux_sys::listen::take`,
+`LinuxBoard::hold_before_drop`). The root phase logs `adopted, not fed` for that start. The store is the only
+marker of a restart: the runtime directory no longer tells a restart from a first start (the unit keeps no
+`RuntimeDirectoryPreserve=`), and nothing else does.
+
+The store's rules, each tested on the lifecycle the service manager gives it:
+
+- **A crash and a restart** keep the descriptor. The restart adopts it; a restart that dies before healthy is fed
+  by nothing, and the watchdog resets the board one period after the last feed (QEMU `daemon-loop-bind`).
+- **A failed unit** drops the store, as systemd does for a unit that ends in `failed`. Nothing feeds the watchdog
+  after that, and the board resets one period after the last feed. The next start of the board is a boot's first
+  start, and the reset is what the operator sees.
+- **A stop, then a start** (an operator's `systemctl restart`, or a stop and start of the unit) empties the store
+  (`FileDescriptorStorePreserve=` is not set). The start after it is a first start: the root phase opens the node and
+  feeds it once, and logs `fed`. That feed is the deliberate restart's, the same as a boot's first start.
+- **A `daemon-reload` or a `daemon-reexec`** keeps the store: the running unit is not restarted, and systemd serialises
+  the store across a re-execution of itself.
+- **A descriptor that is not the node's** (not a character device with the watchdog node's device number, as a
+  store that was filled for another node or another boot would give) is refused by name, closed, and the node is
+  opened and fed as a first start does. A stored descriptor that cannot be kept (no manager, or a manager that
+  refuses it) is named, and the node is then opened by name at the next restart, which feeds it.
+- **BusyBox** has no store. Its restart opens the node by name, as before: the feed on a restart is the documented
+  limit of that init, which `packaging/README.md` says. The first start of a BusyBox board holds and feeds the same.
 
 The QEMU check runs the real lemnosd under its unit (`lemnos-unit-check exec`, as 999:999) behind a hook that
 arms the watchdog as slot-init does, with `LEMNOSD_START_TRACE=1`, and reads the pieces from the hook's last feed
@@ -2235,7 +2253,11 @@ board), and the next bind begins. The QEMU check proves both ends: a bind hung a
 watchdog is fed after it (`daemon-hang`: the watchdog's bind began 2.46 s and its first tick 2.55 s after the hook's
 last feed), a lemnosd stopped right after its root-phase feed is reset one period later (`daemon-stop`: 15.1 s),
 and a lemnosd killed at the end of its root phase on every start and restarted is fed only by the first start
-and reset one period after it (`daemon-loop`: 14 starts, one fed, reset 15.7 s after that feed).
+and reset one period after it (`daemon-loop`: 14 starts, one fed, reset 15.7 s after that feed). The last case
+is `daemon-loop-bind`: the node is owned by the daemon's group, so a restart's bind can open it by name, and each
+start is killed after its watchdog's bind has ended, before it is healthy. Each restart takes the stored descriptor
+and feeds nothing, so the guest is reset one period after the first start's feed. On a tree whose restart opens the
+node by name, that case never resets (PING-ON-OPEN).
 
 **Which mechanism catches which hang.**
 

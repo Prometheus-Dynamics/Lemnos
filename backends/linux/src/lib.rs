@@ -205,19 +205,37 @@ impl LinuxBoard {
     }
 
     /// Holds the node a need names across the drop, as lemnosd's root phase runs (still root): a
-    /// watchdog (`watchdog:<node>` or `watchdogN`) is opened and fed once, and its bind after the
-    /// drop takes the held descriptor (`watchdog.rs`). Returns the line the root phase logs, or
-    /// `None` for a need of a kind that is not held (it is opened by name at its bind).
+    /// watchdog (`watchdog:<node>` or `watchdogN`) is held and its bind after the drop takes the held
+    /// descriptor (`watchdog.rs`). `stored` is what the service manager kept for a restart: a stored
+    /// descriptor for the node is taken as it is, and the node is not opened. Returns `None` for a need
+    /// of a kind that is not held (it is opened by name at its bind).
     ///
     /// # Errors
     /// A watchdog that is not there, or the open's or the feed's error, each by name.
-    pub fn hold_before_drop(&self, need: &str) -> core::result::Result<Option<String>, String> {
+    pub fn hold_before_drop(
+        &self,
+        need: &str,
+        stored: &mut Vec<std::fs::File>,
+    ) -> core::result::Result<Option<Hold>, String> {
         let Some(path) = self.watchdog_path(need) else {
             return Ok(None);
         };
-        watchdog::hold(&path)
-            .map(|()| Some(format!("{}: held across the drop and fed", path.display())))
-            .map_err(|e| format!("{}: not held: {e}", path.display()))
+        match watchdog::hold(&path, stored) {
+            Ok(watchdog::Held::Fed) => Ok(Some(Hold {
+                line: format!("{}: held across the drop and fed", path.display()),
+                path,
+                fed: true,
+            })),
+            Ok(watchdog::Held::Adopted) => Ok(Some(Hold {
+                line: format!(
+                    "{}: held across the drop from the service's descriptor store (not fed)",
+                    path.display()
+                ),
+                path,
+                fed: false,
+            })),
+            Err(e) => Err(format!("{}: not held: {e}", path.display())),
+        }
     }
 
     /// The adapter a `i2c-N` or `i2c:of=<node>` name means. `i2c:of=` is the adapter whose
@@ -249,6 +267,25 @@ impl LinuxBoard {
         let device = Spidev::open_path(&path).map_err(|e| open_status(&e))?;
         Ok(device.holding(claim))
     }
+}
+
+/// A watchdog held across the drop by [`LinuxBoard::hold_before_drop`].
+#[derive(Debug)]
+pub struct Hold {
+    /// The line the root phase logs.
+    pub line: String,
+    /// The node held.
+    pub path: PathBuf,
+    /// Whether the node was opened and fed here (its descriptor is the one to keep in the store),
+    /// rather than taken from the store as it was.
+    pub fed: bool,
+}
+
+/// The held watchdog descriptors, as copies, with their nodes: what the service manager keeps for a
+/// restart (see [`hold_before_drop`](LinuxBoard::hold_before_drop)).
+#[must_use]
+pub fn held_watchdogs() -> Vec<(PathBuf, std::fs::File)> {
+    watchdog::held_copies()
 }
 
 const I2C: &str = "i2c-";
@@ -568,8 +605,15 @@ mod tests {
         let (mut board, dir) = temp_board("held-watchdog");
         let node = dir.join("watchdog7");
         std::fs::write(&node, b"").unwrap();
-        let line = board.hold_before_drop("watchdog7").unwrap().unwrap();
-        assert!(line.contains("held across the drop and fed"), "{line}");
+        let hold = board
+            .hold_before_drop("watchdog7", &mut Vec::new())
+            .unwrap()
+            .unwrap();
+        assert!(hold.fed, "{hold:?}");
+        assert!(
+            hold.line.contains("held across the drop and fed"),
+            "{hold:?}"
+        );
         assert_eq!(std::fs::read(&node).unwrap(), [0u8], "the hold feeds once");
         // The node is now closed to everyone by name, as a root 0600 node is to the daemon's user.
         std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -583,14 +627,21 @@ mod tests {
             "the bind feeds through the held file"
         );
         // A kind that is not held is left to its bind.
-        assert_eq!(board.hold_before_drop("i2c-3").unwrap(), None);
+        assert!(
+            board
+                .hold_before_drop("i2c-3", &mut Vec::new())
+                .unwrap()
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_watchdog_that_is_not_there_is_not_held_and_says_so() {
         let (board, dir) = temp_board("absent-watchdog");
-        let why = board.hold_before_drop("watchdog9").unwrap_err();
+        let why = board
+            .hold_before_drop("watchdog9", &mut Vec::new())
+            .unwrap_err();
         assert!(why.contains("watchdog9: not held"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
     }

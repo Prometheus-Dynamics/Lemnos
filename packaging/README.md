@@ -207,6 +207,9 @@ Three rules follow, and the OS must keep them:
   where systemd fed `/dev/watchdog0` itself with `RuntimeWatchdogUSec=15s`).
 - **Do not run a second feeder** on BusyBox: no `watchdog` daemon, and no other init step that opens the
   node. slot-init is the only init step that opens it (`docs/slots.md`, "The watchdog chain").
+- **BusyBox limit (documented, not fixed):** BusyBox has no file descriptor store, so a restart of lemnosd opens
+  the node by name at its bind, and that open feeds a running watchdog. A lemnosd that dies after its bind and
+  before it is healthy is fed by each restart on that init. Its first start holds and feeds as on systemd.
 - **The units set no `WatchdogSec=`.** A software timeout that restarts a hung daemon would race the
   hardware reboot with a second, shorter clock. Dropping it keeps one escalation, identical on both
   init systems. `Type=notify` stays, for readiness only.
@@ -221,7 +224,21 @@ Three rules follow, and the OS must keep them:
 
 lemnosd's root phase opens a keep-alive device's watchdog (the node its `uses` names) as root before the drop
 and feeds it at once, so the node's owner does not matter to the watchdog: root 0600 from devtmpfs is enough,
-and nothing waits on udev for it (`docs/slots.md`, "The watchdog chain", window 4). The `lemnos` group can
+and nothing waits on udev for it (`docs/slots.md`, "The watchdog chain", window 4).
+
+The unit keeps that descriptor in systemd's file descriptor store (`FileDescriptorStoreMax=4`, and lemnosd sends
+`FDSTORE=1`). A restart takes it back and feeds nothing, since opening a running watchdog feeds it. The store is
+emptied by a stop, so an operator's `systemctl restart` is a first start, and it is not kept across a failed unit.
+Do not set `FileDescriptorStorePreserve=` on the unit: a store kept across a stop would hold a watchdog descriptor
+for a daemon that is down. The unit's `RuntimeDirectoryPreserve=` is not set, and nothing depends on the directory
+surviving a restart.
+
+**Ordering.** `lemnosd.service` has `DefaultDependencies=no`, with `After=systemd-sysusers.service`,
+`Before=shutdown.target` and `Conflicts=shutdown.target` in place of the implicit ones. It does not wait for
+`local-fs.target`: a filesystem check runs before that target, and a check must never run in the unfed gap between
+slot-init's exec and lemnosd's root-phase feed (`docs/slots.md`, "The watchdog chain", window 4). The image mounts
+what lemnosd uses before `switch_root` (the slot's data partition, which slot-init mounts), or on a filesystem with no
+check pass (`fsck` passno 0), and says so in its own unit contract. The `lemnos` group can
 still open the node (`SUBSYSTEM=="watchdog"` in the udev rules, `^watchdog` in the mdev fragment), for a
 keep-alive device named by its `device` setting, which the root phase does not hold. Nothing else should.
 

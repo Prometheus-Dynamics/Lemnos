@@ -39,6 +39,7 @@ with the board's own software stopped only for each test and put back afterwards
 | [`J4b2.md`](../testing/board-runs/J4b2.md) | Not run yet: the receiver's frame-start count against the sensor's frame rate, its sequence numbers, and whether every frame start shows (a channel with no buffer address raises none, as measured earlier) |
 | [`B13.md`](../testing/board-runs/B13.md) | `thermal-zone` on the board's zone, a missing zone and a file of its own: values, `NOT_FOUND`, `IO`, recovery with no restart, the zone followed under load |
 | [`GROW.md`](../testing/board-runs/GROW.md) | Not run yet: the data partition's first-boot grow on a card, MBR or GPT: `info` states, `e2fsck` after a clean power-off, a second boot that does nothing, the watchdog through the resize |
+| [`WDT-ORDER.md`](../testing/board-runs/WDT-ORDER.md) | Not run yet: lemnosd's unit ordering on a board's cold boot, the unfed gap at its real systemd start, the watchdog descriptor store across a kill and a deliberate restart |
 
 Each file says which of its checks ran and which did not, and why. The fixes the run made are in
 the kernel module (`rs/pio.rs`, `rs/rp1_csi2.rs`, `rs/pisp_fe.rs`), the `rp1-csi2` and
