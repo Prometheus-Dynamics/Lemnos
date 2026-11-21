@@ -207,7 +207,10 @@ pub struct Core {
 
 struct Watchdogs {
     dogs: [wdt::Model; 2],
+    /// The instant the counters are accounted to: every count up to here has run.
     last: Instant,
+    /// When the first watchdog ran out, at the instant it ran out (not when a thread noticed it).
+    expired: Option<Instant>,
 }
 
 fn le_words(bytes: &[u8]) -> VecDeque<u32> {
@@ -231,7 +234,9 @@ fn packet_bytes(words: &mut VecDeque<u32>, len: usize) -> Vec<u8> {
 }
 
 impl Core {
-    fn new(faults: Faults) -> Arc<Self> {
+    /// A core whose watchdogs start counting at `origin`, the board's load (the same origin the kicks and the
+    /// console are timed from).
+    fn new(faults: Faults, origin: Instant) -> Arc<Self> {
         let mut regs = HashMap::new();
         regs.insert(
             GSNPSID,
@@ -271,7 +276,8 @@ impl Core {
                     wdt::Model::new(wdt::BASE0, WDT_HZ, wdt::Fault::None).timed(),
                     wdt::Model::new(wdt::BASE1, WDT_HZ, wdt::Fault::None).timed(),
                 ],
-                last: Instant::now(),
+                last: origin,
+                expired: None,
             }),
             faults,
             stopped: AtomicBool::new(false),
@@ -283,8 +289,11 @@ impl Core {
     }
 
     /// The board's time passes: the watchdogs count. A watchdog that ran out resets the board, which
-    /// ends the stage's thread here.
-    fn tick(&self) {
+    /// ends the stage's thread here. Returns the instant the counters are accounted to.
+    ///
+    /// The counters run on the board's time, not on the thread's: a reset is stamped at the instant the
+    /// counter ran out, which is the board's time for it, however late this thread gets to the next tick.
+    fn tick(&self) -> Instant {
         if self.stopped.load(Ordering::Relaxed) {
             resume_unwind(Box::new(Reset::Stopped));
         }
@@ -295,18 +304,52 @@ impl Core {
         let ns = now.duration_since(w.last).as_nanos();
         let cycles = (ns * u128::from(WDT_HZ) / 1_000_000_000) as u64;
         if cycles == 0 {
-            return;
+            return w.last;
         }
+        let start = w.last;
         w.last +=
             Duration::from_nanos((u128::from(cycles) * 1_000_000_000 / u128::from(WDT_HZ)) as u64);
-        let fired = w
-            .dogs
-            .iter_mut()
-            .fold(false, |f, d| d.advance_cycles(cycles) | f);
+        let mut ran_out: Option<Instant> = None;
+        for d in w.dogs.iter_mut() {
+            // The cycles this dog had left at the start of the chunk: it ran out that many cycles in.
+            let left = d.remaining_cycles();
+            if d.advance_cycles(cycles) {
+                let at = start
+                    + Duration::from_nanos(
+                        (u128::from(left) * 1_000_000_000 / u128::from(WDT_HZ)) as u64,
+                    );
+                ran_out = Some(ran_out.map_or(at, |e| e.min(at)));
+            }
+        }
+        if let Some(at) = ran_out {
+            w.expired = Some(w.expired.map_or(at, |e| e.min(at)));
+        }
+        let fired = ran_out.is_some();
+        let last = w.last;
         drop(w);
         if fired {
             resume_unwind(Box::new(Reset::Watchdog));
         }
+        last
+    }
+
+    /// The instant the watchdog ran out, if it has.
+    fn expired(&self) -> Option<Instant> {
+        self.wdt.lock().unwrap_or_else(|e| e.into_inner()).expired
+    }
+
+    /// A kick of the watchdog at `addr` (the CRR write of [`wdt::KICK`]). The counter reloads at the instant
+    /// the counters are accounted to, which is returned: the board's time for the kick.
+    fn wdt_kick(&self, addr: usize, value: u32) -> Instant {
+        let at = self.tick();
+        let mut w = self.wdt.lock().unwrap_or_else(|e| e.into_inner());
+        let dog = if (wdt::BASE0..wdt::BASE0 + 0x800).contains(&addr) {
+            &mut w.dogs[0]
+        } else {
+            &mut w.dogs[1]
+        };
+        dog.write32(addr, value);
+        at
     }
 
     fn wdt_access(&self, addr: usize, write: Option<u32>) -> u32 {
@@ -814,11 +857,13 @@ impl RegAccess for Bus {
     fn write32(&mut self, addr: usize, value: u32) {
         if (wdt::BASE0..wdt::BASE1 + 0x800).contains(&addr) {
             if wdt::BASES.iter().any(|&base| addr == base + wdt::CRR) && value == wdt::KICK {
-                let at = self.started.elapsed().as_secs_f64();
+                let at = self.core.wdt_kick(addr, value);
+                let at = at.saturating_duration_since(self.started).as_secs_f64();
                 let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
                 shared.kicks.push((at, addr));
+            } else {
+                self.core.wdt_access(addr, Some(value));
             }
-            self.core.wdt_access(addr, Some(value));
             return;
         }
         self.core.tick();
@@ -945,8 +990,8 @@ impl SimBoard {
     /// The load and the start: the boot ROM leaves the bus and the check build runs from its entry (both
     /// watchdogs armed first, as the image's entry does). Returns when the start went out.
     pub fn load_and_start(&mut self) -> Instant {
-        let core = Core::new(self.faults.clone());
         let at = Instant::now();
+        let core = Core::new(self.faults.clone(), at);
         {
             let mut shared = self.lock();
             shared
@@ -962,8 +1007,17 @@ impl SimBoard {
         let faults = self.faults.clone();
         let card = self.card.clone();
         self.threads.push(std::thread::spawn(move || {
+            let watch = stage_core.clone();
             let reset = run_stage(stage_core, shared.clone(), at, &faults, card);
-            let when = started.elapsed().as_secs_f64();
+            // A watchdog reset happened when its counter ran out; the thread only noticed it later.
+            let when = match reset {
+                Reset::Watchdog => watch
+                    .expired()
+                    .unwrap_or_else(Instant::now)
+                    .saturating_duration_since(started)
+                    .as_secs_f64(),
+                _ => started.elapsed().as_secs_f64(),
+            };
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             s.resets.push((when, reset));
             stage_done.store(true, Ordering::SeqCst);
