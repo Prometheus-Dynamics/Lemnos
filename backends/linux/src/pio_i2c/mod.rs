@@ -30,6 +30,12 @@ use bus::PioBus;
 use selector::Pins;
 
 /// Whether a board-file name is a PIO I2C bus.
+/// Whether the backend's own parser takes `need` as a well-formed PIO I2C bus name.
+#[cfg(test)]
+pub(crate) fn takes(need: &str) -> bool {
+    matches!(selector::parse(need), Some(Ok(_)))
+}
+
 pub(crate) fn names(need: &str) -> bool {
     selector::is_selector(need)
 }

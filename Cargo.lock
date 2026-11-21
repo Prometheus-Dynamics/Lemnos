@@ -1468,6 +1468,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "lemnos-host",
+ "lemnos-linux-names",
  "lemnos-slot-store",
  "lemnosd",
  "serde",
@@ -2722,6 +2723,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-host",
  "lemnos-linux-hotplug",
+ "lemnos-linux-names",
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
@@ -2735,6 +2737,10 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
 ]
+
+[[package]]
+name = "lemnos-linux-names"
+version = "2.0.1-dev"
 
 [[package]]
 name = "lemnos-linux-stream"

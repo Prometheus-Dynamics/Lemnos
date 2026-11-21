@@ -1,0 +1,12 @@
+[package]
+name = "lemnos-linux-names"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The board-file resource names the Linux backend takes, and their grammar: one table that the backend's parsers and `lemnos-ctl validate` both read. No dependencies"
+
+[lints]
+workspace = true

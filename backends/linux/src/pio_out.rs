@@ -35,7 +35,7 @@ const PREFIX: &str = "pio-out:";
 
 /// The GPIO a `pio-out:gpio=N` name means: `Some(Ok(n))`, `Some(Err)` for a malformed name, and
 /// `None` for a name of another kind.
-fn parse(need: &str) -> Option<Result<u8, ()>> {
+pub(crate) fn parse(need: &str) -> Option<Result<u8, ()>> {
     let rest = need.strip_prefix(PREFIX)?;
     let gpio = rest
         .strip_prefix("gpio=")

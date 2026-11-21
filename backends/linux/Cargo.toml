@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-linux-names = { path = "../linux-names" }
 lemnos-linux-hotplug = { path = "../linux-hotplug" }
 lemnos-linux-sys = { path = "../linux-sys" }
 # The watchdog's timeout requests: the ioctls, in the driver's own sys crate.

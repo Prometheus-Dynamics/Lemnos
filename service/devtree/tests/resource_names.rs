@@ -89,7 +89,6 @@ fn resource_names_a_line_the_soc_lacks_is_refused_by_name() {
 fn resource_names_forms_the_map_does_not_describe_are_not_checked() {
     for name in [
         "usb:1-1.4",
-        "pio-i2c:sda=8,scl=7",
         "dma:a/b",
         "gpiochip0:17",
         "pwmchip0:1",
@@ -98,4 +97,11 @@ fn resource_names_forms_the_map_does_not_describe_are_not_checked() {
     ] {
         assert!(refused(&with_bus(name)).is_empty(), "{name} was checked");
     }
+}
+
+#[test]
+fn resource_names_a_pio_name_is_checked_against_a_soc_with_no_pio_block() {
+    let reason = refused(&with_bus("pio-i2c:sda=8,scl=7"));
+    assert_eq!(reason.len(), 1, "{reason:?}");
+    assert!(reason[0].contains("no PIO block"), "{reason:?}");
 }

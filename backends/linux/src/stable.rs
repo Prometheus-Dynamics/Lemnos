@@ -178,6 +178,33 @@ pub(crate) fn watchdog_dev(dev: &Path, sys: &Path, node: &str) -> Option<PathBuf
     None
 }
 
+/// The I2C adapter device (`dev/i2c-N`) whose device-tree node is `node`, found under `sys`
+/// (`bus/i2c/devices/i2c-N/of_node`, as the kernel links it). `None` when no adapter has that node,
+/// or the name is not one of the kernel's `i2c-N`.
+pub(crate) fn i2c_bus_dev(dev: &Path, sys: &Path, node: &str) -> Option<PathBuf> {
+    let live = sys.join("firmware/devicetree/base");
+    for entry in std::fs::read_dir(sys.join("bus/i2c/devices"))
+        .ok()?
+        .flatten()
+    {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("i2c-") || name[4..].parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(of_node) = std::fs::canonicalize(entry.path().join("of_node")) else {
+            continue;
+        };
+        let Ok(below) = of_node.strip_prefix(&live) else {
+            continue;
+        };
+        if below.to_str() == Some(node.trim_start_matches('/')) {
+            return Some(dev.join(name));
+        }
+    }
+    None
+}
+
 /// The PWM chip directory (`class/pwm/pwmchipN`) whose device-tree node is `node`, found under
 /// `sys`. Each chip's `device/of_node` link is resolved and its path taken below the live tree.
 pub(crate) fn pwm_chip_dir(sys: &Path, node: &str) -> Option<PathBuf> {

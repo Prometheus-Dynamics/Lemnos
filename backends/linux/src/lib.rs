@@ -220,6 +220,15 @@ impl LinuxBoard {
             .map_err(|e| format!("{}: not held: {e}", path.display()))
     }
 
+    /// The adapter a `i2c-N` or `i2c:of=<node>` name means. `i2c:of=` is the adapter whose
+    /// device-tree node is that node, found now (the kernel numbers the adapters as they probe).
+    fn i2c_path(&self, need: &str) -> Option<PathBuf> {
+        if let Ok(lemnos_linux_names::Name::I2cOf { node }) = lemnos_linux_names::parse(need) {
+            return stable::i2c_bus_dev(&self.dev, &self.sys, node);
+        }
+        self.node(need, I2C)
+    }
+
     /// The watchdog node a name means: `watchdog:<node>` by its device-tree node, or the numbered
     /// `watchdogN` as it is. Resolved now, not kept: the kernel may renumber.
     fn watchdog_path(&self, need: &str) -> Option<PathBuf> {
@@ -277,7 +286,7 @@ impl Provider for LinuxBoard {
     fn provided(&self, need: &str) -> bool {
         pio_i2c::provided(&self.dev, need)
             || pio_out::provided(&self.dev, need)
-            || exists(self.node(need, I2C))
+            || exists(self.i2c_path(need))
             || exists(self.node(need, SPI))
             || exists(self.node(need, TTY))
             || exists(self.line_node(need).map(|(path, _)| path))
@@ -323,7 +332,7 @@ impl Provider for LinuxBoard {
             ))));
         }
         // Every device on a bus opens it: the kernel serialises their transfers.
-        let path = self.node(need, I2C).ok_or(Status::NOT_FOUND)?;
+        let path = self.i2c_path(need).ok_or(Status::NOT_FOUND)?;
         let bus = I2cBus::open_path(&path).map_err(|e| open_status(&e))?;
         Ok(I2c(lemnos_core::Held::boxed(Box::new(bus))))
     }
@@ -767,6 +776,92 @@ mod tests {
         assert!(board.provided("spidev0.0"));
         assert!(!board.provided("pio-i2c:sda=8,scl=7"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The grammar table in `lemnos-linux-names` and the backend's own parsers agree: every example
+    /// of the table is taken by the parser the backend uses for it, and each malformed name is
+    /// refused by both. The forms with no strict parser of their own here (`i2c-N`, the numbered
+    /// `gpiochipN`, `pwmchipN`, `watchdogN`, `ttyNAME` and the module's blocks) are checked by the
+    /// tests that open them, above.
+    #[test]
+    fn the_backend_parsers_and_the_names_table_agree() {
+        fn backend_takes(name: &str) -> bool {
+            stable::parse(name).is_some()
+                || usb::UsbName::parse(name).is_some()
+                || pio_out::parse(name).is_some_and(|gpio| gpio.is_ok())
+                || pio_i2c::takes(name)
+        }
+        for form in lemnos_linux_names::FORMS {
+            let parsed = lemnos_linux_names::parse(form.example).is_ok();
+            assert!(
+                parsed,
+                "{}: the table's example {:?}",
+                form.name, form.example
+            );
+            if matches!(
+                form.name,
+                "gpio"
+                    | "pwm"
+                    | "watchdog"
+                    | "usb-port"
+                    | "usb-id"
+                    | "usb-class"
+                    | "pio-out"
+                    | "pio-i2c"
+            ) {
+                assert!(
+                    backend_takes(form.example),
+                    "{:?} is refused by the backend",
+                    form.example
+                );
+            }
+        }
+        for name in [
+            "usb:1-",
+            "usb:1a2b:3c4",
+            "usb:class:e",
+            "pio-out:gpio=40",
+            "gpio:a/b:3",
+            "pwm:/x/../y:1",
+            "watchdog:soc/x",
+        ] {
+            assert!(lemnos_linux_names::parse(name).is_err(), "{name}");
+            assert!(
+                !backend_takes(name),
+                "the backend takes the malformed {name}"
+            );
+        }
+    }
+
+    /// An I2C bus named by its device-tree node is found under the sysfs adapter whose `of_node`
+    /// is that node, and is provided as `/dev/i2c-N`. The fake tree is the kernel's layout: the
+    /// adapter `i2c-7` links its node below the live tree.
+    #[test]
+    fn an_i2c_bus_named_by_its_device_tree_node_is_provided_as_its_adapter() {
+        let (_, dir) = temp_board("i2c-of");
+        let sys = dir.join("sys");
+        let dev = dir.join("dev");
+        std::fs::create_dir_all(&dev).unwrap();
+        let node = sys.join("firmware/devicetree/base/axi/pcie@1000120000/rp1/i2c@74000");
+        std::fs::create_dir_all(&node).unwrap();
+        let adapter = sys.join("bus/i2c/devices/i2c-7");
+        std::fs::create_dir_all(&adapter).unwrap();
+        std::os::unix::fs::symlink(&node, adapter.join("of_node")).unwrap();
+        std::fs::write(dev.join("i2c-7"), b"").unwrap();
+        let board = LinuxBoard::at(&dev, &sys);
+        let name = "i2c:of=/axi/pcie@1000120000/rp1/i2c@74000";
+        assert!(board.provided(name));
+        assert!(!board.provided("i2c:of=/axi/pcie@1000120000/rp1/i2c@70000"));
+        assert!(!board.provided("i2c:of=axi/pcie@1000120000/rp1/i2c@74000"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The real host's sysfs has no adapter with a node the host does not have: the name is not
+    /// provided, and the lookup is not a stand-in that always passes.
+    #[test]
+    fn an_i2c_node_the_real_host_lacks_is_not_provided() {
+        let board = LinuxBoard::at("/dev", "/sys");
+        assert!(!board.provided("i2c:of=/lemnos-no-such-node/i2c@0"));
     }
 
     #[test]

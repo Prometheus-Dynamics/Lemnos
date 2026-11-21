@@ -344,11 +344,17 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
     if let Some((device, reason)) = lemnosd::gadget::link_refusals(&board).into_iter().next() {
         return Err(format!("{path}: device {device:?}: {reason}"));
     }
-    // A backend resource name the SoC map does not have (an `i2c-N` the SoC has no bus for, a
-    // `udc:` no controller of the SoC has) is refused here by name, before any device is made. The
-    // map is the SoC's (`socs/<soc>.toml`, or `--socs`). A board that names a checkable resource and
-    // a SoC needs that map, since without it the name cannot be checked. A board with no SoC, or no
-    // checkable name, does not need it, and its names are checked at bind.
+    // A backend resource name is parsed with the one grammar the backend reads (`lemnos_linux_names`):
+    // a name of no known form, or a malformed one, is refused by name on every board. A name the SoC
+    // map can check (an `i2c-N` the SoC has no bus for, an `i2c:of=` node it lacks, a `udc:` no
+    // controller of the SoC has) is then refused against the map, which is the SoC's
+    // (`socs/<soc>.toml`, or `--socs`). A board that names such a name and a `soc` needs that map.
+    if let Some(refusal) = lemnos_devtree::resources::grammar_refusals(&board)
+        .into_iter()
+        .next()
+    {
+        return Err(format!("{path}: {refusal}"));
+    }
     if board.board.soc.is_some() && lemnos_devtree::resources::any_checkable(&board) {
         let map = load_map(&board, socs).map_err(|e| format!("{path}: {e}"))?;
         if let Some(refusal) = lemnos_devtree::resources::refusals(&board, &map)
