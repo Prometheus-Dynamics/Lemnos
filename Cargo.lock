@@ -1853,6 +1853,7 @@ dependencies = [
  "lemnos-driver-k230isp-sys",
  "lemnos-driver-regjob-sys",
  "lemnos-hal",
+ "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
@@ -2152,7 +2153,9 @@ dependencies = [
  "lemnos-core",
  "lemnos-driver-rkisp-sys",
  "lemnos-hal",
+ "lemnos-host",
  "lemnos-measure",
+ "lemnos-sim",
  "lemnos-v4l2",
 ]
 

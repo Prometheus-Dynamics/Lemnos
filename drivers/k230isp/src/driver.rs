@@ -446,10 +446,17 @@ impl K230Isp {
             self.error();
             return Ok(());
         }
-        let Some(buffer) = statistics_buffer(&mut self.statistics, &mut self.held_statistics)?
-        else {
-            self.error();
-            return Ok(());
+        // `pending` is already clear, so the job's error is counted here, on every path out.
+        let buffer = match statistics_buffer(&mut self.statistics, &mut self.held_statistics) {
+            Ok(Some(buffer)) => buffer,
+            Ok(None) => {
+                self.error();
+                return Ok(());
+            }
+            Err(err) => {
+                self.error();
+                return Err(err);
+            }
         };
         let frame = StreamFrame {
             buffer,

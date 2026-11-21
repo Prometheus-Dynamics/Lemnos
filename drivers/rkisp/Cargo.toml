@@ -27,6 +27,8 @@ lemnos-v4l2 = { path = "../../backends/v4l2" }
 [dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
 
 [package.metadata.lemnos]
 driver = "Rkisp"

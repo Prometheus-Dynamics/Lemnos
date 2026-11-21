@@ -1054,3 +1054,203 @@ fn statistics_buffer_reports_a_failed_ask_as_an_io_error_and_holds_nothing() {
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     assert_eq!(mask, 0);
 }
+
+// ---- The ask on the full job path. The statistics stream answers from a script; the consumer
+// keeps the one buffer it is given, so the second job's result must ask.
+
+/// A statistics stream of `buffers` buffers answering the driver's asks from `script`. The clone
+/// kept is the stream the driver publishes to, for the test to read.
+fn scripted_statistics(
+    buffers: u32,
+    script: Vec<std::result::Result<Option<u32>, ErrorKind>>,
+) -> (StreamHandle, MockStream, Arc<AtomicUsize>) {
+    let inner = MockStream::with_bytes(buffers, STATISTICS_BYTES);
+    let asked = Arc::new(AtomicUsize::new(0));
+    let stream = Asks {
+        inner: inner.clone(),
+        script: Mutex::new(script.into()),
+        asked: asked.clone(),
+    };
+    (lemnos_core::Held::boxed(Box::new(stream)), inner, asked)
+}
+
+/// A driver on `streams`' config stream and the given statistics stream, started and ticked once.
+fn driver_with_statistics(streams: &Streams, statistics: StreamHandle) -> (K230Isp, Handle) {
+    let handle = Handle::default();
+    let needs = K230IspNeeds {
+        config: lemnos_core::Held::boxed(Box::new(streams.config.clone())),
+        statistics,
+    };
+    streams.config.fill(0, &list(&[(AE_V_SIZE, 2)]));
+    let mut d = K230Isp::with_hardware(Box::new(Hw(handle.clone())), needs);
+    d.start().unwrap();
+    d.tick(0);
+    (d, handle)
+}
+
+/// Runs one job through the block with frames out for it, as the job-path tests do.
+fn run_job(d: &mut K230Isp, b: &Handle, streams: &Streams, identity: u64, at: u64) {
+    post(&streams.config, &job(identity, 0));
+    d.tick(STRIDE * at);
+    b.frame_out(at);
+    b.frame_out(at + 1);
+    d.tick(STRIDE * (at + 1));
+}
+
+#[test]
+fn statistics_that_do_not_fit_the_buffer_are_an_error_and_nothing_is_published() {
+    let streams = Streams {
+        statistics: MockStream::with_bytes(4, STATISTICS_BYTES - 4),
+        ..Streams::new()
+    };
+    let (mut d, b) = running(&streams);
+    streams.config.fill(2, &list(&[(AE_V_SIZE, 2)]));
+    post(&streams.config, &job(77, 2));
+    d.tick(STRIDE);
+    // A frame that left before the update has settled does not count.
+    b.frame_out(10);
+    d.tick(2 * STRIDE);
+    b.with(|b| {
+        b.events.push_back(Event {
+            status: MIS_FRAME_IN,
+            timestamp_ns: 15,
+        });
+    });
+    d.tick(3 * STRIDE);
+    set_statistics(&b, 9);
+    b.frame_out(20);
+    d.tick(4 * STRIDE);
+    // The write to a buffer shorter than the result is refused: nothing is published for the job.
+    assert!(streams.statistics.take_frame().is_none());
+    let c = d.counters().unwrap();
+    assert_eq!((c.jobs, c.errors), (0, 1));
+}
+
+#[test]
+fn a_refused_ask_for_statistics_is_an_error_that_leaves_the_device_open() {
+    let streams = Streams::new();
+    let (stats, _, asked) = scripted_statistics(1, vec![Ok(None)]);
+    let (mut d, b) = driver_with_statistics(&streams, stats);
+    let closed = b.with(|b| b.closed);
+    run_job(&mut d, &b, &streams, 1, 1);
+    run_job(&mut d, &b, &streams, 2, 10);
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "only the second job asks");
+    let c = d.counters().unwrap();
+    assert_eq!((c.jobs, c.errors), (1, 1));
+    assert_eq!(
+        b.with(|b| b.closed),
+        closed,
+        "a refusal is the job's error, not a device fault"
+    );
+}
+
+#[test]
+fn a_busy_ask_for_statistics_fails_the_device_and_is_recovered() {
+    let streams = Streams::new();
+    let (stats, _, asked) = scripted_statistics(1, vec![Err(ErrorKind::Busy)]);
+    let (mut d, b) = driver_with_statistics(&streams, stats);
+    let closed = b.with(|b| b.closed);
+    run_job(&mut d, &b, &streams, 1, 1);
+    run_job(&mut d, &b, &streams, 2, 10);
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "only the second job asks");
+    let c = d.counters().unwrap();
+    assert_eq!(
+        (c.jobs, c.errors),
+        (1, 1),
+        "a failed ask is the job's error"
+    );
+    assert!(
+        b.with(|b| b.closed) > closed,
+        "a failed ask is a stream fault: the device is closed for recovery"
+    );
+}
+
+// ---- The real object. A real host's job-driven statistics stream, through its producer endpoint,
+// under the driver. The config stream stays a mock: the statistics endpoint is the one under test.
+// The endpoint's ask cannot fail (it answers `Ok` in every case), so a Busy ask has no real case;
+// the Busy outcome is checked on the stand-in above, and the real case is the refusal.
+
+use lemnos_core::{
+    BusKind, CallerId, Config, Description, Manifest, MethodId, Need, NeedKind, Reply, Resources,
+    StreamKind,
+};
+
+const STATS_CALLER: CallerId = CallerId(7);
+
+/// The driver a real host serves its statistics stream under: a job-driven stream, declared as
+/// the driver's own need.
+struct StatsSource;
+
+impl lemnos_core::Driver for StatsSource {
+    const MANIFEST: Manifest = Manifest {
+        name: "stats-source",
+        needs: &[Need {
+            name: "statistics",
+            kind: NeedKind::Bus(BusKind::Stream),
+            optional: true,
+            stream: Some(StreamKind::JobDriven),
+        }],
+        provides: &[],
+    };
+
+    fn bind(_: &mut Resources<'_>, _: &Config<'_>) -> lemnos_core::Result<Self> {
+        Ok(Self)
+    }
+
+    fn describe(&self, _: &mut Description) {}
+
+    fn dispatch(&mut self, _: MethodId, _: &[u8], _: &mut Reply<'_>) -> Status {
+        Status::NOT_SUPPORTED
+    }
+}
+
+/// A real host with one device whose `statistics` stream is job-driven, of `buffers` buffers.
+fn statistics_host(buffers: u32) -> lemnos_host::Host {
+    let text = format!(
+        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+         [[devices]]\nid = \"a\"\ndriver = \"stats-source\"\n\
+         [devices.streams.statistics]\nbuffers = {buffers}\nbuffer_bytes = {STATISTICS_BYTES}\n\
+         job_slots = 2\njob_bytes = 16\n"
+    );
+    let sim = lemnos_sim::SimBoard::new();
+    let clock = sim.clock();
+    lemnos_host::Host::start(
+        &lemnos_host::board::parse(&text).unwrap(),
+        &[lemnos_host::entry::<StatsSource>()],
+        Box::new(sim),
+        Arc::new(clock),
+        lemnos_host::Options::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_refused_ask_on_a_real_statistics_stream_is_counted_by_the_host_and_is_the_job_error() {
+    let host = statistics_host(1);
+    let producer = host.stream_producer(0, "statistics").unwrap();
+    let mut held = host
+        .stream_attach(0, "statistics", STATS_CALLER)
+        .unwrap()
+        .consumer()
+        .unwrap();
+    let streams = Streams::new();
+    let statistics: StreamHandle = lemnos_core::Held::boxed(Box::new(producer));
+    let (mut d, b) = driver_with_statistics(&streams, statistics);
+    run_job(&mut d, &b, &streams, 1, 1);
+    // The consumer takes job 1's result and keeps its only buffer.
+    let slot = held
+        .pop_entry()
+        .unwrap()
+        .and_then(|entry| entry.frame())
+        .expect("job 1's result");
+    assert_eq!(slot.bytes as usize, STATISTICS_BYTES);
+    run_job(&mut d, &b, &streams, 2, 10);
+    assert!(
+        held.pop_entry().unwrap().is_none(),
+        "no second result went out"
+    );
+    let stats = host.stream_stats(0, "statistics").unwrap();
+    assert_eq!(stats.refused, 1, "the host counts the refused ask");
+    let c = d.counters().unwrap();
+    assert_eq!((c.jobs, c.errors), (1, 1));
+}
