@@ -85,6 +85,14 @@ bay_initramfs_bytes = 1048576
 bay_device_tree_bytes = 90112
 bay_cmdline_bytes = 4096
 bay_overlay_bytes = 4096
+device_tree_names = ["bcm2712-rpi-5-b.dtb"]
+firmware_files = ["overlay_map.dtb", "hat_map.dtb"]
+firmware_filters = ["pi5"]
+
+[boot.eeprom]
+build = "2026-05-12"
+max_restarts = "not set"
+reboot_on_fatal_error = true
 
 [[devices]]
 id = "identity"

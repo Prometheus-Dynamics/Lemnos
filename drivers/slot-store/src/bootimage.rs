@@ -1,28 +1,31 @@
-//! The boot partition's image (I5i8, layout version 5): the whole FAT16 volume a board boots from,
+//! The boot partition's image (layout version 6): the whole FAT16 volume a board boots from,
 //! made by one function that the tests and `lemnos-ctl boot-partition` both call.
 //!
-//! The volume holds, at its root: the generated firmware text and the layout copy (the caller's
-//! [`Parts::root`]), the two pointers `default.txt`, `previous.txt` and `trial.txt` (two sectors each,
-//! naming bay set 0), and the three record files `trial.rec`, `reason.rec`, `episodes.rec` (empty,
-//! 1024 bytes each). Under `slots/` are the three bay sets `bay0` to `bay2`: each holds the five
-//! payload roles pre-created at their board sizes ([`bays::Layout`]), the set's `bayinfo.rec`, and
-//! its fixed generated files ([`Parts::fixed`]). The first slot is installed into `bay0` by
-//! [`bays::install`] (the installer's own code path), so the image's default is a committed set.
+//! The volume holds, at its root: the generated firmware text, the layout copy and the bay member
+//! list (the caller's [`Parts::root`]), the pointers `default.txt`, `previous.txt` and `trial.txt`
+//! (two sectors each, naming bay set 0), and the record files. Under `slots/` are the three bay
+//! sets `bay0` to `bay2`: each a directory sized for its files' entries, with its record
+//! (`bayinfo.rec`), its subdirectories, and its region, held whole by `reserve` until an install
+//! ([`crate::bays`]). The first slot is installed into `bay0` by [`bays::install`] (the
+//! installer's own code path), so the image's default is a committed set whose files sit at their
+//! exact sizes.
 //!
 //! The U-Boot form (`Family::UbootBlock`) has no pointers and no records on the volume but
-//! `reason.rec`: its default is the environment's, and each set's `extlinux/extlinux.conf` is composed from the command line
-//! ([`extlinux_text`]). A compressed kernel is refused by name there (requirements section 8.6).
+//! `reason.rec`: its default is the environment's, and each set's `extlinux/extlinux.conf` is
+//! composed from the command line ([`extlinux_text`]). A compressed kernel is refused by name there.
 
-use crate::bays::{self, Done, Error, INFO_BYTES, INFO_NAME, Layout, POINTER_BYTES, ROLES, SETS};
+use crate::bayfat::{self, Region};
+use crate::bays::{self, Done, Form, INFO_BYTES, INFO_NAME, Info, Layout, POINTER_BYTES, SETS};
 use crate::bootfat::{self, ReadAt};
 use crate::fatimage::{self, Node};
 use crate::firmware;
 use crate::twocopy::{SECTOR, Sectors};
 
+pub use crate::bays::{EXTLINUX, EXTLINUX_BYTES};
+
 /// The pointers and records at the root of the Pi firmware's volume.
 pub const POINTERS: [&str; 3] = ["default.txt", "previous.txt", "trial.txt"];
-/// The bay set the first slot is installed into. The three pointers name it from the start (until a
-/// real previous or trial exists), and [`build`] refuses an image where the slot is elsewhere.
+/// The bay set the first slot is installed into.
 pub const FIRST_SET: u8 = 0;
 /// The three record files at the root of the Pi firmware's volume, empty.
 pub const RECORDS: [&str; 3] = ["trial.rec", "reason.rec", "episodes.rec"];
@@ -39,10 +42,6 @@ fn switch_off_record() -> Vec<u8> {
     }
     out
 }
-/// The U-Boot form's composed extlinux file, its path under each set and its bay size.
-pub const EXTLINUX: &str = "extlinux/extlinux.conf";
-/// The bay size of the composed extlinux file.
-pub const EXTLINUX_BYTES: u64 = 4096;
 
 /// The two firmware families the image is made for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,15 +53,14 @@ pub enum Family {
     UbootBlock,
 }
 
-/// A generated file of a bay set, other than the payload roles.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fixed {
-    /// The path under the set directory.
-    pub path: &'static str,
-    /// Its bytes, written at build time.
-    pub bytes: Vec<u8>,
-    /// Its size on the volume: its own length, or a bay size it is padded to.
-    pub size: u64,
+impl Family {
+    /// The bay form of the family.
+    pub fn form(self) -> Form {
+        match self {
+            Family::Tryboot => Form::Firmware,
+            Family::UbootBlock => Form::Uboot,
+        }
+    }
 }
 
 /// What the image is made of, apart from the payloads and the size.
@@ -70,12 +68,11 @@ pub struct Fixed {
 pub struct Parts {
     /// The family.
     pub family: Family,
-    /// The payload bays.
+    /// The payload bays (its form is the family's).
     pub layout: Layout,
-    /// The root files the caller generates: `(name, bytes)`, names without a directory.
+    /// The root files the caller generates: `(name, bytes)`, names without a directory. The bay
+    /// member list ([`bays::FIRMWARE_LIST`]) is added by the builder.
     pub root: Vec<(&'static str, Vec<u8>)>,
-    /// The generated files of each set.
-    pub fixed: Vec<Fixed>,
 }
 
 /// One line of a verification: whether it holds, and what it says.
@@ -159,13 +156,9 @@ pub fn extlinux_text(cmdline: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// The volume's tree for `parts`, with the sets' payloads as zeros of their bay sizes (the
-/// installer writes the real bytes into them).
+/// The volume's tree for `parts`: the root files, and each set's directory with its record, its
+/// subdirectories (empty) and its region.
 pub(crate) fn tree(parts: &Parts) -> Vec<Node> {
-    let pad_file = |name: &'static str, size: u64, pad: u8| Node::File {
-        name,
-        data: vec![pad; size as usize],
-    };
     let mut root: Vec<Node> = parts
         .root
         .iter()
@@ -174,6 +167,10 @@ pub(crate) fn tree(parts: &Parts) -> Vec<Node> {
             data: bytes.clone(),
         })
         .collect();
+    root.push(Node::File {
+        name: bays::FIRMWARE_LIST,
+        data: bays::firmware_list_text(&parts.layout).into_bytes(),
+    });
     if parts.family == Family::Tryboot {
         for name in POINTERS {
             root.push(Node::File {
@@ -189,65 +186,44 @@ pub(crate) fn tree(parts: &Parts) -> Vec<Node> {
                 data: vec![0; INFO_BYTES as usize],
             });
         }
-        // The restart count's baseline, empty (unknown) until one is written. Not in `RECORDS`: an
-        // image without it still places and boots (`Records::place` does not require it).
         root.push(Node::File {
             name: BASELINE_FILE,
             data: vec![0; INFO_BYTES as usize],
         });
-        // The security switch on a slot board: `SECURE.REC`, pre-created off, a two-copy record of
-        // the switch's first generation. Pre-created so that an image without it is refused, not read
-        // as off (`security::BootSwitch`).
         root.push(Node::File {
             name: crate::security::BOOT_RECORD,
             data: switch_off_record(),
         });
     }
     if parts.family == Family::UbootBlock {
-        // The U-Boot form's one record: a kernel gap's reason (its trial and default are in U-Boot's
-        // environment). Pre-created, like the Pi form's, so a write is two sectors and no file is made.
         root.push(Node::File {
             name: "reason.rec",
             data: vec![0; INFO_BYTES as usize],
         });
     }
+    let entries = parts.layout.dir_entries();
+    let caps = parts.layout.caps();
     let mut sets = Vec::new();
     for set in 0..SETS {
-        let mut children = Vec::new();
-        for (i, r) in ROLES.iter().enumerate() {
-            let size = parts.layout.bytes[i];
-            let node = pad_file(base_name(r.path), size, r.pad);
-            children.push(split_dir(node, r.path));
-        }
-        // The board's firmware overlays, each a zero-padded bay of its own.
-        for i in 5..parts.layout.count() {
-            let path: &'static str = leak(parts.layout.member_path(i));
-            let node = pad_file(base_name(path), parts.layout.member_bytes(i), 0);
-            children.push(split_dir(node, path));
-        }
-        for f in &parts.fixed {
-            let data = if f.bytes.len() as u64 == f.size {
-                f.bytes.clone()
-            } else {
-                let mut v = f.bytes.clone();
-                v.resize(f.size as usize, b' ');
-                v
-            };
-            children.push(split_dir(
-                Node::File {
-                    name: base_name(f.path),
-                    data,
-                },
-                f.path,
-            ));
-        }
-        children.push(Node::File {
+        let mut children = vec![Node::File {
             name: INFO_NAME,
             data: vec![0; INFO_BYTES as usize],
+        }];
+        for (dir, n) in entries.iter().skip(1) {
+            children.push(Node::DirOf {
+                name: leak(dir.clone()),
+                entries: *n,
+                children: Vec::new(),
+            });
+        }
+        children.push(Node::Region {
+            name: bayfat::RESERVE,
+            caps: caps.clone(),
         });
-        sets.push(Node::Dir {
+        sets.push(Node::DirOf {
             name: ["bay0", "bay1", "bay2"][set as usize],
-            children: merge_dirs(children),
+            entries: entries[0].1,
+            children,
         });
     }
     root.push(Node::Dir {
@@ -257,60 +233,9 @@ pub(crate) fn tree(parts: &Parts) -> Vec<Node> {
     root
 }
 
-/// A name the volume's tree holds for the life of the build (the tree's names are `'static`). The
-/// names are a board's few overlay paths, leaked once per build of an image.
+/// A name the volume's tree holds for the life of the build (the tree's names are `'static`).
 fn leak(name: String) -> &'static str {
     Box::leak(name.into_boxed_str())
-}
-
-/// The last component of a path: the name the file has in its directory.
-fn base_name(path: &'static str) -> &'static str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-/// A file path `a/b/c` as nested directories: the leaf named as the file, the directories around
-/// it. A plain name is a file.
-fn split_dir(leaf: Node, path: &'static str) -> Node {
-    match path.split_once('/') {
-        None => leaf,
-        Some((dir, rest)) => Node::Dir {
-            name: dir,
-            children: vec![split_dir(leaf, rest)],
-        },
-    }
-}
-
-/// Joins the directories of one level that share a name (`overlays/` and `overlays/README`), and
-/// the same inside each of them.
-fn merge_dirs(nodes: Vec<Node>) -> Vec<Node> {
-    let mut out: Vec<Node> = Vec::new();
-    for node in nodes {
-        match node {
-            Node::Dir { name, children } => {
-                match out
-                    .iter()
-                    .position(|n| matches!(n, Node::Dir { name: d, .. } if *d == name))
-                {
-                    Some(i) => {
-                        if let Node::Dir { children: have, .. } = &mut out[i] {
-                            have.extend(children);
-                        }
-                    }
-                    None => out.push(Node::Dir { name, children }),
-                }
-            }
-            file => out.push(file),
-        }
-    }
-    out.into_iter()
-        .map(|n| match n {
-            Node::Dir { name, children } => Node::Dir {
-                name,
-                children: merge_dirs(children),
-            },
-            file => file,
-        })
-        .collect()
 }
 
 /// The smallest partition, in bytes, that holds `parts`' tree: the first size, in whole sectors,
@@ -334,7 +259,7 @@ pub fn min_size(parts: &Parts) -> Result<u64, String> {
 }
 
 /// Builds the image of `size` bytes, with the first slot `slot` installed into bay set 0 from
-/// `payloads` (the five roles in [`ROLES`] order). Refused by name, with nothing built, when the
+/// `payloads` (in payload order, [`Layout::paths`]). Refused by name, with nothing built, when the
 /// size is not whole sectors, is below [`min_size`], a payload is larger than its bay, the kernel is
 /// compressed on the U-Boot form, or the composed image does not verify.
 pub fn build(parts: &Parts, size: u64, slot: &str, payloads: &[&[u8]]) -> Result<Vec<u8>, String> {
@@ -342,6 +267,9 @@ pub fn build(parts: &Parts, size: u64, slot: &str, payloads: &[&[u8]]) -> Result
         return Err(format!(
             "--size {size} is not a whole number of {SECTOR}-byte sectors"
         ));
+    }
+    if parts.layout.form != parts.family.form() {
+        return Err("the layout's form is not the family's".into());
     }
     let min = min_size(parts)?;
     if size < min {
@@ -354,22 +282,12 @@ pub fn build(parts: &Parts, size: u64, slot: &str, payloads: &[&[u8]]) -> Result
     if parts.family == Family::UbootBlock {
         refuse_compressed_kernel(payloads[0])?;
     }
-    for f in &parts.fixed {
-        if f.bytes.len() as u64 > f.size {
-            return Err(format!(
-                "{}: {} bytes do not fit {}",
-                f.path,
-                f.bytes.len(),
-                f.size
-            ));
-        }
-    }
     let root = tree(parts);
     let mut mem = Mem(fatimage::volume(&root, size / SECTOR as u64));
+    bays::write_empty_records(&mut mem)?;
+    bays::lay_out_empty_sets(&mut mem, &parts.layout)?;
     install_first(&mut mem, parts, slot, payloads)?;
-    // The pointers name the bay the slot was installed in: a first install that put it elsewhere
-    // would leave previous.txt and trial.txt naming a bay with no slot in it.
-    let installed = bays::set_of_slot(&mut mem, &parts.layout, slot).map_err(|e| e.to_string())?;
+    let installed = bays::set_of_slot(&mut mem, slot).map_err(|e| e.to_string())?;
     if installed != Some(FIRST_SET) {
         return Err(format!(
             "the first slot {slot} is in {installed:?}, not the bay the pointers name ({})",
@@ -384,7 +302,7 @@ pub fn build(parts: &Parts, size: u64, slot: &str, payloads: &[&[u8]]) -> Result
 }
 
 /// The installer's code path for the first slot: [`bays::install`] for the Pi firmware form, and for
-/// the U-Boot form the same payload commit with the composed extlinux file.
+/// the U-Boot form the same commit, which has no pointers to move.
 pub fn install_first<D: Sectors + ReadAt>(
     dev: &mut D,
     parts: &Parts,
@@ -400,158 +318,125 @@ pub fn install_first<D: Sectors + ReadAt>(
             Err(e) => Err(e.to_string()),
         },
         Family::UbootBlock => {
-            let sets = bays::place_sets(dev, &parts.layout)?;
-            let (files, info) = sets[FIRST_SET as usize].clone();
-            let text = extlinux_text(payloads[3])?;
-            let lba = bootfat::locate_path(
-                dev,
-                &format!("{}/{EXTLINUX}", bays::set_dir(FIRST_SET)),
-                EXTLINUX_BYTES,
-            )
-            .map_err(|e| e.to_string())?
-            .first_lba;
-            bays::commit_set_with(
-                dev,
-                &parts.layout,
-                &files,
-                info,
-                slot,
-                payloads,
-                Some((lba, &text, EXTLINUX_BYTES)),
-            )
-            .map_err(|e: Error| e.to_string())
+            let info = bays::place_sets(dev)?[FIRST_SET as usize];
+            bays::commit_set(dev, &parts.layout, FIRST_SET, info, slot, payloads)
+                .map_err(|e| e.to_string())
         }
     }
 }
 
-/// Verifies an image, or a dump of a real partition, read-only. Each finding is one line. The
-/// checks are the boot chain's: the locator places every file at its size, each pointer is a whole
-/// line, the default and previous sets' payloads hash to their records, every committed set's
-/// composed extlinux file matches its command line (U-Boot form), and the firmware's root text is
-/// there.
+/// The region a set's `reserve` and files must lie in, read from its record.
+fn region_of<D: Sectors + ReadAt>(dev: &mut D, lba: u64) -> Result<Info, String> {
+    bays::record_or_why(dev, lba)?.map_err(|why| {
+        format!(
+            "{why}: it names no region of layout version {}",
+            bays::LAYOUT_VERSION
+        )
+    })
+}
+
+/// Whether the file at `path` (its chain) lies inside `region`; its size for the message.
+fn inside<D: ReadAt>(dev: &mut D, path: &str, region: Region) -> Result<u64, String> {
+    let size = bootfat::size_of_path(dev, path).map_err(|e| format!("{path}: {e}"))?;
+    if size == 0 {
+        return Ok(0);
+    }
+    let found = bootfat::locate_path(dev, path, size).map_err(|e| format!("{path}: {e}"))?;
+    let v = bootfat::volume(dev).map_err(|e| e.to_string())?;
+    let first = (found.first_lba - v.data_start) / v.spc + 2;
+    let n = size.div_ceil(v.spc * SECTOR as u64);
+    if first < region.start || first + n > region.start + region.clusters {
+        return Err(format!(
+            "{path}: clusters {first}..{} lie outside the set's region",
+            first + n
+        ));
+    }
+    Ok(size)
+}
+
+/// Verifies an image, or a dump of a real partition, read-only. Each finding is one line: each set's
+/// record and region (aligned, on the volume, apart from the other sets'), its files and `reserve`
+/// inside its region, each committed set's files against its record, the pointers, the records and
+/// the firmware's root text.
 pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut push = |ok: bool, text: String| out.push(Finding { ok, text });
-    let sets = match bays::place_sets(dev, &parts.layout) {
+    let sets = match bays::place_sets(dev) {
         Ok(s) => s,
         Err(e) => {
             push(false, format!("locator: {e}"));
             return out;
         }
     };
-    push(
-        true,
-        format!("locator: {} sets placed at their sizes", sets.len()),
-    );
-    for (set, (files, info)) in sets.iter().enumerate() {
-        match bays::read_info(dev, *info) {
-            Ok(None) => push(true, format!("bay{set}: empty (no committed record)")),
-            Ok(Some(rec)) => {
-                let mut ok = true;
-                let held: Vec<&str> = rec.firmware.iter().map(|(p, _, _)| p.as_str()).collect();
-                let declared: Vec<String> = parts
-                    .layout
-                    .firmware
-                    .iter()
-                    .map(|(p, _)| p.clone())
-                    .collect();
-                if held.iter().copied().ne(declared.iter().map(String::as_str)) {
-                    push(
-                        false,
-                        format!(
-                            "bay{set} ({}): holds the firmware overlays {} and the board declares {}",
-                            rec.slot,
-                            if held.is_empty() {
-                                "none".to_string()
-                            } else {
-                                held.join(", ")
-                            },
-                            if declared.is_empty() {
-                                "none".to_string()
-                            } else {
-                                declared.join(", ")
-                            }
-                        ),
-                    );
-                    ok = false;
-                }
-                let members: Vec<(String, u64, [u8; 32])> = ROLES
-                    .iter()
-                    .zip(rec.files.iter())
-                    .map(|(r, (len, hash))| (r.role.to_string(), *len, *hash))
-                    .chain(
-                        rec.firmware
-                            .iter()
-                            .map(|(p, len, hash)| (p.clone(), *len, *hash)),
-                    )
-                    .collect();
-                for (i, (what, len, hash)) in members.iter().enumerate() {
-                    let bytes = match bays::read_file(dev, files[i], *len) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            push(false, format!("bay{set}: {what}: {e}"));
-                            ok = false;
-                            continue;
-                        }
-                    };
-                    if bytes.len() as u64 != *len {
-                        ok = false;
-                    }
-                    if <sha2::Sha256 as sha2::Digest>::digest(&bytes).as_slice() != hash {
-                        push(
-                            false,
-                            format!(
-                                "bay{set} ({}): the {what} file does not match its record",
-                                rec.slot
-                            ),
-                        );
-                        ok = false;
-                    }
-                }
-                if ok {
-                    let text = if rec.firmware.is_empty() {
-                        format!(
-                            "bay{set} ({}): the five payloads match their record",
-                            rec.slot
-                        )
-                    } else {
-                        format!(
-                            "bay{set} ({}): the five payloads and {} firmware overlay(s) match their record",
-                            rec.slot,
-                            rec.firmware.len()
-                        )
-                    };
-                    push(true, text);
-                }
-                if parts.family == Family::UbootBlock {
-                    let cmd = bays::read_file(dev, files[3], rec.files[3].0).unwrap_or_default();
-                    match (
-                        extlinux_text(&cmd),
-                        bootfat::locate_path(
-                            dev,
-                            &format!("slots/bay{set}/{EXTLINUX}"),
-                            EXTLINUX_BYTES,
-                        ),
-                    ) {
-                        (Ok(text), Ok(found)) => {
-                            let file = bays::read_file(dev, found.first_lba, EXTLINUX_BYTES)
-                                .unwrap_or_default();
-                            let same = file.starts_with(&text)
-                                && file[text.len()..].iter().all(|&b| b == b' ');
-                            push(
-                                same,
-                                format!(
-                                    "bay{set}: extlinux.conf {} the composed text of its command line",
-                                    if same { "matches" } else { "does not match" }
-                                ),
-                            );
-                        }
-                        (Err(e), _) => push(false, format!("bay{set}: extlinux.conf: {e}")),
-                        (_, Err(e)) => push(false, format!("bay{set}: extlinux.conf: {e}")),
-                    }
-                }
+    push(true, format!("locator: {} set records placed", sets.len()));
+    let v = match bootfat::volume(dev) {
+        Ok(v) => v,
+        Err(e) => {
+            push(false, format!("volume: {e}"));
+            return out;
+        }
+    };
+    let mut regions: Vec<(usize, Region)> = Vec::new();
+    for (set, lba) in sets.iter().enumerate() {
+        let info = match region_of(dev, *lba) {
+            Ok(i) => i,
+            Err(e) => {
+                push(false, format!("bay{set}: {e}"));
+                continue;
             }
-            Err(e) => push(false, format!("bay{set}: record: {e}")),
+        };
+        let r = info.region;
+        if let Err(e) = r.check(&v) {
+            push(false, format!("bay{set}: {e}"));
+            continue;
+        }
+        if let Some((other, _)) = regions
+            .iter()
+            .find(|(_, o)| r.start < o.start + o.clusters && o.start < r.start + r.clusters)
+        {
+            push(false, format!("bay{set}: its region overlaps bay{other}'s"));
+        }
+        regions.push((set, r));
+        let dir = bays::set_dir(set as u8);
+        if info.slot.is_none() {
+            // An empty set's region is its record's; what its directory holds is the next
+            // install's to lay out (a cut install leaves it half written, and that is no fault).
+            push(
+                true,
+                format!(
+                    "bay{set}: region at cluster {}, {} clusters; empty (no committed record)",
+                    r.start, r.clusters
+                ),
+            );
+            continue;
+        }
+        let mut names: Vec<String> = parts.layout.names();
+        names.push(bayfat::RESERVE.to_string());
+        let mut placed = true;
+        for n in &names {
+            if let Err(e) = inside(dev, &format!("{dir}/{n}"), r) {
+                push(false, format!("bay{set}: {e}"));
+                placed = false;
+            }
+        }
+        if placed {
+            push(
+                true,
+                format!(
+                    "bay{set}: region at cluster {}, {} clusters, holds its files and reserve",
+                    r.start, r.clusters
+                ),
+            );
+        }
+        match bays::check_set(dev, &parts.layout, set as u8, &info) {
+            Ok(slot) => push(
+                true,
+                format!(
+                    "bay{set} ({slot}): its {} files match their record",
+                    info.members.len()
+                ),
+            ),
+            Err(e) => push(false, e),
         }
     }
     if parts.family == Family::Tryboot {
@@ -579,79 +464,55 @@ pub fn verify<D: Sectors + ReadAt>(dev: &mut D, parts: &Parts) -> Vec<Finding> {
         }
     }
     for (name, bytes) in &parts.root {
-        out.push(exact(dev, name, bytes, bytes.len() as u64));
+        out.push(exact(dev, name, bytes));
     }
-    for set in 0..SETS {
-        for f in parts.fixed.iter().filter(|f| !f.bytes.is_empty()) {
-            let mut want = f.bytes.clone();
-            want.resize(f.size as usize, b' ');
-            let path = format!("{}/{}", bays::set_dir(set), f.path);
-            out.push(exact(dev, &path, &want, f.size));
-        }
-    }
+    let list = bays::firmware_list_text(&parts.layout).into_bytes();
+    out.push(exact(dev, bays::FIRMWARE_LIST, &list));
     out
 }
 
-/// A committed bay set read back from the image: its slot, and its members by name, the five payload
-/// roles first (in [`ROLES`] order), then each firmware overlay as its record names it. Read only:
-/// the hashes are not checked here (that is [`verify`]'s job).
+/// A committed bay set read back from the image: its slot, and its files by path, in written order.
+/// Read only: the hashes are not checked here (that is [`verify`]'s job).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Committed {
     /// The bay set's number.
     pub set: usize,
     /// The slot the set's record names.
     pub slot: String,
-    /// The members, in order: `(name, bytes)`.
+    /// The files, in order: `(path, bytes)`.
     pub members: Vec<(String, Vec<u8>)>,
 }
 
-/// The committed bay sets of an image, read as [`verify`] reads them. A set with no committed record
-/// is left out. A member that cannot be read is an error: the caller says which set it was in.
+/// The committed bay sets of an image. A set with no committed slot is left out.
 pub fn committed<D: Sectors + ReadAt>(
     dev: &mut D,
     parts: &Parts,
 ) -> Result<Vec<Committed>, String> {
-    let sets = bays::place_sets(dev, &parts.layout)?;
+    let sets = bays::place_sets(dev)?;
     let mut out = Vec::new();
-    for (set, (files, info)) in sets.iter().enumerate() {
-        let Some(rec) =
-            bays::read_info(dev, *info).map_err(|e| format!("bay{set}: record: {e}"))?
+    for (set, lba) in sets.iter().enumerate() {
+        let Some(rec) = bays::read_info(dev, *lba).map_err(|e| format!("bay{set}: record: {e}"))?
         else {
             continue;
         };
-        let sizes: Vec<(String, u64)> = ROLES
-            .iter()
-            .zip(rec.files.iter())
-            .map(|(r, (len, _))| (r.role.to_string(), *len))
-            .chain(rec.firmware.iter().map(|(p, len, _)| (p.clone(), *len)))
-            .collect();
-        let mut members = Vec::with_capacity(sizes.len());
-        for (i, (name, len)) in sizes.into_iter().enumerate() {
-            let bytes = bays::read_file(dev, files[i], len)
-                .map_err(|e| format!("bay{set} ({}): {name}: {e}", rec.slot))?;
-            members.push((name, bytes));
+        let Some(slot) = rec.slot.clone() else {
+            continue;
+        };
+        let mut members = Vec::new();
+        for (path, (len, _)) in parts.layout.names().into_iter().zip(&rec.members) {
+            let at = format!("{}/{path}", bays::set_dir(set as u8));
+            let bytes = bootfat::read_file(dev, &at, *len)
+                .map_err(|e| format!("bay{set} ({slot}): {path}: {e}"))?;
+            members.push((path, bytes));
         }
-        out.push(Committed {
-            set,
-            slot: rec.slot.clone(),
-            members,
-        });
+        out.push(Committed { set, slot, members });
     }
     Ok(out)
 }
 
-/// One finding for a file that must hold exactly `want`, at exactly `size` bytes.
-fn exact<D: Sectors + ReadAt>(dev: &mut D, path: &str, want: &[u8], size: u64) -> Finding {
-    let found = match bootfat::locate_path(dev, path, size) {
-        Ok(f) => f,
-        Err(e) => {
-            return Finding {
-                ok: false,
-                text: format!("{path}: {e}"),
-            };
-        }
-    };
-    match bays::read_file(dev, found.first_lba, size) {
+/// One finding for a file that must hold exactly `want`.
+fn exact<D: Sectors + ReadAt>(dev: &mut D, path: &str, want: &[u8]) -> Finding {
+    match bootfat::read_file(dev, path, want.len() as u64) {
         Ok(bytes) if bytes == want => Finding {
             ok: true,
             text: format!("{path}: holds its generated bytes"),

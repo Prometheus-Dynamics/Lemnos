@@ -13,6 +13,9 @@ use lemnos_slot_store::verity;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+#[path = "support/pi.rs"]
+mod pi;
+
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -22,7 +25,7 @@ fn socs() -> String {
 }
 
 fn run(args: &[&str]) -> (Result<(), String>, String) {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args = pi::with_firmware(args);
     let mut out = Vec::new();
     let r = lemnos_ctl::run(&args, &mut out);
     (r, String::from_utf8(out).unwrap())
@@ -52,9 +55,14 @@ fn board(dir: &Path, uboot: bool) -> String {
     let text = std::fs::read_to_string(repo().join("testing/boards/reference.toml")).unwrap();
     let path = dir.join(if uboot { "uboot.toml" } else { "tryboot.toml" });
     let text = if uboot {
+        // The firmware's own files are the Pi form's: the U-Boot form stores none.
         text.replace(
             "record = \"tryboot\"",
             "record = \"uboot\", uboot_env_size = 8192",
+        )
+        .replace(
+            "firmware_files = [\"overlay_map.dtb\", \"hat_map.dtb\"]\n",
+            "",
         )
     } else {
         text
@@ -103,14 +111,15 @@ fn payload(dir: &Path, board: &str, slot: &str, gzip: bool) -> String {
     let p = dir.join("payload");
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
-    let mut kernel = vec![0u8; 3000];
-    if gzip {
-        kernel[..2].copy_from_slice(&[0x1f, 0x8b]);
+    pi::write_payload(&p, pi::CMDLINE, 4096);
+    pi::write_firmware(&pi::firmware_beside(&p), &[]);
+    if !gzip {
+        std::fs::write(
+            p.join("kernel"),
+            lemnos_firmware_check::sample::arm64_image(4096),
+        )
+        .unwrap();
     }
-    std::fs::write(p.join("kernel"), kernel).unwrap();
-    std::fs::write(p.join("initramfs"), b"initramfs").unwrap();
-    std::fs::write(p.join("device-tree"), b"device tree").unwrap();
-    std::fs::write(p.join("board-overlay"), b"overlay").unwrap();
     let line = p.join("cmdline");
     let (r, _) = run(&[
         "tree",
@@ -899,7 +908,9 @@ fn the_cli_file_is_byte_identical_to_the_librarys_for_the_same_inputs() {
             b.bay_cmdline_bytes.unwrap(),
             b.bay_overlay_bytes.unwrap(),
         ])
-        .unwrap(),
+        .unwrap()
+        .with_dtbs(&b.device_tree_names)
+        .with_files(&b.firmware_files),
         overlay: generated.overlay_sha256.map(|sha256| Overlay {
             board: board.board.id.clone(),
             sha256,
@@ -915,6 +926,16 @@ fn the_cli_file_is_byte_identical_to_the_librarys_for_the_same_inputs() {
         "board-overlay",
     ]
     .map(payload);
+    // The board's firmware files follow the five roles, from the directory the CLI was given.
+    let firmware = pi::firmware_beside(Path::new(&m.payload));
+    let payloads: Vec<Vec<u8>> = payloads
+        .into_iter()
+        .chain(
+            b.firmware_files
+                .iter()
+                .map(|name| std::fs::read(firmware.join(name)).unwrap()),
+        )
+        .collect();
     let key = SigningKey::from_bytes(&SEED7);
     let sign = |message: &[u8]| key.sign(message).to_bytes();
     let whole = std::fs::read(&m.rootfs).unwrap();
@@ -933,7 +954,7 @@ fn the_cli_file_is_byte_identical_to_the_librarys_for_the_same_inputs() {
                 sign: &sign,
             }),
         },
-        payloads.to_vec(),
+        payloads,
         &mut &whole[..],
     )
     .unwrap();

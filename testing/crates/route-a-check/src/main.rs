@@ -120,13 +120,12 @@ fn partition(foreign: bool) -> Result<Vec<u8>, String> {
         family: Family::Tryboot,
         layout: Bays::new([4096, 2048, 1024, 512, 512]).map_err(|e| format!("{e:?}"))?,
         root: vec![
-            ("slot-layout.toml", b"version = 5\n".to_vec()),
+            ("slot-layout.toml", b"version = 6\n".to_vec()),
             (
                 "config.txt",
                 lemnos_slot_store::firmware::CONFIG_TXT.as_bytes().to_vec(),
             ),
         ],
-        fixed: Vec::new(),
     };
     let payloads = payloads(OURS);
     let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();

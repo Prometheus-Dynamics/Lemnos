@@ -19,7 +19,7 @@
 use super::*;
 // The driver's own `Result` takes a status; the writer's errors are words.
 use core::result::Result;
-use lemnos_slot_store::bays::{self, ROLES};
+use lemnos_slot_store::bays;
 use lemnos_slot_store::boot_raw::{Boot, BootRaw, Pointer};
 use lemnos_slot_store::bootimage::Mem;
 use lemnos_slot_store::bundle;
@@ -176,7 +176,9 @@ pub fn write_first_slot(input: FirstSlot<'_>) -> Result<String, String> {
     let image_layout = reference
         .bay_layout()
         .map_err(|e| format!("the boot image's bays: {e}"))?;
-    check_layout(&image_layout, &input.board.layout)?;
+    // Sectors per cluster, boot sector byte 13: `Boot::on` has read the volume already.
+    let cluster_bytes = u64::from(input.boot_image[13]) * 512;
+    check_layout(&image_layout, &input.board.layout, cluster_bytes)?;
     let copy = Arc::new(Mutex::new(
         Boot::on(Mem(input.boot_image.clone())).map_err(|e| format!("the boot image: {e}"))?,
     ));
@@ -436,7 +438,8 @@ pub fn check_bay(boot: &mut Boot<Mem>, id: &str, payloads: &[&[u8]]) -> Result<(
     let (set, info) = boot.bay_record(id).map_err(|_| {
         format!("the boot image holds no bay for slot {id}: build the image from this bundle")
     })?;
-    bays::compare_hashes(set, &info, payloads)
+    let layout = boot.bay_layout()?;
+    bays::compare_hashes(&layout, set, &info, payloads)
         .map_err(|why| format!("{why}: build the image from this bundle"))
 }
 
@@ -455,27 +458,35 @@ pub fn check_bay_manifest(
         format!("the boot image holds no bay for slot {id}: build the image from this bundle")
     })?;
     let layout = boot.bay_layout()?;
-    if info.firmware.len() != layout.firmware.len() {
+    let sources = layout.sources();
+    if info.members.len() != sources.len() {
         return Err(format!(
-            "bay{set} holds {} firmware overlays and the board declares {}: build the image from this tree",
-            info.firmware.len(),
-            layout.firmware.len()
+            "bay{set} holds {} files and the board's layout makes {}: build the image from this tree",
+            info.members.len(),
+            sources.len()
         ));
     }
-    for (i, path) in layout.paths().iter().enumerate() {
+    let names = layout.names();
+    // The record keeps each file's length and the first eight bytes of its SHA-256; slot.json lists
+    // each payload's full SHA-256. The generated file is not in slot.json: the bay's read check
+    // holds it to the record.
+    for ((name, source), (_, held)) in names.iter().zip(&sources).zip(&info.members) {
+        let Some(i) = *source else { continue };
+        let path = layout.member_path(i);
         let want = boot_files
             .iter()
-            .find(|(listed, _)| listed == path)
+            .find(|(listed, _)| *listed == path)
             .map(|(_, sha)| sha.as_str())
             .ok_or_else(|| format!("slot.json lists no hash for boot file {path}"))?;
-        let held = if i < 5 {
-            info.files[i].1
-        } else {
-            info.firmware[i - 5].2
-        };
-        if !bundle::hex(&held).eq_ignore_ascii_case(want) {
+        let held = bundle::hex(held);
+        if want.len() < held.len() || !want[..held.len()].eq_ignore_ascii_case(&held) {
+            let copy = if *name == path {
+                String::new()
+            } else {
+                format!(" (a copy of {path})")
+            };
             return Err(format!(
-                "bay{set} holds boot file {path} with a different hash than slot.json says: build the image from this tree"
+                "bay{set} holds boot file {name}{copy} with a different hash than slot.json says: build the image from this tree"
             ));
         }
     }
@@ -491,21 +502,25 @@ pub fn open_boot_image(image: &[u8]) -> Result<Boot<Mem>, String> {
     Boot::on(Mem(image.to_vec())).map_err(|e| format!("the boot image: {e}"))
 }
 
-/// The boot image's bays are the board file's: the same five roles and the same sizes, the same
-/// firmware overlays at the same sizes, and the same firmware config digest.
-pub fn check_layout(image: &bays::Layout, board: &bays::Layout) -> Result<(), String> {
-    for (i, role) in ROLES.iter().enumerate() {
-        if image.bytes[i] != board.bytes[i] {
-            return Err(format!(
-                "the boot image's {} bay is {} bytes; the board file's [boot] says {}: the image was built for another layout",
-                role.role, image.bytes[i], board.bytes[i]
-            ));
-        }
-    }
-    if image.firmware != board.firmware {
+/// The boot image's bays are the board file's: the same files under the same names in the same
+/// form, the same firmware config digest, and each set's region big enough for the board's largest
+/// files. The image keeps no per-file sizes (each set owns one region, `docs/slots.md`), so the
+/// region is held to what the board's `[boot]` sizes need at the image's `cluster_bytes`.
+pub fn check_layout(
+    image: &bays::Layout,
+    board: &bays::Layout,
+    cluster_bytes: u64,
+) -> Result<(), String> {
+    if image.form != board.form {
         return Err(format!(
-            "the boot image's firmware overlays are {:?}; the board file's [boot] says {:?}: the image was built for another layout",
-            image.firmware, board.firmware
+            "the boot image's bays are in the {:?} form; the board file's record is the {:?} form: the image was built for another board",
+            image.form, board.form
+        ));
+    }
+    let (have, want) = (image.names(), board.names());
+    if have != want {
+        return Err(format!(
+            "the boot image's bays hold {have:?}; the board file's [boot] makes {want:?}: the image was built for another layout"
         ));
     }
     if image.config != board.config {
@@ -513,6 +528,15 @@ pub fn check_layout(image: &bays::Layout, board: &bays::Layout) -> Result<(), St
             "the boot image's firmware config lines are {}; the board file's [boot] config_lines are {}: the image was built for other lines",
             image.config.as_deref().unwrap_or("none"),
             board.config.as_deref().unwrap_or("none")
+        ));
+    }
+    let need = lemnos_slot_store::fatimage::region_clusters(&board.caps(), cluster_bytes / 512)
+        * cluster_bytes;
+    // Every role of a discovered layout carries the smallest region of the image.
+    let region = image.bytes[0];
+    if region < need {
+        return Err(format!(
+            "the boot image's bay regions are {region} bytes; the board file's [boot] sizes need {need}: the image was built for another layout"
         ));
     }
     Ok(())

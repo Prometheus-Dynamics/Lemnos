@@ -279,22 +279,37 @@ pub(crate) fn merge_findings(
 ) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut push = |ok: bool, text: String| out.push(Finding { ok, text });
-    let declared = boot.firmware_overlays.len();
+    // The device tree is stored under the board's default names, each a copy: the first is read.
+    let tree = boot
+        .device_tree_names
+        .first()
+        .map_or("board.dtb", String::as_str);
     for c in sets {
         let set = c.set;
         let slot = &c.slot;
-        if c.members.len() != 5 + declared {
+        let member = |path: &str| {
+            c.members
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, b)| b.as_slice())
+        };
+        let overlays: Option<Vec<&[u8]>> = boot
+            .firmware_overlays
+            .iter()
+            .map(|name| member(&format!("overlays/{name}.dtbo")))
+            .collect();
+        let (Some(tree_bytes), Some(overlays)) = (member(tree), overlays) else {
             push(
                 false,
                 format!(
-                    "bay{set} ({slot}): holds {} members and the board declares {declared} firmware overlays: no host merge",
-                    c.members.len().saturating_sub(5)
+                    "bay{set} ({slot}): does not hold {tree} and the {} firmware overlay(s) the board declares: no host merge",
+                    boot.firmware_overlays.len()
                 ),
             );
             continue;
-        }
+        };
         let base = work.join(format!("bay{set}-base.dtb"));
-        if let Err(e) = std::fs::write(&base, &c.members[2].1) {
+        if let Err(e) = std::fs::write(&base, tree_bytes) {
             push(false, format!("bay{set} ({slot}): {}: {e}", base.display()));
             continue;
         }
@@ -304,7 +319,7 @@ pub(crate) fn merge_findings(
             let overlay = work.join(format!("bay{set}-{name}.dtbo"));
             let next = work.join(format!("bay{set}-{j}.dtb"));
             let params = params_of(boot, name);
-            let written = std::fs::write(&overlay, &c.members[5 + j].1);
+            let written = std::fs::write(&overlay, overlays[j]);
             if let Err(e) = written {
                 push(
                     false,

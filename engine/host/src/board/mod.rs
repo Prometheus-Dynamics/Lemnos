@@ -841,6 +841,71 @@ pub struct BootSpec {
     /// properties it must hold. Needs `firmware_overlays`. Default none.
     #[serde(default)]
     pub expect_nodes: Vec<ExpectNode>,
+    /// The names the firmware loads the device tree by on this board, without a `device_tree=`
+    /// line (its own default names): the device-tree payload is stored under each, as a copy.
+    /// Required for the `tryboot` record; the `uboot` record's default is `board.dtb`.
+    #[serde(default)]
+    pub device_tree_names: Vec<String>,
+    /// Firmware data files each bay's `overlays/` carries (the firmware's overlay and HAT maps, for
+    /// example), each copied from `--firmware DIR` and loaded by the firmware itself. Default none.
+    #[serde(default)]
+    pub firmware_files: Vec<String>,
+    /// The `firmware_overlays` entries the firmware applies by itself (through its overlay map, for
+    /// a SoC revision) rather than through a `dtoverlay=` line. Each is listed in
+    /// `firmware_overlays` too. Default none.
+    #[serde(default)]
+    pub firmware_applied: Vec<String>,
+    /// The `config.txt` model filters (`[NAME]`) the board's firmware evaluates as on, besides
+    /// `[all]`: what the firmware-layout check reads the config files with. Default none.
+    #[serde(default)]
+    pub firmware_filters: Vec<String>,
+    /// `[boot.eeprom]`: what the board's bootloader EEPROM holds ([`EepromSpec`]). Nothing writes
+    /// it; `lemnos-ctl validate` and `boot-partition` check its form. Required for the `tryboot`
+    /// record on the Raspberry Pi 5 family.
+    #[serde(default)]
+    pub eeprom: Option<EepromSpec>,
+}
+
+/// `[boot.eeprom]`: what the board's bootloader EEPROM holds, as read from the board
+/// ([`BootSpec::eeprom`]). A description: Lemnos never writes the EEPROM, and nothing compares it with
+/// the running bootloader. Each setting is stated, as its value or as `"not set"` (the bootloader's
+/// own default then applies, which nothing here assumes).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EepromSpec {
+    /// The bootloader build date, `YYYY-MM-DD`: which settings it knows.
+    pub build: String,
+    /// `MAX_RESTARTS`.
+    pub max_restarts: EepromSetting<i64>,
+    /// `REBOOT_ON_FATAL_ERROR`, `"not set"` on a build that predates it.
+    pub reboot_on_fatal_error: EepromSetting<bool>,
+}
+
+/// One EEPROM setting as the board holds it: its value, or `"not set"`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum EepromSetting<T> {
+    /// The setting is in the EEPROM's configuration with this value.
+    Set(T),
+    /// The setting is not in the EEPROM's configuration.
+    NotSet(NotSet),
+}
+
+/// The word `"not set"`, and no other string.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NotSet;
+
+impl<'de> Deserialize<'de> for NotSet {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(d)?;
+        if word == "not set" {
+            Ok(NotSet)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "{word:?} is not a setting: give the value, or \"not set\""
+            )))
+        }
+    }
 }
 
 /// One node the merged device tree must hold ([`BootSpec::expect_nodes`]).

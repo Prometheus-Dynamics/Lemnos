@@ -78,18 +78,13 @@ fn changed(before: &[u8], after: &[u8]) -> Vec<u64> {
         .collect()
 }
 
-/// A set's sectors: its five files and its record pair.
+/// A set's sectors: what it owns (its region, the region's FAT sectors, its directories), and its
+/// record pair.
 fn set_lbas(image: &[u8], set: usize) -> (Vec<u64>, [u64; 2]) {
-    let layout = test_bays();
-    let sets = bay::place_sets(&mut Mem(image.to_vec()), &layout).unwrap();
-    let (files, info) = sets[set].clone();
-    let mut out = Vec::new();
-    for (i, lba) in files.iter().enumerate() {
-        for k in 0..layout.bytes[i] / 512 {
-            out.push(lba + k);
-        }
-    }
-    (out, [info, info + 1])
+    let mut dev = Mem(image.to_vec());
+    let info = bay::place_sets(&mut dev).unwrap()[set];
+    let owned = bay::set_sectors(&mut dev, set as u8).unwrap();
+    (owned, [info, info + 1])
 }
 
 /// The bay name of a slot, read through the record's own bay lookup.
@@ -286,21 +281,9 @@ fn end_to_end_uboot_form_install_trial_confirm_keep_previous_free() {
     let after = fs::read(&node).unwrap();
     assert_eq!(bay_of(&board, "os-2").as_deref(), Some("bay1"));
     let (files, info) = set_lbas(&before, 1);
-    let extlinux = {
-        let mut dev = Mem(before.clone());
-        let found = lemnos_slot_store::bootfat::locate_path(
-            &mut dev,
-            "slots/bay1/extlinux/extlinux.conf",
-            bootimage::EXTLINUX_BYTES,
-        )
-        .unwrap();
-        (0..bootimage::EXTLINUX_BYTES / 512)
-            .map(|k| found.first_lba + k)
-            .collect::<Vec<_>>()
-    };
     for lba in changed(&before, &after) {
         assert!(
-            files.contains(&lba) || info.contains(&lba) || extlinux.contains(&lba),
+            files.contains(&lba) || info.contains(&lba),
             "the install of B wrote sector {lba}, outside bay1"
         );
     }

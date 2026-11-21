@@ -362,6 +362,15 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
     // device: a setting a driver refuses is refused here, by device and key.
     lemnos_host::check_settings(&board, &lemnosd::builtin::drivers())
         .map_err(|e| format!("{path}: {e}"))?;
+    // The `[boot]` keys of a board whose slot device keeps a boot partition record (the firmware's
+    // names and files, the EEPROM keys): the rules the image builder applies, so a board file is
+    // refused here, not when its image is built.
+    if board.devices.iter().any(|d| d.driver == "system-slots") {
+        let record = boot_dir::record_of(&board).map_err(|e| format!("{path}: {e}"))?;
+        if record == "tryboot" || record == "uboot" {
+            boot_partition::check_board_boot(&board).map_err(|e| format!("{path}: {e}"))?;
+        }
+    }
     // A link names a device of this board, and not the device itself. Whether the two ends agree
     // is only known to a running host, which checks it at bind.
     for device in &board.devices {

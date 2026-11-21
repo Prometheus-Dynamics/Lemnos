@@ -123,7 +123,8 @@ impl Board {
     fn edit(&self, id: &str) {
         use lemnos_slot_store::twocopy::{FileSectors, Sectors};
         let mut raw = lemnos_slot_store::boot_raw::Boot::open(&self.node).unwrap();
-        let (dir, _) = lemnos_slot_store::boot_raw::BootRaw::slot_bay(&mut raw, id).unwrap();
+        let (dir, lengths) = lemnos_slot_store::boot_raw::BootRaw::slot_bay(&mut raw, id).unwrap();
+        let len = lengths.iter().find(|(n, _)| n == "cmdline.txt").unwrap().1;
         let handle = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -131,7 +132,7 @@ impl Board {
             .unwrap();
         let mut dev = FileSectors::new(handle, 0);
         let found =
-            lemnos_slot_store::bootfat::locate_path(&mut dev, &format!("{dir}/cmdline.txt"), 4096)
+            lemnos_slot_store::bootfat::locate_path(&mut dev, &format!("{dir}/cmdline.txt"), len)
                 .unwrap();
         let text = String::from_utf8(crate::bay_fixture::payloads(id)[3].clone()).unwrap();
         let mut sector = [0u8; 512];

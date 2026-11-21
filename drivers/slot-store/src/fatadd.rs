@@ -628,6 +628,20 @@ impl<'a> Editor<'a> {
                 map.runs
             ));
         };
+        self.take_at(path, first, need, data, dir)
+    }
+
+    /// Takes the clusters `first..first + need` (each must be free) for `path` and writes `data`
+    /// into them; [`Editor::take_run`] after its allocation, and a region's aligned run.
+    fn take_at(
+        &mut self,
+        path: &str,
+        first: u64,
+        need: u64,
+        data: &[u8],
+        dir: bool,
+    ) -> Result<u64, String> {
+        let geo = self.geo();
         if !geo.in_range(first) || !geo.in_range(first + need - 1) {
             return Err(format!(
                 "{path}: the allocator gave clusters {first} to {}, outside the volume: nothing was written",
@@ -755,6 +769,47 @@ impl<'a> Editor<'a> {
         Ok(())
     }
 
+    /// Adds a bay set's region file `name` to `dir`: one run of clusters that starts on a multiple of
+    /// [`crate::bayfat::FAT16_PER_SECTOR`] and numbers a multiple of it ([`fatimage::region_clusters`]),
+    /// so its FAT sectors hold only its entries. The first such free run is taken; when there is
+    /// none the add is refused by name. Nothing is ever moved to make room.
+    pub fn add_region(
+        &mut self,
+        dir: &DirAt,
+        dir_path: &str,
+        name: &str,
+        caps: &[u64],
+    ) -> Result<(), String> {
+        let path = join(dir_path, name);
+        let geo = self.geo();
+        let spc = geo.cluster_bytes() as u64 / SECTOR as u64;
+        let need = fatimage::region_clusters(caps, spc);
+        let align = crate::bayfat::FAT16_PER_SECTOR;
+        let free = &self.free;
+        let fits = |c: u64| (c..c + need).all(|k| free.get(k as usize).copied().unwrap_or(false));
+        let first = (1..)
+            .map(|k| k * align)
+            .take_while(|c| c + need <= free.len() as u64)
+            .find(|&c| fits(c))
+            .ok_or_else(|| {
+                format!(
+                    "{path}: the bay's region needs one run of {need} free clusters starting on a multiple of {align} (whole FAT sectors), and the volume has none: nothing is ever moved to make room: nothing was written"
+                )
+            })?;
+        let zeros = vec![0u8; (need * geo.cluster_bytes() as u64) as usize];
+        let taken = self.take_at(&path, first, need, &zeros, false)?;
+        let entries = self.entries_for(dir, name, 0x20, taken, zeros.len() as u32);
+        self.append(dir, dir_path, &entries)?;
+        self.added.push(Added {
+            path,
+            is_dir: false,
+            size: zeros.len() as u64,
+            first: taken,
+            clusters: need,
+        });
+        Ok(())
+    }
+
     /// Adds `nodes` to `dir`, in order, the way the image builder fills a volume: a file gets its
     /// run, a directory that is not there yet is made (its `.` and `..` entries, room for its
     /// children) and one that is there is added to. `keep(path)` says whether a file is added;
@@ -773,9 +828,20 @@ impl<'a> Editor<'a> {
                         self.add_file(dir, dir_path, name, data)?;
                     }
                 }
-                Node::Dir { name, children } => {
+                Node::Region { name, caps } => {
                     let path = join(dir_path, name);
-                    if kept_entries(children, &path, keep) == 0 {
+                    if !keep(&path) {
+                        continue;
+                    }
+                    self.add_region(dir, dir_path, name, caps)?;
+                }
+                Node::Dir { name, children } | Node::DirOf { name, children, .. } => {
+                    let want = match node {
+                        Node::DirOf { entries, .. } => *entries as u64,
+                        _ => 0,
+                    };
+                    let path = join(dir_path, name);
+                    if want == 0 && kept_entries(children, &path, keep) == 0 {
                         continue;
                     }
                     let found = self.listing(dir).into_iter().find(|e| e.is_named(name));
@@ -788,7 +854,10 @@ impl<'a> Editor<'a> {
                         }
                         None => {
                             let per = (self.geo().cluster_bytes() / 32) as u64;
-                            let need = (2 + kept_entries(children, &path, keep)).div_ceil(per);
+                            let need = (2 + kept_entries(children, &path, keep))
+                                .max(want)
+                                .div_ceil(per)
+                                .max(1);
                             let parent = match dir {
                                 DirAt::Root => 0,
                                 DirAt::Chain(chain) => chain[0],
@@ -882,8 +951,9 @@ impl<'a> Editor<'a> {
         })
     }
 
-    /// Names `bytes` from sector `lba` as a file of the caller's own that this edit may rewrite in
-    /// place: a bay file an earlier add placed. The audit lets no other allocated cluster change.
+    /// Names `bytes` from sector `lba` as the caller's own that this edit may rewrite in place, its
+    /// FAT entries included: a bay set an earlier add placed (its region and its directories). The
+    /// audit lets no other allocated cluster change.
     pub fn allow_own(&mut self, lba: u64, bytes: u64) {
         let geo = self.geo();
         if lba < geo.data_start {
@@ -945,11 +1015,13 @@ impl<'a> Editor<'a> {
                 }
             } else {
                 match self.survey.owner_of(c) {
+                    // A cluster of the caller's own set (its region, its directories): rewritten
+                    // whole by the install, which keeps the set's kept entries itself.
+                    _ if self.own[i] => Class::OwnFile,
                     Some(e) if e.is_dir => {
                         self.audit_entries(lba, &e.path)?;
                         Class::Dir
                     }
-                    _ if self.own[i] => Class::OwnFile,
                     Some(e) => {
                         return refuse(format!(
                             "sector {lba} would touch an existing file's cluster: cluster {c} belongs to {}",
@@ -1011,7 +1083,8 @@ impl<'a> Editor<'a> {
             }
             let i = c as usize;
             let allowed = (was == 0 && c >= 2 && (self.new_file[i] || self.new_dir[i]))
-                || (self.freed[i] && is == 0);
+                || (self.freed[i] && is == 0)
+                || (c >= 2 && self.own[i]);
             if !allowed {
                 let owner = self
                     .survey
@@ -1103,6 +1176,9 @@ fn kept_entries(children: &[Node], path: &str, keep: &dyn Fn(&str) -> bool) -> u
                     own(name)
                 }
             }
+            Node::DirOf { name, .. } => own(name),
+            Node::Region { name, .. } if keep(&join(path, name)) => own(name),
+            Node::Region { .. } => 0,
         })
         .sum()
 }

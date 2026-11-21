@@ -356,7 +356,8 @@ pub fn arm_trial_raw<D: Sectors>(
 }
 
 /// Whether a boot partition's records and pointers are this system's, as the record writer decides
-/// it: every record and pointer file is found at the size the image builder writes.
+/// it: every record and pointer file is found at the size the image builder writes, and every bay
+/// set's record is this layout version's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ownership {
     /// Every record and pointer file is there at its size.
@@ -371,12 +372,16 @@ pub enum Ownership {
 /// Reads `dev` only and says whether its records and pointers are ours: the same placement
 /// [`Boot::on`] makes before any write, so a partition the writer would refuse as "not ours" is
 /// [`Ownership::NotOurs`] here, and one it would open is [`Ownership::Ours`].
-pub fn ownership<D: ReadAt>(dev: &mut D) -> Ownership {
+pub fn ownership<D: ReadAt + Sectors>(dev: &mut D) -> Ownership {
     let placed = Records::place_named(dev)
         .map(drop)
         .and_then(|()| Pointers::place(dev).map(drop));
     match placed {
-        Ok(()) => Ownership::Ours,
+        Ok(()) => match bays::records_version(dev) {
+            Ok(None) => Ownership::Ours,
+            Ok(Some(why)) => Ownership::NotOurs(why),
+            Err(why) => Ownership::Unknown(why),
+        },
         Err((name, why @ (Refusal::Missing | Refusal::WrongSize { .. }))) => {
             Ownership::NotOurs(format!("{name} {why}"))
         }
@@ -484,6 +489,10 @@ impl<D: Sectors + ReadAt> Boot<D> {
         let records =
             Records::place_named(&mut dev).map_err(|(name, why)| format!("{name} {why}"))?;
         let pointers = Pointers::place(&mut dev).map_err(|(name, why)| format!("{name} {why}"))?;
+        // A partition made for another layout version is not opened: nothing on it is written.
+        if let Some(why) = bays::records_version(&mut dev)? {
+            return Err(why);
+        }
         // Optional: an older image without the file boots, and its flash decision refuses by name.
         let baseline = bootfat::locate(&mut dev, COUNT_FILE, RECORD_BYTES)
             .ok()
@@ -500,8 +509,8 @@ impl<D: Sectors + ReadAt> Boot<D> {
 
     /// The bay set a slot's committed record is in, refused by name when none is.
     fn set_for(&mut self, slot: &str) -> Result<u8, String> {
-        let layout = self.layout.clone()?;
-        bays::set_of_slot(&mut self.dev, &layout, slot)
+        self.layout.clone()?;
+        bays::set_of_slot(&mut self.dev, slot)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| {
                 format!("slot {slot} has no bay on the boot partition: nothing names it")
@@ -517,14 +526,14 @@ impl<D: Sectors + ReadAt> Boot<D> {
         else {
             return Ok(None);
         };
-        let layout = self.layout.clone()?;
+        self.layout.clone()?;
         let Some(set) = bays::set_of(&name) else {
             return Ok(None);
         };
-        let placed = bays::place(&mut self.dev, &layout)?;
+        let placed = bays::place(&mut self.dev)?;
         let info =
             bays::read_info(&mut self.dev, placed.info[set as usize]).map_err(|e| e.to_string())?;
-        Ok(info.map(|i| i.slot))
+        Ok(info.and_then(|i| i.slot))
     }
 
     /// The bay set a slot's files are in: what the boot chain reads. Refused by name when none is.
@@ -536,51 +545,27 @@ impl<D: Sectors + ReadAt> Boot<D> {
     /// hash. Refused by name when the slot has no bay or the bay holds no record.
     pub fn bay_record(&mut self, slot: &str) -> Result<(u8, bays::Info), String> {
         let set = self.set_for(slot)?;
-        let layout = self.layout.clone()?;
-        let placed = bays::place(&mut self.dev, &layout)?;
+        let placed = bays::place(&mut self.dev)?;
         let info = bays::read_info(&mut self.dev, placed.info[set as usize])
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("bay{set} holds no record for {slot}"))?;
         Ok((set, info))
     }
 
-    /// Installs a slot's five payloads into its bay (see [`bays::stage`]): the set that already holds
+    /// Installs a slot's payloads into its bay (see [`bays::stage`]): the set that already holds
     /// the slot, else a set no pointer names. No pointer moves.
     pub fn install_slot(&mut self, slot: &str, payloads: &[&[u8]]) -> Result<bays::Done, String> {
-        self.install_slot_with(slot, payloads, None)
-    }
-
-    /// [`Boot::install_slot`] for a set that carries the U-Boot form's composed `extlinux.conf`
-    /// (`extlinux`, written with the payloads).
-    pub fn install_slot_with(
-        &mut self,
-        slot: &str,
-        payloads: &[&[u8]],
-        extlinux: Option<&[u8]>,
-    ) -> Result<bays::Done, String> {
         let layout = self.layout.clone()?;
-        let protected =
-            bays::Protected::from_volume(&mut self.dev, &layout).map_err(|e| e.to_string())?;
-        let set = bays::choose_set(&mut self.dev, &layout, slot, &protected)
-            .map_err(|e| e.to_string())?;
-        bays::stage_with(
-            &mut self.dev,
-            &layout,
-            set,
-            slot,
-            payloads,
-            extlinux,
-            &protected,
-        )
-        .map_err(|e| e.to_string())
+        let protected = bays::Protected::from_volume(&mut self.dev).map_err(|e| e.to_string())?;
+        let set = bays::choose_set(&mut self.dev, slot, &protected).map_err(|e| e.to_string())?;
+        bays::stage_with(&mut self.dev, &layout, set, slot, payloads, &protected)
+            .map_err(|e| e.to_string())
     }
 
     /// Frees the bay of `slot` by its record alone (see [`bays::free_set`]); nothing else is written.
     pub fn free_slot(&mut self, slot: &str) -> Result<(), String> {
-        let layout = self.layout.clone()?;
-        let Some(set) =
-            bays::set_of_slot(&mut self.dev, &layout, slot).map_err(|e| e.to_string())?
-        else {
+        self.layout.clone()?;
+        let Some(set) = bays::set_of_slot(&mut self.dev, slot).map_err(|e| e.to_string())? else {
             return Ok(());
         };
         // The rule (M36b): `previous.txt` names the default's bay until a real previous exists, and
@@ -599,9 +584,8 @@ impl<D: Sectors + ReadAt> Boot<D> {
                 .write(&mut self.dev, Pointer::Previous, &bays::set_name(fallback))
                 .map_err(|e| e.to_string())?;
         }
-        let protected =
-            bays::Protected::from_volume(&mut self.dev, &layout).map_err(|e| e.to_string())?;
-        bays::free_set(&mut self.dev, &layout, set, &protected).map_err(|e| e.to_string())?;
+        let protected = bays::Protected::from_volume(&mut self.dev).map_err(|e| e.to_string())?;
+        bays::free_set(&mut self.dev, set, &protected).map_err(|e| e.to_string())?;
         debug_assert!(
             self.pointer_set(Pointer::Previous)?.is_some(),
             "previous.txt names no bay after a removal"
@@ -641,8 +625,8 @@ impl BayVolume<FileSectors> {
 }
 
 impl<D: Sectors + ReadAt> BayVolume<D> {
-    /// The volume on `dev` (a node, or an image in a test): its bay layout, read from the sizes of
-    /// the first set's files.
+    /// The volume on `dev` (a node, or an image in a test): its bay layout, read from its member
+    /// list and its sets' records.
     pub fn on(mut dev: D) -> Result<Self, String> {
         let layout = bays::discover(&mut dev)?;
         let reason = bootfat::locate(&mut dev, REASON_FILE, RECORD_BYTES)
@@ -671,39 +655,27 @@ impl<D: Sectors + ReadAt> BayVolume<D> {
         bays::slot_bay_on(&mut self.dev, &self.layout, slot)
     }
 
-    /// Installs a slot's five payloads into its bay (see [`bays::stage_with`]), with the U-Boot form's
-    /// composed `extlinux` when given. `protected` is the environment's default, previous and trial
-    /// (the caller reads them); no pointer or environment variable moves.
+    /// Installs a slot's payloads into its bay (see [`bays::stage_with`]); the set's composed
+    /// `extlinux.conf` is written with them. `protected` is the environment's default, previous and
+    /// trial (the caller reads them); no pointer or environment variable moves.
     pub fn install_slot_with(
         &mut self,
         slot: &str,
         payloads: &[&[u8]],
-        extlinux: Option<&[u8]>,
         protected: &bays::Protected,
     ) -> Result<bays::Done, String> {
-        let set = bays::choose_set(&mut self.dev, &self.layout, slot, protected)
-            .map_err(|e| e.to_string())?;
-        bays::stage_with(
-            &mut self.dev,
-            &self.layout,
-            set,
-            slot,
-            payloads,
-            extlinux,
-            protected,
-        )
-        .map_err(|e| e.to_string())
+        let set = bays::choose_set(&mut self.dev, slot, protected).map_err(|e| e.to_string())?;
+        bays::stage_with(&mut self.dev, &self.layout, set, slot, payloads, protected)
+            .map_err(|e| e.to_string())
     }
 
     /// Frees the bay of `slot` by its record alone (see [`bays::free_set`]). `protected` as for
     /// [`BayVolume::install_slot_with`].
     pub fn free_slot(&mut self, slot: &str, protected: &bays::Protected) -> Result<(), String> {
-        let Some(set) =
-            bays::set_of_slot(&mut self.dev, &self.layout, slot).map_err(|e| e.to_string())?
-        else {
+        let Some(set) = bays::set_of_slot(&mut self.dev, slot).map_err(|e| e.to_string())? else {
             return Ok(());
         };
-        bays::free_set(&mut self.dev, &self.layout, set, protected).map_err(|e| e.to_string())
+        bays::free_set(&mut self.dev, set, protected).map_err(|e| e.to_string())
     }
 }
 

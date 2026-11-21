@@ -4,6 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "support/pi.rs"]
+mod pi;
+
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -40,7 +43,7 @@ fn slot_boards() -> Vec<PathBuf> {
 }
 
 fn run(args: &[&str]) -> (Result<(), String>, String) {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args = pi::with_firmware(args);
     let mut out = Vec::new();
     let r = lemnos_ctl::run(&args, &mut out);
     (r, String::from_utf8(out).unwrap())
@@ -53,37 +56,15 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// The five payloads of a board: each the size of its bay, the kernel gzip-shaped (the Pi form takes
-/// a gzip kernel, requirements section 8.7).
+/// The five payloads of a board, shaped as the firmware reads them (`support/pi.rs`), with the
+/// board's firmware files in `<dir>/firmware`, which [`run`] passes as `--firmware`.
 fn payloads(dir: &Path, board: &lemnos_host::board::BoardFile) -> PathBuf {
-    let b = &board.boot;
-    let sizes = [
-        b.bay_kernel_bytes.unwrap(),
-        b.bay_initramfs_bytes.unwrap(),
-        b.bay_device_tree_bytes.unwrap(),
-        b.bay_cmdline_bytes.unwrap(),
-        b.bay_overlay_bytes.unwrap(),
-    ];
-    let roles = [
-        "kernel",
-        "initramfs",
-        "device-tree",
-        "cmdline",
-        "board-overlay",
-    ];
     let payload = dir.join("payload");
-    std::fs::create_dir_all(&payload).unwrap();
-    for (i, role) in roles.iter().enumerate() {
-        let mut bytes = vec![(i as u8).wrapping_add(1); sizes[i] as usize];
-        if i == 0 {
-            bytes[0] = 0x1F;
-            bytes[1] = 0x8B;
-        }
-        if i == 3 {
-            bytes = b"console=serial0,115200 root=lemnos\n".to_vec();
-        }
-        std::fs::write(payload.join(role), bytes).unwrap();
-    }
+    pi::write_payload(&payload, pi::CMDLINE, 4096);
+    pi::write_firmware(
+        &pi::firmware_beside(&payload),
+        &board.boot.firmware_overlays,
+    );
     payload
 }
 
@@ -157,7 +138,7 @@ fn every_board_with_a_slot_device_builds_a_real_size_image_that_verifies_and_loc
             "{name}: {report}"
         );
         assert!(
-            report.contains("locator:") && report.contains("bay0 (a): the five payloads match"),
+            report.contains("locator:") && report.contains("bay0 (a): its "),
             "{name}: {report}"
         );
         assert!(
@@ -427,7 +408,11 @@ fn a_uboot_board_without_its_environment_size_names_the_file_the_device_and_the_
     let path = dir.join("board.toml");
     std::fs::write(
         &path,
-        text.replace("record = \"tryboot\"", "record = \"uboot\""),
+        text.replace("record = \"tryboot\"", "record = \"uboot\"")
+            .replace(
+                "firmware_files = [\"overlay_map.dtb\", \"hat_map.dtb\"]\n",
+                "",
+            ),
     )
     .unwrap();
     let (r, _) = run(&[
@@ -477,7 +462,7 @@ fn a_flipped_byte_in_a_bay_is_named_by_verify_and_fails_it() {
     let lba = lemnos_slot_store::bootfat::locate_path(
         &mut mem,
         "slots/bay0/kernel8.img",
-        board.boot.bay_kernel_bytes.unwrap(),
+        std::fs::metadata(payload.join("kernel")).unwrap().len(),
     )
     .unwrap()
     .first_lba;
@@ -537,7 +522,14 @@ fn a_uboot_board_builds_an_image_with_its_environment_locator() {
     let text = std::fs::read_to_string(repo().join("testing/boards/reference.toml")).unwrap();
     let keys = "record = \"uboot\", uboot_env_size = 8192";
     let board_path = dir.join("uboot.toml");
-    std::fs::write(&board_path, text.replace("record = \"tryboot\"", keys)).unwrap();
+    std::fs::write(
+        &board_path,
+        text.replace("record = \"tryboot\"", keys).replace(
+            "firmware_files = [\"overlay_map.dtb\", \"hat_map.dtb\"]\n",
+            "",
+        ),
+    )
+    .unwrap();
     let board = board_of(&board_path);
     let payload = payloads(&dir, &board);
     // The U-Boot form refuses a compressed kernel: an uncompressed one.

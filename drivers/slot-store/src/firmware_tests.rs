@@ -5,14 +5,19 @@ fn pi_firmware_text_is_the_fixed_fallback_text() {
     assert_eq!(
         CONFIG_TXT,
         "kernel_watchdog_timeout=15\ninclude default.txt\n[boot_count>3]\ninclude previous.txt\n[all]\n\
-            kernel=kernel8.img\ncmdline=cmdline.txt\ninitramfs initramfs.cpio followkernel\n\
-            device_tree=board.dtb\ndtoverlay=lemnos-board\n"
+            initramfs initramfs.cpio followkernel\ndtoverlay=lemnos-board\n"
     );
     assert_eq!(
         TRYBOOT_TXT,
-        "kernel_watchdog_timeout=15\ninclude trial.txt\nkernel=kernel8.img\ncmdline=cmdline.txt\n\
-            initramfs initramfs.cpio followkernel\ndevice_tree=board.dtb\ndtoverlay=lemnos-board\n"
+        "kernel_watchdog_timeout=15\ninclude trial.txt\n\
+            initramfs initramfs.cpio followkernel\ndtoverlay=lemnos-board\n"
     );
+    // The firmware reads every file under its default name: no line names one.
+    for text in [CONFIG_TXT, CONFIG_TXT_NO_COUNT, TRYBOOT_TXT] {
+        for key in ["kernel=", "cmdline=", "device_tree="] {
+            assert!(!text.contains(key), "{key} in {text:?}");
+        }
+    }
     assert!(
         !TRYBOOT_TXT.contains("boot_count"),
         "a trial is never subject to the count"
@@ -157,25 +162,24 @@ fn a_board_with_rpi_tryboot_gets_the_fixed_text_and_no_other_firmware_does() {
     assert!(generated_for("").is_none());
 }
 
-/// Each slot line of both files names the layout's file, spelled as the layout spells it.
+/// The slot lines of both files name only what the firmware does not find by its default names:
+/// the initramfs, by the layout's spelling, and the board overlay. The kernel, the command line and
+/// the device tree are read under the firmware's default names, so no line names them.
 #[test]
-fn the_slot_lines_name_the_layout_files() {
-    use crate::layout::{BOARD_OVERLAY_NAME, CMDLINE, DEVICE_TREE, INITRAMFS, KERNEL};
+fn the_slot_lines_name_only_what_has_no_default_name() {
+    use crate::layout::{BOARD_OVERLAY_NAME, INITRAMFS};
     for text in [CONFIG_TXT, TRYBOOT_TXT] {
-        assert!(text.contains(&format!("kernel={KERNEL}\n")), "{text}");
-        assert!(text.contains(&format!("cmdline={CMDLINE}\n")), "{text}");
         assert!(
             text.contains(&format!("initramfs {INITRAMFS} followkernel\n")),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!("device_tree={DEVICE_TREE}\n")),
             "{text}"
         );
         assert!(
             text.contains(&format!("dtoverlay={BOARD_OVERLAY_NAME}\n")),
             "{text}"
         );
+        for key in ["kernel=", "cmdline=", "device_tree="] {
+            assert!(!text.lines().any(|l| l.starts_with(key)), "{key}: {text}");
+        }
     }
 }
 
@@ -184,9 +188,9 @@ fn the_slot_lines_name_the_layout_files() {
 #[test]
 fn the_slot_lines_follow_the_include() {
     let at = |text: &str, needle: &str| text.find(needle).unwrap();
-    assert!(at(CONFIG_TXT, "include previous.txt") < at(CONFIG_TXT, "kernel="));
-    assert!(at(CONFIG_TXT, "[all]") < at(CONFIG_TXT, "kernel="));
-    assert!(at(TRYBOOT_TXT, "include trial.txt") < at(TRYBOOT_TXT, "kernel="));
+    assert!(at(CONFIG_TXT, "include previous.txt") < at(CONFIG_TXT, "initramfs "));
+    assert!(at(CONFIG_TXT, "[all]") < at(CONFIG_TXT, "initramfs "));
+    assert!(at(TRYBOOT_TXT, "include trial.txt") < at(TRYBOOT_TXT, "initramfs "));
 }
 
 #[test]

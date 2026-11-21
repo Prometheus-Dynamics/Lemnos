@@ -160,9 +160,19 @@ besides (see [Slots](slots.md#the-boot-partition-payload-bays)):
 
 ```text
 lemnos-ctl boot-partition --layout-of testing/boards/reference.toml --socs <repo>/socs --min-size
-lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --payload DIR --size BYTES --out boot.img
+lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --payload DIR --firmware FW --size BYTES --out boot.img
 lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --verify boot.img
 ```
+
+`--firmware FW` is the directory holding the files the board declares beyond the five roles: each
+`firmware_overlays` entry as `<name>.dtbo` and each `firmware_files` entry (on the Raspberry Pi 5
+`overlay_map.dtb` and `hat_map.dtb`, which `scripts/firmware-maps.sh` builds from the pinned kernel tree).
+A board that declares any refuses a build without it, naming them. On a `record = "tryboot"` board the
+image is checked with the firmware-layout rules before it is written, as `lemnos-ctl firmware-check`
+would check it with the board's `device_tree_names` and `firmware_filters`; when a rule fails the
+check's lines are printed and nothing is written (`the image fails N firmware-layout rule(s) (listed
+above): FILE was not written`). The image `--out` writes is the whole partition, a standalone FAT image
+(option R of the boot-partition plan); `--add-to` is the other way, below.
 
 `lemnos-ctl firmware-check IMAGE --dtb NAME [--trial | --dir PREFIX] [--filter NAME]...` reads any boot
 partition image as the Pi firmware does and prints one `ok`/`BAD` line per rule, then
@@ -172,19 +182,19 @@ partition image as the Pi firmware does and prints one `ok`/`BAD` line per rule,
 FAT16 boot partition another system boots from, and writes the changed sector ranges and an undo file
 ([Slots](slots.md#adding-to-an-existing-boot-partition)).
 
-The reference board's `--min-size` is 38244864 bytes (its made-up bays: 11 MiB kernel, 1 MiB initramfs). With
+The reference board's `--min-size` is 39523840 bytes (its made-up bays: 11 MiB kernel, 1 MiB initramfs). With
 `--payload DIR` (five files named for the roles: `kernel`, `initramfs`, `device-tree`, `cmdline`,
 `board-overlay`, and nothing else: a file of any other name is refused by name, `<dir>: the payload directory holds "x", which this board's boot partition does not store (it stores: kernel, initramfs, device-tree, cmdline, board-overlay): nothing was written`, in `--min-size` and in the image build alike, the same rule the install applies to a slot bundle's `boot.files`) it prints the same minimum first, then `role stored_bytes bay_bytes` per role. A `record = "tryboot"` image holds
 `config.txt`, `tryboot.txt`, `default.txt`, `previous.txt`, `trial.txt` (two sectors each), `trial.rec`,
-`reason.rec`, `episodes.rec`, `slot-layout.toml` and the three bay sets; a `record = "uboot"` image holds
-`slot-layout.toml`, `uboot-env.txt`, `boot.cmd` (with the board's `lemnos_usb` and `lemnos_led` lines before
+`reason.rec`, `episodes.rec`, `slot-layout.toml`, `firmware-overlays.txt` and the three bay sets; a
+`record = "uboot"` image holds `slot-layout.toml`, `firmware-overlays.txt`, `uboot-env.txt`, `boot.cmd` (with the board's `lemnos_usb` and `lemnos_led` lines before
 the script), `reason.rec` and the bay sets. The U-Boot environment partition is the disk image's, not this
 image's.
 
 **Output formats** (the three modes a build script reads):
 
 - `--min-size` prints ONE line: the smallest `--size` in bytes, decimal digits and a newline, nothing
-  else (`38244864`). Read it with `read n` or `int(line)`.
+  else (`39523840`). Read it with `read n` or `int(line)`.
 - `--min-size --payload DIR` prints that same line FIRST, then five lines `role stored_bytes bay_bytes`
   (three fields separated by one space; roles in the order `kernel`, `initramfs`, `device-tree`,
   `cmdline`, `board-overlay`; `stored_bytes` is the payload file's size, `bay_bytes` the board's bay).
@@ -208,10 +218,10 @@ the boot files with the root hash filled in; `boot-partition` takes those files 
 ```text
 lemnos-ctl tree --socs <repo>/socs BOARD -o overlay.dts --cmdline-slot cmdline-slot.txt --slot a1
 # payload/ holds kernel, initramfs, device-tree, cmdline (cmdline-slot.txt), board-overlay
-lemnos-ctl bundle --layout-of BOARD --socs <repo>/socs --slot a1 --payload payload --rootfs rootfs.erofs \
+lemnos-ctl bundle --layout-of BOARD --socs <repo>/socs --slot a1 --payload payload --firmware FW --rootfs rootfs.erofs \
   --verity-table verity.txt --product P --version V --key-file signing.seed --payload-out payload-final --out a1.bundle
 lemnos-ctl bundle --layout-of BOARD --socs <repo>/socs --verify a1.bundle --pubkey signing.pub
-lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --payload payload-final --size BYTES --out boot.img
+lemnos-ctl boot-partition --layout-of BOARD --socs <repo>/socs --slot a1 --payload payload-final --firmware FW --size BYTES --out boot.img
 ```
 
 Output of the first `bundle`: `slot ID: product P, version V, board B`, `root hash HEX`, `signed with key id HEX`

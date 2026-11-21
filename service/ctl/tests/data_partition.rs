@@ -13,6 +13,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/pi.rs"]
+mod pi;
+
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -22,7 +25,7 @@ fn socs() -> String {
 }
 
 fn run(args: &[&str]) -> (Result<(), String>, String) {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args = pi::with_firmware(args);
     let mut out = Vec::new();
     let r = lemnos_ctl::run(&args, &mut out);
     (r, String::from_utf8(out).unwrap())
@@ -105,10 +108,8 @@ fn payload(dir: &Path, board: &str, slot: &str) -> String {
     let p = dir.join("payload");
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
-    std::fs::write(p.join("kernel"), vec![0u8; 3000]).unwrap();
-    std::fs::write(p.join("initramfs"), b"initramfs").unwrap();
-    std::fs::write(p.join("device-tree"), b"device tree").unwrap();
-    std::fs::write(p.join("board-overlay"), b"overlay").unwrap();
+    pi::write_payload(&p, pi::CMDLINE, 4096);
+    pi::write_firmware(&pi::firmware_beside(&p), &[]);
     let line = p.join("cmdline");
     let (r, _) = run(&[
         "tree",

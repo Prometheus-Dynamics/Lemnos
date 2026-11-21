@@ -95,16 +95,37 @@ impl From<io::Error> for Refusal {
 
 /// The fields of the volume the placement needs.
 #[derive(Debug, Clone, Copy)]
-struct Volume {
-    spc: u64,
-    fat_start: u64,
-    fat_bytes_per_entry: u64,
-    fat32: bool,
+pub(crate) struct Volume {
+    /// Sectors per cluster.
+    pub(crate) spc: u64,
+    /// The first FAT's byte offset.
+    pub(crate) fat_start: u64,
+    /// Bytes per FAT entry (2 on FAT16, 4 on FAT32).
+    pub(crate) fat_bytes_per_entry: u64,
+    pub(crate) fat32: bool,
     root_start: u64,
     root_entries: u64,
     root_cluster: u32,
-    data_start: u64,
-    clusters: u64,
+    /// The first data sector.
+    pub(crate) data_start: u64,
+    /// The data area's clusters (numbered from 2).
+    pub(crate) clusters: u64,
+    /// The FAT copies.
+    pub(crate) fats: u64,
+    /// Sectors per FAT copy.
+    pub(crate) fat_sectors: u64,
+}
+
+impl Volume {
+    /// The first sector of cluster `c`.
+    pub(crate) fn cluster_lba(&self, c: u64) -> u64 {
+        self.data_start + (c - 2) * self.spc
+    }
+
+    /// The first sector of FAT copy `copy`.
+    pub(crate) fn fat_lba(&self, copy: u64) -> u64 {
+        self.fat_start / 512 + copy * self.fat_sectors
+    }
 }
 
 fn le16(b: &[u8], at: usize) -> u64 {
@@ -115,7 +136,7 @@ fn le32(b: &[u8], at: usize) -> u64 {
     u64::from(u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]))
 }
 
-fn volume<D: ReadAt>(dev: &mut D) -> Result<Volume, Refusal> {
+pub(crate) fn volume<D: ReadAt>(dev: &mut D) -> Result<Volume, Refusal> {
     let mut b = [0u8; 512];
     dev.read_at(0, &mut b)?;
     if le16(&b, 11) != 512 {
@@ -169,11 +190,13 @@ fn volume<D: ReadAt>(dev: &mut D) -> Result<Volume, Refusal> {
         root_cluster,
         data_start: meta + root_sectors,
         clusters,
+        fats: nfats,
+        fat_sectors: fatsz,
     })
 }
 
 /// The FAT entry for cluster `c`.
-fn fat_entry<D: ReadAt>(dev: &mut D, v: &Volume, c: u64) -> Result<u64, Refusal> {
+pub(crate) fn fat_entry<D: ReadAt>(dev: &mut D, v: &Volume, c: u64) -> Result<u64, Refusal> {
     let at = v.fat_start + c * v.fat_bytes_per_entry;
     if v.fat32 {
         let mut b = [0u8; 4];
@@ -407,7 +430,7 @@ impl Listed {
 /// Follows a FAT chain from `first`, at most `limit` clusters. A free, bad or out-of-range
 /// cluster, a loop, or a chain longer than `limit` is refused; so is a chain that ends early
 /// only when the caller checks the length.
-fn cluster_chain<D: ReadAt>(
+pub(crate) fn cluster_chain<D: ReadAt>(
     dev: &mut D,
     v: &Volume,
     first: u64,
@@ -434,7 +457,7 @@ fn cluster_chain<D: ReadAt>(
 }
 
 /// Reads the clusters of `chain` whole, in order, appending them to `out`.
-fn read_clusters<D: ReadAt>(
+pub(crate) fn read_clusters<D: ReadAt>(
     dev: &mut D,
     v: &Volume,
     chain: &[u64],
@@ -676,6 +699,34 @@ pub fn list_dir<D: ReadAt>(dev: &mut D, path: &str) -> Result<Vec<DirEntry>, Ref
         false
     });
     Ok(out)
+}
+
+/// A directory below the root, as stored: its cluster chain and its bytes. The root has no chain on
+/// FAT16, so `path` must name a directory under it.
+pub(crate) fn dir_chain<D: ReadAt>(
+    dev: &mut D,
+    path: &str,
+) -> Result<(Vec<u64>, Vec<u8>), Refusal> {
+    let v = volume(dev)?;
+    let mut dir = Dir::Root;
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        let bytes = dir_bytes(dev, &v, dir)?;
+        let hit = find_entry(&bytes, part).ok_or(Refusal::Missing)?;
+        if hit.attr & ATTR_DIR == 0 {
+            return Err(Refusal::Corrupt("a path component is not a directory"));
+        }
+        if hit.first < 2 {
+            return Err(Refusal::Corrupt("a directory entry names no cluster"));
+        }
+        dir = Dir::Cluster(hit.first);
+    }
+    let Dir::Cluster(first) = dir else {
+        return Err(Refusal::Corrupt("the root directory has no chain"));
+    };
+    let chain = cluster_chain(dev, &v, first, v.clusters)?;
+    let mut bytes = Vec::new();
+    read_clusters(dev, &v, &chain, &mut bytes)?;
+    Ok((chain, bytes))
 }
 
 /// Reads the file at `path` (`/`-separated, relative to the root; a component is a long or short

@@ -38,6 +38,28 @@ dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by na
 #   `firmware_overlays`. The merge is a host check: it runs on the machine that verifies the image, and
 #   nothing it shows is loaded by firmware.
 #
+# A board whose slot device keeps the "tryboot" record (the Raspberry Pi firmware reads the bay sets)
+# states what that firmware reads by itself. These keys are not in this example (it has no slot
+# device), and `lemnos-ctl boot-partition` refuses a tryboot board without the required ones by name:
+# - `device_tree_names` (required on tryboot): the device tree names the board's firmware loads by
+#   default, each with `.dtb`, for example ["bcm2712-rpi-5-b.dtb"]. The bay stores the slot's device tree
+#   under each name (copies); no `device_tree=` line names a file. The U-Boot form stores `board.dtb`.
+# - `firmware_files` (required on tryboot: `overlay_map.dtb` and `hat_map.dtb`): files the firmware reads
+#   from each bay's `overlays/`, copied from `--firmware DIR` like the overlays. Refused on the U-Boot
+#   form.
+# - `firmware_applied`: overlays the firmware applies by itself (no `dtoverlay=` line loads them); each
+#   must be in `firmware_overlays`, and the firmware-layout check applies it to every device tree.
+# - `firmware_filters`: the config.txt model section filters the board's firmware matches (for example
+#   ["pi5"]), which the firmware-layout check follows.
+# - `[boot.eeprom]` (required on a tryboot board whose soc is the Raspberry Pi 5's, allowed on any board
+#   of that soc, refused elsewhere): what the board's bootloader EEPROM holds, as read from the board.
+#   A description: Lemnos never writes the EEPROM and nothing compares it with the running bootloader.
+#   `build` is the bootloader's build date (YYYY-MM-DD); `max_restarts` and `reboot_on_fatal_error` are
+#   each the value the EEPROM's configuration holds, or "not set" when it holds none (the bootloader's
+#   own default then applies; nothing here assumes it). `lemnos-ctl validate`, `boot-partition`, `bundle` and
+#   `data-partition` check the form, and `boot-partition` prints the description with its
+#   firmware-layout check, which assumes nothing from it.
+#
 # [boot] config_lines = ["dtoverlay=test-gpu"]
 # [boot] firmware_overlays = ["test-gpu"]
 [boot]

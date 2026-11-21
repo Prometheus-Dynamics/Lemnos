@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use lemnos_slot_store::bays::{self, Protected};
 use lemnos_slot_store::boot_raw::{BayVolume, Trial};
-use lemnos_slot_store::bootimage;
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use lemnos_slot_store::uboot_env::{self, FileEnv, Geometry, Place};
 
@@ -778,12 +777,11 @@ impl BootRecord for UbootEnv {
         Ok(crate::boot::declared_of(&self.raw()?.bay_layout()))
     }
 
-    /// The slot's payloads and its composed extlinux (from its command line) into a free bay.
+    /// The slot's payloads into a free bay; the set's extlinux is composed from its command line.
     fn install(&self, slot: &str, payloads: &[&[u8]]) -> io::Result<()> {
-        let text = bootimage::extlinux_text(payloads[3]).map_err(io::Error::other)?;
         let protected = self.protected()?;
         self.raw()?
-            .install_slot_with(slot, payloads, Some(&text), &protected)
+            .install_slot_with(slot, payloads, &protected)
             .map(|_| ())
             .map_err(io::Error::other)
     }

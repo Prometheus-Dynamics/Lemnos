@@ -17,8 +17,10 @@
 use std::collections::HashSet;
 
 use super::*;
+use crate::bays;
 use crate::boot_raw::BayVolume;
-use crate::bootimage::{self, Family, Fixed, Parts};
+use crate::bootfat;
+use crate::bootimage::{self, Family, Parts};
 
 /// The payloads of slot `d`.
 fn payloads_d() -> [Vec<u8>; 5] {
@@ -59,13 +61,8 @@ fn pi_parts() -> Parts {
 fn uboot_parts() -> Parts {
     Parts {
         family: Family::UbootBlock,
-        layout: test_layout(),
-        root: vec![("slot-layout.toml", b"version = 5\n".to_vec())],
-        fixed: vec![Fixed {
-            path: bootimage::EXTLINUX,
-            bytes: Vec::new(),
-            size: bootimage::EXTLINUX_BYTES,
-        }],
+        layout: test_layout().with_form(crate::bays::Form::Uboot),
+        root: vec![("slot-layout.toml", b"version = 6\n".to_vec())],
     }
 }
 
@@ -122,15 +119,9 @@ fn history() -> History {
     History { h0, h2, h3, h4, h5 }
 }
 
-/// The sectors of a set's payload files and record pair.
-fn set_sectors(placed: &Placed, layout: &Layout, set: u8, out: &mut HashSet<u64>) {
-    for (i, lba) in placed.files[set as usize].iter().enumerate() {
-        for k in 0..layout.bytes[i] / SECTOR as u64 {
-            out.insert(lba + k);
-        }
-    }
-    out.insert(placed.info[set as usize]);
-    out.insert(placed.info[set as usize] + 1);
+/// Set `set`'s own sectors (region, its FAT sectors, its directories, its record) on `img`.
+fn own(img: &[u8], set: u8, out: &mut HashSet<u64>) {
+    out.extend(bays::set_sectors(&mut Dev::new(img.to_vec()), set).unwrap());
 }
 
 fn pair(lba: u64, out: &mut HashSet<u64>) {
@@ -138,30 +129,23 @@ fn pair(lba: u64, out: &mut HashSet<u64>) {
     out.insert(lba + 1);
 }
 
-/// A set's stored files are exactly the slot's payloads (what the slot's manifest lists), each at its
-/// stored length.
-fn files_are(dev: &mut Dev, placed: &Placed, set: u8, slot: &str) -> Result<(), String> {
-    let info = read_info(dev, placed.info[set as usize])
+/// A set's files are exactly what the slot's payloads write under `layout` (what the slot's
+/// manifest lists, and the generated file), each read by path at its exact length.
+fn files_are(dev: &mut Dev, layout: &Layout, set: u8, slot: &str) -> Result<(), String> {
+    let lba = place_sets(dev)?[set as usize];
+    let info = read_info(dev, lba)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("bay{set} has no record"))?;
-    if info.slot != slot {
-        return Err(format!("bay{set} holds {}, not {slot}", info.slot));
+    if info.slot.as_deref() != Some(slot) {
+        return Err(format!("bay{set} holds {:?}, not {slot}", info.slot));
     }
-    let want = manifest(slot);
-    for i in 0..5 {
-        let (len, _) = info.files[i];
-        if len != want[i].len() as u64 {
+    let want = layout.written(&refs(&manifest(slot)))?;
+    for (path, bytes) in want {
+        let got = bootfat::read_file(dev, &format!("{}/{path}", set_dir(set)), 64 << 20)
+            .map_err(|e| format!("bay{set} ({slot}): {path}: {e}"))?;
+        if got != bytes {
             return Err(format!(
-                "bay{set} ({slot}): {} is {len} bytes, the manifest's is {}",
-                ROLES[i].role,
-                want[i].len()
-            ));
-        }
-        let got = read_file(dev, placed.files[set as usize][i], len).map_err(|e| e.to_string())?;
-        if got != want[i] {
-            return Err(format!(
-                "bay{set} ({slot}): {} differs from the manifest's",
-                ROLES[i].role
+                "bay{set} ({slot}): {path} differs from the manifest's"
             ));
         }
     }
@@ -179,12 +163,12 @@ struct Expect<'a> {
 /// The boot chain's reading of a cut Pi image, and the verifier's.
 fn pi_chain(img: &[u8], layout: &Layout, e: &Expect, parts: &Parts) -> Result<(), String> {
     let mut dev = Dev::new(img.to_vec());
-    let placed = place(&mut dev, layout)?;
+    let placed = place(&mut dev)?;
     let d = boot_view(&mut dev, layout, placed.default)?;
     if !e.defaults.iter().any(|(s, n)| (*s, n.to_string()) == d) {
         return Err(format!("the default boots {d:?}, allowed {:?}", e.defaults));
     }
-    files_are(&mut dev, &placed, d.0, &d.1)?;
+    files_are(&mut dev, layout, d.0, &d.1)?;
     let p = boot_view(&mut dev, layout, placed.previous)?;
     if !e.previous.iter().any(|(s, n)| (*s, n.to_string()) == p) {
         return Err(format!(
@@ -192,9 +176,9 @@ fn pi_chain(img: &[u8], layout: &Layout, e: &Expect, parts: &Parts) -> Result<()
             e.previous
         ));
     }
-    files_are(&mut dev, &placed, p.0, &p.1)?;
+    files_are(&mut dev, layout, p.0, &p.1)?;
     // The protected sets as the next install reads them name the default and the previous.
-    let prot = Protected::from_volume(&mut dev, layout).map_err(|e| e.to_string())?;
+    let prot = Protected::from_volume(&mut dev).map_err(|e| e.to_string())?;
     if prot.default != Some(d.0) || prot.previous != Some(p.0) {
         return Err(format!("the protected sets are {prot:?}"));
     }
@@ -203,14 +187,15 @@ fn pi_chain(img: &[u8], layout: &Layout, e: &Expect, parts: &Parts) -> Result<()
         let set = read_pointer(&mut dev, placed.trial_pointer)
             .map_err(|e| e.to_string())?
             .ok_or("a trial record with no trial pointer")?;
-        files_are(&mut dev, &placed, set, &t.slot).map_err(|e| format!("the trial: {e}"))?;
+        files_are(&mut dev, layout, set, &t.slot).map_err(|e| format!("the trial: {e}"))?;
     }
     // No set holds a record that its files do not match, in any cut state.
     for set in 0..SETS {
-        if let Some(info) =
-            read_info(&mut dev, placed.info[set as usize]).map_err(|e| e.to_string())?
+        if let Some(Info {
+            slot: Some(slot), ..
+        }) = read_info(&mut dev, placed.info[set as usize]).map_err(|e| e.to_string())?
         {
-            files_are(&mut dev, &placed, set, &info.slot)?;
+            files_are(&mut dev, layout, set, &slot)?;
         }
     }
     let bad: Vec<String> = bootimage::verify(&mut bootimage::Mem(img.to_vec()), parts)
@@ -307,15 +292,14 @@ fn report(name: &str, t: &Totals) {
 }
 
 fn placed_of(img: &[u8]) -> Placed {
-    place(&mut Dev::new(img.to_vec()), &test_layout()).unwrap()
+    place(&mut Dev::new(img.to_vec())).unwrap()
 }
 
 /// Pi form, install of `c` (and of `d` over a bay that held `a`).
 fn pi_install_sweep(name: &str, pre: &[u8], slot: &'static str, bay: u8, e: &Expect) {
     let layout = test_layout();
-    let placed = placed_of(pre);
     let mut allowed = HashSet::new();
-    set_sectors(&placed, &layout, bay, &mut allowed);
+    own(pre, bay, &mut allowed);
     let parts = pi_parts();
     let payloads = manifest(slot);
     let t = sweep(
@@ -330,9 +314,7 @@ fn pi_install_sweep(name: &str, pre: &[u8], slot: &'static str, bay: u8, e: &Exp
         &|img| pi_chain(img, &layout, e, &parts),
         &|img| {
             pi_chain(img, &layout, &Expect { ..*e }, &parts)?;
-            let mut dev = Dev::new(img.to_vec());
-            let placed = place(&mut dev, &layout)?;
-            files_are(&mut dev, &placed, bay, slot)
+            files_are(&mut Dev::new(img.to_vec()), &layout, bay, slot)
         },
     );
     report(name, &t);
@@ -386,7 +368,7 @@ fn sweep_pi_trial_arm() {
     let done = |img: &[u8]| {
         pi_chain(img, &layout, &e, &parts)?;
         let mut dev = Dev::new(img.to_vec());
-        let placed = place(&mut dev, &layout)?;
+        let placed = place(&mut dev)?;
         let t = pending_trial(&mut dev, placed.trial).map_err(|e| e.to_string())?;
         match t {
             Some(t) if t.slot == "c" && t.attempts == 3 => {}
@@ -434,7 +416,7 @@ fn sweep_pi_confirm() {
         };
         pi_chain(img, &layout, &end, &parts)?;
         let mut dev = Dev::new(img.to_vec());
-        let placed = place(&mut dev, &layout)?;
+        let placed = place(&mut dev)?;
         if pending_trial(&mut dev, placed.trial)
             .map_err(|e| e.to_string())?
             .is_some()
@@ -499,39 +481,9 @@ fn sweep_pi_remove() {
 
 // ---- The U-Boot form: no pointers on the volume; the environment's bays are the caller's.
 
-fn bay_name(set: u8) -> String {
-    set_dir(set)
-}
-
-/// A U-Boot set's bootable reading: its record, every stored file against the manifest, and the
-/// composed extlinux against the stored command line.
+/// A U-Boot set's bootable reading: its record, and every file (the composed extlinux too) exact.
 fn uboot_bay(dev: &mut Dev, set: u8, slot: &str) -> Result<(), String> {
-    let layout = test_layout();
-    let placed_sets = place_sets(dev, &layout)?;
-    let placed = Placed {
-        files: placed_sets.iter().map(|s| s.0.clone()).collect(),
-        info: placed_sets.iter().map(|s| s.1).collect(),
-        default: 0,
-        previous: 0,
-        trial: 0,
-        trial_pointer: 0,
-    };
-    files_are(dev, &placed, set, slot)?;
-    let want = bootimage::extlinux_text(&manifest(slot)[3])?;
-    let found = bootfat::locate_path(
-        dev,
-        &format!("{}/{}", bay_name(set), bootimage::EXTLINUX),
-        bootimage::EXTLINUX_BYTES,
-    )
-    .map_err(|e| e.to_string())?;
-    let file =
-        read_file(dev, found.first_lba, bootimage::EXTLINUX_BYTES).map_err(|e| e.to_string())?;
-    if !(file.starts_with(&want) && file[want.len()..].iter().all(|&b| b == b' ')) {
-        return Err(format!(
-            "bay{set} ({slot}): extlinux.conf is not the command line's"
-        ));
-    }
-    Ok(())
+    files_are(dev, &uboot_parts().layout, set, slot)
 }
 
 /// The environment's reading after a cut: its default's bay is bootable and whole, and so is the
@@ -540,11 +492,13 @@ fn uboot_chain(img: &[u8], default: (u8, &str), previous: (u8, &str)) -> Result<
     let mut dev = Dev::new(img.to_vec());
     uboot_bay(&mut dev, default.0, default.1).map_err(|e| format!("default: {e}"))?;
     uboot_bay(&mut dev, previous.0, previous.1).map_err(|e| format!("previous: {e}"))?;
-    let layout = test_layout();
-    let sets = place_sets(&mut dev, &layout)?;
+    let sets = place_sets(&mut dev)?;
     for set in 0..SETS {
-        if let Some(info) = read_info(&mut dev, sets[set as usize].1).map_err(|e| e.to_string())? {
-            uboot_bay(&mut dev, set, &info.slot)?;
+        if let Some(Info {
+            slot: Some(slot), ..
+        }) = read_info(&mut dev, sets[set as usize]).map_err(|e| e.to_string())?
+        {
+            uboot_bay(&mut dev, set, &slot)?;
         }
     }
     let bad: Vec<String> = bootimage::verify(&mut bootimage::Mem(img.to_vec()), &uboot_parts())
@@ -560,10 +514,8 @@ fn uboot_chain(img: &[u8], default: (u8, &str), previous: (u8, &str)) -> Result<
 
 fn uboot_install(img: Vec<u8>, slot: &str, protected: &Protected) -> Vec<u8> {
     let p = manifest(slot);
-    let text = bootimage::extlinux_text(&p[3]).unwrap();
     let mut v = BayVolume::on(Dev::new(img)).unwrap();
-    v.install_slot_with(slot, &refs(&p), Some(&text), protected)
-        .unwrap();
+    v.install_slot_with(slot, &refs(&p), protected).unwrap();
     v.into_device().img
 }
 
@@ -576,31 +528,9 @@ fn prot(default: u8, previous: u8) -> Protected {
     }
 }
 
-fn uboot_set_sectors(img: &[u8], set: u8, with_extlinux: bool) -> HashSet<u64> {
-    let layout = test_layout();
-    let mut dev = Dev::new(img.to_vec());
-    let sets = place_sets(&mut dev, &layout).unwrap();
-    let placed = Placed {
-        files: sets.iter().map(|s| s.0.clone()).collect(),
-        info: sets.iter().map(|s| s.1).collect(),
-        default: 0,
-        previous: 0,
-        trial: 0,
-        trial_pointer: 0,
-    };
+fn uboot_set_sectors(img: &[u8], set: u8) -> HashSet<u64> {
     let mut out = HashSet::new();
-    set_sectors(&placed, &layout, set, &mut out);
-    if with_extlinux {
-        let found = bootfat::locate_path(
-            &mut dev,
-            &format!("{}/{}", bay_name(set), bootimage::EXTLINUX),
-            bootimage::EXTLINUX_BYTES,
-        )
-        .unwrap();
-        for k in 0..bootimage::EXTLINUX_BYTES / SECTOR as u64 {
-            out.insert(found.first_lba + k);
-        }
-    }
+    own(img, set, &mut out);
     out
 }
 
@@ -609,18 +539,15 @@ fn sweep_uboot_install() {
     // a in bay0 (previous), b in bay1 (default): c takes bay2.
     let img = uboot_install(uboot_image(), "b", &prot(0, 0));
     let pre = img;
-    let allowed = uboot_set_sectors(&pre, 2, true);
+    let allowed = uboot_set_sectors(&pre, 2);
     let p = manifest("c");
-    let text = bootimage::extlinux_text(&p[3]).unwrap();
     let protected = prot(1, 0);
     let t = sweep(
         "U-Boot form, install c",
         &pre,
         &|dev| {
             let mut v = BayVolume::on(dev).unwrap();
-            let r = v
-                .install_slot_with("c", &refs(&p), Some(&text), &protected)
-                .map(|_| ());
+            let r = v.install_slot_with("c", &refs(&p), &protected).map(|_| ());
             (v.into_device(), r)
         },
         &allowed,
@@ -638,18 +565,15 @@ fn sweep_uboot_install_over_a_bay_that_holds_an_old_record() {
     // a, b, c installed; default c (bay2), previous b (bay1): d takes bay0, which still holds a.
     let img = uboot_install(uboot_image(), "b", &prot(0, 0));
     let img = uboot_install(img, "c", &prot(1, 0));
-    let allowed = uboot_set_sectors(&img, 0, true);
+    let allowed = uboot_set_sectors(&img, 0);
     let p = manifest("d");
-    let text = bootimage::extlinux_text(&p[3]).unwrap();
     let protected = prot(2, 1);
     let t = sweep(
         "U-Boot form, install d over a's old bay",
         &img,
         &|dev| {
             let mut v = BayVolume::on(dev).unwrap();
-            let r = v
-                .install_slot_with("d", &refs(&p), Some(&text), &protected)
-                .map(|_| ());
+            let r = v.install_slot_with("d", &refs(&p), &protected).map(|_| ());
             (v.into_device(), r)
         },
         &allowed,
@@ -666,11 +590,10 @@ fn sweep_uboot_install_over_a_bay_that_holds_an_old_record() {
 fn sweep_uboot_remove() {
     let img = uboot_install(uboot_image(), "b", &prot(0, 0));
     let img = uboot_install(img, "c", &prot(1, 0));
-    let layout = test_layout();
     let mut dev = Dev::new(img.clone());
-    let sets = place_sets(&mut dev, &layout).unwrap();
+    let sets = place_sets(&mut dev).unwrap();
     let mut allowed = HashSet::new();
-    pair(sets[0].1, &mut allowed);
+    pair(sets[0], &mut allowed);
     let protected = prot(2, 1);
     let t = sweep(
         "U-Boot form, remove a",
