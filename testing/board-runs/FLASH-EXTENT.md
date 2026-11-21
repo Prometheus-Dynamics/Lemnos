@@ -36,11 +36,21 @@ no DFU. Consoles were read only. Lock: `/run/user/1000/lemnos-k230d.lock`, held 
 |---|---|
 | R0 `soc` | PASS. Device gone 0.204 s after the start; back as `K230` at 0.536 s; same port. Record: `R0-soc.txt` |
 | R1 `report` (watchdog return) | Not run at the time of the R2 STOP. Re-ruled by Helios (yes), floor re-derived in `K230-USB.md` (the R2-era floor was 100 s, from 1 MHz). See the R1 section below for the result |
+| R1 `report` (watchdog) | **STOP** at 0.947 s after the start, under the re-derived floor of 1.342 s. Back at ROM at 1.477 s |
 | R2 `report` (report and reset) | **STOP.** No end line, no console line on either port in 10.47 s, no record packet. The boot ROM stopped answering identify at 1.055 s after the load (EPROTO). The device left the bus at 1.255 s, about 0.93 s after the start. Record: `R2-report.txt` |
 | `pmpcfg0`, `pmpaddr0` | **UNKNOWN.** The `pmp:` line was not printed. Whether the PMP read ran, trapped or never ran is not established |
 | `stack: <used> of 16384 bytes` | **UNKNOWN.** The end line was not printed. The 8192-byte rule was not tested |
 | Paint and scan below the guard | **UNKNOWN.** `below-guard:` line not printed |
 | Image size | 70,196 bytes at `57b45592` on this PC (`check.sh`, rustc 1.99.0). `docs/k230-flash-extent.md` said 67,996. The 2,200-byte difference is **not explained**. The image end is `0x80371270` (doc: `0x803709d0`); spare below `0x80380000` is 60,816 bytes (doc: 63,024) |
+
+## R1 (watchdog return, 2026-11-21 04:15, after Helios's ruling)
+
+- Floor re-derived from the stage's WDT clock range (`K230-USB.md`): 1.342178 s to 134.217728 s, return by 200 s.
+- Result: **STOP.** `report` image, WDT0 armed, SD none. Identify `K230`; load 70,196 bytes; start at +0.606 s. The board left
+  the bus at 0.947 s after the start, 0 record packets (900 read errors), and came back as `K230` at 1.477 s, same port, devnum 68.
+- The departure is outside the bound (below 1.342 s). The same early departure as R2 (about 0.93 s). Either the clock is above
+  100 MHz or the reset is not the watchdog. Not established. Per the plan, no rerun.
+- Record: `/mnt/nvme-wd/lemnos-targets/FLASH-EXTENT/run1/R1-report.txt`.
 
 ## What the R2 silence does and does not show
 
@@ -64,7 +74,8 @@ no DFU. Consoles were read only. Lock: `/run/user/1000/lemnos-k230d.lock`, held 
 ## Next, for the coordinator
 
 1. Re-rule R1's bound for the 100 MHz watchdog, or hold R1.
-2. Decide on a second R2 only after the silence is explained. The next step is a host-side check of the report path in
+2. The early departure (about 0.93 s, seen in R1 and R2) is unexplained, and the clock figure is UNVERIFIED. The next step is a host-side check, not another board contact.
+   Decide on a second R2 only after that. The next step is a host-side check of the report path in
    qemu with the same entry, not another board contact.
 3. The `k230-stage-report` exit code on a STOP.
 4. The 2,200-byte size difference, and the stack figure, which still needs a run that prints its end line.
