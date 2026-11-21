@@ -90,6 +90,64 @@ mod tests {
         assert_eq!(CREATE, 0x4018_7542); // UDMABUF_CREATE
     }
 
+    /// Opens `/dev/udmabuf`, or says by name why it could not: the real device is the only object
+    /// that decides whether a memfd is a valid source. `None` is a stated skip, printed as one.
+    fn udmabuf_device() -> Option<OwnedFd> {
+        let path = c"/dev/udmabuf";
+        // SAFETY: `path` is a valid C string; the flags take no pointers.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        if fd < 0 {
+            println!(
+                "SKIPPED: /dev/udmabuf is not openable ({}): the real-device refusal did not run",
+                io::Error::last_os_error()
+            );
+            return None;
+        }
+        // SAFETY: a new descriptor from `open`, owned by no one else.
+        Some(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// A memfd of one page, sealed or not as the test asks.
+    fn one_page_memfd(seal: bool) -> OwnedFd {
+        let fd = memfd_create(c"lemnos-udmabuf").unwrap();
+        // SAFETY: `fd` is a memfd this test owns; the size is one page.
+        assert_eq!(unsafe { libc::ftruncate(fd.as_raw_fd(), 4096) }, 0);
+        if seal {
+            add_seals(std::os::fd::AsFd::as_fd(&fd), libc::F_SEAL_SHRINK).unwrap();
+        }
+        fd
+    }
+
+    /// The real kernel refuses an unsealed memfd as a dma-buf source (`EINVAL`), and takes the
+    /// same memfd once it is sealed against shrinking. The second half is the control: the
+    /// refusal is the seal's, not the device's or the size's. A stand-in that seals for the caller
+    /// would pass where the real device fails; this test fails then.
+    #[test]
+    fn udmabuf_refuses_an_unsealed_memfd_and_takes_a_sealed_one() {
+        let Some(dev) = udmabuf_device() else {
+            return;
+        };
+        let unsealed = one_page_memfd(false);
+        let err = create(
+            std::os::fd::AsFd::as_fd(&dev),
+            std::os::fd::AsFd::as_fd(&unsealed),
+            0,
+            4096,
+        )
+        .expect_err("the kernel must refuse a memfd without F_SEAL_SHRINK");
+        assert_eq!(err.raw_os_error(), Some(libc::EINVAL), "{err}");
+
+        let sealed = one_page_memfd(true);
+        let buf = create(
+            std::os::fd::AsFd::as_fd(&dev),
+            std::os::fd::AsFd::as_fd(&sealed),
+            0,
+            4096,
+        )
+        .expect("the same memfd, sealed against shrinking, is a dma-buf");
+        drop(buf);
+    }
+
     #[test]
     fn a_memfd_takes_and_reports_seals() {
         let fd = memfd_create(c"lemnos-test").unwrap();
