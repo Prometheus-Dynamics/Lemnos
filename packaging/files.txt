@@ -21,6 +21,8 @@
 #                 kmod     an image that ships lemnos.ko
 #                 uboot    a U-Boot board that boots from a boot partition (boot.scr)
 #                 ubi      a U-Boot board that boots from raw NAND with UBI (boot.scr from boot-ubi.cmd)
+#                 soc      the SoC map that a board file on the image names in `[board] soc` (for each board file,
+#                          its map is at /usr/share/lemnos/socs/<soc>.toml); maps no board file names may be left out
 #                 never    never installed: documents and this list (no install path; `always` and `never` stand alone)
 #
 # Systemd and BusyBox images both take the same daemon and privilege path (packaging/README.md).
@@ -48,11 +50,13 @@ packaging/uboot/boot.cmd                         BOOT/boot.scr                  
 packaging/uboot/boot-ubi.cmd                     BOOT/boot.scr                                  0644  ubi
 
 # The SoC maps: lemnosd reads the board's (`[board] soc`) at start to check the live device tree against
-# the board file, and says "live tree not checked" without it. Every image ships every map.
-socs/bcm2712-rp1.toml                            /usr/share/lemnos/socs/bcm2712-rp1.toml        0644  always
-socs/k230.toml                                   /usr/share/lemnos/socs/k230.toml               0644  always
-socs/rk3566.toml                                 /usr/share/lemnos/socs/rk3566.toml             0644  always
-socs/rk3576.toml                                 /usr/share/lemnos/socs/rk3576.toml             0644  always
-socs/rk3588.toml                                 /usr/share/lemnos/socs/rk3588.toml             0644  always
-socs/rv1126b.toml                                /usr/share/lemnos/socs/rv1126b.toml            0644  always
-socs/sun60i-a733.toml                            /usr/share/lemnos/socs/sun60i-a733.toml        0644  always
+# the board file, and says "live tree not checked" without it. What an image must hold: for each board file on
+# it, the map its `[board] soc` names, at /usr/share/lemnos/socs/<soc>.toml (`soc`). Lemnos's own package
+# installs every map; an image built from it may keep only the ones its board files name.
+socs/bcm2712-rp1.toml                            /usr/share/lemnos/socs/bcm2712-rp1.toml        0644  soc
+socs/k230.toml                                   /usr/share/lemnos/socs/k230.toml               0644  soc
+socs/rk3566.toml                                 /usr/share/lemnos/socs/rk3566.toml             0644  soc
+socs/rk3576.toml                                 /usr/share/lemnos/socs/rk3576.toml             0644  soc
+socs/rk3588.toml                                 /usr/share/lemnos/socs/rk3588.toml             0644  soc
+socs/rv1126b.toml                                /usr/share/lemnos/socs/rv1126b.toml            0644  soc
+socs/sun60i-a733.toml                            /usr/share/lemnos/socs/sun60i-a733.toml        0644  soc

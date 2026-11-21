@@ -2,7 +2,7 @@
 """Checks packaging/files.txt against the files under packaging/ and socs/ (run by scripts/gate.sh).
 
 Every file under packaging/ is listed once, every SoC map socs/<soc>.toml is listed once at
-/usr/share/lemnos/socs/<soc>.toml (where lemnosd reads it), and every listed source exists. Each line has four
+/usr/share/lemnos/socs/<soc>.toml (where lemnosd reads it) under `soc`, the map a board file on the image names, and every listed source exists. Each line has four
 fields (source, install path, mode, when), and `when` uses only the fixed vocabulary. An install path
 is absolute or BOOT/<name>, and it must be named in the source's own header (its first 25 lines), so
 a source says where it goes. Two lines may name one install path only as the U-Boot alternatives
@@ -13,7 +13,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIST = os.path.join(ROOT, "packaging", "files.txt")
-VOCAB = {"always", "systemd", "busybox", "udev", "orion", "gadget", "health-tcp", "kmod", "uboot", "ubi", "never"}
+VOCAB = {"always", "soc", "systemd", "busybox", "udev", "orion", "gadget", "health-tcp", "kmod", "uboot", "ubi", "never"}
 MODES = {"0644", "0755", "append"}
 ALTERNATIVES = {frozenset({"uboot", "ubi"})}  # install paths two lines may share, by their `when`
 SOCS = "/usr/share/lemnos/socs"  # where lemnosd reads the SoC maps (service/lemnosd/src/main.rs)
@@ -45,8 +45,10 @@ with open(LIST, encoding="utf-8") as f:
         soc_map = source.startswith("socs/")
         if not (source.startswith("packaging/") or soc_map) or not os.path.isfile(os.path.join(ROOT, source)):
             fail(f"{where}: {source} does not exist")
-        if soc_map and (install != f"{SOCS}/{os.path.basename(source)}" or mode != "0644" or when != "always"):
-            fail(f"{where}: {source}: a SoC map installs to {SOCS}/{os.path.basename(source)}, 0644, always")
+        if soc_map and (install != f"{SOCS}/{os.path.basename(source)}" or mode != "0644" or when != "soc"):
+            fail(f"{where}: {source}: a SoC map installs to {SOCS}/{os.path.basename(source)}, 0644, soc")
+        if not soc_map and "soc" in when.split(","):
+            fail(f"{where}: {source}: `soc` is only for the SoC maps under socs/")
         words = when.split(",")
         bad = [w for w in words if w not in VOCAB]
         if bad:
@@ -90,7 +92,7 @@ for dirpath, _, names in os.walk(os.path.join(ROOT, "packaging")):
 for name in sorted(os.listdir(os.path.join(ROOT, "socs"))):
     rel = f"socs/{name}"
     if name.endswith(".toml") and rel not in listed:
-        fail(f"{rel} is a SoC map but not in packaging/files.txt (every image ships every map)")
+        fail(f"{rel} is a SoC map but not in packaging/files.txt (each map is listed, for the image whose board file names it)")
 
 with open(os.path.join(ROOT, "service", "lemnosd", "src", "main.rs"), encoding="utf-8") as f:
     if f'"{SOCS}"' not in f.read():
