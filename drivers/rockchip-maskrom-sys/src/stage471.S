@@ -15,7 +15,8 @@
 // TOP 15 at 24 MHz is 2^31 / 24e6 s.
 //
 // Order matters: TORR before the kick (the kick loads the period), the kick before enabling.
-// Only x9 and w10 are used; x30 is untouched (no bl).
+// Only x9 and w10 are used; x30 is untouched (no bl). Stage order: arm_watchdog, then clear_boot_mode, then
+// spin, return or tail jump (the 471 entries only; the 472 prologue is unchanged).
 
     .macro arm_watchdog
     movz    x9, #0xfe60, lsl #16         // WDT base 0xfe600000 (immediate, no literal pool)
@@ -27,17 +28,29 @@
     str     w10, [x9, #0x00]
     .endm
 
+// clear_boot_mode: writes BOOT_NORMAL (0x5242C300) to PMU_GRF OS_REG0 (0xfdc20200) so that the boot ROM's
+//   reboot-mode word is no longer the BROM download magic after this stage's reset. PMUGRF base 0xfdc20000
+//   plus offset 0x200. Only x9 and w10 are used. Runs after arm_watchdog, so a hang here is still reset.
+    .macro clear_boot_mode
+    movz    x9, #0xfdc2, lsl #16         // PMUGRF base 0xfdc20000 (immediate)
+    movz    w10, #0xc300                 // BOOT_NORMAL = 0x5242C300, low half
+    movk    w10, #0x5242, lsl #16        //   high half
+    str     w10, [x9, #0x200]            // OS_REG0 at 0xfdc20200
+    .endm
+
     .section .text.lemnos_stage471, "ax"
     .global lemnos_stage471_entry
     .global lemnos_arm_and_spin
 
 lemnos_stage471_entry:
     arm_watchdog
+    clear_boot_mode
     adr     x16, lemnos_ddr_blob         // the DDR blob follows this code in the image
     br      x16                          // tail jump: the blob returns to the ROM's x30
 
 lemnos_arm_and_spin:
     arm_watchdog
+    clear_boot_mode
 1:  b       1b                           // no feed: the watchdog resets the board
 
 // lemnos_arm_and_return: arms the watchdog and returns to the boot ROM (x30 untouched). Used by
@@ -46,6 +59,7 @@ lemnos_arm_and_spin:
     .global lemnos_arm_and_return
 lemnos_arm_and_return:
     arm_watchdog
+    clear_boot_mode
     ret
 
 // lemnos_loader472_entry: the 472 loader's prologue. It re-arms the watchdog as its first action,
