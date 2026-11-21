@@ -150,10 +150,11 @@ driver = "bmm150"
 bus = "i2c-1"
 config = { address = 0x10 }
 
-# The power monitor on i2c-1: an INA238-family chip at 0x40. Read on the board (2026-11-13):
-# manufacturer ID 0x5449, device ID register 0x2381. The shunt is NOT readable from the board: the
-# device tree names no shunt-resistor and the shunt calibration register is at its reset value. The
-# 0.010 ohm below is from the earlier run and the product's manifest (unverified against the schematic).
+# The power monitor on i2c-1: an INA238 at 0x40. Read on the board (2026-11-13): manufacturer ID
+# 0x5449, device ID register 0x2381. Its calibration register reads 0x07d0 (2000) on the board
+# (2026-11-17, testing/board-runs/B11.md, check 4), the value for a 0.010 ohm shunt at 2 A full scale,
+# so the shunt below is the one the chip is calibrated to. The wiring is not confirmed: a no-load read
+# on that run gave -0.369 A, which is open on the hands list in B11.md.
 [[devices]]
 id = "power"
 driver = "ina2xx"
