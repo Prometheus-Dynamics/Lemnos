@@ -10,7 +10,7 @@ description = "The K230 USB-boot host: the boot ROM's download mode and the vend
 workspace = true
 
 [dependencies]
-lemnos-k230-usbboot-stage = { path = "../k230-usbboot-stage" }
+lemnos-k230-usbboot-stage = { path = "../../../drivers/k230-usbboot-stage" }
 # The B2 check: the check build's run and its dwc2 driver (run over a register model in the rehearsal),
 # the shared stage's descriptors and the wire's frames.
 lemnos-driver-k230-usbboot-sys = { path = "../../../drivers/k230-usbboot-sys", features = ["ep0-trace"] }

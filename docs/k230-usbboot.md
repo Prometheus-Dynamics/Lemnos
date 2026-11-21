@@ -16,7 +16,7 @@ Every fact the board depends on is listed below with its source, or marked UNVER
 | Crate | What it is |
 |---|---|
 | `testing/crates/k230-usbboot` (`lemnos-k230-usbboot`) | The host: the boot ROM's requests, the burner protocol, the flasher, the libusb transport (`usb`, opens a device only when asked), and a simulated board. No `unsafe` |
-| `testing/crates/k230-usbboot-stage` (`lemnos-k230-usbboot-stage`) | The stage's logic, `no_std`: the wire format, the two watchdogs' registers, readback and model, the SoC reset constants, the medium trait, the SD card protocol (`sd`), and the stage's state machine. No `unsafe` |
+| `drivers/k230-usbboot-stage` (`lemnos-k230-usbboot-stage`) | The stage's logic, `no_std`: the wire format, the two watchdogs' registers, readback and model, the SoC reset constants, the medium trait, the SD card protocol (`sd`), and the stage's state machine. No `unsafe` |
 | `drivers/k230-usbboot-sys` (`lemnos-driver-k230-usbboot-sys`) | The stage's entries (`naked_asm!`: the production entry and five probe images), the watchdogs' register access, the SDHCI host registers and the dwc2 device registers. The only `unsafe` code of the stage |
 
 The stage's logic runs in the simulator as the board would run it. The entry image in

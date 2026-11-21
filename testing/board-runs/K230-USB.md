@@ -34,7 +34,7 @@ until its return path is proven.
   - `board/common/gen_image_cfg/genimage-sdcard.cfg`: SPL copies at sectors 2048 and 3072, environment at
     `0x1e0000`, U-Boot at sector 4096 (from the plan's earlier notes; the file is in the SDK clone).
 - `soc_glb_rst` (`0x91102060`, value `0x10001`): the SoC reset the stage uses as its return. Sourced in
-  `testing/crates/k230-usbboot-stage/src/sysctl.rs` (kendryte `sysctl_boot.h:47`, `sysctl_boot.c:43-49`).
+  `drivers/k230-usbboot-stage/src/sysctl.rs` (kendryte `sysctl_boot.h:47`, `sysctl_boot.c:43-49`).
 - Not verified: whether the ROM returns to download mode after a reset with a bootable card (the vendor
   documents the order; nothing observed). Step R5 is the test.
 - Not verified: the watchdog clock (the stage assumes the lowest clock, 1 MHz, for its longest period).
@@ -56,7 +56,7 @@ until its return path is proven.
     the run record. If the same image still traps, B1 stays open.
 - **B2. The stage's device path has not run on hardware.** The dwc2 `UsbHw` (in `drivers/k230-usbboot-sys`)
   is written from the SDK's dwc2 registers; its enumeration, EP0 and bulk sequences are unverified. The
-  adapter's bench checks are listed in `testing/crates/k230-usbboot-stage/src/fl1/usb.rs`. The first run's
+  adapter's bench checks are listed in `drivers/k230-usbboot-stage/src/fl1/usb.rs`. The first run's
   plan and its PC rehearsal: "B2: the first run of the stage's own USB device path" below. Run 1: the stage stopped
   itself before USB because the `time` CSR does not run in the ROM's state; **still open**.
 - **B3. Gaia's kernel hang before earlycon** is Gaia's; it is not a precondition here (the stage does not
@@ -333,7 +333,7 @@ as `K230` at +1.295 s; 0 record packets, 674 read errors. No banner, no step lin
   No `T` was printed, so the flag was already set when the run began. `.bss` is `NOLOAD`: the ROM copies only the file,
   so the flag held the value SRAM had before the load (a previous run's). The entry never zeroed `.bss`.
 - *Fix (R1f):* the entry zeroes `.bss` from `lemnos_bss_start` to `lemnos_bss_end` (both defined in `image.ld`) before the
-  first static is read. `testing/crates/k230-usbboot-stage/tests/bss_zeroed.rs` fails on the R1e source and passes with the fix.
+  first static is read. `drivers/k230-usbboot-stage/tests/bss_zeroed.rs` fails on the R1e source and passes with the fix.
 
 **R1f: the report's lines appear (hypothesis, written before the run).**
 - *Hypothesis A (the cause was the stale flag):* after `U`, the step lines, the banner `lemnos stage: report`, and the diagnostic
@@ -396,7 +396,7 @@ reset (the R2 path) returned the board; no watchdog was involved.
   then does the same. The verdict for each: PASS by the end rule.
 - *Stop:* a run without its end line (the watchdog cut it, so the no-card SD wait is longer than the watchdog window),
   or a return that is not K230. Report, and no further step.
-- *Stand-in (the rehearsal):* `testing/crates/k230-usbboot-stage` `sd` tests: `a_card_that_stops_answering_mid_check_is_an_error_to_report_as_a_card_fault_candidate`
+- *Stand-in (the rehearsal):* `drivers/k230-usbboot-stage` `sd` tests: `a_card_that_stops_answering_mid_check_is_an_error_to_report_as_a_card_fault_candidate`
   and `a_write_the_card_never_finishes_is_an_error_not_a_hang` (a card that does not answer fails, it does not hang).
 
 **R3 with no card (2026-11-17 01:03; the card is not in the board; one script run; lock held; no RST).**
@@ -671,7 +671,7 @@ this session).** The card is the bench no-boot card read in R3e (CID `0353445352
   `0x80360000` and one job at `0x80380000` (a 64-byte header with its CRC, then up to 1016 sectors of payload at
   `0x80381000`; the load ends inside the ROM's range, `0x80400000`). The stage arms `wdt0` first, starts the card on
   controller 1, refuses unless the CID and the size are the job's, checks the payload's CRC, does the one job,
-  prints the outcome, and takes its SoC reset. `testing/crates/k230-usbboot-stage/src/piece.rs`,
+  prints the outcome, and takes its SoC reset. `drivers/k230-usbboot-stage/src/piece.rs`,
   `run_piece` in `drivers/k230-usbboot-sys/src/image.rs`, host `k230-card` (`testing/crates/k230-usbboot/src/bin`).
 - *Jobs.* `write`: each sector written (CMD24), read back (CMD17) and compared. `zero`: the same with zero
   sectors and no payload. `hash`: sectors read and hashed (SHA-256), nothing written. `test`: the bounded write

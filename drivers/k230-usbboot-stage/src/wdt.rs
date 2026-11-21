@@ -443,7 +443,7 @@ mod tests {
     /// entry is assembly, so this test reads its source and checks the constants it names.
     #[test]
     fn the_sys_entry_arms_both_with_this_sequence_and_reads_back() {
-        let source = include_str!("../../../../drivers/k230-usbboot-sys/src/image.rs");
+        let source = include_str!("../../k230-usbboot-sys/src/image.rs");
         for needle in [
             "0x91106000",
             "0x91106800",

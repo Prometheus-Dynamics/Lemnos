@@ -69,9 +69,9 @@ echo "entry $entry, load segment starts at $load_start, image ends at $end"
 echo "file size $bin_size bytes, footprint $(printf '%#x' "$footprint") bytes from the load address"
 echo "relocations $relocs"
 
-# One constant: the load address the host uses (testing/crates/k230-usbboot-stage/src/image.rs) must equal
+# One constant: the load address the host uses (drivers/k230-usbboot-stage/src/image.rs) must equal
 # the linker script's origin and the entry. A mismatch is refused here and by the stage crate's tests.
-host_load=$(grep -oE 'pub const LOAD_ADDRESS: u32 = 0x[0-9_a-fA-F]+' "$repo/testing/crates/k230-usbboot-stage/src/image.rs" | grep -oE '0x[0-9_a-fA-F]+' | tr -d _)
+host_load=$(grep -oE 'pub const LOAD_ADDRESS: u32 = 0x[0-9_a-fA-F]+' "$repo/drivers/k230-usbboot-stage/src/image.rs" | grep -oE '0x[0-9_a-fA-F]+' | tr -d _)
 ld_origin=$(grep -oE '\. = 0x[0-9a-fA-F]+;' "$repo/drivers/k230-usbboot-image/image.ld" | head -1 | grep -oE '0x[0-9a-fA-F]+')
 [ $((host_load)) -eq $((ld_origin)) ] || { echo "FAIL: the host's load address $host_load is not the linker origin $ld_origin"; exit 1; }
 [ $((host_load)) -eq $((0x80360000)) ] || { echo "FAIL: the load address is not 0x80360000"; exit 1; }

@@ -3,8 +3,8 @@
 //! give-up flag (`GAVE_UP`, in `.bss`) as set, with no `T` printed: the stale value from the run before. These tests
 //! read the sources and fail if the bounds or the zeroing are missing.
 
-const LINKER_SCRIPT: &str = include_str!("../../../../drivers/k230-usbboot-image/image.ld");
-const ENTRY: &str = include_str!("../../../../drivers/k230-usbboot-sys/src/image.rs");
+const LINKER_SCRIPT: &str = include_str!("../../k230-usbboot-image/image.ld");
+const ENTRY: &str = include_str!("../../k230-usbboot-sys/src/image.rs");
 
 #[test]
 fn the_linker_script_names_the_bss_bounds() {

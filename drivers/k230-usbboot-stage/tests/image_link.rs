@@ -4,7 +4,7 @@
 
 use lemnos_k230_usbboot_stage::image::{LOAD_ADDRESS, LOAD_HIGH, LOAD_LOW, MAX_FOOTPRINT};
 
-const LINKER_SCRIPT: &str = include_str!("../../../../drivers/k230-usbboot-image/image.ld");
+const LINKER_SCRIPT: &str = include_str!("../../k230-usbboot-image/image.ld");
 
 /// The address on the linker script's `. = 0x...;` origin line.
 fn linker_origin() -> u32 {

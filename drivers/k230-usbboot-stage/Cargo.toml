@@ -13,5 +13,5 @@ workspace = true
 sha2 = { version = "0.11", default-features = false }
 # The FL1 flash wire and the shared stage rules (drivers/flash-wire, drivers/flash-stage). The K230 stage's
 # controllers (guard, storage, usb, report) are adapters under `fl1`; the rules are not copied here.
-lemnos-flash-wire = { path = "../../../drivers/flash-wire" }
-lemnos-flash-stage = { path = "../../../drivers/flash-stage" }
+lemnos-flash-wire = { path = "../flash-wire" }
+lemnos-flash-stage = { path = "../flash-stage" }
