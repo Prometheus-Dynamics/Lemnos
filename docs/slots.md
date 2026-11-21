@@ -77,11 +77,12 @@ functions `bundle::check_*` that `finish` calls).
 ```text
 lemnos-ctl bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE --verity-table FILE \
   --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT] \
+  [--build clean|dev-reuse] [--medium sd|emmc|spi-nand|spi-nor] \
   [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE
 lemnos-ctl bundle --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]
 ```
 
-The builder supplies the slot id, product, version (and optionally variant, kernel and display name), the
+The builder supplies the slot id, product, version (and optionally variant, kernel, display name, and the slot's `--build` mode and `--medium`, both written only when given), the
 payload directory (the five roles `boot-partition --payload` takes), the erofs image with its hash tree
 appended and the table of the verity step (`key value` lines: `hash_type 1`, `algorithm sha256`, `root_hash`,
 `salt`, `data_blocks`, `data_block_size 4096`, `hash_block_size 4096`, `hash_offset`, `tree_bytes`,
@@ -255,6 +256,8 @@ neither is written exactly as before: no firmware list file, no `boot.config`, f
 | `variant` | optional text |
 | `board` | the board the slot is built for, lowercase `[a-z0-9-]` |
 | `kernel`, `display_name` | optional text, shown by `list` |
+| `build.mode` | optional: `clean` or `dev-reuse`, what `lemnos-ctl bundle --build` takes. The reader keeps any other text and shows it as written. A `dev-reuse` slot is always unsigned: `--build dev-reuse` with `--key-file` is refused |
+| `medium` | optional: `sd`, `emmc`, `spi-nand` or `spi-nor`, the board file's `[flash] medium` values (`lemnos-ctl bundle --medium`). The reader keeps the text as written; a board refuses a slot of another medium (see "The medium check") |
 | `image.size` | `rootfs.erofs`'s size in bytes, hash tree included |
 | `image.sha256` | `rootfs.erofs`'s SHA-256, 64 lowercase hex digits |
 | `verity.root_hash` | 64 lowercase hex digits |
@@ -437,6 +440,30 @@ refusal is `NOT_PERMITTED` with the reason in `list`'s `error`, and nothing is i
   before this field existed reads it from its `signed` label: `untrusted` there is
   `not_checked_unknown_key`, though that install may have been a bad signature under a known key
   (the record kept no key id), so the label cannot say more.
+- `"build"` and `"medium"`: the slot's `build.mode` and `medium` as its `slot.json` says them, shown
+  beside the signature. A slot that records neither reads `not recorded`. `info` adds
+  `default_build`, `default_medium` (the default's, the same words) and `booted_medium` (see "The
+  medium check").
+
+### The medium check
+
+A slot's `medium` is compared with the medium the board booted from. An install is refused before its
+first payload byte, and a trial is refused before anything is written; both are `NOT_SUPPORTED`, with
+the reason in `list`'s `error` and the slot's name and both media in it, for example
+`slot os-2 is for medium emmc, and this board booted from sd`. The booted medium is the one of the
+disk the data partition is mounted from, since a slot's image is a file there: `/proc/self/mountinfo`
+gives its device, and sysfs its controller. An SD card's host reports `SD` and an eMMC `MMC`
+(`/sys/block/<disk>/device/type`); a raw flash MTD reports `nor` or `nand`. When the board's medium
+cannot be told (no data mount, a UBI data partition, another controller), `info` shows
+`booted_medium` as `unknown` and nothing is refused on medium. A slot that records no medium is
+never refused on it.
+
+The K230's boot strap register (`SOC_BOOT_CTL`, `0x91102040`, bits 0-1: 0 SPI-NOR, 1 SPI-NAND, 2 SDIO0,
+3 SDIO1) is not used. Two reasons: the SoC map (`socs/*.toml`) has no field for register facts, and the
+strap fact is not verified locally (the SDK source it is quoted from is not on this machine). The medium
+comes from the data disk's controller instead. The strap is a possible later source for the booted medium,
+once a map field and a check against the source exist; U-Boot's environment is never trusted for it, since
+the canmv board code forces SDIO1.
 
 `info` shows the policy, the last install's signature result and, last, how the last install attempt ended (`last_attempt`, see "The last install attempt" below): `require_signed` (now always the security view's value, see "The security switch"), and
 `last_install` with `slot` (empty when refused), `signature` (the outcome, or `refused`), `signer`

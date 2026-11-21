@@ -12,6 +12,12 @@
 //! - `board`: the board the slot was built for, lowercase `[a-z0-9-]`: the board file's
 //!   `[board] id` of the board that may run it.
 //! - `kernel`, `display_name`: optional text, shown by `list`.
+//! - `build.mode` (optional): how the builder made the slot: `clean` or `dev-reuse`. The reader keeps
+//!   any text it finds and shows it as written; the writer takes only those two, and a `dev-reuse` slot
+//!   is always unsigned.
+//! - `medium` (optional): the storage medium the slot's root is read from: `sd`, `emmc`, `spi-nand` or
+//!   `spi-nor` (the board file's `[flash] medium` values). The reader keeps the text as written; a
+//!   board refuses a slot whose medium is not the one it booted from.
 //! - `image.size`: `rootfs.erofs`'s size in bytes, its hash tree included.
 //! - `image.sha256`: `rootfs.erofs`'s SHA-256, 64 lowercase hex digits.
 //! - `verity.root_hash`: 64 lowercase hex digits.
@@ -47,6 +53,10 @@ pub const SCHEMA: u64 = 3;
 pub const VERSION_MAX_BYTES: usize = 256;
 /// The data and hash block size.
 pub const BLOCK: u64 = 4096;
+/// The build modes the writer takes (`build.mode`).
+pub const BUILD_MODES: [&str; 2] = ["clean", "dev-reuse"];
+/// The storage media a slot may name (`medium`): the board file's `[flash] medium` values.
+pub const MEDIUMS: [&str; 4] = ["sd", "emmc", "spi-nand", "spi-nor"];
 /// SHA-256 digests in one hash block.
 const PER_BLOCK: u64 = BLOCK / 32;
 
@@ -93,6 +103,10 @@ pub struct Manifest {
     pub board: String,
     pub kernel: String,
     pub display_name: String,
+    /// `build.mode` as written, empty when the slot records none.
+    pub build_mode: String,
+    /// `medium` as written, empty when the slot records none.
+    pub medium: String,
     pub image_size: u64,
     pub image_sha256: String,
     pub verity: Verity,
@@ -184,6 +198,15 @@ impl Manifest {
         if !self.display_name.is_empty() {
             text("display_name", &self.display_name);
         }
+        if !self.build_mode.is_empty() {
+            out.push_str(",\"build\":{\"mode\":");
+            json::quoted(&self.build_mode, &mut out);
+            out.push('}');
+        }
+        if !self.medium.is_empty() {
+            out.push_str(",\"medium\":");
+            json::quoted(&self.medium, &mut out);
+        }
         out.push_str(&format!(
             ",\"image\":{{\"size\":{},\"sha256\":\"{}\"}}",
             self.image_size, self.image_sha256
@@ -264,6 +287,8 @@ impl Manifest {
         if !valid_name(&board) {
             return Err("slot.json's board isn't lowercase [a-z0-9-]".into());
         }
+        let build_mode = optional("build.mode")?;
+        let medium = optional("medium")?;
         let image_size = number("image.size")?;
         let image_sha256 = text_of("image.sha256")?;
         if !is_hex(&image_sha256, 64) {
@@ -341,6 +366,8 @@ impl Manifest {
             board,
             kernel: optional("kernel")?,
             display_name: optional("display_name")?,
+            build_mode,
+            medium,
             image_size,
             image_sha256,
             verity: Verity {
@@ -382,6 +409,8 @@ mod tests {
             board: "board-a".into(),
             kernel: "6.12".into(),
             display_name: "An OS".into(),
+            build_mode: "clean".into(),
+            medium: "sd".into(),
             image_size: 300 * BLOCK + tree_bytes(300),
             image_sha256: HASH.into(),
             verity: Verity {
@@ -412,10 +441,15 @@ mod tests {
         bare.variant.clear();
         bare.kernel.clear();
         bare.display_name.clear();
+        bare.build_mode.clear();
+        bare.medium.clear();
         bare.overlay = None;
         let text = bare.to_json();
         assert!(
-            !text.contains("\"variant\"") && !text.contains("\"overlay\""),
+            !text.contains("\"variant\"")
+                && !text.contains("\"overlay\"")
+                && !text.contains("\"build\"")
+                && !text.contains("\"medium\""),
             "{text}"
         );
         assert_eq!(Manifest::parse(&text).unwrap(), bare);
@@ -427,7 +461,7 @@ mod tests {
     #[test]
     fn the_serialized_bytes_are_fixed() {
         let want = format!(
-            "{{\"schema\":3,\"id\":\"os-2\",\"product\":\"an-os\",\"version\":\"2.0 \\\"rc\\\"\",\"variant\":\"lite\",\"board\":\"board-a\",\"kernel\":\"6.12\",\"display_name\":\"An OS\",\"image\":{{\"size\":{},\"sha256\":\"{HASH}\"}},\"verity\":{{\"root_hash\":\"{HASH}\",\"salt\":\"{HASH}\",\"data_blocks\":300,\"hash_offset\":1228800}},\"boot\":{{\"overlay\":{{\"board\":\"board-a\",\"sha256\":\"{HASH}\"}},\"files\":{{\"kernel8.img\":\"{HASH}\",\"overlays/lemnos-board.dtbo\":\"{HASH}\"}}}}}}",
+            "{{\"schema\":3,\"id\":\"os-2\",\"product\":\"an-os\",\"version\":\"2.0 \\\"rc\\\"\",\"variant\":\"lite\",\"board\":\"board-a\",\"kernel\":\"6.12\",\"display_name\":\"An OS\",\"build\":{{\"mode\":\"clean\"}},\"medium\":\"sd\",\"image\":{{\"size\":{},\"sha256\":\"{HASH}\"}},\"verity\":{{\"root_hash\":\"{HASH}\",\"salt\":\"{HASH}\",\"data_blocks\":300,\"hash_offset\":1228800}},\"boot\":{{\"overlay\":{{\"board\":\"board-a\",\"sha256\":\"{HASH}\"}},\"files\":{{\"kernel8.img\":\"{HASH}\",\"overlays/lemnos-board.dtbo\":\"{HASH}\"}}}}}}",
             300 * BLOCK + tree_bytes(300)
         );
         assert_eq!(whole().to_json(), want);
@@ -539,11 +573,11 @@ mod tests {
         assert!(Manifest::parse(&family).unwrap_err().contains("family"));
     }
 
-    /// A schema 3 manifest with a top-level `build` object (how a builder made the image) and one
-    /// other key the reader does not know reads as the same manifest without them, in every field.
-    /// The writer drops them: `to_json` of either reads back and writes the same bytes.
+    /// A top-level `build` object is read and kept: `build.mode` comes back as written, and the
+    /// writer writes it again. A key the reader does not know is ignored, and every other field reads
+    /// the same as it does without them.
     #[test]
-    fn unknown_top_level_keys_are_ignored_and_known_fields_read_the_same() {
+    fn build_mode_is_kept_and_unknown_top_level_keys_are_ignored() {
         let plain = manifest("\"variant\":\"lite\",", 300);
         let extra = manifest(
             "\"variant\":\"lite\",\"build\":{\"mode\":\"dev-reuse\"},\"note\":\"from a builder\",",
@@ -551,9 +585,44 @@ mod tests {
         );
         let want = Manifest::parse(&plain).unwrap();
         let got = Manifest::parse(&extra).unwrap();
-        assert_eq!(got, want);
-        assert_eq!(got.to_json(), want.to_json());
-        assert!(!got.to_json().contains("build"), "{}", got.to_json());
+        assert_eq!(got.build_mode, "dev-reuse");
+        assert_eq!(got.medium, "");
+        let mut stripped = got.clone();
+        stripped.build_mode.clear();
+        assert_eq!(stripped, want);
+        assert!(
+            got.to_json().contains("\"build\":{\"mode\":\"dev-reuse\"}"),
+            "{}",
+            got.to_json()
+        );
+        assert_eq!(Manifest::parse(&got.to_json()).unwrap(), got);
+    }
+
+    /// `build.mode` and `medium` are read as written, whatever they say (the reader shows an unknown
+    /// mode and an unknown medium rather than refusing them), but they must be text.
+    #[test]
+    fn build_mode_and_medium_are_text_as_written() {
+        let text = manifest("\"medium\":\"emmc\",\"build\":{\"mode\":\"nightly\"},", 3);
+        let got = Manifest::parse(&text).unwrap();
+        assert_eq!(
+            (got.medium.as_str(), got.build_mode.as_str()),
+            ("emmc", "nightly")
+        );
+        let bad = manifest("\"medium\":3,", 3);
+        assert_eq!(
+            Manifest::parse(&bad).unwrap_err(),
+            "slot.json's medium isn't text"
+        );
+        let bad = manifest("\"build\":{\"mode\":true},", 3);
+        assert_eq!(
+            Manifest::parse(&bad).unwrap_err(),
+            "slot.json's build.mode isn't text"
+        );
+        let none = Manifest::parse(&manifest("", 3)).unwrap();
+        assert_eq!(
+            (none.medium, none.build_mode),
+            (String::new(), String::new())
+        );
     }
 
     #[test]

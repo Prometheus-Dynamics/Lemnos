@@ -212,6 +212,14 @@ impl Unpack {
                 ),
             ));
         }
+        if let Some(why) =
+            crate::medium::mismatch(&parsed.id, &parsed.medium, &self.admit.booted_medium)
+        {
+            return Err((
+                Status::NOT_SUPPORTED,
+                format!("{why}: a slot for another medium is refused, and nothing was written"),
+            ));
+        }
         // The boot partition stores the role files and nothing else, on every form: a slot that
         // lists another would install and then fail its own boot check. Refused here, before the
         // first payload byte, so nothing is written.
@@ -395,6 +403,9 @@ pub struct Admit {
     pub require_signed: bool,
     /// The board file's `[board] id`: a slot built for another board is refused.
     pub board_id: String,
+    /// The medium the board booted from (`medium`'s words), empty when it can't be told: a slot
+    /// whose `medium` is another one is refused, and a slot of unknown medium is not.
+    pub booted_medium: String,
     /// The firmware overlay paths the boot partition declares (`overlays/<name>.dtbo`), in the layout's
     /// order: a bundle's boot files must be the five roles and exactly these.
     pub firmware: Vec<String>,

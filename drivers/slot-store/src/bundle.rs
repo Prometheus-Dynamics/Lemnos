@@ -390,6 +390,11 @@ pub struct Build<'a> {
     pub variant: &'a str,
     pub kernel: &'a str,
     pub display_name: &'a str,
+    /// `build.mode`: `clean` or `dev-reuse`, or empty for none recorded. A `dev-reuse` build is
+    /// always unsigned: it takes no `signer`.
+    pub build_mode: &'a str,
+    /// `medium`: one of [`crate::manifest::MEDIUMS`], or empty for none recorded.
+    pub medium: &'a str,
     /// The builder's dm-verity facts, which the root image is held to.
     pub table: &'a verity::Table,
     pub rules: &'a Rules,
@@ -558,6 +563,24 @@ pub fn build<R: Read>(
         ));
     }
     crate::manifest::check_version(b.version, "--version")?;
+    if !b.build_mode.is_empty() && !crate::manifest::BUILD_MODES.contains(&b.build_mode) {
+        return Err(format!(
+            "--build {:?} is not clean or dev-reuse",
+            b.build_mode
+        ));
+    }
+    if b.build_mode == "dev-reuse" && b.signer.is_some() {
+        return Err(
+            "--build dev-reuse is always unsigned: a dev-reuse slot takes no --key-file".into(),
+        );
+    }
+    if !b.medium.is_empty() && !crate::manifest::MEDIUMS.contains(&b.medium) {
+        return Err(format!(
+            "--medium {:?} is not one of {}",
+            b.medium,
+            crate::manifest::MEDIUMS.join(", ")
+        ));
+    }
     if !valid_name(&rules.board) {
         return Err(format!(
             "the board file's [board] id {:?} isn't lowercase [a-z0-9-], which a slot's board must be",
@@ -606,6 +629,8 @@ pub fn build<R: Read>(
         board: rules.board.clone(),
         kernel: b.kernel.to_string(),
         display_name: b.display_name.to_string(),
+        build_mode: b.build_mode.to_string(),
+        medium: b.medium.to_string(),
         image_size: b.table.image_bytes,
         image_sha256: hex(&image_sha),
         verity: Verity {

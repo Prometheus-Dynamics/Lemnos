@@ -137,6 +137,7 @@ mod count;
 mod count_tests;
 pub mod grow;
 mod install;
+mod medium;
 pub mod offline;
 mod resolve;
 pub use lemnos_slot_store::tar;
@@ -223,6 +224,9 @@ pub struct SystemSlots {
     boot_node: core::result::Result<PathBuf, String>,
     /// The board file's `[board] id`. A slot built for another board is never booted.
     board_id: String,
+    /// The medium the board booted from, in place of [`medium::booted`] (a stand-in for tests of a
+    /// medium the test host does not have). `None` on a board: the medium is read from the system.
+    booted_override: Option<String>,
     running: Option<String>,
     reserve: u64,
     keep: u32,
@@ -561,6 +565,7 @@ impl SystemSlots {
             boot_sources: Vec::new(),
             boot_node: core::result::Result::Err("the board file's boot_sources is not set".into()),
             board_id: String::new(),
+            booted_override: None,
             running: None,
             reserve: DEFAULT_RESERVE,
             keep: DEFAULT_KEEP,
@@ -857,6 +862,45 @@ impl SystemSlots {
         Err(Status::NOT_SUPPORTED)
     }
 
+    /// Whether slot `id`'s `medium` is the medium the board booted from, or either is unknown. A trial
+    /// of a slot for another medium is refused by name, with the reason in the state.
+    fn fits_medium(&self, id: &str) -> Result<()> {
+        let slot = self.manifest_text(id, "medium");
+        let Some(why) = medium::mismatch(id, &slot, &self.booted_medium()) else {
+            return Ok(());
+        };
+        let mut state = self.state();
+        state.error = format!("{why}: a trial of it is refused");
+        let _ = self.save(&state);
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    /// The medium the board booted from: [`medium::booted`], or the test stand-in. Empty when unknown.
+    fn booted_medium(&self) -> String {
+        match &self.booted_override {
+            Some(medium) => medium.clone(),
+            None => medium::booted().unwrap_or("").to_string(),
+        }
+    }
+
+    /// A text key of slot `id`'s `slot.json` as written, empty when the slot records none or can't
+    /// be read.
+    fn manifest_text(&self, id: &str, key: &str) -> String {
+        fs::read_to_string(self.layout.manifest(id))
+            .ok()
+            .and_then(|text| json::Json::parse(&text))
+            .and_then(|m| m.path(key).and_then(json::Json::text).map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    /// [`Self::manifest_text`] for `list` and `info`: `not recorded` when the slot records none.
+    fn recorded(&self, id: &str, key: &str) -> String {
+        match self.manifest_text(id, key) {
+            value if value.is_empty() => "not recorded".to_string(),
+            value => value,
+        }
+    }
+
     /// With `require_signed`, a slot may be set as the default or tried only when its signature
     /// verified. The reason in the state when not.
     fn fits_signature(&self, id: &str) -> Result<()> {
@@ -986,6 +1030,7 @@ impl SystemSlots {
             keys: self.keys.clone(),
             require_signed: security::enforced(),
             board_id: self.board_id.clone(),
+            booted_medium: self.booted_medium(),
             firmware,
             config,
         };
@@ -1188,6 +1233,23 @@ impl SystemSlots {
             signature_word(&Meta::load(&self.layout, &self.state().default))
         ));
         quoted(&signing::boot_unverified(&self.layout), &mut out);
+        // The default's build and medium as its slot.json says them (`not recorded` when it says
+        // neither), and the medium the board booted from (`unknown` when it can't be told).
+        let default = self.state().default;
+        for (key, value) in [
+            ("default_build", self.recorded(&default, "build.mode")),
+            ("default_medium", self.recorded(&default, "medium")),
+            (
+                "booted_medium",
+                match self.booted_medium() {
+                    medium if medium.is_empty() => "unknown".to_string(),
+                    medium => medium,
+                },
+            ),
+        ] {
+            out.push_str(&format!(",\"{key}\":"));
+            quoted(&value, &mut out);
+        }
         // Appended last: the ids of the keys the board holds, so a client can choose the key it
         // signs with without learning the keys. Each id is the SHA-256 of the public key.
         out.push_str(",\"key_ids\":[");
@@ -1454,7 +1516,7 @@ impl SystemSlots {
             out.push(',');
         }
         out.push_str(&format!(
-            "\"size\":{size},\"verity\":{},\"intact\":{},\"flags\":[{}],\"pinned\":{},\"failures\":{},\"failed\":{},\"signature\":\"{}\"}}",
+            "\"size\":{size},\"verity\":{},\"intact\":{},\"flags\":[{}],\"pinned\":{},\"failures\":{},\"failed\":{},\"signature\":\"{}\",",
             !text("verity.root_hash").is_empty(),
             want == Some(size),
             flags.join(","),
@@ -1463,6 +1525,21 @@ impl SystemSlots {
             meta.failed(),
             signature_word(&meta),
         ));
+        // Beside the signature: how the builder made the slot (`clean`, `dev-reuse`, or the text a
+        // builder wrote) and the medium its root is for. `not recorded` when the slot says neither.
+        for (key, path) in [("build", "build.mode"), ("medium", "medium")] {
+            let value = text(path);
+            out.push_str(&format!("\"{key}\":"));
+            quoted(
+                if value.is_empty() {
+                    "not recorded"
+                } else {
+                    &value
+                },
+                &mut out,
+            );
+            out.push(if key == "build" { ',' } else { '}' });
+        }
         out
     }
 
@@ -2186,6 +2263,7 @@ impl Slots for SystemSlots {
         self.writable()?;
         self.installed(id)?;
         self.fits_board(id)?;
+        self.fits_medium(id)?;
         self.fits_signature(id)?;
         // Before anything is written: a board whose loader can't start a trial refuses it, by its reason.
         if let TrialUpdates::Unavailable(why) = self.look_at_trial_updates() {

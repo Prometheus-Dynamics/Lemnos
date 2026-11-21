@@ -31,8 +31,14 @@
 //!            "good":"yes|no|untried","signed":"trusted|untrusted|unsigned","signer":"<owner>",
 //!            "installed":"<UTC time>","last_boot":"<UTC time>",
 //!            "failures":N,"failed":false,
-//!            "signature":"verified|not_checked_unknown_key|not_checked_unsigned"}]}
+//!            "signature":"verified|not_checked_unknown_key|not_checked_unsigned",
+//!            "build":"clean|dev-reuse|<other text as written>|not recorded",
+//!            "medium":"sd|emmc|spi-nand|spi-nor|<other text as written>|not recorded"}]}
 //! ```
+//!
+//! `build` is the slot's `build.mode` and `medium` its `medium` (`slot.json`, `docs/slots.md`): text as
+//! the slot's manifest says it, `not recorded` when the manifest says neither. A `dev-reuse` slot is
+//! always unsigned, so its `signature` is `not_checked_unsigned`.
 //!
 //! `signed` is the older label of the same fact (`trusted` is `verified`, `untrusted` is
 //! `not_checked_unknown_key`, `unsigned` is `not_checked_unsigned`); a slot installed before the
@@ -44,6 +50,8 @@
 //!  "signature":"verified|not_checked_unknown_key|not_checked_unsigned|refused","signer":"<owner>",
 //!  "reason":"<the reason in words>"},"default_signature":"<the default's signature word>",
 //!  "boot_unverified":"<the slot the boot side started unverified, or \"\">",
+//!  "default_build":"<the default's build, as list shows it>","default_medium":"<the default's medium, as list shows it>",
+//!  "booted_medium":"sd|emmc|spi-nand|spi-nor|unknown",
 //!  "key_ids":[{"id":"<64 hex: SHA-256 of a held public key>","owner":"<owner>"}],
 //!  "last_attempt":{"state":"none|running|installed|refused|cancelled|interrupted|failed",
 //!   "slot":"<the slot id the attempt was for, or \"\">","reason":"<the reason the starter was given, at most 192 bytes>",

@@ -3785,6 +3785,7 @@ fn feed_raw(board: &Board, bytes: &[u8], require: bool) -> (Result<(), (Status, 
         }],
         require_signed: require,
         board_id: BOARD.into(),
+        booted_medium: String::new(),
         firmware: Vec::new(),
         config: None,
     };
@@ -4559,6 +4560,8 @@ fn a_bundle_made_by_the_writer_installs_on_both_record_forms() {
                 variant: "",
                 kernel: "",
                 display_name: "",
+                build_mode: "",
+                medium: "",
                 table: &table,
                 rules: &rules,
                 signer: Some(Signer {
@@ -4927,6 +4930,9 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "last_install",
             "default_signature",
             "boot_unverified",
+            "default_build",
+            "default_medium",
+            "booted_medium",
             "key_ids",
             "last_attempt",
             "boot_count",
@@ -6290,5 +6296,105 @@ fn an_unwritable_state_dir_refuses_a_switch_before_any_boot_record_is_written() 
             .slots
             .info_json()
             .contains("\"state_unwritable\":\"\"")
+    );
+}
+
+/// `list` says each slot's build mode and medium as its manifest writes them, `not recorded` when it
+/// writes neither, and an unknown build mode as it is written.
+#[test]
+fn the_list_shows_each_slots_build_and_medium_or_not_recorded() {
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    assert!(
+        board
+            .slots
+            .list_json()
+            .contains("\"build\":\"not recorded\",\"medium\":\"not recorded\""),
+        "{}",
+        board.slots.list_json()
+    );
+    let path = board.layout().manifest("os-2");
+    let text = fs::read_to_string(&path).unwrap().replace(
+        "\"board\":\"slots-test\",",
+        "\"board\":\"slots-test\",\"medium\":\"emmc\",\"build\":{\"mode\":\"dev-reuse\"},",
+    );
+    fs::write(&path, text).unwrap();
+    let list = board.slots.list_json();
+    assert!(
+        list.contains("\"signature\":\"verified\",\"build\":\"dev-reuse\",\"medium\":\"emmc\""),
+        "{list}"
+    );
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"mode\":\"dev-reuse\"", "\"mode\":\"nightly\"");
+    fs::write(&path, text).unwrap();
+    assert!(
+        board.slots.list_json().contains("\"build\":\"nightly\""),
+        "an unknown build mode is shown as written"
+    );
+}
+
+/// A slot for another medium than the one the board booted from is refused by name at install (before
+/// anything is written) and at trial; a slot of the booted medium installs, and a slot that records
+/// no medium is never refused on it.
+#[test]
+fn a_slot_for_another_medium_is_refused_by_name_at_install_and_trial() {
+    let mut board = Board::new("os-1");
+    board.slots.booted_override = Some("sd".into());
+    board.install_ok("os-2");
+    let info = board.slots.info_json();
+    assert!(info.contains("\"booted_medium\":\"sd\""), "{info}");
+    assert!(
+        info.contains("\"default_medium\":\"not recorded\""),
+        "{info}"
+    );
+
+    // Install: an emmc slot is refused by name, and nothing is left behind.
+    let bundle = Bundle::new("os-6");
+    let manifest = bundle.manifest().replace(
+        "\"board\":\"slots-test\",",
+        "\"board\":\"slots-test\",\"medium\":\"emmc\",",
+    );
+    let (status, _, _) = board.stream(1, &bundle.pack_with(&manifest), 4096);
+    assert_eq!(status, Status::NOT_SUPPORTED);
+    assert!(
+        board
+            .state()
+            .error
+            .contains("slot os-6 is for medium emmc, and this board booted from sd"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.layout().installed("os-6"));
+    assert!(!board.work_left());
+
+    // Install: an sd slot of the booted medium installs.
+    let bundle = Bundle::new("os-7");
+    let manifest = bundle.manifest().replace(
+        "\"board\":\"slots-test\",",
+        "\"board\":\"slots-test\",\"medium\":\"sd\",",
+    );
+    let (status, result, _) = board.stream(1, &bundle.pack_with(&manifest), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(result, b"os-7");
+
+    // Trial: an installed slot whose manifest now names emmc is refused by name, nothing restarted.
+    let path = board.layout().manifest("os-2");
+    let text = fs::read_to_string(&path).unwrap().replace(
+        "\"board\":\"slots-test\",",
+        "\"board\":\"slots-test\",\"medium\":\"emmc\",",
+    );
+    fs::write(&path, text).unwrap();
+    assert_eq!(
+        board.slots.trial("os-2", false, false, true),
+        Err(Status::NOT_SUPPORTED)
+    );
+    assert!(
+        board
+            .state()
+            .error
+            .contains("slot os-2 is for medium emmc, and this board booted from sd"),
+        "{}",
+        board.state().error
     );
 }

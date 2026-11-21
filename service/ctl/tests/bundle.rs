@@ -947,6 +947,8 @@ fn the_cli_file_is_byte_identical_to_the_librarys_for_the_same_inputs() {
             variant: "lite",
             kernel: "6.12",
             display_name: "An OS",
+            build_mode: "",
+            medium: "",
             table: &table,
             rules: &rules,
             signer: Some(Signer {
@@ -964,4 +966,67 @@ fn the_cli_file_is_byte_identical_to_the_librarys_for_the_same_inputs() {
         std::fs::read(&file).unwrap() == library,
         "the CLI's bundle differs from the library's"
     );
+}
+
+/// `--build` and `--medium` are written into `slot.json` as `build.mode` and `medium`, and read back
+/// by `--verify`; a `dev-reuse` build takes no key, and a value outside the writer's list is refused
+/// by name with nothing written.
+#[test]
+fn the_build_mode_and_medium_are_written_to_slot_json_and_refused_by_name() {
+    let m = made("build-medium", false, false);
+    let (r, _, file) = m.make("clean.bundle", &["--build", "clean", "--medium", "sd"]);
+    r.unwrap();
+    let manifest = members_of(&file)
+        .into_iter()
+        .find(|(name, _)| name == "slot.json")
+        .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+        .unwrap();
+    assert!(
+        manifest.contains("\"build\":{\"mode\":\"clean\"},\"medium\":\"sd\""),
+        "{manifest}"
+    );
+    let (verified, _) = m.verify(&file, &[]);
+    verified.unwrap();
+
+    // A dev-reuse build is unsigned: a key file is refused, and nothing is written.
+    let seed = key_file(&m.dir, "dev.seed", &SEED7, 0o600);
+    let (r, _, file) = m.make(
+        "dev-signed.bundle",
+        &["--build", "dev-reuse", "--key-file", &seed],
+    );
+    let e = r.unwrap_err();
+    assert!(e.contains("always unsigned"), "{e}");
+    assert!(!Path::new(&file).exists());
+
+    // A dev-reuse build without a key is written, and says so in its manifest.
+    let (r, _, file) = m.make("dev.bundle", &["--build", "dev-reuse"]);
+    r.unwrap();
+    let manifest = members_of(&file)
+        .into_iter()
+        .find(|(name, _)| name == "slot.json")
+        .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+        .unwrap();
+    assert!(
+        manifest.contains("\"build\":{\"mode\":\"dev-reuse\"}"),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("\"medium\""), "{manifest}");
+
+    for (label, extra, why) in [
+        (
+            "mode",
+            &["--build", "nightly"][..],
+            "--build \"nightly\" is not clean or dev-reuse",
+        ),
+        (
+            "medium",
+            &["--medium", "tape"][..],
+            "--medium \"tape\" is not one of sd, emmc, spi-nand, spi-nor",
+        ),
+    ] {
+        let (r, _, file) = m.make(&format!("{label}.bundle"), extra);
+        let e = r.unwrap_err();
+        assert!(e.contains(why), "{label}: {e}");
+        assert!(!Path::new(&file).exists(), "{label}: wrote a file");
+    }
 }

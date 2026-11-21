@@ -7,10 +7,13 @@
 //! ```text
 //! lemnos-ctl bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR --rootfs FILE
 //!                   --verity-table FILE --product P --version V [--variant TEXT] [--kernel TEXT]
-//!                   [--display-name TEXT] [--key-file FILE [--expect-key-id HEX]]
-//!                   [--payload-out DIR] --out FILE
+//!                   [--display-name TEXT] [--build clean|dev-reuse] [--medium sd|emmc|spi-nand|spi-nor]
+//!                   [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE
 //! lemnos-ctl bundle --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]
 //! ```
+//!
+//! `--build` and `--medium` are the slot manifest's `build.mode` and `medium` (both optional, both written
+//! only when given). A `dev-reuse` build is always unsigned: it takes no `--key-file`.
 //!
 //! `--payload DIR` is the directory `boot-partition --payload` takes (the five roles by name).
 //! `--rootfs FILE` is the erofs image with its dm-verity hash tree appended, and `--verity-table`
@@ -30,7 +33,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
 
-const USAGE: &str = "usage: lemnos-ctl bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR [--firmware DIR] --rootfs FILE --verity-table FILE --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT] [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE | --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]";
+const USAGE: &str = "usage: lemnos-ctl bundle --layout-of BOARD [--socs DIR] --slot ID --payload DIR [--firmware DIR] --rootfs FILE --verity-table FILE --product P --version V [--variant TEXT] [--kernel TEXT] [--display-name TEXT] [--build MODE] [--medium MEDIUM] [--key-file FILE [--expect-key-id HEX]] [--payload-out DIR] --out FILE | --verify FILE [--layout-of BOARD [--socs DIR]] [--pubkey FILE]";
 
 #[derive(Default)]
 struct Options {
@@ -45,6 +48,8 @@ struct Options {
     variant: Option<String>,
     kernel: Option<String>,
     display_name: Option<String>,
+    build: Option<String>,
+    medium: Option<String>,
     verity_table: Option<String>,
     key_file: Option<String>,
     expect_key_id: Option<String>,
@@ -72,6 +77,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--variant" => &mut o.variant,
             "--kernel" => &mut o.kernel,
             "--display-name" => &mut o.display_name,
+            "--build" => &mut o.build,
+            "--medium" => &mut o.medium,
             "--verity-table" => &mut o.verity_table,
             "--expect-key-id" => &mut o.expect_key_id,
             "--key-file" => &mut o.key_file,
@@ -196,6 +203,8 @@ fn write_bundle(o: &Options, out: &mut dyn Write) -> Result<(), String> {
             variant: o.variant.as_deref().unwrap_or(""),
             kernel: o.kernel.as_deref().unwrap_or(""),
             display_name: o.display_name.as_deref().unwrap_or(""),
+            build_mode: o.build.as_deref().unwrap_or(""),
+            medium: o.medium.as_deref().unwrap_or(""),
             table: &table,
             rules: &rules,
             signer: key_id.map(|key_id| Signer {
