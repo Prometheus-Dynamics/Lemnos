@@ -84,6 +84,12 @@ four fake drivers the simulated board uses.
   `scripts/check-shm-one-source.sh <Cargo.lock>` and `scripts/check-lemnos-pin.sh <Cargo.lock> <rev>`.
   Enabling it is only supported in a build that keeps the root `[patch]` of the Lemnos source.
 
+- **`testing-boot-roots`** is for the QEMU route-A stanza only, never a shipped build: with
+  `LEMNOSD_TEST_BOOT_ROOTS=CHOSEN:SYS:DEV` set, the slot drivers read their boot chain from those
+  three directories instead of `/proc/device-tree/chosen`, `/sys` and `/dev` (an x86 guest has no
+  device tree). `testing/qemu/run.sh` builds it after the shipped daemon is copied, as
+  `/lemnosd-route-a`.
+
 The shipped form is a small static binary:
 
 ```sh slow
@@ -142,7 +148,13 @@ open after the drop is a line on the error output, and the device that opens it 
 own reason. Started without root, it runs as it is and says which capabilities it lacks. The privileged
 start is the list `STEPS` in `service/lemnosd/src/privilege.rs`: each step runs as root, with the board
 file and the socket and ids the daemon will run as, before the drop. Its one built-in step makes the
-socket's directory. The USB gadgets are not a step: the root phase describes them (`gadget::describe`) and
+socket's directory. After the gadget helper is forked, the drivers' root phases run (`ROOT_PHASES`):
+`system-slots` (`record = "tryboot"`) and `system-security` (`record = "boot"`) open the boot partition
+read-only, read whose records are on it, and open it read-write only when they are this system's; the
+descriptor is kept for the driver after the drop (`lemnos_slot_store::boot_node::hand_over`), so the node
+stays root's. Each prints one line, `lemnosd: root phase: <driver>: <what it did>`. The U-Boot
+environment's whole-disk node, the data partition's grow and UBI volumes are not handed over: under the
+unit their writes fail by name. The USB gadgets are not a step: the root phase describes them (`gadget::describe`) and
 forks the [privileged helper](#privileged-helper) and its root parent for them, which keep root after the drop. No unit or
 script gives the daemon a user, or a file capability. The steps and the drop are described in
 [`packaging/README.md`](../packaging/README.md#one-privilege-path).
@@ -178,6 +190,24 @@ widens by `mount` and `umount2`). Each also runs under a seccomp allowlist of it
 writes only under the configfs gadget tree it makes (`/sys/kernel/config/usb_gadget/lemnos-NAME`), the
 FunctionFS mount point it makes (`/dev/usb-ffs/NAME`), and the `UDC` attribute of that gadget. It needs no
 `CAP_CHOWN`, since `UDC` stays root's and the daemon binds through the helper.
+
+**The FunctionFS mount lives in the unit's mount namespace.** Under `ProtectSystem=strict` the
+service manager gives each start of the unit its own mount namespace, slave to the host's, so the
+mount the helper makes is seen only inside the unit and goes with that start. The instance itself
+lives on while a holder keeps the endpoints it was lent. A daemon started again finds the board
+file's tree in configfs with no mount it can see, and asks f_fs for one: f_fs refuses a second mount
+of an instance that is still mounted elsewhere or has open files (`EBUSY`). Then the tree is held. It
+is left bound and as it is, and the setup fails with `EBUSY` and says so, and is tried again under the
+failure rule. Once the holder lets go, the mount is taken in the new namespace and the tree is adopted,
+not remade. The holder is a client the last daemon lent the pair to (`usb_endpoints_end`), and it can
+live on past that daemon: `lemnos-orion` is a unit of its own, and a consumer's process is in no
+unit of Lemnos's. Nothing makes it let go, so the wait is bounded. A tree still held
+`lemnos_linux::HELD_LIMIT` (10 s) after the first setup that found it held is taken over: unbound,
+taken down and made again on a fresh instance. The helper logs that the holder's endpoints are broken,
+and the held copies fail from then on. With the 8 s cap on retries, the link is made again within
+18 s of the first setup that found the tree held. The board's USB link is worth more than a clean
+hand-over. The gadget check runs the daemon under `lemnos-unit-check exec`, and its hub moves into the
+daemon's namespace (`ns PID`) for the mounts it makes and removes.
 
 **Every file it touches is an entry of a directory it opened once.** It opens configfs
 (`/sys/kernel/config`, which must be a mounted configfs: the directory of an unmounted configfs is "not

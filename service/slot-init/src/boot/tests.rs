@@ -265,6 +265,10 @@ impl Ops for Fake {
 
     fn sync(&self) {}
 
+    fn chown_dir(&self, dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
+        self.call(format!("chown {uid}:{gid} {}", self.short(dir)))
+    }
+
     fn restart(&self, argument: Option<&str>) {
         let _ = self.call(match argument {
             Some(argument) => format!("restart {argument}"),
@@ -3126,4 +3130,60 @@ fn a_route_a_boot_that_fails_keeps_its_log_off_the_other_systems_state_dir() {
     assert!(logs.contains("slot os-2 can't start"), "{logs}");
     assert_eq!(state_tree(&data), before, "{logs}");
     assert!(!data.join("board/slots").join(DATA_LOG).exists(), "{logs}");
+}
+
+/// A boot of our own slot gives the slots state dir and the image dir to lemnosd's user, by the ids
+/// in the slot's root: the dirs alone, so the daemon writes them after its drop.
+#[test]
+fn an_owned_boot_gives_the_slots_dirs_to_the_daemons_user() {
+    let board = Board::new();
+    let (fake, why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert_eq!(why, "", "{logs}");
+    let calls = fake.calls();
+    assert!(
+        calls.contains(&"chown 990:990 data/board/slots".to_string()),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&"chown 990:990 data/slots".to_string()),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("chown")).count(),
+        2,
+        "{calls:?}"
+    );
+}
+
+/// Route A: another system's dirs are never given away.
+#[test]
+fn a_route_a_boot_gives_nothing_away() {
+    let board = route_a_board();
+    let (fake, _why) = board.boot(&[]);
+    let calls = fake.calls();
+    assert!(!calls.iter().any(|c| c.starts_with("chown")), "{calls:?}");
+}
+
+/// A state dir that is a link is never followed: it is refused by name and left as it is.
+#[test]
+fn a_linked_state_dir_is_not_given_away() {
+    let board = Board::new();
+    let state = board.env.at("data/board/slots");
+    let elsewhere = board.env.at("data/board/elsewhere");
+    fs::rename(&state, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &state).unwrap();
+    let (fake, _why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    let calls = fake.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("chown") && c.contains("board/slots")),
+        "{calls:?}"
+    );
+    assert!(
+        logs.contains("board/slots is not a plain directory"),
+        "{logs}"
+    );
 }

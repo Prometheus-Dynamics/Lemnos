@@ -28,8 +28,15 @@ impl Lemnosd {
     pub fn start(program: &Path, board: &Path, socket: &Path) -> Result<Self, String> {
         let _ = fs::remove_file(socket);
         let ready = Ready::new()?;
-        let mut command = Command::new(program);
+        // Started as the packaged unit with the gadget drop-in starts it: root with only the unit's
+        // bounding set, its system call filter and its file system sandbox (lemnos-unit-check exec),
+        // then the daemon's own drop to --user. The socket's directory stands for /run/lemnos.
+        let mut command = Command::new(program.with_file_name("lemnos-unit-check"));
         command
+            .args(["exec", "--with", "gadget", "--runtime-dir"])
+            .arg(socket.parent().unwrap_or(Path::new("/run")))
+            .arg("--")
+            .arg(program)
             .arg("--board")
             .arg(board)
             .arg("--socket")

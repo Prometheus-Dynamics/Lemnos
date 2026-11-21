@@ -41,7 +41,18 @@ pub enum Outcome {
     Adopted,
     /// A different tree was there, unbound: it was taken down and made again.
     Remade,
+    /// The board file's tree was there, its FunctionFS instance still held by a holder of a daemon
+    /// before this one past [`HELD_LIMIT`]: it was unbound, taken down and made again, and the
+    /// holder's endpoints are broken (their reads and writes fail from then on).
+    TakenOver,
 }
+
+/// How long a held FunctionFS instance (see [`Outcome::TakenOver`]) is waited for, from the first
+/// setup that finds it held. A holder of endpoints a daemon before this one lent may be in a
+/// process that outlives that daemon and never closes them; the board's USB link is worth more
+/// than its clean hand-over. With the failure rule's 8 s cap on retries, the link is made again
+/// within `HELD_LIMIT` + 8 s of the first setup that found it held.
+pub const HELD_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The directories a gadget is made in. Opened once where they can be, and again at the next setup
 /// where they could not (configfs not mounted yet, the mount point's parent not there yet).
@@ -51,6 +62,10 @@ pub struct Trees {
     configfs: Option<Dir>,
     mounts: Option<Dir>,
     udc_class: Option<Dir>,
+    /// Each controller whose tree was found held, and when it was first found so.
+    held: std::sync::Arc<std::sync::Mutex<Vec<(String, std::time::Instant)>>>,
+    /// [`HELD_LIMIT`], shorter in tests.
+    held_limit: std::time::Duration,
 }
 
 /// The three roots, owned: the system's constants, or a test's stand-in directories.
@@ -95,7 +110,16 @@ impl Trees {
             configfs: None,
             mounts: None,
             udc_class: None,
+            held: std::sync::Arc::default(),
+            held_limit: HELD_LIMIT,
         }
+    }
+
+    /// The same trees with another wait for a held instance (tests).
+    #[must_use]
+    pub fn with_held_limit(mut self, limit: std::time::Duration) -> Self {
+        self.held_limit = limit;
+        self
     }
 
     /// Takes a configfs directory that is not a mounted configfs (an empty mount point, before
@@ -185,17 +209,54 @@ impl Trees {
     ) -> io::Result<Outcome> {
         let plan =
             Plan::of(&UsbDescriptors::parse(descriptors).map_err(invalid)?).map_err(invalid)?;
+        // Taken before the gadget, which borrows the trees for the call.
+        let held_list = std::sync::Arc::clone(&self.held);
+        let limit = self.held_limit;
         let g = self.gadget(udc_name)?;
         if !g.udc_class.exists(&g.name) {
             return Err(io::Error::from_raw_os_error(libc::ENOENT));
         }
+        let mut held = held_list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let outcome = match g.gadgets.kind(&g.dir_name()) {
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Outcome::Made,
             Err(error) => return Err(error),
             Ok(Kind::Dir) => {
                 let dir = g.gadgets.open_dir(&g.dir_name())?;
-                match classify(&g, &dir, &plan, functions, system)? {
+                let found = classify(&g, &dir, &plan, functions, owner, system)?;
+                let since = match found {
+                    Found::Held => match held.iter().find(|(name, _)| *name == g.name) {
+                        Some((_, since)) => Some(*since),
+                        None => {
+                            let now = std::time::Instant::now();
+                            held.push((g.name.clone(), now));
+                            Some(now)
+                        }
+                    },
+                    _ => {
+                        held.retain(|(name, _)| *name != g.name);
+                        None
+                    }
+                };
+                match found {
                     Found::Same => return Ok(Outcome::Adopted),
+                    Found::Held => {
+                        let waited = since.map_or(std::time::Duration::ZERO, |s| s.elapsed());
+                        if waited < limit {
+                            return Err(fault(
+                                libc::EBUSY,
+                                format!(
+                                    "the gadget tree {} is the board file's, but its FunctionFS instance is still held: a daemon before this one mounted it where this one can't see, and its endpoints are still open (f_fs refuses a second mount): left alone for {} s more, then taken over",
+                                    g.dir_name(),
+                                    limit.saturating_sub(waited).as_secs().max(1)
+                                ),
+                            ));
+                        }
+                        held.retain(|(name, _)| *name != g.name);
+                        let _ = dir.write("UDC", b"\n");
+                        Outcome::TakenOver
+                    }
                     Found::Foreign(part) => {
                         return Err(fault(
                             libc::EEXIST,
@@ -340,6 +401,10 @@ fn bound(dir: &Dir) -> bool {
 /// What the tree there is, against what the description asks for.
 enum Found {
     Same,
+    /// The board file's tree, but its FunctionFS instance is mounted elsewhere or still has open
+    /// files: a daemon before this one, in a mount namespace this one can't see, lent its
+    /// endpoints, and a holder keeps them. Never remade or unbound while so.
+    Held,
     /// Every part is of a kind this module makes; a value or a part differs. The first difference.
     Different(String),
     /// A part this module never makes.
@@ -396,7 +461,8 @@ fn classify(
     dir: &Dir,
     plan: &Plan,
     functions: &[GadgetFunction],
-    system: &dyn Mounts,
+    owner: Owner,
+    system: &mut dyn Mounts,
 ) -> io::Result<Found> {
     // Parts that are not ours first: a tree with such a part is not the helper's, however close.
     let ours = [g.function_name(), NCM_DIR.to_owned(), ACM_DIR.to_owned()];
@@ -517,7 +583,16 @@ fn classify(
             .open_handle(&g.name)
             .is_ok_and(|m| system.mounted(&m))
     {
-        return different("the FunctionFS mount is not there");
+        // Not mounted where this process can see it. The service manager gives each start of the
+        // daemon its own mount namespace, so the mount a daemon before this one made went with it,
+        // while the instance lives on as long as a holder keeps its endpoints open. f_fs refuses a
+        // second mount of such an instance (EBUSY), which is how it is told: it is never remade or
+        // unbound under the holder. A mount that is taken is this tree's, made here: the same tree.
+        return match mount_ffs(g, owner, system) {
+            Ok(()) => Ok(Found::Same),
+            Err(error) if error.raw_os_error() == Some(libc::EBUSY) => Ok(Found::Held),
+            Err(error) => different(&format!("the FunctionFS mount is not there ({error})")),
+        };
     }
     Ok(Found::Same)
 }
@@ -610,6 +685,14 @@ fn remove_functions(gadget: &Dir, ffs: &str, reuse: bool) {
     }
 }
 
+/// Mounts the gadget's FunctionFS instance on its mount point, owned by the daemon's user.
+fn mount_ffs(g: &Gadget<'_>, owner: Owner, system: &mut dyn Mounts) -> io::Result<()> {
+    g.mounts.ensure_dir(&g.name, 0o755)?;
+    let mount = g.mounts.open_handle(&g.name)?;
+    let options = format!("uid={},gid={},rmode=0500,fmode=0600", owner.uid, owner.gid);
+    system.functionfs(&g.name, &mount.proc_path(), &options)
+}
+
 /// Makes the tree, in the order of the module docs of the gadget.
 fn make(
     g: &Gadget<'_>,
@@ -686,11 +769,7 @@ fn make(
             GadgetFunction::Ffs => {
                 if !reuse {
                     functions_dir.make_dir(&g.function_name(), 0o755)?;
-                    g.mounts.ensure_dir(&g.name, 0o755)?;
-                    let mount = g.mounts.open_handle(&g.name)?;
-                    let options =
-                        format!("uid={},gid={},rmode=0500,fmode=0600", owner.uid, owner.gid);
-                    system.functionfs(&g.name, &mount.proc_path(), &options)?;
+                    mount_ffs(g, owner, system)?;
                 }
                 links.push(g.function_name());
             }

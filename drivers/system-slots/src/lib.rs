@@ -90,6 +90,37 @@ pub const FOREIGN: &str = "foreign: the boot records are not ours; the slots sta
 /// The health word while the boot records can't be read far enough to say whose they are.
 pub const OWNER_UNKNOWN: &str = "foreign-unknown: the boot records can't be read to say whose they are; the slots state is left untouched until they can";
 
+/// The health word while the state dir or the image dir can't be written on a board whose records
+/// are ours: the unit grants no write there (`ReadWritePaths`, the slots drop-in), or the dirs are not
+/// the daemon's user's (slot-init makes them so). `list` and `info` name the dir and the error.
+/// A write of the slots state failed and no later one in the same dir has succeeded (static, for the
+/// driver's health; `info` and `list` name the file and the error as `write_failed`).
+pub const WRITE_FAILED: &str = "write-failed: a write of the slots state failed, so what the board shows may be behind what it did";
+
+pub const STATE_UNWRITABLE: &str = "state-unwritable: the slots state or image dir can't be written by the daemon, so no slot can be installed, switched or confirmed";
+
+/// Whether the daemon can write its state dir and its image dir: a file is made in each and removed.
+/// Only on a board whose records are ours (another system's dirs are never touched).
+///
+/// # Errors
+///
+/// The first dir that can't be written, and why.
+fn state_dirs_writable(layout: &Layout) -> core::result::Result<(), String> {
+    for dir in [layout.state_dir(), layout.images()] {
+        // A dir that isn't there yet is made, as the writer makes it; one the daemon can't make is
+        // the first error.
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let probe = dir.join(format!(".lemnosd-write-check-{}", std::process::id()));
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        fs::remove_file(&probe).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// How often an unknown owner is looked at again: the failure rule's cap.
 const OWNER_RETRY_NS: u64 = 8_000_000_000;
 
@@ -179,6 +210,11 @@ pub struct SystemSlots {
     /// and every call that would write is refused (see [`SystemSlots::ours`]). `Ours` and `NotOurs`
     /// are kept; `Unknown` is looked at again on each tick and call.
     owner: Ownership,
+    /// Why the state dir or the image dir can't be written, on a board whose records are ours
+    /// (see [`state_dirs_writable`]): `None` when both can. Looked at again every 8 s while set.
+    state_unwritable: Option<String>,
+    /// When the state dirs are next looked at while they can't be written (monotonic ns).
+    state_check_ns: u64,
     /// When the record's trial updates are next looked at (monotonic ns), while the board has a record
     /// that can say no.
     trial_watch_ns: u64,
@@ -279,6 +315,32 @@ fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
         Ok(Some(table)) => boot_node::node_for_table(&table),
         Ok(None) => Err("raw NAND keeps its record in the UBI volume: no boot disk".into()),
         Err(error) => Err(error.to_string()),
+    }
+}
+
+/// The daemon's root phase for a slots device, run as root before the drop to the daemon's user,
+/// which can't open the boot node by name. For the `tryboot` record the boot partition is probed
+/// read only and handed over read-write only when its records are ours
+/// (`lemnos_slot_store::boot_raw::prepare`). The other records' nodes are not handed over (the
+/// `uboot` record's environment is on the whole disk; raw NAND's volumes come and go): under the
+/// daemon's own user their writes fail, by name, in health. Returns one line for the daemon's log.
+#[must_use]
+pub fn root_phase(cfg: &Config<'_>) -> String {
+    use lemnos_slot_store::boot_raw::{Prepared, prepare};
+    match cfg.str("record").unwrap_or("tryboot") {
+        "tryboot" => match boot_node_of(cfg) {
+            Ok(node) => match prepare(&node) {
+                Prepared::ReadWrite => format!("{}: handed over read-write", node.display()),
+                Prepared::ReadOnly(why) => {
+                    format!("{}: handed over read only ({why})", node.display())
+                }
+                Prepared::Failed(why) => format!("not handed over: {why}"),
+            },
+            Err(why) => format!("the boot partition isn't known: {why}"),
+        },
+        other => format!(
+            "the {other} record's node is not handed over: its writes need root, and fail by name under the daemon's user"
+        ),
     }
 }
 
@@ -537,12 +599,15 @@ impl SystemSlots {
             trial_updates: TrialUpdates::Available,
             config_refusal,
             owner,
+            state_unwritable: None,
+            state_check_ns: 0,
             trial_watch_ns: 0,
         };
         if !slots.ours() {
             // Another system's state: nothing here is ours to clear.
             return slots;
         }
+        slots.state_unwritable = state_dirs_writable(&slots.layout).err();
         slots.clear_interrupted();
         // The one thing the board's own record keeps of an install is that a restart cut it short.
         let kept = State::load(&slots.layout);
@@ -563,14 +628,21 @@ impl SystemSlots {
         self.owner == Ownership::Ours
     }
 
-    /// `FAILED_PRECONDITION` while the boot records are not ours: a call that would write the slots
-    /// state is refused before it reads or writes anything.
+    /// `FAILED_PRECONDITION` while the boot records are not ours, or while the daemon can't write
+    /// its state or image dir: a call that would write the slots state is refused before it reads
+    /// or writes anything, so no boot record is switched that the state could not follow. An
+    /// unwritable dir is looked at again first, so a grant given since is taken at once.
     fn writable(&mut self) -> Result<()> {
-        if self.ours() {
-            Ok(())
-        } else {
-            Err(Status::FAILED_PRECONDITION)
+        if !self.ours() {
+            return Err(Status::FAILED_PRECONDITION);
         }
+        if self.state_unwritable.is_some() {
+            self.state_unwritable = state_dirs_writable(&self.layout).err();
+        }
+        if self.state_unwritable.is_some() {
+            return Err(Status::FAILED_PRECONDITION);
+        }
+        Ok(())
     }
 
     /// Why the slots state is not written, `""` when the boot records are ours: `list` and `info`
@@ -607,6 +679,13 @@ impl SystemSlots {
 
     fn save(&self, state: &State) -> Result<()> {
         state.save(&self.layout).map_err(|_| Status::IO)
+    }
+
+    /// The last failed write in the state or image dir (`store::replace` keeps it), until a later
+    /// write there succeeds.
+    fn write_failed(&self) -> Option<String> {
+        store::write_failure(&self.layout.state_dir())
+            .or_else(|| store::write_failure(&self.layout.images()))
     }
 
     /// The slots that keep their directory on the boot partition, and `also`.
@@ -1171,6 +1250,10 @@ impl SystemSlots {
         // Appended last: why the slots state is left untouched, `""` when the boot records are ours.
         out.push_str(",\"foreign\":");
         quoted(&self.foreign_text(), &mut out);
+        out.push_str(",\"state_unwritable\":");
+        quoted(self.state_unwritable.as_deref().unwrap_or(""), &mut out);
+        out.push_str(",\"write_failed\":");
+        quoted(&self.write_failed().unwrap_or_default(), &mut out);
         out.push('}');
         out
     }
@@ -1283,6 +1366,11 @@ impl SystemSlots {
             ("error", state.error.as_str()),
             ("config_refusal", self.config_refusal.unwrap_or("")),
             ("foreign", &self.foreign_text()),
+            (
+                "state_unwritable",
+                self.state_unwritable.as_deref().unwrap_or(""),
+            ),
+            ("write_failed", &self.write_failed().unwrap_or_default()),
         ] {
             quoted(key, &mut out);
             out.push(':');
@@ -1627,6 +1715,12 @@ impl Lifecycle for SystemSlots {
             Ownership::NotOurs(_) => return Health::Degraded(FOREIGN),
             Ownership::Unknown(_) => return Health::Degraded(OWNER_UNKNOWN),
         }
+        if self.state_unwritable.is_some() {
+            return Health::Degraded(STATE_UNWRITABLE);
+        }
+        if self.write_failed().is_some() {
+            return Health::Degraded(WRITE_FAILED);
+        }
         // The first word: a config.txt that cannot select the default is the one thing the boot needs.
         if let Some(why) = self.config_refusal {
             return Health::Degraded(why);
@@ -1677,6 +1771,10 @@ impl Lifecycle for SystemSlots {
             self.indicate();
             return matches!(self.owner, Ownership::Unknown(_))
                 .then(|| now_ns.saturating_add(OWNER_RETRY_NS));
+        }
+        if self.state_unwritable.is_some() && now_ns >= self.state_check_ns {
+            self.state_unwritable = state_dirs_writable(&self.layout).err();
+            self.state_check_ns = now_ns.saturating_add(OWNER_RETRY_NS);
         }
         self.pull();
         self.indicate();

@@ -17,6 +17,8 @@ max_tenths=25
 fragments=(
   "packaging/systemd/lemnosd.service.d/gadget.conf|lemnosd-gadget.service"
   "packaging/systemd/lemnosd.service.d/health-tcp.conf|lemnosd-health-tcp.service"
+  "packaging/systemd/lemnosd.service.d/slots.conf|lemnosd-slots.service"
+  "packaging/systemd/lemnosd.service.d/security.conf|lemnosd-security.service"
 )
 # the unit it is in ; name as systemd-analyze prints it ; score in tenths ; reason
 # (a semicolon between the fields: a name may hold a bar)
@@ -70,6 +72,9 @@ if [[ "$systemd_major" -ge 254 ]]; then
   for unit in packaging/systemd/*.service; do
     sed -e 's|^ExecStart=/usr/bin/[^ ]*|ExecStart=/bin/true|' "$unit" >"$work/$(basename "$unit")"
   done
+  # The generated security unit (`lemnos-ctl tree --security-unit`), as the reference board's golden.
+  sed -e 's|^ExecStart=/usr/bin/[^ ]*.*|ExecStart=/bin/true|' service/ctl/tests/golden/reference-security.service \
+    >"$work/lemnos-board-security.service"
   verified="$(cd "$work" && systemd-analyze verify --man=no ./*.service 2>&1)" || {
     if grep -q "not found" <<<"$verified"; then
       echo "    units: skipped, a unit the files refer to is not on this systemd: $(grep -m1 'not found' <<<"$verified")"

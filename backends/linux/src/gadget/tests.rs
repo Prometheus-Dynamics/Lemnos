@@ -180,10 +180,17 @@ const ENABLE: u8 = 2;
 struct Recorder {
     mounts: Vec<(String, PathBuf, String)>,
     unmounts: Vec<PathBuf>,
+    /// How many mounts f_fs refuses next (`EBUSY`): the instance is mounted elsewhere or has open
+    /// files.
+    busy: usize,
 }
 
 impl Mounts for Recorder {
     fn functionfs(&mut self, source: &str, target: &Path, options: &str) -> io::Result<()> {
+        if self.busy > 0 {
+            self.busy -= 1;
+            return Err(io::Error::from_raw_os_error(libc::EBUSY));
+        }
         self.mounts.push((
             source.to_string(),
             target.to_path_buf(),
@@ -231,7 +238,10 @@ impl Drop for Scratch {
 fn own() -> Owner {
     // A directory this test makes, so its owner is the test's own user, whatever owns the
     // system's temporary directory (root, in CI).
-    let dir = std::env::temp_dir().join(format!("lemnos-gadget-owner-{}", std::process::id()));
+    // One name per call: tests run in parallel, and each removes its own when done.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("lemnos-gadget-owner-{}-{n}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let _scratch = Scratch::of_dir(dir.clone());
     let meta = fs::metadata(&dir).unwrap();
@@ -1851,4 +1861,75 @@ fn a_platform_device_name_resolves_to_its_controller_entry() {
         "two entries: none"
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+/// A daemon started again in a fresh mount namespace (each start gets its own) can't see the mount
+/// the last one made. While a holder keeps that instance's endpoints, f_fs refuses a second mount
+/// (EBUSY): the tree is left as it is, bound, and the setup says why. Once the holder lets go the
+/// mount is taken here and the tree is the same one: adopted, not remade.
+#[test]
+fn a_held_functionfs_instance_another_namespace_mounted_is_left_alone_until_let_go() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    helper_setup(&mut trees, &mut recorder).unwrap();
+    fs::write(tree.gadget_dir().join("UDC"), "udc0\n").unwrap();
+    // The mount went with the last daemon's namespace.
+    let _ = fs::remove_file(tree.mount().join("ep0"));
+    let mut held = Recorder {
+        busy: 1,
+        ..Recorder::default()
+    };
+    let mut again = Trees::new(&tree.roots());
+    let error = helper_setup(&mut again, &mut held).unwrap_err();
+    assert_eq!(errno_of(&error), Some(libc::EBUSY), "{error}");
+    assert!(error.to_string().contains("still held"), "{error}");
+    assert_eq!(tree.attribute("UDC"), "udc0\n", "still bound");
+    assert!(held.unmounts.is_empty());
+    let mut free = Recorder::default();
+    assert_eq!(
+        helper_setup(&mut again, &mut free).unwrap(),
+        Outcome::Adopted
+    );
+    assert_eq!(free.mounts.len(), 1, "mounted here once: {:?}", free.mounts);
+    assert!(free.unmounts.is_empty());
+}
+
+/// A holder that never lets go does not keep the board off USB: past the limit the tree is unbound,
+/// taken down and made again on a fresh instance, and the setup says it took over.
+#[test]
+fn a_functionfs_instance_held_past_the_limit_is_taken_over() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    helper_setup(&mut trees, &mut recorder).unwrap();
+    fs::write(tree.gadget_dir().join("UDC"), "udc0\n").unwrap();
+    let _ = fs::remove_file(tree.mount().join("ep0"));
+    // Within the limit: left alone.
+    let mut waiting = Trees::new(&tree.roots());
+    let mut held = Recorder {
+        busy: 1,
+        ..Recorder::default()
+    };
+    let error = helper_setup(&mut waiting, &mut held).unwrap_err();
+    assert_eq!(errno_of(&error), Some(libc::EBUSY), "{error}");
+    assert!(error.to_string().contains("then taken over"), "{error}");
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    // Past it: the held instance's probe is refused once more, and then a fresh one is made.
+    let mut past = Trees::new(&tree.roots()).with_held_limit(std::time::Duration::ZERO);
+    let mut held = Recorder {
+        busy: 1,
+        ..Recorder::default()
+    };
+    assert_eq!(
+        helper_setup(&mut past, &mut held).unwrap(),
+        Outcome::TakenOver
+    );
+    assert_ne!(tree.attribute("UDC"), "udc0\n", "unbound");
+    assert_eq!(
+        held.mounts.len(),
+        1,
+        "a fresh instance mounted: {:?}",
+        held.mounts
+    );
 }

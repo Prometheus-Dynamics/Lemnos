@@ -447,9 +447,10 @@ fn cases(
 
     // 6. The daemon's process dies with the pair held. END hangs up at once. The endpoints stay
     // enabled while the holder's copies are open (the host still sees the device): a read in flight
-    // keeps waiting until the host moves bytes, and then takes them. A new daemon on the same mount
-    // cannot bind the gadget while those copies are open; once the holder closes them, it lends the
-    // pair again (the reuse rule: a mount with ep0 is reused, never remounted).
+    // keeps waiting until the host moves bytes, and then takes them. A new daemon (in a mount
+    // namespace of its own, as the unit starts it) finds the instance held and leaves the gadget
+    // alone while those copies are open, up to the held limit; once the holder closes them, it
+    // lends the pair again. 6b is the holder that never closes.
     let waiting = spawn_echo(&hold.out, &hold.input)?;
     check(still(&waiting), "6 (a) a read on a configured host waits");
     daemon.kill();
@@ -497,6 +498,37 @@ fn cases(
         "6 the new pair carries a chunk once the host has configured again",
     );
 
+    // 6b. A holder that never lets go: the daemon dies and starts again while the pair stays open
+    // and is never closed. The board's link is worth more than the holder's pair: past the held
+    // limit the new daemon takes the gadget over, and the link is back within the limit plus the
+    // failure rule's 8 s cap (and the start). The held copies fail from then on.
+    let stale = hold;
+    daemon.kill();
+    daemon.restart().map_err(io::Error::other)?;
+    let started = Instant::now();
+    let bound = lemnos_linux::HELD_LIMIT + Duration::from_secs(8 + 4);
+    // Timed to a chunk carried on the new pair: the daemon's health alone reads Ok while it is in
+    // a call, so it proves nothing.
+    hold = Hold::take(daemon)?;
+    let warm = spawn_echo(&hold.out, &hold.input)?;
+    hub.ask("bulk")?;
+    let carried = echoed(&warm);
+    let took = started.elapsed();
+    check(
+        carried && took <= bound,
+        &format!(
+            "6b with a holder that never closes, the new daemon takes the gadget over and the link carries a chunk within {} s (took {} ms)",
+            bound.as_secs(),
+            took.as_millis()
+        ),
+    );
+    let broken = errno(read_once(&stale.out)?.recv_timeout(SHORT).ok());
+    check(
+        broken.is_some(),
+        &format!("6b the held copies fail after the take-over (got errno {broken:?})"),
+    );
+    drop(stale);
+
     // 5. The device is switched off through the daemon (its client's power switch): the daemon
     // disables the function, closes its endpoints, and lets go. END hangs up, the holder's copies
     // stay open. The queued AIO read is the one in flight at the switch (a sync read and an AIO read
@@ -518,6 +550,12 @@ fn cases(
         hold.end_hung_up(LONG),
         "5 END hangs up when the device is switched off through the daemon",
     );
+    // The daemon runs as the unit runs it, in a mount namespace of its own: its mount is only
+    // there, so the hub's mounts act in it.
+    let pid = daemon
+        .pid()
+        .ok_or_else(|| io::Error::other("the daemon is not running"))?;
+    hub.ask(&format!("ns {pid}"))?;
     let umounted = hub.ask("umount");
     check(
         umounted.as_ref().err().and_then(|e| e.raw_os_error()) == Some(EBUSY),

@@ -9,6 +9,57 @@ pub const BASE: &str = include_str!("../../../../packaging/systemd/lemnosd.servi
 pub const GADGET: &str =
     include_str!("../../../../packaging/systemd/lemnosd.service.d/gadget.conf");
 
+/// `packaging/systemd/lemnosd.service.d/slots.conf`, the drop-in of a board with a slot device.
+pub const SLOTS: &str = include_str!("../../../../packaging/systemd/lemnosd.service.d/slots.conf");
+/// `packaging/systemd/lemnosd.service.d/security.conf`, the drop-in of a board with a [security] table.
+pub const SECURITY: &str =
+    include_str!("../../../../packaging/systemd/lemnosd.service.d/security.conf");
+/// `packaging/systemd/lemnosd.service.d/health-tcp.conf`, the drop-in of a board with a `tcp:` source.
+pub const HEALTH_TCP: &str =
+    include_str!("../../../../packaging/systemd/lemnosd.service.d/health-tcp.conf");
+
+/// A path the unit makes writable (`ReadWritePaths=`): `optional` when it is written with a leading
+/// `-`, which makes a missing path fine instead of a failed start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Writable {
+    pub path: String,
+    pub optional: bool,
+}
+
+/// `ReadWritePaths=` across the files: a list setting, so each assignment adds and an empty one
+/// clears what came before.
+pub fn read_write_paths(files: &[&str]) -> Vec<Writable> {
+    let mut out = Vec::new();
+    for value in values(files, "ReadWritePaths") {
+        if value.is_empty() {
+            out.clear();
+        }
+        for word in value.split_whitespace() {
+            let (optional, path) = match word.strip_prefix('-') {
+                Some(path) => (true, path),
+                None => (false, word),
+            };
+            out.push(Writable {
+                path: path.to_string(),
+                optional,
+            });
+        }
+    }
+    out
+}
+
+/// `RuntimeDirectory=` across the files, each a name under `/run`.
+pub fn runtime_directories(files: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values(files, "RuntimeDirectory") {
+        if value.is_empty() {
+            out.clear();
+        }
+        out.extend(value.split_whitespace().map(str::to_string));
+    }
+    out
+}
+
 /// Capability names as unit files write them, by number.
 const NAMES: [&str; 41] = [
     "CAP_CHOWN",
@@ -275,6 +326,42 @@ mod tests {
         assert_eq!(system_call_names(&[cleared]).unwrap(), None);
         assert!(system_call_names(&["[Service]\nSystemCallFilter=~@mount\n"]).is_err());
         assert!(system_call_names(&["[Service]\nSystemCallFilter=@nope\n"]).is_err());
+    }
+
+    #[test]
+    fn the_slots_and_security_drop_ins_add_their_paths() {
+        assert!(read_write_paths(&[BASE]).is_empty());
+        let paths = read_write_paths(&[BASE, GADGET, SLOTS, SECURITY]);
+        let names: Vec<(&str, bool)> = paths
+            .iter()
+            .map(|w| (w.path.as_str(), w.optional))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("/sys/kernel/config/usb_gadget", true),
+                ("/data/board/slots", false),
+                ("/data/slots", false),
+                ("/var/lib/lemnos", true),
+                ("/run/board", false),
+            ]
+        );
+        assert_eq!(runtime_directories(&[BASE]), ["lemnos"]);
+        assert_eq!(last(&[BASE], "ProtectSystem"), Some("strict"));
+        assert_eq!(last(&[BASE], "ProtectKernelTunables"), Some("yes"));
+        assert_eq!(last(&[BASE], "PrivateTmp"), Some("yes"));
+    }
+
+    #[test]
+    fn an_empty_read_write_paths_clears() {
+        let cleared = "[Service]\nReadWritePaths=\nReadWritePaths=/a\n";
+        assert_eq!(
+            read_write_paths(&[SLOTS, cleared]),
+            [Writable {
+                path: "/a".into(),
+                optional: false
+            }]
+        );
     }
 
     #[test]

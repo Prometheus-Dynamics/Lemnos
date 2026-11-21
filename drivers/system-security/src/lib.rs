@@ -88,6 +88,34 @@ const KEYS: &[Key] = &[
     Key::optional("orion", Kind::Bool),
 ];
 
+/// The daemon's root phase for the security switch, run as root before the drop: with
+/// `record = "boot"` the switch's record is on the boot partition, which the daemon's user can't open
+/// by name, so the partition is handed over as the slots driver's root phase does (read-write only
+/// when its records are ours). A node the slots device already handed over is left as it is.
+/// Returns one line for the daemon's log.
+#[must_use]
+pub fn root_phase(cfg: &Config<'_>) -> String {
+    use lemnos_slot_store::boot_raw::{Prepared, prepare};
+    if cfg.str("record") != Some(BOOT_RECORD) {
+        return "the record is a file: nothing to hand over".into();
+    }
+    let node = match cfg.list("boot_sources") {
+        Some(items) => boot_node::node_for_items(items),
+        None => Err("boot_sources is not set, so the boot partition can't be found".into()),
+    };
+    match node {
+        Ok(node) if boot_node::handed(&node).is_some() => {
+            format!("{}: already handed over", node.display())
+        }
+        Ok(node) => match prepare(&node) {
+            Prepared::ReadWrite => format!("{}: handed over read-write", node.display()),
+            Prepared::ReadOnly(why) => format!("{}: handed over read only ({why})", node.display()),
+            Prepared::Failed(why) => format!("not handed over: {why}"),
+        },
+        Err(why) => format!("the boot partition isn't known: {why}"),
+    }
+}
+
 impl Lifecycle for SystemSecurity {
     type Needs = SystemSecurityNeeds;
 

@@ -127,6 +127,33 @@ fn linux_board(gadget_helper: Option<&GadgetHelper>) -> LinuxBoard {
     board
 }
 
+/// The route-A check's seam (feature `testing-boot-roots`, never shipped): the boot chain from
+/// `LEMNOSD_TEST_BOOT_ROOTS=CHOSEN:SYS:DEV`, set before the root phase, which reads it first.
+#[cfg(feature = "testing-boot-roots")]
+fn test_boot_roots() {
+    let Some(value) = std::env::var_os("LEMNOSD_TEST_BOOT_ROOTS") else {
+        return;
+    };
+    let value = value.to_string_lossy().into_owned();
+    let parts: Vec<&str> = value.split(':').collect();
+    if let [chosen, sys, dev] = parts[..] {
+        let roots = lemnos_slot_store::boot_node::BootRoots {
+            chosen: PathBuf::from(chosen),
+            sys: PathBuf::from(sys),
+            dev: PathBuf::from(dev),
+        };
+        if let Ok(mut held) = lemnos_slot_store::boot_node::TEST_ROOTS.lock() {
+            *held = Some(roots);
+        }
+        let _ = writeln!(std::io::stderr(), "lemnosd: test boot roots {value}");
+    } else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "lemnosd: LEMNOSD_TEST_BOOT_ROOTS is not CHOSEN:SYS:DEV: {value}"
+        );
+    }
+}
+
 fn main() -> ExitCode {
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     let mut board = var("LEMNOSD_BOARD", DEFAULT_BOARD);
@@ -209,6 +236,8 @@ fn main() -> ExitCode {
         Ok(drop) => drop,
         Err(error) => return complain(&error),
     };
+    #[cfg(feature = "testing-boot-roots")]
+    test_boot_roots();
     let mut root = privilege::Started::default();
     match (drop, lemnos_linux_sys::privilege::observe()) {
         (Some(request), Ok(now)) if now.euid == 0 => {

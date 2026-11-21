@@ -36,6 +36,8 @@ pub trait Ops {
     /// The kernel's log, for keeping after a failure.
     fn kernel_log(&self) -> String;
     fn sync(&self);
+    /// Gives the directory `dir` itself (never a link, never what it holds) to `uid`:`gid`.
+    fn chown_dir(&self, dir: &Path, uid: u32, gid: u32) -> Result<(), String>;
     /// A restart, with the boot loader's argument when given (`0 tryboot`). Returns only when
     /// it couldn't.
     fn restart(&self, argument: Option<&str>);

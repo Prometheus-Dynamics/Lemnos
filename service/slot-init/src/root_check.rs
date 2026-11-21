@@ -109,6 +109,22 @@ fn is_masked(root: &Path) -> bool {
     }
 }
 
+/// The ids lemnosd drops to, from the root's `/etc/passwd` ([`USER`]'s uid) and `/etc/group`
+/// ([`GROUP`]'s gid). `None` when either line is missing or malformed.
+#[must_use]
+pub fn ids(root: &Path) -> Option<(u32, u32)> {
+    let field = |file: &str, name: &str| -> Option<u32> {
+        let text = fs::read_to_string(resolve(root, file)?).ok()?;
+        text.lines().find_map(|line| {
+            let mut parts = line.split(':');
+            (parts.next() == Some(name))
+                .then(|| parts.nth(1)?.parse().ok())
+                .flatten()
+        })
+    };
+    Some((field("etc/passwd", USER)?, field("etc/group", GROUP)?))
+}
+
 /// Whether a `name:...` line opens the file (passwd and group alike).
 fn names(root: &Path, file: &str, name: &str) -> bool {
     let Some(path) = resolve(root, file) else {

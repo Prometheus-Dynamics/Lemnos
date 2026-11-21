@@ -1228,6 +1228,21 @@ it too. The verdicts of the listed lines:
 The run-time record writes (trial, default, reason) are not on this list: they are raw sector or raw
 environment writes, which the scan does not take for a file write.
 
+### Under the unit: the writes that are still root's (design, not built)
+
+The daemon runs as its own user under `ProtectSystem=strict` (`packaging/README.md`). The boot
+partition is handed over by the root phase, and the state dirs are the daemon's by `slots.conf` and
+slot-init. Three writes need more than that, and none of them can be made under the unit today:
+
+| Write | What it needs | Why a grant is not enough | Plan |
+|---|---|---|---|
+| The `uboot` record's environment (`Place` on a raw partition or an MTD node) | read and write of one node, root `0600` | nothing else: the record is plain reads and writes at offsets | The root phase hands it over as it hands over the boot partition. It opens the node read-only, probes it (both copies' CRC, the board file's geometry, the driver's own keys), and opens it read-write only when the environment is ours. No udev rule: a rule on a raw partition gives the whole node to the group for good. |
+| Growing the data partition (`grow`: the whole disk's table, then `BLKPG_RESIZE_PARTITION`) | the whole-disk node, and `CAP_SYS_ADMIN` when the ioctl is made | the ioctl checks the capability when it is made, not when the node is opened, so a handed-over descriptor does not carry it | Moves to slot-init, which is root and runs before the daemon. Grow happens once, at the first start, and its record (`board/slots/grow`) already says where it got to. The driver reads the record and reports it, and writes nothing to the disk. |
+| UBI slots (`make`, `rename` and `remove` on `/dev/ubiN`, `begin_update` on a volume, `ubiblock`) | `CAP_SYS_RESOURCE` for every one of those ioctls | the same: the kernel checks the capability at each ioctl | A small root helper forked by the root phase, built like the gadget helper. It keeps uid 0 and `CAP_SYS_RESOURCE` alone, under its own seccomp allowlist. It acts only on the UBI device the board file names, and only on volumes with the slots' prefix. For an update it opens the volume, starts the update, and passes the write descriptor back over its socket pair, so the image bytes never go through the helper. |
+
+Until these are built, a board with a `uboot` record, `grow` or UBI slots can't make those writes
+under the unit: the kernel refuses the open (`EACCES`) or the ioctl (`EPERM`).
+
 ## Two-copy records
 
 State that must survive a power cut, and that a boot loader or the initramfs needs, is kept as
@@ -1374,6 +1389,18 @@ system reads it on its next boot. So on such a boot:
   security switch's precondition lists it as `busy`. A partition that can't be read far enough to say
   (a device fault) is `foreign-unknown`: nothing is written, and it is looked at again every 8 s and on
   each call.
+- under the daemon's unit the decision needs no write access: the daemon's root phase opens the
+  partition read-only, probes it with the same test, and opens it read-write only when the records are
+  ours (`lemnos_slot_store::boot_raw::prepare`); otherwise the driver holds a read-only descriptor at
+  most. slot-init gives `board/slots` and `slots` to the daemon's user only on an owned boot
+  (`lemnos_slot_store::owner`), and never through a link. With the records ours but the dirs not
+  writable (still root's, or no `slots.conf` drop-in), health says `state-unwritable` and every call
+  that would write is refused with `FAILED_PRECONDITION` before a boot record is touched (the dirs are
+  looked at again at each such call and every 8 s, so a grant given since is taken); with the
+  partition not handed over read-write, `record-unreachable`; a write that failed later is
+  `write-failed`, and `info` and `list` name the file and the error as `write_failed`
+  (`packaging/README.md`). The QEMU stanza `route-a` runs the real daemon through the unit launcher on
+  both kinds of partition and reads the records back raw.
 
 ```text
 lemnos-ctl boot-partition --add-to DUMP --layout-of BOARD [--socs DIR] --slot ID --payload DIR

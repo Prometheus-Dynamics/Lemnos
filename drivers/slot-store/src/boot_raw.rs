@@ -12,7 +12,6 @@ use crate::bootfat::{self, ReadAt, Refusal};
 use crate::firmware;
 use crate::records::MAX_ATTEMPTS;
 use crate::twocopy::{Error, FileSectors, Kind, Pair, SECTOR, Sectors};
-use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 
@@ -387,10 +386,55 @@ pub fn ownership<D: ReadAt>(dev: &mut D) -> Ownership {
 
 /// [`ownership`] of the boot partition at `node`, opened read only.
 pub fn ownership_of(node: &Path) -> Ownership {
-    match OpenOptions::new().read(true).open(node) {
+    match crate::boot_node::open(node, false) {
         Ok(file) => ownership(&mut FileSectors::new(file, 0)),
         Err(e) => Ownership::Unknown(format!("{}: {e}", node.display())),
     }
+}
+
+/// What the daemon's root phase did with a boot node (see [`prepare`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prepared {
+    /// The records are ours: the node is handed over read-write.
+    ReadWrite,
+    /// The records are not ours, or can't be read to say: the node is handed over read only, and
+    /// nothing on it can be written. The text says why.
+    ReadOnly(String),
+    /// The node could not be opened at all; nothing is handed over. The text says why.
+    Failed(String),
+}
+
+/// The root phase's step for a boot node, before the daemon drops to its own user: the node is
+/// opened read only and the ownership probe runs on it; only when the records are ours is it opened
+/// read-write, and that file is handed over ([`crate::boot_node::hand_over`]). On another system's
+/// partition, or one that can't be read to say, the read-only file is handed over instead, so the
+/// dropped daemon holds no way to write it.
+pub fn prepare(node: &Path) -> Prepared {
+    use std::fs::OpenOptions;
+    let read = match OpenOptions::new().read(true).open(node) {
+        Ok(file) => file,
+        Err(e) => return Prepared::Failed(format!("{}: {e}", node.display())),
+    };
+    let probe = match read.try_clone() {
+        Ok(file) => file,
+        Err(e) => return Prepared::Failed(format!("{}: {e}", node.display())),
+    };
+    let why = match ownership(&mut FileSectors::new(probe, 0)) {
+        Ownership::Ours => match OpenOptions::new().read(true).write(true).open(node) {
+            Ok(file) => {
+                crate::boot_node::hand_over(node, file, true);
+                return Prepared::ReadWrite;
+            }
+            Err(e) => format!(
+                "the records are ours, but {} can't be opened read-write: {e}",
+                node.display()
+            ),
+        },
+        Ownership::NotOurs(why) => format!("not ours: {why}"),
+        Ownership::Unknown(why) => format!("can't be read to say whose: {why}"),
+    };
+    crate::boot_node::hand_over(node, read, false);
+    Prepared::ReadOnly(why)
 }
 
 /// The boot partition's block node, opened for the raw records and pointers. Nothing mounts it.
@@ -408,11 +452,8 @@ impl Boot<FileSectors> {
     /// Opens the node read-write and finds every record and pointer file on it. A file that is
     /// missing or not placeable is refused by name.
     pub fn open(node: &Path) -> Result<Self, String> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(node)
-            .map_err(|e| format!("{}: {e}", node.display()))?;
+        let file =
+            crate::boot_node::open(node, true).map_err(|e| format!("{}: {e}", node.display()))?;
         Boot::on(FileSectors::new(file, 0)).map_err(|e| format!("{}: {e}", node.display()))
     }
 }
@@ -593,11 +634,8 @@ pub struct BayVolume<D = FileSectors> {
 impl BayVolume<FileSectors> {
     /// Opens the node read-write and reads its bay layout. Nothing is mounted.
     pub fn open(node: &Path) -> Result<Self, String> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(node)
-            .map_err(|e| format!("{}: {e}", node.display()))?;
+        let file =
+            crate::boot_node::open(node, true).map_err(|e| format!("{}: {e}", node.display()))?;
         BayVolume::on(FileSectors::new(file, 0)).map_err(|e| format!("{}: {e}", node.display()))
     }
 }
@@ -860,10 +898,8 @@ fn no_episodes_here() -> String {
 /// record is there) strictly, with every record and pointer; the U-Boot form with its reason record
 /// alone. Refused by name when the volume is neither.
 pub fn open_records(node: &Path) -> Result<Box<dyn BootRaw>, String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .open(node)
-        .map_err(|e| format!("{}: {e}", node.display()))?;
+    let file =
+        crate::boot_node::open(node, false).map_err(|e| format!("{}: {e}", node.display()))?;
     let mut probe = FileSectors::new(file, 0);
     if bootfat::locate(&mut probe, TRIAL_FILE, RECORD_BYTES).is_ok() {
         return Boot::open(node).map(|boot| Box::new(boot) as Box<dyn BootRaw>);

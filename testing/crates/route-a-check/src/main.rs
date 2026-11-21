@@ -1,60 +1,115 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-//! The route-A check (test only, never shipped): the engine host, the same `Host::start` that
-//! lemnosd calls, with `system-slots` on a board whose boot partition is another system's (its
-//! `default.txt` is that system's 55-byte file) and whose data partition holds that system's slots
-//! state, in this system's own eight-key format, as an older build of it left it. Run in the QEMU
-//! guest, in real time, past the driver's uptime and its first slow boot-file check.
+//! The route-A check (test only, never shipped): the real lemnosd, started as its packaged unit
+//! starts it (`lemnos-unit-check exec --with slots`: root, the unit's capability set, system call
+//! filter and file system sandbox, then lemnosd's own drop to `--user`), with `system-slots` on a
+//! boot partition that is another system's, then on one that is ours. Run in the QEMU guest as root,
+//! in real time, past the driver's uptime and its first slow boot-file check. Every call goes over
+//! the daemon's socket.
 //!
 //!   lemnos-route-a-check
 //!
-//! It passes when the state dir and the boot partition are byte-identical after the start, after
-//! the ticks, and after every call that would write (each refused with `FAILED_PRECONDITION`); when
-//! the device's health and its `list` and `info` say `foreign`; and when the same run on a boot
-//! partition of ours does write (its start and its `confirm`), so the check can tell the two apart.
+//! Three runs:
+//!
+//! - **foreign**: the partition's `default.txt` is the other system's 55-byte file and the data
+//!   partition holds that system's slots state, root's, as slot-init leaves it when the records are
+//!   not ours. The state dir and the partition stay byte-identical after the start, the ticks and
+//!   every writing call (each refused with `FAILED_PRECONDITION`); health, `list` and `info` say
+//!   `foreign`; the root phase held the partition read only.
+//! - **ours**: the partition is ours and the slots dirs are given to the daemon's user by slot-init's
+//!   own rule (`lemnos_slot_store::owner`). The root phase hands the partition over read-write; health
+//!   is ok; `confirm` and `trial` are taken, the daemon is restarted on the trial slot as the board
+//!   would boot it, and `confirm` and `set_default` are taken there. After each, the boot records are
+//!   read back raw from the partition: the trial record, then `default.txt`.
+//! - **image-side**: the partition is ours, but the slots dirs are root's and the unit has no slots
+//!   drop-in. The daemon must say so by name (`state-unwritable`) and refuse the switch.
 //!
 //! The slots driver takes its boot chain from the device tree on a board. An x86 guest has none, so
-//! the chain is stood in with `boot_node::TEST_ROOTS` (the `testing` feature): a fake `chosen` and a
-//! fake sysfs whose boot partition node is a file holding the partition.
+//! the chain is stood in through lemnosd's `testing-boot-roots` seam (`/lemnosd-route-a`, built apart
+//! from the shipped daemon): a fake `chosen` and sysfs under `/run/route-a`, and the partition node a
+//! root-owned 0600 file under `/dev/route-a`, which only the root phase can open.
+//!
+//! `LEMNOS_ROUTE_A_PC=1` runs the same calls on a PC as an ordinary user, with no launcher, no drop
+//! and no hand-over, under `LEMNOS_ROUTE_A_ROOT`: a rehearsal of the slot calls only.
 
-use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::fs::{self, File};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-use std::sync::Arc;
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{CallerId, Encode, Health, HostClock, MethodId, Status, Writer};
-use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_client::{Client, DeviceHealth, Error, Handle};
+use lemnos_core::{Driver, Encode, Status, Writer};
+use lemnos_daemon_ready::Ready;
+use lemnos_driver_system_slots::SystemSlots;
 use lemnos_slot_store::bays::Layout as Bays;
-use lemnos_slot_store::boot_node::{BootRoots, TEST_ROOTS};
+use lemnos_slot_store::boot_raw::{Boot, Pointer, Pointers, Records};
 use lemnos_slot_store::bootimage::{self, Family, Parts};
+use lemnos_slot_store::owner;
+use lemnos_slot_store::twocopy::FileSectors;
 
-/// Where the check stands the board in: a tmpfs under `/run` in the guest. `LEMNOS_ROUTE_A_ROOT`
-/// names another place, for a run on a PC first.
+/// The other system's slot: the id an older build of it would have.
+const OTHER: &str = "system-2026.2.0-dev.993-abcd-e1097ec7";
+/// Our running slot, in bay 0 of the partition.
+const OURS: &str = "ours-1";
+/// Our second slot, installed into a free bay before the daemon starts.
+const NEXT: &str = "ours-2";
+/// The board's id, which a slot's manifest must name.
+const BOARD_ID: &str = "route-a";
+/// The daemon's ids, as numbers: the guest has no account database. The unit names `lemnos`.
+const DAEMON: u32 = 999;
+/// The driver's uptime before a default boot is good, set short so the run passes it in seconds.
+const UPTIME_S: u64 = 4;
+/// How long the daemon runs before the calls: past the uptime and the first slow boot-file check.
+const RUN: Duration = Duration::from_secs(UPTIME_S + 6);
+const READY_WAIT: Duration = Duration::from_secs(20);
+/// How long a health read may take to be known: a device in a call reads Ok until it returns.
+const SETTLE: Duration = Duration::from_secs(10);
+
+fn pc() -> bool {
+    std::env::var_os("LEMNOS_ROUTE_A_PC").is_some()
+}
+
+/// Where the fake boot chain, the board file and the daemon's log go.
 fn root_dir() -> PathBuf {
     std::env::var_os("LEMNOS_ROUTE_A_ROOT")
         .map_or_else(|| PathBuf::from("/run/route-a"), PathBuf::from)
 }
-/// The other system's slot: the id an older build of it would have.
-const OTHER: &str = "system-2026.2.0-dev.993-abcd-e1097ec7";
-/// Our slot, in bay 0 of the partition.
-const OURS: &str = "ours-1";
-/// The driver's uptime before a default boot is good, set short so the run passes it in seconds.
-const UPTIME_S: u64 = 4;
-/// How long the host runs before the calls: past the uptime, and past the first slow boot-file
-/// check (at the first tick; the next is ten minutes on, which the driver's unit test runs).
-const RUN: Duration = Duration::from_secs(UPTIME_S + 6);
 
-/// The driver clock: nanoseconds since the host started.
-struct Clock(Instant);
-
-impl HostClock for Clock {
-    fn now_ns(&self) -> u64 {
-        u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX)
+/// Where the partition node goes: under /dev in the guest, writable under the unit as on a board.
+fn dev_dir() -> PathBuf {
+    if pc() {
+        root_dir().join("dev")
+    } else {
+        PathBuf::from("/dev/route-a")
     }
+}
+
+/// The data partition: `/data`, the path the slots drop-in grants.
+fn data_dir() -> PathBuf {
+    if pc() {
+        root_dir().join("data")
+    } else {
+        PathBuf::from("/data")
+    }
+}
+
+/// The unit's runtime directory, stood in.
+fn runtime_dir() -> PathBuf {
+    if pc() {
+        root_dir().join("run")
+    } else {
+        PathBuf::from("/run/route-a-unit")
+    }
+}
+
+fn socket() -> PathBuf {
+    runtime_dir().join("lemnosd.sock")
+}
+
+fn daemon_log() -> PathBuf {
+    root_dir().join("lemnosd.log")
 }
 
 /// A boot partition from the image builder with slot [`OURS`] in bay 0 and every pointer naming it.
@@ -73,16 +128,7 @@ fn partition(foreign: bool) -> Result<Vec<u8>, String> {
         ],
         fixed: Vec::new(),
     };
-    let payloads: Vec<Vec<u8>> = [
-        "kernel",
-        "initramfs",
-        "device tree",
-        "console=tty1",
-        "overlay",
-    ]
-    .iter()
-    .map(|what| format!("{what} {OURS}").into_bytes())
-    .collect();
+    let payloads = payloads(OURS);
     let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
     let size = bootimage::min_size(&parts)?;
     let mut image = bootimage::build(&parts, size, OURS, &refs)?;
@@ -96,8 +142,23 @@ fn partition(foreign: bool) -> Result<Vec<u8>, String> {
     Ok(image)
 }
 
-/// The fake boot chain over `root`, with the partition at `root/dev/mmcblk0p1`.
-fn boot_chain(root: &Path, image: &[u8]) -> std::io::Result<BootRoots> {
+fn payloads(slot: &str) -> Vec<Vec<u8>> {
+    [
+        "kernel",
+        "initramfs",
+        "device tree",
+        "console=tty1",
+        "overlay",
+    ]
+    .iter()
+    .map(|what| format!("{what} {slot}").into_bytes())
+    .collect()
+}
+
+/// The fake boot chain: `chosen` and sysfs under the root dir, the partition node under the dev dir,
+/// owned by root with mode 0600 (on a board, root and group disk; no group of the daemon's).
+fn boot_chain(image: &[u8]) -> std::io::Result<(PathBuf, String)> {
+    let root = root_dir();
     let sys = root.join("sys");
     let node = sys.join("firmware/devicetree/base/soc/mmc@7e202000");
     fs::create_dir_all(&node)?;
@@ -115,10 +176,17 @@ fn boot_chain(root: &Path, image: &[u8]) -> std::io::Result<BootRoots> {
     let chosen = root.join("chosen");
     fs::create_dir_all(&chosen)?;
     fs::write(chosen.join("lemnos,boot-source"), b"/soc/mmc@7e202000\0")?;
-    let dev = root.join("dev");
+    let dev = dev_dir();
     fs::create_dir_all(&dev)?;
-    fs::write(dev.join("mmcblk0p1"), image)?;
-    Ok(BootRoots { chosen, sys, dev })
+    let file = dev.join("mmcblk0p1");
+    fs::write(&file, image)?;
+    if !pc() {
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok((
+        file,
+        format!("{}:{}:{}", chosen.display(), sys.display(), dev.display()),
+    ))
 }
 
 /// The other system's slots state, as an older build of it left it.
@@ -147,6 +215,55 @@ fn foreign_state(data: &Path) -> std::io::Result<()> {
     fs::create_dir_all(images.join(".incoming"))?;
     fs::write(images.join(".incoming/part"), b"half a bundle")?;
     Ok(())
+}
+
+/// A slot's image and its schema-3 manifest, as a bundle's install leaves them: one data block and
+/// its hash tree, and the five boot files hashed as the install stores them in the bay.
+fn slot_files(slot: &str) -> (Vec<u8>, String) {
+    use lemnos_slot_store::bootcheck::sha256_hex;
+    use lemnos_slot_store::manifest::{BLOCK, SCHEMA, tree_bytes};
+    let hash_offset = BLOCK;
+    let size = hash_offset + tree_bytes(1);
+    let image = vec![0u8; usize::try_from(size).unwrap_or(0)];
+    let files: Vec<String> = lemnos_slot_store::bays::ROLES
+        .iter()
+        .zip(payloads(slot))
+        .map(|(role, bytes)| format!("\"{}\":\"{}\"", role.path, sha256_hex(&bytes)))
+        .collect();
+    let zeros = "0".repeat(64);
+    let manifest = format!(
+        "{{\"schema\":{SCHEMA},\"id\":\"{slot}\",\"product\":\"route-a\",\"version\":\"1.0\",\"board\":\"{BOARD_ID}\",\
+         \"image\":{{\"size\":{size},\"sha256\":\"{}\"}},\
+         \"verity\":{{\"root_hash\":\"{zeros}\",\"salt\":\"{zeros}\",\"data_blocks\":1,\"hash_offset\":{hash_offset}}},\
+         \"boot\":{{\"files\":{{{}}}}}}}",
+        sha256_hex(&image),
+        files.join(",")
+    );
+    (image, manifest)
+}
+
+/// Our two slots on the data partition, as the installer leaves them: image, manifest and a good meta.
+fn our_state(data: &Path, booted: &str) -> std::io::Result<()> {
+    let state = data.join("board/slots");
+    let images = data.join("slots");
+    fs::create_dir_all(&state)?;
+    fs::create_dir_all(&images)?;
+    for (seq, slot) in [OURS, NEXT].iter().enumerate() {
+        let (image, manifest) = slot_files(slot);
+        fs::write(images.join(format!("{slot}.erofs")), image)?;
+        fs::write(images.join(format!("{slot}.json")), manifest)?;
+        fs::write(
+            state.join(format!("{slot}.meta")),
+            format!("GOOD=yes\nFAILED=no\nPINNED=no\nSEQ={}\n", seq + 1),
+        )?;
+    }
+    fs::write(state.join("booted"), format!("{booted}\n"))
+}
+
+/// The bay the pointers name for `slot` (`bay<N>`, as a pointer file holds it), from the
+/// partition's own records.
+fn bay_dir(node: &Path, slot: &str) -> Result<String, String> {
+    Ok(format!("bay{}", Boot::open(node)?.bay_of(slot)?))
 }
 
 /// Every entry under `root`, in path order: its path, kind, mode, owner and bytes.
@@ -188,39 +305,110 @@ fn first_difference(before: &Tree, after: &Tree) -> String {
         .map_or_else(String::new, |gone| format!("{} went", gone.0.display()))
 }
 
-fn board_text(data: &Path, boot: &Path) -> String {
+fn board_text() -> String {
+    let root = root_dir();
+    let none = root.join("none");
+    let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/lemnos-route-a-check"));
     format!(
         r#"format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "route-a"
+id = "{BOARD_ID}"
 
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], systemctl = "/bin/false", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0, confirm_uptime_s = {UPTIME_S}, device_tree = "{none}", vcio = "{none}" }}
+config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], systemctl = "{me}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0, confirm_uptime_s = {UPTIME_S}, device_tree = "{none}", vcio = "{none}" }}
 "#,
-        data = data.display(),
-        boot = boot.display(),
-        none = boot.with_file_name("none").display(),
+        data = data_dir().display(),
+        boot = root.join("boot").display(),
+        me = me.display(),
+        none = none.display(),
     )
 }
 
-/// The method of the device's contracts named `name`.
-fn method_of(host: &Host, device: u32, name: &str) -> Option<MethodId> {
-    let manifest = host.manifest(device)?;
-    for (contract, info) in manifest.provides.iter().enumerate() {
-        for method in info.methods {
-            if method.name == name {
-                return Some(MethodId {
-                    contract: u8::try_from(contract).ok()?,
-                    method: method.id,
-                });
+/// How the daemon is started.
+#[derive(Clone, Copy)]
+struct Start {
+    /// The unit's slots drop-in is given to the launcher.
+    drop_in: bool,
+}
+
+/// One lemnosd, killed by its PID when dropped.
+struct Daemon(Option<Child>);
+
+impl Daemon {
+    fn start(roots: &str, how: Start) -> Result<Self, String> {
+        let me = std::env::current_exe().map_err(|e| e.to_string())?;
+        let _ = fs::remove_file(socket());
+        let board = root_dir().join("board.toml");
+        fs::write(&board, board_text()).map_err(|e| format!("the board file: {e}"))?;
+        let lemnosd = me.with_file_name("lemnosd-route-a");
+        let mut command = if pc() {
+            Command::new(&lemnosd)
+        } else {
+            let mut c = Command::new(me.with_file_name("lemnos-unit-check"));
+            c.arg("exec");
+            if how.drop_in {
+                c.args(["--with", "slots"]);
+            }
+            c.arg("--runtime-dir").arg(runtime_dir()).arg("--");
+            c.arg(&lemnosd);
+            c
+        };
+        command
+            .arg("--board")
+            .arg(&board)
+            .arg("--socket")
+            .arg(socket());
+        if !pc() {
+            command.args([
+                "--user",
+                &DAEMON.to_string(),
+                "--group",
+                &DAEMON.to_string(),
+            ]);
+        }
+        command.env("LEMNOSD_TEST_BOOT_ROOTS", roots);
+        let log = File::options()
+            .create(true)
+            .append(true)
+            .open(daemon_log())
+            .map_err(|e| format!("the daemon's log: {e}"))?;
+        command.stderr(Stdio::from(log)).stdout(Stdio::null());
+        let ready = Ready::new()?;
+        ready.give(&mut command);
+        let mut child = command.spawn().map_err(|e| format!("start lemnosd: {e}"))?;
+        match ready.wait(&mut child, READY_WAIT) {
+            Ok(()) => Ok(Self(Some(child))),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(format!("{error}; its log: {}", log_text()))
             }
         }
     }
-    None
+}
+
+impl Daemon {
+    /// Kills the daemon by the PID this check started, and reaps it.
+    fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn log_text() -> String {
+    fs::read_to_string(daemon_log()).unwrap_or_default()
 }
 
 /// The arguments, encoded as the generated client encodes them.
@@ -243,67 +431,141 @@ impl Args {
     }
 }
 
-/// A started host over `data` and the partition `image`, with the slots device's index.
-fn start(root: &Path, data: &Path, image: &[u8]) -> Result<(Host, u32), String> {
-    let roots = boot_chain(root, image).map_err(|e| format!("the boot chain: {e}"))?;
-    *TEST_ROOTS.lock().map_err(|_| "the roots lock")? = Some(roots);
-    let board = parse(&board_text(data, &root.join("boot"))).map_err(|e| format!("{e}"))?;
-    let host = Host::start(
-        &board,
-        &[entry::<lemnos_driver_system_slots::SystemSlots>()],
-        Box::new(lemnos_linux::LinuxBoard::new()),
-        Arc::new(Clock(Instant::now())),
-        Options::default(),
-    )
-    .map_err(|e| format!("the host did not start: {e:?}"))?;
-    let slots = host
-        .devices()
-        .into_iter()
-        .find(|d| d.id == "slots")
-        .map(|d| d.index)
-        .ok_or("no slots device")?;
-    Ok((host, slots))
+/// The slots device over the socket: its handles by contract, and its methods by name.
+struct Slots {
+    client: Client,
 }
 
-fn health(host: &Host, device: u32) -> Health {
-    host.devices()
-        .into_iter()
-        .find(|d| d.index == device)
-        .map_or(Health::Ok, |d| d.health)
+impl Slots {
+    fn connect() -> Result<Self, String> {
+        let client = Client::connect(socket(), "route-a").map_err(|e| format!("connect: {e:?}"))?;
+        Ok(Self { client })
+    }
+
+    /// The contract tag and method id of the method called `name`.
+    fn method(name: &str) -> Option<(&'static str, u16)> {
+        for info in SystemSlots::MANIFEST.provides {
+            for method in info.methods {
+                if method.name == name {
+                    return Some((info.tag.as_str(), method.id));
+                }
+            }
+        }
+        None
+    }
+
+    fn handle(&self, name: &str) -> Result<(Handle, u16), String> {
+        let (tag, id) = Self::method(name).ok_or(format!("no method {name}"))?;
+        let handle = self
+            .client
+            .open_tag("slots", tag)
+            .map_err(|e| format!("open {tag}: {e:?}"))?;
+        Ok((handle, id))
+    }
+
+    fn call(&self, name: &str, args: &Args) -> Result<(), Error> {
+        let (mut handle, id) = self.handle(name).map_err(|text| Error::Refused {
+            status: Status::NOT_FOUND,
+            text,
+        })?;
+        self.client
+            .call(&mut handle, id, args.bytes(), &mut [])
+            .map(drop)
+    }
+
+    fn job(&self, name: &str, args: &Args) -> Result<(), Error> {
+        let (mut handle, id) = self.handle(name).map_err(|text| Error::Refused {
+            status: Status::NOT_FOUND,
+            text,
+        })?;
+        self.client
+            .start_job(&mut handle, id, args.bytes())
+            .map(drop)
+    }
+
+    /// The text of a method that only fills a buffer (`list`, `info`).
+    fn text(&self, name: &str) -> Result<String, String> {
+        let (mut handle, id) = self.handle(name)?;
+        let mut reply = vec![0u8; 1 << 16];
+        let cap = u32::try_from(reply.len()).unwrap_or(u32::MAX).to_le_bytes();
+        let n = self
+            .client
+            .call(&mut handle, id, &cap, &mut reply)
+            .map_err(|e| format!("{name}: {e:?}"))?;
+        Ok(String::from_utf8_lossy(&reply[..n]).into_owned())
+    }
+
+    /// The device's health and its reason, from the daemon's list.
+    fn health(&self) -> Result<(DeviceHealth, String), String> {
+        let devices = self.client.list().map_err(|e| format!("list: {e:?}"))?;
+        devices
+            .into_iter()
+            .find(|d| d.name == "slots")
+            .map(|d| (d.health, d.reason))
+            .ok_or_else(|| "no slots device".to_string())
+    }
 }
 
-/// The text of a method that only fills a buffer (`list`, `info`).
-fn text(host: &Host, device: u32, name: &str) -> Result<String, String> {
-    let method = method_of(host, device, name).ok_or(format!("no method {name}"))?;
-    let mut reply = vec![0u8; 1 << 16];
-    let cap = u32::try_from(reply.len()).unwrap_or(u32::MAX).to_le_bytes();
-    let n = host
-        .call(device, method, &cap, &mut reply)
-        .map_err(|s| format!("{name}: {s:?}"))?;
-    Ok(String::from_utf8_lossy(&reply[..n]).into_owned())
+fn status_of(got: &Result<(), Error>) -> Option<Status> {
+    match got {
+        Err(Error::Refused { status, .. }) => Some(*status),
+        _ => None,
+    }
+}
+
+/// The partition's records, read back raw by sector as the boot loader reads them.
+fn raw_default(node: &Path) -> Result<Option<String>, String> {
+    let file = File::open(node).map_err(|e| e.to_string())?;
+    let mut dev = FileSectors::new(file, 0);
+    let pointers = Pointers::place(&mut dev).map_err(|(n, e)| format!("{n}: {e:?}"))?;
+    pointers
+        .read(&mut dev, Pointer::Default)
+        .map_err(|e| e.to_string())
+}
+
+fn raw_trial(node: &Path) -> Result<Option<String>, String> {
+    let file = File::open(node).map_err(|e| e.to_string())?;
+    let mut dev = FileSectors::new(file, 0);
+    let records = Records::place(&mut dev).map_err(|e| format!("{e:?}"))?;
+    records
+        .trial(&mut dev)
+        .map(|t| t.map(|t| t.slot))
+        .map_err(|e| format!("{e:?}"))
 }
 
 struct Checks(u32);
 
 impl Checks {
-    fn check(&mut self, ok: bool, what: &str) {
+    fn check(&mut self, ok: bool, what: &str) -> bool {
         if ok {
             println!("route-a: ok: {what}");
         } else {
             println!("route-a: FAIL: {what}");
             self.0 += 1;
         }
+        ok
     }
 }
 
+/// The slots dirs as slot-init leaves them: given to the daemon's user on ours, by its own rule.
+fn give_slots_dirs(data: &Path) -> Result<(), String> {
+    if pc() {
+        return Ok(());
+    }
+    for dir in [data.join("board/slots"), data.join("slots")] {
+        owner::give_dir(&dir, DAEMON, DAEMON, owner::lchown)?;
+    }
+    Ok(())
+}
+
 fn route_a(c: &mut Checks) -> Result<(), String> {
-    let root = root_dir().join("foreign");
-    let data = root.join("data");
+    let data = data_dir();
     foreign_state(&data).map_err(|e| format!("the state: {e}"))?;
     let image = partition(true)?;
-    let node = root.join("dev/mmcblk0p1");
+    let (node, roots) = boot_chain(&image).map_err(|e| format!("the boot chain: {e}"))?;
     let before = tree(&data).map_err(|e| e.to_string())?;
-    let (host, slots) = start(&root, &data, &image)?;
+    let daemon = Daemon::start(&roots, Start { drop_in: true })?;
+    let slots = Slots::connect()?;
     let after_start = tree(&data).map_err(|e| e.to_string())?;
     c.check(
         after_start == before,
@@ -312,6 +574,16 @@ fn route_a(c: &mut Checks) -> Result<(), String> {
             first_difference(&before, &after_start)
         ),
     );
+    if !pc() {
+        let log = log_text();
+        c.check(
+            log.contains("root phase: slots: ") && log.contains("handed over read only"),
+            &format!(
+                "the root phase held the partition read only: {}",
+                log.trim()
+            ),
+        );
+    }
     thread::sleep(RUN);
     let after_ticks = tree(&data).map_err(|e| e.to_string())?;
     c.check(
@@ -323,12 +595,11 @@ fn route_a(c: &mut Checks) -> Result<(), String> {
         ),
     );
     let foreign = lemnos_driver_system_slots::FOREIGN;
+    let health = slots.health()?;
     c.check(
-        health(&host, slots) == Health::Degraded(foreign),
-        &format!("health is degraded: {foreign}"),
+        health.0 == DeviceHealth::Degraded && health.1.contains(foreign),
+        &format!("health is degraded, foreign: {health:?}"),
     );
-    let refused = Err(Status::FAILED_PRECONDITION);
-    let caller = CallerId(5);
     let calls: [(&str, Args, bool); 12] = [
         (
             "install",
@@ -356,28 +627,29 @@ fn route_a(c: &mut Checks) -> Result<(), String> {
         ("apply", Args::new().put(&false), false),
     ];
     for (name, args, job) in &calls {
-        let method = method_of(&host, slots, name).ok_or(format!("no method {name}"))?;
         let got = if *job {
-            host.start_job(caller, slots, method, args.bytes())
-                .map(drop)
+            slots.job(name, args)
         } else {
-            host.call_as(caller, slots, method, args.bytes(), &mut [])
-                .map(drop)
+            slots.call(name, args)
         };
-        c.check(got == refused, &format!("{name} is refused: {got:?}"));
+        c.check(
+            status_of(&got) == Some(Status::FAILED_PRECONDITION),
+            &format!("{name} is refused: {got:?}"),
+        );
     }
-    let list = text(&host, slots, "list")?;
+    let list = slots.text("list")?;
     c.check(
         list.contains(&format!("\"foreign\":\"{foreign}: default.txt")),
         &format!("list says foreign: {list}"),
     );
-    let info = text(&host, slots, "info")?;
+    let info = slots.text("info")?;
     c.check(
         info.contains(&format!("\"foreign\":\"{foreign}: default.txt")),
         "info says foreign",
     );
     thread::sleep(Duration::from_secs(2));
-    host.shutdown();
+    drop(slots);
+    drop(daemon);
     let after = tree(&data).map_err(|e| e.to_string())?;
     c.check(
         after == before,
@@ -391,50 +663,180 @@ fn route_a(c: &mut Checks) -> Result<(), String> {
     Ok(())
 }
 
+/// Our partition with [`NEXT`] installed in a free bay, as the installer leaves it, and its node.
+fn our_partition() -> Result<(PathBuf, String), String> {
+    let (node, roots) =
+        boot_chain(&partition(false)?).map_err(|e| format!("the boot chain: {e}"))?;
+    let payloads = payloads(NEXT);
+    let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+    Boot::open(&node)?.install_slot(NEXT, &refs)?;
+    Ok((node, roots))
+}
+
 fn ours(c: &mut Checks) -> Result<(), String> {
-    let root = root_dir().join("ours");
-    let data = root.join("data");
-    fs::create_dir_all(data.join("board/slots")).map_err(|e| e.to_string())?;
-    fs::create_dir_all(data.join("slots").join(OURS)).map_err(|e| e.to_string())?;
-    fs::write(data.join("board/slots/booted"), format!("{OURS}\n")).map_err(|e| e.to_string())?;
-    let before = tree(&data).map_err(|e| e.to_string())?;
-    let (host, slots) = start(&root, &data, &partition(false)?)?;
+    let data = data_dir();
+    our_state(&data, OURS).map_err(|e| format!("the state: {e}"))?;
+    give_slots_dirs(&data)?;
+    let (node, roots) = our_partition()?;
+    let mut daemon = Daemon::start(&roots, Start { drop_in: true })?;
+    let slots = Slots::connect()?;
+    if !pc() {
+        let log = log_text();
+        c.check(
+            log.contains("root phase: slots: ") && log.contains("handed over read-write"),
+            &format!(
+                "the root phase handed the partition over read-write: {}",
+                log.trim()
+            ),
+        );
+    }
+    let health = slots.health()?;
     c.check(
-        tree(&data).map_err(|e| e.to_string())? != before,
-        "on a partition of ours the start writes its settings",
+        health.0 == DeviceHealth::Ok,
+        &format!("on ours the health is ok: {health:?}"),
     );
+    // A device in a call reads Ok to the host, so the driver's own words are read too.
+    let info = slots.text("info")?;
     c.check(
-        health(&host, slots) == Health::Ok,
-        "on ours the health is ok",
+        info.contains("\"state_unwritable\":\"\"") && info.contains("\"write_failed\":\"\""),
+        &format!("on ours info says the state is writable: {info}"),
     );
-    let confirm = method_of(&host, slots, "confirm").ok_or("no confirm")?;
-    let got = host.call_as(CallerId(5), slots, confirm, &[], &mut []);
+    let got = slots.call("confirm", &Args::new());
     c.check(got.is_ok(), &format!("on ours confirm is taken: {got:?}"));
-    let fallbacks = fs::read_to_string(data.join("board/slots/fallbacks")).unwrap_or_default();
-    c.check(fallbacks == "0\n", "on ours confirm writes the state");
-    host.shutdown();
+    let state = data.join("board/slots/state.env");
+    c.check(
+        fs::metadata(&state).is_ok_and(|m| pc() || m.uid() == DAEMON),
+        "the daemon's user wrote the state",
+    );
+    let got = slots.call(
+        "trial",
+        &Args::new().put(&NEXT).put(&false).put(&false).put(&false),
+    );
+    if !c.check(got.is_ok(), &format!("trial {NEXT} is taken: {got:?}")) {
+        println!("route-a: info: {}", slots.text("info").unwrap_or_default());
+        println!("route-a: list: {}", slots.text("list").unwrap_or_default());
+        println!("route-a: log: {}", log_text());
+    }
+    let trial = raw_trial(&node);
+    c.check(
+        trial.as_ref().is_ok_and(|t| t.as_deref() == Some(NEXT)),
+        &format!("the partition's trial record names {NEXT}, read back raw: {trial:?}"),
+    );
+    drop(slots);
+    daemon.stop();
+    // The trial boot, as slot-init records it: the slot the board came up on.
+    fs::write(data.join("board/slots/booted"), format!("{NEXT}\n")).map_err(|e| e.to_string())?;
+    daemon = Daemon::start(&roots, Start { drop_in: true })?;
+    let slots = Slots::connect()?;
+    let got = slots.call("confirm", &Args::new());
+    c.check(
+        got.is_ok(),
+        &format!("on the trial slot confirm is taken: {got:?}"),
+    );
+    let next_bay = bay_dir(&node, NEXT)?;
+    let ours_bay = bay_dir(&node, OURS)?;
+    let default = raw_default(&node);
+    let trial = raw_trial(&node);
+    c.check(
+        default.as_ref().is_ok_and(|d| d.as_deref() == Some(next_bay.as_str()))
+            && trial.as_ref().is_ok_and(Option::is_none),
+        &format!(
+            "the confirm switched default.txt to {NEXT} ({next_bay}) and cleared the trial, read back raw: {default:?} {trial:?}"
+        ),
+    );
+    let got = slots.call("set_default", &Args::new().put(&OURS).put(&false));
+    c.check(
+        got.is_ok(),
+        &format!("set_default {OURS} is taken: {got:?}"),
+    );
+    let default = raw_default(&node);
+    c.check(
+        default
+            .as_ref()
+            .is_ok_and(|d| d.as_deref() == Some(ours_bay.as_str())),
+        &format!("default.txt names {OURS} ({ours_bay}), read back raw: {default:?}"),
+    );
+    drop(slots);
+    drop(daemon);
     Ok(())
 }
 
-fn main() -> ExitCode {
+/// Ours, but the dirs are root's and the unit has no slots drop-in: the image left out both.
+fn image_side(c: &mut Checks) -> Result<(), String> {
+    if pc() {
+        return Ok(());
+    }
+    let data = data_dir();
+    our_state(&data, OURS).map_err(|e| format!("the state: {e}"))?;
+    let (node, roots) = our_partition()?;
+    let before = fs::read(&node).map_err(|e| e.to_string())?;
+    let daemon = Daemon::start(&roots, Start { drop_in: false })?;
+    let slots = Slots::connect()?;
+    let word = lemnos_driver_system_slots::STATE_UNWRITABLE;
+    // A device in a call reads Ok until the call returns (the host does not know yet): the first
+    // health that is known is the one checked, within the bound.
+    let until = Instant::now() + SETTLE;
+    let health = loop {
+        let health = slots.health()?;
+        if health.0 != DeviceHealth::Ok || Instant::now() >= until {
+            break health;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    c.check(
+        health.0 == DeviceHealth::Degraded && health.1.contains(word),
+        &format!("with root's dirs and no drop-in the health names it: {health:?}"),
+    );
+    let got = slots.call("set_default", &Args::new().put(&NEXT).put(&false));
+    c.check(
+        status_of(&got) == Some(Status::FAILED_PRECONDITION),
+        &format!("set_default is refused before anything is written: {got:?}"),
+    );
+    let info = slots.text("info")?;
+    c.check(
+        info.contains("\"state_unwritable\":\"/data/board/slots: "),
+        &format!("info names the dir and why: {info}"),
+    );
+    drop(slots);
+    drop(daemon);
+    c.check(
+        fs::read(&node).is_ok_and(|now| now == before),
+        "the boot partition is unchanged",
+    );
+    Ok(())
+}
+
+/// Clears what one run stood in: the guest's /run and /dev are small.
+fn clear() {
     let _ = fs::remove_dir_all(root_dir());
+    let _ = fs::remove_dir_all(dev_dir());
+    let data = data_dir();
+    let _ = fs::remove_dir_all(data.join("board"));
+    let _ = fs::remove_dir_all(data.join("slots"));
+    let _ = fs::create_dir_all(root_dir());
+    let _ = fs::create_dir_all(runtime_dir());
+}
+
+fn main() -> ExitCode {
+    // The board's `systemctl`, run by the daemon for a restart: there is nothing to restart here.
+    if std::env::args().nth(1).as_deref() == Some("reboot") {
+        return ExitCode::SUCCESS;
+    }
     let mut c = Checks(0);
     for (name, run) in [
         ("route A", route_a as fn(&mut Checks) -> Result<(), String>),
         ("ours", ours),
+        ("image-side", image_side),
     ] {
+        clear();
         if let Err(why) = run(&mut c) {
             c.check(false, &format!("{name}: {why}"));
-        }
-        // Each half's board goes before the next is stood in: the guest's /run is small.
-        if let Ok(dir) = fs::read_dir(root_dir()) {
-            for entry in dir.flatten() {
-                let _ = fs::remove_dir_all(entry.path());
-            }
+            println!("route-a: the daemon's log: {}", log_text().trim());
         }
     }
-    *TEST_ROOTS.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    clear();
     let _ = fs::remove_dir_all(root_dir());
+    let _ = fs::remove_dir_all(runtime_dir());
     if c.0 == 0 {
         println!("route-a: PASS");
         ExitCode::SUCCESS

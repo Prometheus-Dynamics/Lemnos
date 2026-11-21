@@ -233,6 +233,8 @@ pub struct Flow {
     corrupt: bool,
     /// The view was not rendered; the record is still the truth and the render is retried.
     view_pending: bool,
+    /// Why the last render failed (its file and the error), shown with `view pending`.
+    view_error: String,
     /// The last check or change, one line each (`ok`, or what stopped it).
     last: Vec<String>,
     /// Test seam: a simulated power cut stops the change before this step runs.
@@ -294,6 +296,7 @@ impl Flow {
             switch,
             corrupt,
             view_pending: false,
+            view_error: String::new(),
             last: vec!["ok".into()],
             #[cfg(test)]
             fault: None,
@@ -494,8 +497,14 @@ impl Flow {
     /// Renders the view for the current switch. A failure leaves the view pending.
     pub fn render(&mut self) {
         match security::render_at(&self.render_dir, self.switch) {
-            Ok(()) => self.view_pending = false,
-            Err(_) => self.view_pending = true,
+            Ok(()) => {
+                self.view_pending = false;
+                self.view_error.clear();
+            }
+            Err(error) => {
+                self.view_pending = true;
+                self.view_error = format!("{}: {error}", self.render_dir.display());
+            }
         }
     }
 
@@ -514,14 +523,11 @@ impl Flow {
         let mut lines = vec![
             format!("switch {}", if self.switch.on { "on" } else { "off" }),
             format!("generation {}", self.switch.generation),
-            format!(
-                "view {}",
-                if self.view_pending {
-                    "pending"
-                } else {
-                    "current"
-                }
-            ),
+            if self.view_pending {
+                format!("view pending: {}", self.view_error)
+            } else {
+                "view current".to_string()
+            },
             format!("orion {}", if self.orion { "present" } else { "absent" }),
             format!("serial {}", board.serial.unwrap_or("absent")),
             format!(

@@ -260,7 +260,15 @@ impl Tryboot {
     /// Refuses slot setup on a boot partition whose `config.txt` lacks the select lines (see
     /// `firmware::check_config_text`). Read only: a board's config.txt is never edited here.
     fn config_refusal_now(&self) -> Option<&'static str> {
-        let mut raw = self.raw().ok()?;
+        // Another system's records, or ones that can't be read to say whose: `foreign` says so, and
+        // nothing here is ours to open for writing.
+        if !matches!(self.ownership(), Ownership::Ours) {
+            return None;
+        }
+        // A record that can't be opened is said, never passed over: nothing on it can be written.
+        let Ok(mut raw) = self.raw() else {
+            return Some(RECORD_UNREACHABLE);
+        };
         match raw.config_text() {
             Ok(text) => lemnos_slot_store::firmware::config_refusal(&text),
             Err(_) => Some(CONFIG_UNREADABLE),
@@ -272,6 +280,11 @@ impl Tryboot {
         lemnos_slot_store::firmware::check_config_text(&text).map_err(io::Error::other)
     }
 }
+
+/// Why the boot partition's records can't be opened (the node isn't known, the daemon's user can't
+/// open it and the root phase handed nothing over, or it was handed over read only): static, for the
+/// driver's health; `info` and the refused call's error carry the detail.
+pub const RECORD_UNREACHABLE: &str = "record-unreachable: the boot partition's records can't be opened for writing, so no slot can be switched, tried or confirmed";
 
 /// Why `config.txt` cannot be read from the boot partition (static: the driver's health carries it).
 const CONFIG_UNREADABLE: &str = "config.txt cannot be read from the boot partition: Lemnos never edits it, so no slot is set up until it can be read";

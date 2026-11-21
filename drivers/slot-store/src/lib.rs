@@ -35,6 +35,7 @@ pub mod json;
 pub mod layout;
 pub mod manifest;
 pub mod mbr;
+pub mod owner;
 pub mod records;
 pub mod security;
 pub mod signing;

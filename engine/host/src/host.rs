@@ -339,29 +339,44 @@ fn refusal_of(
     if let Some(problem) = uses_refusal(board, spec, entry, drivers, found) {
         return Some(problem);
     }
-    let owned = match spec.owned_config() {
-        Ok(owned) => owned,
-        Err(error) => return Some(error.to_string()),
-    };
-    let entries: Vec<(&str, ConfigValue<'_>)> = owned
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_value()))
-        .collect();
-    let lists = match spec.owned_lists() {
-        Ok(lists) => lists,
-        Err(error) => return Some(error.to_string()),
-    };
     let tags: Vec<&str> = entry
         .manifest
         .provides
         .iter()
         .map(|c| c.tag.as_str())
         .collect();
-    if owned.iter().any(|(key, _)| key == "keys") && takes_trust_root(&tags) {
-        return Some(
-            "setting \"keys\": the board has one trust root, `[security] keys`, which the host gives to this driver; name no key list of its own".to_string(),
-        );
+    let taken = with_device_config(board, spec, |config| {
+        if config.get("keys").is_some() && takes_trust_root(&tags) {
+            return Some(
+                "setting \"keys\": the board has one trust root, `[security] keys`, which the host gives to this driver; name no key list of its own".to_string(),
+            );
+        }
+        (entry.check)(config).err().map(|error| error.to_string())
+    });
+    match taken {
+        Ok(problem) => problem,
+        Err(error) => Some(error),
     }
+}
+
+/// Runs `f` with the settings of the board's device `spec` as its driver is given them at bind (the
+/// same [`Config`] the host builds). The daemon's root phase uses it for the devices whose drivers
+/// take a step before the drop.
+///
+/// # Errors
+///
+/// The device's settings can't be read as values or lists; the text names why.
+pub fn with_device_config<R>(
+    board: &BoardFile,
+    spec: &DeviceSpec,
+    f: impl FnOnce(&Config<'_>) -> R,
+) -> core::result::Result<R, String> {
+    let owned = spec.owned_config().map_err(|error| error.to_string())?;
+    let entries: Vec<(&str, ConfigValue<'_>)> = owned
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_value()))
+        .collect();
+    let lists = spec.owned_lists().map_err(|error| error.to_string())?;
     let refs: Vec<(&str, Vec<&str>)> = lists
         .iter()
         .map(|(key, items)| (key.as_str(), items.iter().map(String::as_str).collect()))
@@ -373,7 +388,7 @@ fn refusal_of(
     let config = Config::new(&entries)
         .with_lists(&borrowed)
         .on_board(&board.board.id);
-    (entry.check)(&config).err().map(|error| error.to_string())
+    Ok(f(&config))
 }
 
 /// The first `uses` entry of the device that its driver does not take, or that names a device the

@@ -96,6 +96,39 @@ of a trial, and without the families the socket is refused, the source is never 
 back at its deadline. The daemon listens on nothing. A BusyBox image has no such limit and installs nothing.
 The drop-in under systemd has not run on a board (`testing/board-runs/HEALTH-TCP.md`).
 
+A board with slots has its own optional drop-in, `packaging/systemd/lemnosd.service.d/slots.conf`. Install
+it as `/etc/systemd/system/lemnosd.service.d/slots.conf` on a board whose board file has a `system-slots`
+device, and only then (its `when` in `files.txt` is `slots`). Its one setting,
+`ReadWritePaths=/data/board/slots /data/slots`, makes the slot driver's state and image dirs (under its
+`data`, default `/data`) the writable pieces of the read-only filesystem. Who owns them is slot-init's to
+set, not the daemon's: before it starts lemnosd, slot-init (root, in the initramfs) gives both dirs to the
+daemon's user and group, read from the new root's `passwd` and `group`, and only when the boot records are
+this system's. It changes the dirs alone, never what they hold, never through a link, and nothing when they
+are the user's already. On a board whose records are another system's it gives nothing, and the driver
+writes nothing there (`docs/slots.md`, "Route A"). A board file with another `data` must change the paths to
+match. `scripts/check-packaging-files.py` fails by the board's name when a board file in `testing/boards/`
+has a `system-slots` device whose dirs the drop-in does not grant. Without the drop-in, or with the dirs
+still root's, the driver's health says `state-unwritable` and no slot is installed, switched or confirmed.
+
+The boot partition is reached another way: its node stays root's (group `disk` on a board), and the
+daemon's root phase opens it before the drop. It opens it read-only first and reads whose records are on
+it; only when they are this system's does it open it read-write and keep that descriptor for the driver.
+Another system's or unreadable records leave a read-only descriptor at most. Descriptors are close-on-exec
+and are opened after the gadget helper is forked, so no child holds one. The drivers that use it
+(`system-slots` with `record = "tryboot"`, `system-security` with `record = "boot"`) say
+`record-unreachable` in health when it can't be opened for writing. No unit setting is involved.
+
+A board file with a `[security]` table takes `packaging/systemd/lemnosd.service.d/security.conf`
+(`when`: `security`), installed as `/etc/systemd/system/lemnosd.service.d/security.conf`. Its setting,
+`ReadWritePaths=-/var/lib/lemnos /run/board`, lets the security switch write its record (`[security] record`,
+a file under `/var/lib/lemnos`) and re-render the view in `/run/board`. Both are made before lemnosd starts
+by the generated unit `lemnos-board-security.service` (`lemnos-ctl tree --security-unit`), which runs as the
+daemon's user: `/run/board` is its `RuntimeDirectory` (mode 0775) and the record's directory its
+`StateDirectory` (mode 0750), so the daemon chowns neither. A record outside `/var/lib/lemnos` is refused by
+name by the generator and by `scripts/check-packaging-files.py`. When the record can't be written, the
+change is refused with `missing: the record was not written: <error>`; a view that can't be rendered is
+`view pending: <dir>: <error>` in the device's state, and is rendered again before each change and read.
+
 **The exposure limit.** `scripts/check-packaging.sh` reads each unit's score from `systemd-analyze security`.
 The base units stay at 2.5 with nothing added. Each fragment is checked on top of the base unit, and
 may add exactly its items in the script's `additions` list, each at the score it has:
@@ -130,7 +163,8 @@ until the drop, with `Type=notify`, `Restart=always` and a constant `RestartSec=
 `StartLimit`, and no `WatchdogSec=` (see "The hardware watchdog").
 
 The hardening that still applies to a daemon that starts as root: `NoNewPrivileges`, `ProtectSystem=strict`
-(the root phase writes only its runtime directory, which the unit makes), `ProtectHome`, `PrivateTmp`,
+(the root phase writes only its runtime directory, which the unit makes; the drop-ins above add the
+slots and security paths), `ProtectHome`, `PrivateTmp`,
 `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`,
 `ProtectHostname`, `ProtectClock`, `ProtectProc=invisible`, `LockPersonality`, `MemoryDenyWriteExecute`,
 `RestrictRealtime`, `RestrictSUIDSGID`, `RestrictNamespaces`, `SystemCallArchitectures`, and

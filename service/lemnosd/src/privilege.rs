@@ -65,6 +65,35 @@ pub const STEPS: &[Step] = &[Step {
     run: runtime_directory,
 }];
 
+/// The drivers that take a step as root before the drop, by driver name: each is given its
+/// device's settings and returns one line for the log. The slots and security drivers open the boot
+/// partition here, which the daemon's user can't open by name, and keep the file for after the drop
+/// (read-write only when the records on it are ours).
+/// A driver's root phase: run as root with its device's settings, it returns the line it logs.
+pub type RootPhase = fn(&lemnos_core::Config<'_>) -> String;
+
+pub const ROOT_PHASES: &[(&str, RootPhase)] = &[
+    ("system-slots", lemnos_driver_system_slots::root_phase),
+    ("system-security", lemnos_driver_system_security::root_phase),
+];
+
+/// Runs [`ROOT_PHASES`] for every device of the board whose driver has one, in the board's order.
+/// Nothing is refused here: a node that can't be handed over makes the driver's own writes fail by
+/// name after the drop, and its health says so. Run after the gadget helper is forked, so the
+/// helper (a fork with no exec, which close-on-exec does not cover) never holds the files.
+fn driver_root_phases(cx: &Context<'_>) -> io::Result<Refusals> {
+    use std::io::Write;
+    for device in cx.board.devices.iter().filter(|d| d.refused.is_none()) {
+        let Some((_, phase)) = ROOT_PHASES.iter().find(|(name, _)| *name == device.driver) else {
+            continue;
+        };
+        let line = lemnos_host::with_device_config(cx.board, device, phase)
+            .unwrap_or_else(|why| format!("its settings can't be read: {why}"));
+        let _ = writeln!(io::stderr(), "lemnosd: root phase: {}: {line}", device.id);
+    }
+    Ok(Vec::new())
+}
+
 /// Builds the request from `--user` and `--group`, or their environment variables. A group needs a
 /// user.
 ///
@@ -151,6 +180,8 @@ pub fn start(
     } else {
         None
     };
+    refused
+        .extend(driver_root_phases(&cx).map_err(|error| format!("driver root phases: {error}"))?);
     let plan = Plan {
         uid,
         gid,
