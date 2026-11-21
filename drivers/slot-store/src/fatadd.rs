@@ -696,7 +696,7 @@ impl<'a> Editor<'a> {
             out.extend(fatimage::long_entries(name, &sfn));
             sfn
         };
-        out.push(fatimage::short_entry(&sfn, attr, first as u32, size));
+        out.push(fatimage::named_entry(name, &sfn, attr, first as u32, size));
         out
     }
 

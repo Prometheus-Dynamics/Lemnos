@@ -1348,6 +1348,47 @@ Board checks that cannot be made on this PC (how the firmware reads a pointer fi
 whether `os_prefix=slots/bayN/` applies to every file it reads, U-Boot reading `slots/<bay>/` through
 `sysboot`) are in `testing/board-runs/I5i8.md`, each marked untested on board.
 
+### Firmware layout: what the firmware loads, checked
+
+The Pi firmware has no error path a board can recover from: a kernel it cannot size, a missing device
+tree or an overlay it cannot apply ends in a halt, and the boot ROM only tries again. So every file it
+loads is checked against the rules it reads by, before anything reaches a board. `lemnos-ctl
+firmware-check IMAGE` (crate `lemnos-firmware-check`) reads a boot partition image as the firmware does
+and prints one `ok`/`BAD` line per rule, then `firmware-layout rule N: PASS` or `FAIL (n BAD)`, with a
+non-zero exit when any rule fails. It reads only.
+
+**A view** is one way the firmware reaches a directory: `config.txt` (a normal boot), `--trial`
+(`tryboot.txt`, with `[tryboot]` on), or `--dir PREFIX` (`config.txt` with `os_prefix` taken as `PREFIX`).
+The text is followed as the firmware follows it: `include`, the model section filters the board has
+(`--filter NAME`; any other model filter is off, and a filter the check does not know is off and printed
+as such), `[boot_count...]` (`--boot-count N`), and `os_prefix`, prepended to every file.
+
+**The rules** (`RULE_VERSION` 1):
+
+| rule | holds when |
+|---|---|
+| names | no `kernel=`, `cmdline=` or `device_tree=`: the firmware's default names only |
+| kernel | the first default name that is there (`kernel_2712.img`, then `kernel8.img`; `--kernel NAME` to change); a gzip kernel is one member ending exactly at the end of the file, its CRC-32 right, its ISIZE equal to the decompressed size both in the trailer and as the file's last four bytes (the firmware sizes its output from those), and the arm64 Image magic after decompression; an uncompressed one carries the magic |
+| dtb | each default device tree the board's firmware loads (`--dtb NAME`, one or more) is there, its `totalsize` is the file size, and it carries `__symbols__` |
+| overlays | `overlays/README` under the prefix (so overlays load from the prefix, not the shared `overlays/`), `overlay_map.dtb` and `hat_map.dtb` there at their `totalsize`; each `dtoverlay=` and each `--needs-overlay NAME` (one the firmware applies by itself) there at its `totalsize`, and applying to every default device tree: each `__fixups__` label is in the tree's `__symbols__` and each `target-path` names a node (through `/aliases` when it is an alias) |
+| cmdline | one line, nothing after its newline, no blank padding, at most 1600 bytes |
+| initramfs | plain newc cpio ending at its trailer (followed by at most one 512-byte block of zeros, a cpio tool's padding), or gzip, zstd or xz ending at the end of the file; zstd is walked frame by frame and block by block, not decompressed |
+| case | every file and the `overlays` directory show the name exactly as the firmware asks for it: a long name, or an 8.3 name with its lowercase flags (byte 12), as Linux vfat writes them |
+
+The gzip end is found by inflating the stream (miniz_oxide, decompress only): no other reading says where
+a gzip stream ends.
+
+**Where a bad payload is stopped.** At creation, never on the device. The image builder (`lemnos-ctl
+boot-partition`) and the bundle step (`lemnos-ctl bundle`), which is where a PC check runs, check the
+payload and record the rule version they checked at in the signed manifest (`firmware_layout`). On the
+device, the install verifies the signature and the sizes only, and refuses by name a bundle whose manifest
+has no `firmware_layout` or an older one, so a bundle made before a rule is refused rather than installed.
+The check and its inflate are host-side: lemnos-ctl links them (and lemnos-ctl ships on images), the
+daemon and slot-init never do, and `scripts/check-shipped.sh` holds that for lemnosd, lemnos-slot-init,
+lemnos-good-boot and lemnos-orion, together with a licence allow-list for the check's dependency tree.
+The manifest key, the builder's check and the device's refusal come with layout version 6 (each file at
+its exact size, below); the padded layout above fails this check, which is why it is replaced.
+
 ### Adding to an existing boot partition
 
 `lemnos-ctl boot-partition --add-to DUMP` is for a board that runs another system from a FAT16 boot

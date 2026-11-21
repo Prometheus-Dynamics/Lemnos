@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-firmware-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Reads a boot partition image as the Pi firmware does and says, one line per rule, whether every file it loads is stored at its exact size and name"
+
+[lints]
+workspace = true
+
+# A host-side check: lemnos-ctl links it (the image builder, the bundle step, `firmware-check`).
+# The daemon and slot-init never do; scripts/check-shipped.sh holds that.
+[dependencies]
+# The FAT reader the bays are read with: the check sees the same files the installer wrote.
+lemnos-slot-store = { path = "../../drivers/slot-store" }
+# Inflate, to find where a gzip stream really ends (its trailer is the only size the format has).
+# Decompress only: default features off, so no allocation inside it and no compressor.
+miniz_oxide = { version = "=0.8.9", default-features = false }
