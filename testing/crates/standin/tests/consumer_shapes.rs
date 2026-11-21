@@ -266,3 +266,24 @@ fn what_isnt_there_is_named() {
         Err(lemnos_standin::Error::Board(_))
     ));
 }
+
+/// A line a board device owns is not raw: a second device the board gives the same line is refused
+/// at bind (`BUSY`, retried with backoff as every failure is), and the stand-in names that reason.
+/// The device that owns the line keeps running.
+#[test]
+fn a_line_a_board_device_owns_is_refused() {
+    let sim = SimBoard::new();
+    let _line = sim.add_line("shared");
+    let board = "[[devices]]\nid = \"power\"\ndriver = \"gpio-power-switch\"\n\
+                 uses = { line = \"shared\" }\n\
+                 [[devices]]\nid = \"aux\"\ndriver = \"raw-bus\"\nuses = { line = \"shared\" }\n";
+    let standin = StandIn::start(board, sim).unwrap();
+    standin.wait_running(&["power"]).unwrap();
+    let error = standin
+        .wait_running_for(&["aux"], Duration::from_secs(2))
+        .unwrap_err();
+    let text = error.to_string();
+    assert!(text.starts_with("aux isn't running: BackingOff"), "{text}");
+    assert!(text.contains("bind failed: busy"), "{text}");
+    standin.wait_running(&["power"]).unwrap();
+}

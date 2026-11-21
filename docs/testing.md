@@ -85,8 +85,9 @@ zones for the drivers that read `/sys`. `start_in(dir, ...)` puts the socket in 
 next to that tree. What the hardware was told is read back from the simulated parts (`MockLine::level`,
 `MockPwm::current`, `FanFiles::pwm1`). A light's colours are read through the service, with `current`.
 
-It is the real service, so it refuses what a board refuses: a claim another client holds is `BUSY`, and
-an address the board file doesn't allow is `NOT_PERMITTED`. `testing/crates/standin/tests/consumer_shapes.rs`
+It is the real service, so it refuses what a board refuses: a claim another client holds is `BUSY`, a line
+a board device owns is `bind failed: busy` for any other device the board gives it, and an address the board
+file doesn't allow is `NOT_PERMITTED`. `testing/crates/standin/tests/consumer_shapes.rs`
 shows each use. The Orion precheck is left out (no Orion in a consumer's test).
 
 ### The boundary rules
