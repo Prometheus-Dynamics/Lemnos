@@ -439,3 +439,32 @@ Run by the coordinator on the board (boot id 033d48d0-cced-4528-88f6-ea2fe8bd695
 `readlink -f /sys/block/mmcblk0/device` returned `/sys/devices/platform/fe2b0000.mmc/mmc_host/mmc0/mmc0:aaaa`;
 `/sys/class/mmc_host` lists only `mmc0`, which is `fe2b0000.mmc`. So the SD card is on sdmmc0 at
 0xfe2b0000, as `bind.rs` assumes. This item is verified; nothing else on the board changed.
+
+## Board run, 2026-11-21: read-only anchors (ZERO 3E)
+
+Status: untested on board. The anchors and the reboot-mode register were read. Nothing was written, no board step
+A to E was run, and the board was not rebooted. The board is the same serial (`b3d1ffecafae5cec`) and the same ED25519
+host key as above.
+
+Hypothesis (written before the run): the first 16 MiB of `mmcblk0` and `uboot-env` equal the anchors recorded above,
+and the reboot-mode register reads `0x5242C300` (BOOT_NORMAL).
+
+| Read | Value | Anchor | Result |
+|---|---|---|---|
+| sha256 of the first 16 MiB of `/dev/mmcblk0` | `2578fdb1e5097dd43dd55cc2d1ca4124ad1cf4b006e49a435391c4012e26bea3` | the same | equal |
+| sha256 of `/dev/mmcblk0p1` (`uboot-env`) | `de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31` | the same | equal |
+| `OS_REG0` at `0xfdc20200` | `0x5242C300` | BOOT_NORMAL | as expected |
+| `/sys/block/mmcblk0/size` | 124735488 sectors | the same | equal |
+
+The `rootfs` (p2) hash was not taken: the record says p2 changes while the system runs, so a read now proves nothing
+about the maskrom baseline.
+
+The register read is `busybox devmem 0xfdc20200 32` with no value, so it is a read. `/proc/iomem` has no entry for
+the `0xfdc2xxxx` range, and `CONFIG_STRICT_DEVMEM=y` with `IO_STRICT_DEVMEM` unset, so the read went through
+`/dev/mem` to an unclaimed register. This is the same read the earlier windows took and gave the same value. It is
+a read of a boot-mode word; nothing in the run wrote it.
+
+Result: the anchors and the boot-mode word read as the record says. Step 1a (the write of `0xEF08A53C` and the reboot
+into maskrom) is not run: it is a write and a reboot, and it waits for the coordinator's go and the PC-side host.
+
+Evidence: `/run/user/1000/zero3e-sweep/mr1.out` on the PC.

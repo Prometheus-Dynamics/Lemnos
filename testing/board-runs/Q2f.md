@@ -115,3 +115,24 @@ this repository reads the boot fragment.
   and the test boards, not from a schematic).
 - The reference SoC's `usb-peripheral` port: its base tree was not read for a VBUS fact, so a board that
   names that port must state its VBUS.
+
+## Board run, 2026-11-21: read-only on the ZERO 3E (RK3566)
+
+Status: untested on board. The live VBUS facts were read. No stand-in was applied, no meter was on the PC bench,
+and no host was plugged into the port.
+
+Hypothesis (written before the run): the live `usb2phy@fe8a0000/otg-port` has no `phy-supply` (or one naming a
+regulator that can be read), and no regulator is wired to the device port.
+
+| Read | Live value | Result |
+|---|---|---|
+| `usb2phy@fe8a0000/otg-port/phy-supply` | absent | the port has no VBUS supply: matches the map's base fact `usb-no-vbus` (no `phy-supply` in the base) |
+| `usb2phy@fe8a0000/otg-port` properties | `status` only | no `regulator-lemnos-no-vbus` (no overlay applied) |
+| sysfs regulator named `vbus` | `regulator.16`, `disabled`, 0 users | this is the PMIC's `OTG_SWITCH` (`/i2c@fdd40000/pmic@20/regulators/OTG_SWITCH`), a host-VBUS switch that nothing uses; the device port does not reference it |
+| other regulators | 22 registered (sysfs `regulator.0`..`.21`); none is bound to the OTG port | the rails the board uses are enabled (for example `vcc5v_midu`, `vcc3v3_sys`); the regulator nodes were not checked for a GPIO enable |
+
+Result: the RK3566 port's VBUS is undriven by the device tree in this image, which is the base fact the map states.
+The PMIC's OTG switch is disabled and has no consumer. The step-1 overlay check, the step-2 stand-in read after an
+overlay, and the meter steps 3 to 5 need an overlay and a meter, and were not run.
+
+Evidence: `/run/user/1000/zero3e-sweep/q2fg.out` on the PC.

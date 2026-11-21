@@ -44,3 +44,25 @@ at the pin (or the port's VBUS) and the kernel's view, in the order below.
   is the finding.
 - The U-Boot naming for RK3588 is assumed from the RK3566 driver (`docs/device-tree.md`, "U-Boot naming").
 - The Raspberry Pi kernel's hog path (`rpi-7.2.y`) was not compared with v6.12 line by line.
+
+## Board run, 2026-11-21: read-only on the ZERO 3E (RK3566)
+
+Status: untested on board. The live tree, sysfs and the boot file were read. No hold was applied, and the
+U-Boot environment was not touched.
+
+Hypothesis (written before the run): no `gpio-hog` in the live tree, no `lemnos` marker, debugfs not mounted,
+and the boot file has no hold line.
+
+| Read | Result |
+|---|---|
+| `gpio-hog` anywhere under `/proc/device-tree` | none |
+| `lemnos` string under `/proc/device-tree` | none |
+| `/sys/kernel/debug/gpio` | debugfs is not mounted; not mounted by this check (not mounted here, so no line-by-line level can be read) |
+| GPIO chips in sysfs | `gpiochip0`..`gpiochip4` present |
+| `/boot/extlinux/extlinux.conf` | `label gaia`, `devicetree /boot/rk3566-radxa-zero-3e-gadget.dtb`, `append root=PARTLABEL=rootfs rootwait console=ttyS2,1500000 earlycon`; no hold |
+
+Result: no hold exists on this image. The checks 1 to 5 need an overlay with the hog or a U-Boot fragment that
+holds a line, the `gpio` write in U-Boot, and a debugfs-visible driver. None was run; the debugfs read is the
+blocking item, since mounting debugfs is a change this run did not make.
+
+Evidence: `/run/user/1000/zero3e-sweep/q2fg.out` on the PC.

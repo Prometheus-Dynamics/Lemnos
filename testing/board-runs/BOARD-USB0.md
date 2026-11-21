@@ -105,3 +105,38 @@ nodes, kernel log tail): equal, apart from this session's own login processes an
 worker threads. 55 modules both times; no module loaded or removed. boot_id unchanged; the
 reboot-mode register unchanged; the first 16 MiB hash unchanged. The only trace is dropbear's
 login lines in `/tmp/messages` (tmpfs). The board's `eth0` and its DHCP client were not touched.
+
+## Board run, 2026-11-21: read-only, the open items and the baseline
+
+Status: untested on board. This run only read the board. It wrote nothing to it, loaded and unloaded no module,
+unbound nothing, changed no storage or U-Boot environment, and did not reboot it. Board: the ZERO 3E, serial
+`b3d1ffecafae5cec`, ED25519 host key `SHA256:FYYZVU…Q3g` (the same as the record above); the PC's access was a
+private known-hosts file under `/run/user/1000`, and `~/.ssh/known_hosts` was not edited.
+
+Hypothesis (written before the run): the blocks in the table are present with the same compatibles, the blocks the
+board lacks are absent, and the module count is the same as the earlier baseline (55).
+
+| Check | Result |
+|---|---|
+| `video-codec@fdee0000` (VEPU), `iommu@fdee0800` | present, `rockchip,rk3568-vepu`; IOMMU `rockchip,rk3568-iommu`; bound to `hantro-vpu`, `rk_iommu` |
+| `video-codec@fdea0400` (VPU), `iommu@fdea0800` | present, `rockchip,rk3568-vpu`; IOMMU present; bound to `hantro-vpu`, `rk_iommu` |
+| `rga@fdeb0000` | present, `rockchip,rk3568-rga`; bound to `rockchip-rga` |
+| `watchdog@fe600000` | present, `rockchip,rk3568-wdt`, `snps,dw-wdt`; bound to `dw_wdt` |
+| NPU, `jpegd@fded0000`, `rkvdec`, `rkvenc` | absent from the live tree (no node, no match) |
+| `/dev/video0`, `/dev/video1`, `/dev/video2` | present (RGA, decoder, encoder) |
+| `/dev/mpp_service`, `/dev/dma_heap` | absent |
+| `/dev/watchdog`, `/dev/watchdog0`, `/dev/mem` | present |
+| loaded modules | 55, the same count as the earlier baseline; `hantro_vpu`, `rockchip_rga`, `panfrost`, `rockchipdrm` among them |
+| processes | no lemnos or slot process; the only watchdog thread is the kernel's `[watchdogd]` |
+| mounts | `/` ext4; `/dev`, `/proc`, `/sys`, `/run`, `/tmp`, `/dev/shm` as before |
+| `udc` | `fcc00000.usb`, `configured`, `g_ether` (the link this PC uses) |
+
+Result: the table in this note holds on the board as it runs now. No block the table lists as absent is present.
+The record's open probes still cannot run on this image: there is no vendor service node (`/dev/mpp_service`), no
+NPU node, and no JPEG-decoder node. The board's boot id changed since the 2026-11-18 record (`033d48d0…` to
+`8a105359…`): the board rebooted before this session's first read, and this run did not reboot it.
+
+Not run: any row that needs a vendor image, a serial console, a daemon, or a write. The reading list in this note
+(`K1b`, `RKJPEGE`, `RKJPEG-DEC`, `E32`, `I5i5`, `I5i7`) stays as it was.
+
+Evidence: `/run/user/1000/zero3e-sweep/board-usb0.out` on the PC.

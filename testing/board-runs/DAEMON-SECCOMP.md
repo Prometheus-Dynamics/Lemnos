@@ -31,3 +31,12 @@ image starts.
 ## Result
 
 Not run. **untested on board**
+
+## Board run, 2026-11-21: not applicable on the ZERO 3E
+
+Not run as a row. This sheet is for the CM5 image, which has `lemnosd` under its unit. The ZERO 3E has no daemon.
+A read-only check found no `lemnos` process, no systemd tree (`/usr/lib/systemd`, `/etc/systemd`) and no `lemnosd`
+binary, so neither read (`Seccomp:` of a `lemnosd` process, `SystemCallFilter` of its unit) can be taken there.
+The result is not a pass and not a fail: the probe found nothing to read. **untested on board**
+
+Evidence: `/run/user/1000/zero3e-sweep/daemon-seccomp.out` on the PC.

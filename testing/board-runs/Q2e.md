@@ -112,3 +112,32 @@ Each removal was a one-line change, the source restored from a copy afterwards, 
   is taken from the bus address, not read from a board.
 - `dr_mode = "peripheral"` with no `extcon` on the RK3566 or RK3588: the fixed peripheral role does not
   use `extcon`. Whether a board needs VBUS detection on the port is unproven on hardware.
+
+## Board run, 2026-11-21: read-only on the ZERO 3E (RK3566)
+
+Status: untested on board. The live tree and sysfs were read; the overlay was not applied and the port was not
+plugged into a host.
+
+Hypothesis (written before the run): the live `/usb@fcc00000` is `peripheral` and `okay` (this board's gadget
+network runs on it), `/sys/class/udc` lists `fcc00000.usb`, and the RK3566 has no SuperSpeed PHY node.
+
+| Read | Live value | Result |
+|---|---|---|
+| `usb@fcc00000/dr_mode` | `peripheral` (with its NUL) | matches step 2 |
+| `usb@fcc00000/status` | `okay` | matches |
+| `usb@fcc00000/compatible` | `rockchip,rk3568-dwc3`, `snps,dwc3` | the map's name |
+| `usb@fcc00000/phys`, `phy-names` | one phandle, `usb2-phy` | the USB 2 PHY only; no SuperSpeed PHY (matches the map) |
+| `usb@fcc00000/maximum-speed` | `high-speed` | USB 2 only |
+| `usb@fcc00000/extcon` | present | set by the SoC tree for the OTG role (the map's note) |
+| `usb2phy@fe8a0000/otg-port` | `okay`, no `phy-supply` | matches the map's base fact (`usb-no-vbus`) |
+| `/sys/class/udc` | `fcc00000.usb`, state `configured`, function `g_ether` | matches step 3 |
+| netdev on the UDC | `usb0` under `fcc00000.usb/gadget.0` | the gadget network is on this port |
+| SuperSpeed or xHCI node in the tree | none | matches |
+
+The `dr_mode = peripheral` here comes from the image's gadget device tree, not from a lemnos overlay. This read
+therefore shows the live state of the port; it does not show the overlay's effect.
+
+Not run: step 2 (applying the overlay with `fdtoverlays`), step 4 (plug into a host and `lsusb`) and step 5
+(`lemnos-ctl validate`, which is not on the board). Those change the port or the boot. **untested on board**.
+
+Evidence: `/run/user/1000/zero3e-sweep/q2e.out` on the PC.
