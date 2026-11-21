@@ -722,6 +722,7 @@ impl SystemSlots {
     fn fail_install(&mut self, install: &mut Install, failure: Failure) -> Status {
         let status = failure.0;
         self.show("failed", NO_PROGRESS);
+        self.unwind(install);
         install.discard();
         let ended = if install.refused {
             Ended::Refused
@@ -767,7 +768,8 @@ impl SystemSlots {
         self.end_attempt(Ended::Refused, reason, None);
     }
 
-    /// The install's next bytes; the last of them puts the slot in place.
+    /// The install's next bytes. The last of them ends the bytes; the finish's steps then run from the
+    /// driver's ticks (see [`SystemSlots::finish_step`]), so no call waits for the finish.
     fn feed(&mut self, install: &mut Install, offset: u64, bytes: &[u8]) -> Result<()> {
         if let Err(failure) = install.take(offset, bytes) {
             // A write out of order changes nothing: the install goes on from where it is.
@@ -785,50 +787,93 @@ impl SystemSlots {
             self.show("receiving", permille(install.got, install.size));
             return Ok(());
         }
-        // The hash, verity and signature are checked by `finish`, whichever way the bytes came.
+        install.begin_finish();
         self.show("verifying", NO_PROGRESS);
-        let mut state = self.state();
+        Ok(())
+    }
+
+    /// Runs the next step of an install's finish: what a tick does while one is due. A step is short,
+    /// so the device answers other calls between steps. A step that fails ends the install.
+    fn finish_step(&mut self) {
+        if !self.install.as_ref().is_some_and(Install::finishing) {
+            return;
+        }
+        let Some(mut install) = self.install.take() else {
+            return;
+        };
         let finish = Finish {
             layout: &self.layout,
             boot_args: &self.boot_args,
             boot_sources: &self.boot_sources,
             guard: Guard {
                 running: self.running(),
-                default: state.default.clone(),
+                default: self.state().default,
             },
             record: &*self.record,
         };
-        match install.finish(&finish) {
-            Ok(id) => {
+        let done = install.step(&finish);
+        match done {
+            Ok(None) => {}
+            Ok(Some(id)) => {
                 if let Some(signed) = install.signed.clone() {
                     self.last_signed = Some((id.clone(), signed));
                 }
-                self.mark_keep_old(&id, install.keep_old)?;
-                state.staged = id.clone();
-                state.state = "staged".into();
-                state.error.clear();
-                state.progress = 1000;
-                self.save(&state)?;
-                install.drop_source();
-                install.end = Some(Ok(id));
-                // The bays are written whether or not the loader will act on them. When it won't, the reply says so.
-                let reason = match self.record.trial_updates() {
-                    TrialUpdates::Available => String::new(),
-                    TrialUpdates::Unavailable(why) => format!(
-                        "the boot loader will not start it: {}",
-                        why.reason.sentence()
-                    ),
-                };
-                self.end_attempt(Ended::Installed, &reason, Some(install));
-                self.show("done", NO_PROGRESS);
-                Ok(())
+                match self.stage(&id, install.keep_old) {
+                    Ok(()) => {
+                        // The bays are written whether or not the loader will act on them. When it won't, the reply says so.
+                        let reason = match self.record.trial_updates() {
+                            TrialUpdates::Available => String::new(),
+                            TrialUpdates::Unavailable(why) => format!(
+                                "the boot loader will not start it: {}",
+                                why.reason.sentence()
+                            ),
+                        };
+                        install.drop_source();
+                        install.end = Some(Ok(id));
+                        self.end_attempt(Ended::Installed, &reason, Some(&install));
+                        self.show("done", NO_PROGRESS);
+                    }
+                    Err(status) => {
+                        let reason =
+                            "the slot is in place, but the install's record could not be written";
+                        self.fail_install(&mut install, (status, reason.into()));
+                    }
+                }
             }
             Err(failure) => {
                 if let Some(signed) = install.signed.clone() {
                     self.last_signed = Some((String::new(), signed));
                 }
-                Err(self.fail_install(install, failure))
+                self.fail_install(&mut install, failure);
             }
+        }
+        self.install = Some(install);
+    }
+
+    /// Runs every finish step now, as the ticks would, one after another. For the offline writer, which
+    /// has no host to tick it.
+    pub(crate) fn finish_all(&mut self) {
+        while self.install.as_ref().is_some_and(Install::finishing) {
+            self.finish_step();
+        }
+    }
+
+    /// Makes an installed slot the staged one, with its keep-old marker when the install asked for it.
+    fn stage(&mut self, id: &str, keep_old: bool) -> Result<()> {
+        self.mark_keep_old(id, keep_old)?;
+        let mut state = self.state();
+        state.staged = id.to_string();
+        state.state = "staged".into();
+        state.error.clear();
+        state.progress = 1000;
+        self.save(&state)
+    }
+
+    /// Frees the bay of an install that ends before its commit (see [`Install::bay_slot`]): no
+    /// pointer and no image names it, so the bay goes back.
+    fn unwind(&self, install: &Install) {
+        if let Some(id) = install.bay_slot() {
+            let _ = self.record.free(id);
         }
     }
 
@@ -1854,11 +1899,14 @@ impl Lifecycle for SystemSlots {
             self.state_check_ns = now_ns.saturating_add(OWNER_RETRY_NS);
         }
         self.pull();
+        self.finish_step();
         self.indicate();
         let install = self
             .install
             .as_ref()
-            .filter(|install| install.end.is_none() && install.source.is_some())
+            .filter(|install| {
+                install.end.is_none() && (install.source.is_some() || install.finishing())
+            })
             .map(|_| now_ns);
         let settle = self.settle(now_ns);
         let slow = self.slow_check(now_ns);
@@ -2075,10 +2123,8 @@ impl Lifecycle for SystemSlots {
         };
         let state = match &install.end {
             None => {
-                return JobState::Running {
-                    done: install.got,
-                    total: install.size,
-                };
+                let (done, total) = install.progress();
+                return JobState::Running { done, total };
             }
             Some(Ok(id)) => JobState::Finished(match result.write(id.as_bytes()) {
                 Ok(()) => Status::OK,
@@ -2092,6 +2138,7 @@ impl Lifecycle for SystemSlots {
 
     fn job_cancel(&mut self, job: JobId) {
         if let Some(mut install) = self.install.take_if(|i| i.job == job && i.end.is_none()) {
+            self.unwind(&install);
             install.discard();
             install.end = Some(Err((Status::CANCELLED, String::new())));
             self.end_attempt(Ended::Cancelled, attempt::CANCELLED, Some(&install));

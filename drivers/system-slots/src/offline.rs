@@ -552,6 +552,7 @@ fn drive(slots: &mut SystemSlots, bundle: &[u8], layout: &Layout) -> Result<Stri
             .write((i * STREAM) as u64, piece)
             .map_err(|status| refusal(layout, status))?;
     }
+    slots.finish_all();
     let mut out = [0u8; 256];
     let mut reply = Reply::new(&mut out);
     let id = match slots.job(job, &mut reply) {

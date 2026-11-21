@@ -526,26 +526,53 @@ pub fn kept(layout: &Layout, id: &str) -> Option<Vec<(String, String)>> {
     )
 }
 
-/// Keeps `dir` (a slot's boot directory as it goes on the boot partition) on the data
-/// partition: each file by content, and `<id>.boot` listing them.
-pub fn put(layout: &Layout, id: &str, dir: &Path) -> io::Result<()> {
-    let store = layout.bootfiles();
-    fs::create_dir_all(&store)?;
-    let mut list = String::new();
-    for name in files_under(dir)? {
-        let from = dir.join(&name);
+/// A slot's boot directory (as it goes on the boot partition) kept on the data partition: each file
+/// by content, and `<id>.boot` listing them. It goes in one file a step: each file is hashed and
+/// copied unless the store has its content already, and the slot's list is written last.
+pub struct Put {
+    dir: PathBuf,
+    store: PathBuf,
+    list_path: PathBuf,
+    names: Vec<String>,
+    at: usize,
+    list: String,
+}
+
+impl Put {
+    /// Starts putting `dir` (the slot `id`'s boot directory) into the store.
+    pub fn begin(layout: &Layout, id: &str, dir: &Path) -> io::Result<Self> {
+        let store = layout.bootfiles();
+        fs::create_dir_all(&store)?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            store,
+            list_path: layout.boot_list(id),
+            names: files_under(dir)?,
+            at: 0,
+            list: String::new(),
+        })
+    }
+
+    /// The next file's step, or the list's when every file is in. `true` once the directory is in.
+    pub fn step(&mut self) -> io::Result<bool> {
+        let Some(name) = self.names.get(self.at).cloned() else {
+            sync_dir(&self.store)?;
+            replace(&self.list_path, self.list.as_bytes())?;
+            return Ok(true);
+        };
+        let from = self.dir.join(&name);
         let sha = sha256_file(&from)?;
-        let to = store.join(&sha);
+        let to = self.store.join(&sha);
         if !to.exists() {
-            let beside = store.join(format!(".{sha}.tmp"));
+            let beside = self.store.join(format!(".{sha}.tmp"));
             fs::copy(&from, &beside)?;
             fs::File::open(&beside)?.sync_all()?;
             fs::rename(&beside, &to)?;
         }
-        list.push_str(&format!("{sha}  {name}\n"));
+        self.list.push_str(&format!("{sha}  {name}\n"));
+        self.at += 1;
+        Ok(false)
     }
-    sync_dir(&store)?;
-    replace(&layout.boot_list(id), list.as_bytes())
 }
 
 /// A removed slot's kept files, and then the files no slot lists any more.

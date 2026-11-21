@@ -869,7 +869,18 @@ other stakeholders, so its lines are named `orion: ...` in the refusal.
   a sender in that group can write there and nothing else can.
 
 Both ways feed the same unpacker and the same checks. A job's progress is the bytes taken of the
-size. Its result is the new slot's id. One install runs at a time.
+size, then one unit for each of the finish's five steps: the checks, the slot's files, the payloads
+into a bay, the boot directory into the store, and the commit (the image and manifest into place,
+then the metadata). The total is the size plus those five, so the figure never goes back. Its result
+is the new slot's id. One install runs at a time.
+
+The finish is not in the call that takes the last byte. That call returns at once with the job
+running, and the driver runs the finish one step a tick, each step short: the boot directory's files
+go in one file a step, so a call from another session answers between any two steps. A step that
+refuses ends the job with the refusal, and the reason is in `info`. A cancel after the payloads are
+in a bay frees that bay, since nothing points at it yet. The commit is one step, so a cancel falls
+before it or not at all; once it has run, the install is in place. `docs/daemon.md` ("When a client gets `BUSY`") has the job's
+contract.
 
 ## Over Orion
 

@@ -14,6 +14,7 @@ use lemnos_core::{
 use sha2::{Digest, Sha256};
 
 use crate::boot::{BootRecord, hex};
+use crate::install::Install;
 use crate::json::Json;
 use crate::manifest::BLOCK;
 use crate::store::{self, Layout, Meta, State};
@@ -414,10 +415,14 @@ impl Board {
             }
             offset += chunk.len() as u64;
             if let Some(JobState::Running { done, total }) = self.poll(job) {
-                assert_eq!(total, bytes.len() as u64);
+                assert_eq!(total, bytes.len() as u64 + crate::install::FINISH_UNITS);
                 assert!(done >= last_progress);
                 last_progress = done;
             }
+        }
+        // The finish's steps run from the ticks, as the host runs them.
+        while self.slots.install.as_ref().is_some_and(Install::finishing) {
+            self.slots.tick(0);
         }
         let mut out = [0u8; 128];
         let mut reply = Reply::new(&mut out);
@@ -603,6 +608,7 @@ fn only_the_starter_writes_and_only_where_the_install_is() {
     );
     // Out of order changed nothing: it goes on from where it was.
     board.slots.write(512, &bundle[512..]).unwrap();
+    board.slots.finish_all();
     let mut out = [0; 16];
     assert_eq!(
         board.slots.job(job, &mut Reply::new(&mut out)),
@@ -1518,8 +1524,18 @@ config = {{ systemctl = "{ctl}" }}
             .unwrap();
         offset += chunk.len() as u64;
     }
+    // The finish's steps run from the host's ticks, one a tick, until the job ends.
     let mut updates: Vec<JobUpdate> = Vec::new();
-    host.take_job_updates(&mut updates);
+    for _ in 0..1000 {
+        host.run_ticks();
+        host.take_job_updates(&mut updates);
+        if updates
+            .iter()
+            .any(|u| matches!(u.event, JobEvent::Finished { .. }))
+        {
+            break;
+        }
+    }
     let end = updates
         .iter()
         .find_map(|u| match &u.event {
@@ -5210,11 +5226,15 @@ fn a_session_that_did_not_start_it_sees_a_running_install_as_the_job_shows_it() 
     board.slots.write(0, &bundle[..3000]).unwrap();
     let seen = attempt_of(&mut board);
     assert_eq!(seen.state, "running");
-    // The job's own figures, which `list` and `describe` show.
+    // The attempt counts the bundle's bytes; the job's progress adds the finish's steps to them.
     let Some(JobState::Running { done, total }) = board.poll(job) else {
         panic!("not running")
     };
-    assert_eq!((seen.received, seen.total), (Some(done), Some(total)));
+    assert_eq!(
+        (seen.received, seen.total),
+        (Some(done), Some(bundle.len() as u64))
+    );
+    assert_eq!(total, bundle.len() as u64 + crate::install::FINISH_UNITS);
     assert_eq!(seen.slot, "os-2");
     assert!(
         seen.text.contains("slot os-2 running (3000 of "),
@@ -5223,6 +5243,7 @@ fn a_session_that_did_not_start_it_sees_a_running_install_as_the_job_shows_it() 
     );
     board.slots.caller(CallerId(1));
     board.slots.write(3000, &bundle[3000..]).unwrap();
+    board.slots.finish_all();
     assert_eq!(attempt_of(&mut board).state, "installed");
 }
 
@@ -5244,6 +5265,7 @@ fn a_new_attempt_replaces_the_record_when_it_starts() {
     assert_eq!(seen.reason, "", "the earlier reason is gone");
     board.slots.caller(CallerId(1));
     board.slots.write(0, &bundle).unwrap();
+    board.slots.finish_all();
     let seen = attempt_of(&mut board);
     assert_eq!(
         (seen.state.as_str(), seen.slot.as_str()),
@@ -6397,4 +6419,107 @@ fn a_slot_for_another_medium_is_refused_by_name_at_install_and_trial() {
         "{}",
         board.state().error
     );
+}
+
+/// The call that takes a bundle's last byte returns while the finish is still to run: the finish is
+/// steps the driver's ticks run, one a tick, so no call waits behind it. Fail before: the write ran
+/// the whole finish, so the job had ended when it returned and any call behind it waited out the
+/// deadline.
+#[test]
+fn the_call_that_takes_the_last_byte_returns_before_the_finish_runs() {
+    let mut board = Board::new("os-1");
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board.slots.write(0, &bundle).unwrap();
+    assert!(matches!(
+        board.poll(job),
+        Some(JobState::Running { done, total }) if done == bundle.len() as u64 && total > done
+    ));
+    assert!(!board.layout().installed("os-2"));
+    // Each tick runs one step. Between the steps another call answers, and the progress only goes up.
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut last = bundle.len() as u64;
+    let mut ticks = 0;
+    while let Some(JobState::Running { done, .. }) = board.poll(job) {
+        assert!(done >= last, "progress went back: {done} after {last}");
+        last = done;
+        board.slots.tick(0);
+        board.slots.list(&mut buf).unwrap();
+        ticks += 1;
+        assert!(ticks < 1000, "the finish never ended");
+    }
+    // Every phase, and every boot file's copy, is a step of its own.
+    assert!(ticks > 5, "the finish took {ticks} steps");
+    let mut out = [0u8; 128];
+    let mut reply = Reply::new(&mut out);
+    assert_eq!(
+        board.slots.job(job, &mut reply),
+        JobState::Finished(Status::OK)
+    );
+    let len = reply.len();
+    assert_eq!(&out[..len], b"os-2");
+    assert!(board.layout().installed("os-2"));
+    assert!(!board.work_left());
+}
+
+/// A bundle that is bigger than one tick's read comes through a streamed install whose finish runs
+/// from the ticks, and the job reports its progress up to the end.
+#[test]
+fn a_streamed_install_bigger_than_a_tick_finishes_through_its_job() {
+    let mut board = Board::new("os-1");
+    let bundle = big_bundle("os-2");
+    let (status, result, progress) = board.stream(1, &bundle, 64 * 1024);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(result, b"os-2");
+    assert!(progress > 0);
+    assert!(board.layout().installed("os-2"));
+}
+
+/// A bundle refused by one of the finish's checks ends its job with the refusal, named, and the last
+/// attempt says it was refused.
+#[test]
+fn a_refusal_the_finish_finds_comes_back_by_name() {
+    let mut board = Board::new("os-1");
+    let mut other = Bundle::new("os-2");
+    other.boot[1].1 = format!(
+        "console=tty1 rootwait board.slot=os-9 board.roothash={ROOT_HASH} board.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n"
+    )
+    .into_bytes();
+    let (status, _, _) = board.stream(1, &other.pack(), 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert!(board.state().error.contains("doesn't name its slot"));
+    assert!(board.slots.info_json().contains("\"state\":\"refused\""));
+    assert!(!board.layout().installed("os-2"));
+    assert!(!board.work_left());
+}
+
+/// A cancel after the payloads are in a bay frees the bay: nothing points at it, and no image or
+/// manifest names it.
+#[test]
+fn a_cancel_after_the_payloads_are_in_frees_their_bay() {
+    let mut board = Board::new("os-1");
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board.slots.write(0, &bundle).unwrap();
+    while !board.told.installed().iter().any(|s| s == "os-2") {
+        board.slots.tick(0);
+    }
+    board.slots.job_cancel(job);
+    assert!(board.told.freed().iter().any(|s| s == "os-2"));
+    assert!(!board.work_left());
+    assert!(!board.layout().installed("os-2"));
+    let mut out = [0u8; 8];
+    assert_eq!(
+        board.slots.job(job, &mut Reply::new(&mut out)),
+        JobState::Finished(Status::CANCELLED)
+    );
+    board.install_ok("os-2");
 }

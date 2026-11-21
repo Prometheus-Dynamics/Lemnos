@@ -82,8 +82,9 @@ pub trait Slots {
     #[method(1)]
     fn list(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
     /// Starts installing a bundle of `size` bytes, which [`Slots::write`] then delivers in
-    /// order. The job's progress is the bytes taken of `size`, and its result the new slot's id
-    /// (UTF-8). `pin` keeps the slot from housekeeping; `keep_old` has confirming it remove no
+    /// order. The job's progress is the bytes taken of `size`, then one unit for each of the five
+    /// finish steps (total `size + 5`), and its result the new slot's id (UTF-8). The finish runs
+    /// from the driver's ticks, so the call that takes the last byte returns at once. `pin` keeps the slot from housekeeping; `keep_old` has confirming it remove no
     /// old slots. One install at a time: `BUSY` while another runs. Never over the running or
     /// the default slot. `NOT_PERMITTED` when the signature policy refuses the bundle (`info`
     /// then says why); `INVALID_ARGUMENT` for a malformed signature.

@@ -381,7 +381,8 @@ fn a_bundle_pushed_through_orion_installs_through_the_install_file_action() {
             Some(Update::Doing(doing)) => {
                 let done = u64::from_le_bytes(doing.data[..8].try_into().expect("done"));
                 let total = u64::from_le_bytes(doing.data[8..16].try_into().expect("total"));
-                assert_eq!(total, bundle.len() as u64);
+                // The bytes, then the install's five finish steps (`FINISH_UNITS`).
+                assert_eq!(total, bundle.len() as u64 + 5);
                 assert_eq!(doing.message, format!("{done} of {total}"));
                 seen.push(done);
             }

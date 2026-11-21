@@ -447,6 +447,63 @@ pub struct Install {
     /// The bundle's file in `.incoming`, for an install from a file: read on the driver's ticks,
     /// and deleted when the install ends.
     pub source: Option<Source>,
+    /// The finish's next step, once every byte has come (see [`Install::step`]); `None` before, and
+    /// after the last step.
+    phase: Option<Phase>,
+    /// The finish steps done, in the progress's units (see [`Install::progress`]).
+    units: u64,
+    /// What the finish's steps keep between ticks.
+    fin: Fin,
+}
+
+/// The finish's steps, in order. Each is one call of [`Install::step`], made from the driver's tick,
+/// so a step is short and the device answers other calls between two of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The bundle's checks: the tar is whole, the manifest is a slot's, the signature, board and
+    /// slot are admitted, the boot files and the command line are the bundle's. Writes nothing.
+    Check,
+    /// slot.json, the overlays' README and the board's boot-loader files for the slot.
+    Prepare,
+    /// The payloads into a free bay of the boot partition.
+    Payloads,
+    /// The slot's boot directory into the store on the data partition: one file a step.
+    BootFiles,
+    /// The image and manifest into place, and the slot's metadata: the install is then in place.
+    Commit,
+}
+
+impl Phase {
+    fn next(self) -> Option<Phase> {
+        match self {
+            Phase::Check => Some(Phase::Prepare),
+            Phase::Prepare => Some(Phase::Payloads),
+            Phase::Payloads => Some(Phase::BootFiles),
+            Phase::BootFiles => Some(Phase::Commit),
+            Phase::Commit => None,
+        }
+    }
+}
+
+/// The finish's steps counted in the progress: one unit for each of the phases, whatever the number
+/// of boot files. The progress's total is the bundle's size plus these.
+pub const FINISH_UNITS: u64 = 5;
+
+/// What the finish's steps keep from one tick to the next.
+#[derive(Default)]
+struct Fin {
+    /// The slot's id, once the checks have named it.
+    id: String,
+    /// The slot's boot directory in the work directory, and its command line as the bundle has it.
+    boot_dir: PathBuf,
+    cmdline: String,
+    /// The signature's outcome, once the checks have decided it.
+    outcome: Option<Outcome>,
+    /// The boot directory's copy going into the store, while its files are going in.
+    put: Option<boot::Put>,
+    /// Whether the payloads are in the bay and the commit has not begun: a cancel or a failure then
+    /// frees the bay, since no pointer and no image names it.
+    bay: bool,
 }
 
 /// A bundle in `.incoming`, open.
@@ -587,6 +644,9 @@ impl Install {
             signed: None,
             refused: false,
             source: None,
+            phase: None,
+            units: 0,
+            fin: Fin::default(),
         })
     }
 
@@ -620,18 +680,62 @@ impl Install {
         self.got == self.size
     }
 
-    /// Checks what came against the signed manifest and puts the slot in place. Returns its id.
-    pub fn finish(&mut self, board: &Finish<'_>) -> Result<String, Failure> {
-        let mut refused = false;
-        let done = self.finish_checks(board, &mut refused);
-        self.refused = refused;
-        done
+    /// The bytes have all come: the finish's steps run from here, one a call of [`Install::step`].
+    pub fn begin_finish(&mut self) {
+        if self.phase.is_none() && self.complete() && self.end.is_none() {
+            self.phase = Some(Phase::Check);
+        }
     }
 
-    /// [`Install::finish`]'s work. `refused` says, at the point a failure returns, whether it is
-    /// a refusal (the bundle's words or the board's turn it away) or the work going wrong (the
-    /// disk, a hash or size that does not match).
-    fn finish_checks(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<String, Failure> {
+    /// Whether the finish's steps are still to run.
+    pub fn finishing(&self) -> bool {
+        self.phase.is_some()
+    }
+
+    /// The progress the install stands at: `(done, total)`. The bytes taken, then one unit for
+    /// each finish step done, so the figure never goes back when the last byte comes.
+    pub fn progress(&self) -> (u64, u64) {
+        (self.got + self.units, self.size + FINISH_UNITS)
+    }
+
+    /// The slot whose payloads are in its bay while the commit has not begun: a cancel or a failure
+    /// frees that bay, since no pointer and no image name it.
+    pub fn bay_slot(&self) -> Option<&str> {
+        self.fin.bay.then_some(self.fin.id.as_str())
+    }
+
+    /// Runs the next finish step. `Some(id)` once the slot is in place; `None` while steps remain.
+    /// A failure ends the finish: the caller then ends the install.
+    pub fn step(&mut self, board: &Finish<'_>) -> Result<Option<String>, Failure> {
+        let Some(phase) = self.phase else {
+            return Ok(None);
+        };
+        let mut refused = false;
+        let done = match phase {
+            Phase::Check => self.check(board, &mut refused),
+            Phase::Prepare => self.prepare(board, &mut refused),
+            Phase::Payloads => self.payloads(board, &mut refused),
+            Phase::BootFiles => self.boot_files(board, &mut refused),
+            Phase::Commit => self.commit(board, &mut refused),
+        };
+        self.refused = refused;
+        match done {
+            Err(failure) => {
+                self.phase = None;
+                Err(failure)
+            }
+            Ok(false) => Ok(None),
+            Ok(true) => {
+                self.units += 1;
+                self.phase = phase.next();
+                Ok(self.phase.is_none().then(|| self.fin.id.clone()))
+            }
+        }
+    }
+
+    /// The bundle's checks: the tar is whole; the manifest is a slot's; the signature, the board and
+    /// the slot are admitted; the boot files and the command line are the bundle's. Writes nothing.
+    fn check(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
         if !self.tar.finished() {
             return Err(bad("the bundle ends in the middle"));
         }
@@ -687,11 +791,26 @@ impl Install {
             .map_err(|_| bad("the bundle has no boot/cmdline.txt"))?;
         let cmdline = bundle::cmdline_line(&line).to_string();
         bundle::check_cmdline(args, &id, root_hash, board.boot_sources, &cmdline).map_err(bad)?;
-        // The boot side, kept on the data partition. A slot whose directory is already on the
-        // boot partition (installed again) gets its new files there now.
+        *refused = false;
+        self.fin = Fin {
+            id,
+            boot_dir,
+            cmdline,
+            outcome: Some(outcome),
+            put: None,
+            bay: false,
+        };
+        Ok(true)
+    }
+
+    /// The boot side for the slot, kept on the data partition's side: its `slot.json`, the overlays
+    /// README, and the board's boot-loader files (`prepare`). A slot whose directory is already on the
+    /// boot partition (installed again) gets its new files there now.
+    fn prepare(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
         let io = disk("the slot's boot files");
         *refused = false;
-        fs::write(boot_dir.join("slot.json"), &unpack.manifest).map_err(&io)?;
+        let boot_dir = self.fin.boot_dir.clone();
+        fs::write(boot_dir.join("slot.json"), &self.unpack.manifest).map_err(&io)?;
         let readme = boot_dir.join("overlays/README");
         if boot_dir.join("overlays").is_dir() && !readme.exists() {
             fs::write(
@@ -703,45 +822,78 @@ impl Install {
         *refused = true;
         board
             .record
-            .prepare(&boot_dir, &id, &cmdline)
+            .prepare(&boot_dir, &self.fin.id, &self.fin.cmdline)
             .map_err(|error| bad(format!("the boot loader's files for this slot: {error}")))?;
-        // The payloads go into a free bay of the boot partition, refusals first (a payload missing or
-        // larger than its bay is refused by name before any write); no pointer moves. Then the copy
-        // kept on the data partition, by content.
-        // The members in the boot partition's order: the five roles, then the firmware overlays the
-        // boot partition declares (the admission made the bundle's set exactly these).
+        Ok(true)
+    }
+
+    /// The payloads go into a free bay of the boot partition: the five roles, then the firmware
+    /// overlays the boot partition declares (the admission made the bundle's set exactly these).
+    /// Refusals come first (a payload missing or larger than its bay is refused by name before any
+    /// write); no pointer moves.
+    fn payloads(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
+        *refused = true;
         let mut members: Vec<String> = lemnos_slot_store::bays::stored_files()
             .iter()
             .map(|p| p.to_string())
             .collect();
-        members.extend(unpack.admit.firmware.iter().cloned());
+        members.extend(self.unpack.admit.firmware.iter().cloned());
         let mut stored = Vec::with_capacity(members.len());
         for path in &members {
-            let bytes = fs::read(boot_dir.join(path))
+            let bytes = fs::read(self.fin.boot_dir.join(path))
                 .map_err(|_| bad(format!("the bundle has no boot/{path}")))?;
             stored.push(bytes);
         }
         let payloads: Vec<&[u8]> = stored.iter().map(Vec::as_slice).collect();
         board
             .record
-            .install(&id, &payloads)
-            .map_err(|error| bad(format!("slot {id}'s boot files: {error}")))?;
+            .install(&self.fin.id, &payloads)
+            .map_err(|error| bad(format!("slot {}'s boot files: {error}", self.fin.id)))?;
+        self.fin.bay = true;
+        *refused = false;
+        Ok(true)
+    }
+
+    /// The slot's boot directory into the boot partition's store on the data side, one file a call.
+    fn boot_files(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
+        let io = disk("the slot's boot files");
+        *refused = false;
+        if self.fin.put.is_none() {
+            let put =
+                boot::Put::begin(board.layout, &self.fin.id, &self.fin.boot_dir).map_err(&io)?;
+            self.fin.put = Some(put);
+        }
+        let Some(put) = self.fin.put.as_mut() else {
+            return Ok(true);
+        };
+        let done = put.step().map_err(&io)?;
+        if done {
+            self.fin.put = None;
+        }
+        Ok(done)
+    }
+
+    /// The image and the manifest go into place by rename, then the slot's metadata. From the first
+    /// rename the install is past any undo: a cancel or a failure no longer frees the bay.
+    fn commit(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
+        let io = disk("the slot's boot files");
         *refused = false;
         let layout = board.layout;
-        boot::put(layout, &id, &boot_dir).map_err(&io)?;
-        // The data side: the image, then the manifest, each by rename.
+        let id = self.fin.id.clone();
         let images = layout.images();
         let manifest_tmp = images.join(format!(".{id}.json.tmp"));
-        fs::write(&manifest_tmp, &unpack.manifest).map_err(&io)?;
+        fs::write(&manifest_tmp, &self.unpack.manifest).map_err(&io)?;
         File::open(&manifest_tmp)
             .and_then(|f| f.sync_all())
             .map_err(&io)?;
+        self.fin.bay = false;
+        let unpack = &self.unpack;
         match &unpack.volume {
             Some(volume) => volume
                 .writer
                 .rename(&volume.name, &ubi::image_volume(&id))
                 .map_err(disk("the image's volume"))?,
-            None => fs::rename(&root, layout.image(&id)).map_err(&io)?,
+            None => fs::rename(unpack.work.join("rootfs.erofs"), layout.image(&id)).map_err(&io)?,
         }
         crate::store::sync_dir(&images).map_err(&io)?;
         fs::rename(&manifest_tmp, layout.manifest(&id)).map_err(&io)?;
@@ -751,6 +903,9 @@ impl Install {
         meta.set("PINNED", if self.pin { "yes" } else { "no" });
         meta.set("GOOD", "untried");
         // `SIGNATURE` is the outcome word; `SIGNED` keeps the label older boards and readers use.
+        let Some(outcome) = self.fin.outcome.clone() else {
+            return Err(bad("the bundle's signature was not decided"));
+        };
         meta.set("SIGNATURE", outcome.word());
         meta.set("SIGNED", outcome.legacy_word());
         meta.set("SIGNER", outcome.signer());
@@ -758,7 +913,7 @@ impl Install {
         let seq = crate::store::next_seq(layout).map_err(&io)?;
         meta.set("SEQ", &seq.to_string());
         meta.save(layout, &id).map_err(&io)?;
-        Ok(id)
+        Ok(true)
     }
 
     /// The slot the bundle's manifest names, once it has come and parsed.
@@ -768,6 +923,7 @@ impl Install {
 
     /// Removes what came so far.
     pub fn discard(&mut self) {
+        self.phase = None;
         let _ = fs::remove_dir_all(&self.unpack.work);
         if let Some(volume) = &self.unpack.volume {
             let _ = volume.writer.remove(&volume.name);

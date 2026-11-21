@@ -91,6 +91,7 @@ fn live(dir: &Path, bundle: &[u8], image: &[u8], time: &str) -> (Status, String)
                     return (status, String::new());
                 }
             }
+            slots.finish_all();
             let mut out = [0u8; 256];
             let id = match slots.job(job, &mut Reply::new(&mut out)) {
                 JobState::Finished(Status::OK) => String::from_utf8_lossy(&out)
