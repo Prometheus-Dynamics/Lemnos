@@ -370,10 +370,11 @@ pub fn run(mode: &str, last: f64) -> ! {
         say(&format!(
             "user: daemon ({mode}): PID 1 is hung (its main thread blocks; nothing reaps or waits)"
         ));
+        let label = mode.to_owned();
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(STAY_SECONDS));
             say(&format!(
-                "user: daemon ({mode}): the guest stayed up {STAY_SECONDS} s with PID 1 hung; powering off"
+                "user: daemon ({label}): the guest stayed up {STAY_SECONDS} s with PID 1 hung; powering off"
             ));
             let _ = guest::power_off();
         });
