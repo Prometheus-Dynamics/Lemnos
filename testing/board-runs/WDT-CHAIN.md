@@ -3,12 +3,13 @@
 **Untested on board.** This record is the plan for the on-board check of the watchdog chain
 (`docs/slots.md`, "The watchdog chain"). Nothing here has run on a board. The host side is tested: the
 fake-device tests of `service/slot-init/src/dog.rs` and `drivers/hw-watchdog`, and the QEMU check
-(`testing/qemu/run-watchdog.sh`, the `normal` mode's hand-over gap). The reference board is the one the
+(`testing/qemu/run-watchdog.sh`: the `normal` mode's hand-over gap with a stand-in, and the `daemon*` modes, which
+run the real lemnosd under its unit behind the hook and read its start trace). The reference board is the one the
 planning files name; this record says "the reference board" as the rest of the repository does.
 
 Purpose. Confirm on the reference board the things QEMU cannot show: the open timeout covers the
 initramfs start, the device rounds the 15 s request to a period under the bound, the hand-over gap
-from slot-init's exec to lemnosd's first feed is under a third of the applied period, and a refused
+from slot-init's exec to lemnosd's root-phase feed is under a third of the applied period, and a refused
 device is named in the kernel log.
 
 ## Rules for this run
@@ -36,9 +37,9 @@ the time it was read. Write each stamp into the run's record with its source.
 | S2. slot-init's open and arm | `slot-init: watchdog armed: N s (asked for 15 s)` in `board/slots/slot-init.log` (or the kernel log), with the time | the probe-to-open time, against the 30 s open timeout; the period read back |
 | S3. The period read back at each open | `/sys/class/watchdog/watchdogN/timeout` read at S2 (through the run's own log), and again at S5 | the rounding of the 15 s request (the DesignWare rounds up; the bcm2835 does not exceed 15 s) |
 | S4. slot-init's last feed before the exec | the `booted` marker write before `switch_root` (`board/slots/booted`), with the time, and the feed before the exec, which leaves no log line | the hand-over gap starts here |
-| S5. lemnosd's open at bind | lemnosd's log line at its hw-watchdog bind, with the time, and the holder of the node (`ls -l /proc/<lemnosd pid>/fd`, read only) | the second opener (window 5) |
-| S6. lemnosd's first feed | the first `tick` that feeds (lemnosd's log, at the first healthy tick), with the time | the hand-over gap ends here |
-| S7. The gap | S6 minus S4, from the two stamps | must be at most applied / 3 (the bound: `testing/qemu/run-watchdog.sh`, `HANDOVER_GAP_DIVISOR`) |
+| S5. lemnosd's root-phase feed | `lemnosd: root phase: <id>: watchdog: /dev/watchdogN: held across the drop and fed`, and with `LEMNOSD_START_TRACE=1` in `/etc/lemnos/lemnosd.env` the stamped `lemnosd: start trace: <s> root phase: <id> fed` (CLOCK_MONOTONIC, the kernel log's clock); the holder of the node (`ls -l /proc/<lemnosd pid>/fd`, read only) | the second opener; the hand-over gap ends here (window 4) |
+| S6. lemnosd's first tick | `lemnosd: start trace: <s> first tick <id> returned`, or lemnosd's log at the first healthy tick | window 5: within the applied period of S5 |
+| S7. The gap | S5 minus S4, from the two stamps; the start trace's `exec` stamp splits it into systemd's part (S4 to exec) and lemnosd's (exec to S5) | must be at most applied / 3 (the bound: `testing/qemu/run-watchdog.sh`, `HANDOVER_GAP_DIVISOR`) |
 | S8. Any refusal | `WATCHDOG REFUSED (watchdog-period-outside-bound)`, `(watchdog-period-zero)`, `(watchdog-period-unreadable)`, or `NO WATCHDOG (watchdog-node-absent)` in slot-init's log | whether slot-init refused the device; a refusal is a failed check unless it was the test's purpose |
 | S9. The steady feed | the lemnosd feed interval over 60 s at steady running (half the `timeout_s` on the device, read back) | window 6 |
 

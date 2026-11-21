@@ -199,8 +199,8 @@ the restart delay is a constant 1 s.
 Three rules follow, and the OS must keep them:
 
 - **Do not give the watchdog to systemd.** The device has exactly two openers, in order: slot-init (the
-  initramfs `/init` of a slot, from its open to its `switch_root`) and then lemnosd's `hw-watchdog` driver
-  (at its bind). Leave `RuntimeWatchdogSec=` and `ShutdownWatchdogSec=` unset in
+  initramfs `/init` of a slot, from its open to its `switch_root`) and then lemnosd (its root phase opens
+  and feeds it as root, and the `hw-watchdog` driver's bind takes that descriptor). Leave `RuntimeWatchdogSec=` and `ShutdownWatchdogSec=` unset in
   `/etc/systemd/system.conf` (and its drop-ins): either would have systemd open the same device and feed it
   while lemnosd is dead. `scripts/check-packaging.sh` checks the units for these keys, not `system.conf`; the
   `system.conf` rule is checked by hand on the board (the M37 probe read it: `testing/board-runs/M37.md`,
@@ -219,8 +219,11 @@ Three rules follow, and the OS must keep them:
   takes well under that bound (0.4 to 2.5 s for the whole stop and start in the detached board checks'
   rehearsal, `testing/board-runs/scripts`).
 
-The `lemnos` group can open the watchdog node (`SUBSYSTEM=="watchdog"` in the udev rules, `^watchdog`
-in the mdev fragment), so the daemon can open it as its own user. Nothing else should.
+lemnosd's root phase opens a keep-alive device's watchdog (the node its `uses` names) as root before the drop
+and feeds it at once, so the node's owner does not matter to the watchdog: root 0600 from devtmpfs is enough,
+and nothing waits on udev for it (`docs/slots.md`, "The watchdog chain", window 4). The `lemnos` group can
+still open the node (`SUBSYSTEM=="watchdog"` in the udev rules, `^watchdog` in the mdev fragment), for a
+keep-alive device named by its `device` setting, which the root phase does not hold. Nothing else should.
 
 ## Without systemd (BusyBox init)
 

@@ -94,6 +94,91 @@ fn driver_root_phases(cx: &Context<'_>) -> io::Result<Refusals> {
     Ok(Vec::new())
 }
 
+/// Holds the nodes of every keep-alive device across the drop (`LinuxBoard::hold_before_drop`): the
+/// watchdog is opened as root and fed at once, so the unfed hand-over from the initramfs ends here,
+/// and its bind takes the held descriptor whatever the node's owner is. Run last before the drop, so
+/// the feed is as late as it can be and the host's start gets the whole period after it. A node that
+/// can't be held is named; its bind then opens it by name, as without this step.
+///
+/// Only the boot's first start holds ([`first_start`]). Opening a running watchdog feeds it, so a
+/// daemon that died after its root phase, before it is healthy, and was restarted would otherwise feed
+/// the device once a restart for good, and the watchdog would never catch it. A restart opens the node
+/// at its bind, by name, after the drop, as before this step: the udev rule has long applied by then.
+fn hold_keepalive_nodes(board: &BoardFile, linux: &lemnos_linux::LinuxBoard, first: &FirstStart) {
+    use std::io::Write;
+    let keepalive: Vec<_> = board
+        .devices
+        .iter()
+        .filter(|d| d.keepalive && d.refused.is_none())
+        .collect();
+    if keepalive.is_empty() {
+        return;
+    }
+    match first {
+        FirstStart::Restart(dir) => {
+            let _ = writeln!(
+                io::stderr(),
+                "lemnosd: root phase: a restart in this boot ({} is already the daemon's): the keep-alive nodes are not held; their binds open them",
+                dir.display()
+            );
+            return;
+        }
+        FirstStart::First | FirstStart::NoDirectory => {}
+    }
+    for device in keepalive {
+        for (need, name) in &device.uses {
+            match linux.hold_before_drop(name) {
+                Ok(Some(line)) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "lemnosd: root phase: {}: {need}: {line}",
+                        device.id
+                    );
+                    crate::start_trace_line(&format!("root phase: {} fed", device.id));
+                }
+                Ok(None) => {}
+                Err(why) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "lemnosd: root phase: {}: {need}: {why}",
+                        device.id
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Whether this start is the boot's first, from the owner of the socket's directory.
+#[derive(Debug, PartialEq, Eq)]
+enum FirstStart {
+    /// The directory is not there yet, or is not the daemon's: the boot's first start.
+    First,
+    /// The directory is already the daemon's: a restart.
+    Restart(PathBuf),
+    /// The socket has no directory.
+    NoDirectory,
+}
+
+/// Tells the boot's first start from a restart, as root before the runtime directory step: the
+/// unit's runtime directory is made root's by the service manager and handed to the daemon's user
+/// (`uid`:`gid`) by the first start's root phase, and the unit keeps it across a restart
+/// (`RuntimeDirectoryPreserve=restart`); a stop removes it. So a directory that is already the
+/// daemon's means an earlier start of this boot got as far as its root phase. The owner is read from
+/// the directory itself: root here has no `CAP_DAC_OVERRIDE`, and can't look inside a directory that
+/// is the daemon's (0750).
+fn first_start(socket: &Path, uid: u32, gid: u32) -> FirstStart {
+    let Some(dir) = socket.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return FirstStart::NoDirectory;
+    };
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.uid() == uid && meta.gid() == gid && uid != 0 => {
+            FirstStart::Restart(dir.to_path_buf())
+        }
+        _ => FirstStart::First,
+    }
+}
+
 /// Builds the request from `--user` and `--group`, or their environment variables. A group needs a
 /// user.
 ///
@@ -172,6 +257,8 @@ pub fn start(
         uid,
         gid,
     };
+    // Before the runtime directory step hands the directory to the daemon's user.
+    let first = first_start(socket, uid, gid);
     let mut refused = run_steps(STEPS, &cx)?;
     let client = if helper {
         let (client, invalid) = crate::gadget::spawn(board, lemnos_linux::Owner { uid, gid })?;
@@ -182,6 +269,7 @@ pub fn start(
     };
     refused
         .extend(driver_root_phases(&cx).map_err(|error| format!("driver root phases: {error}"))?);
+    hold_keepalive_nodes(board, &lemnos_linux::LinuxBoard::new(), &first);
     let plan = Plan {
         uid,
         gid,
@@ -344,6 +432,37 @@ fn runtime_directory(cx: &Context<'_>) -> io::Result<Refusals> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runtime_directory_already_the_daemons_is_a_restart() {
+        let dir = std::env::temp_dir().join(format!("lemnosd-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("run/lemnosd.sock");
+        let (uid, gid) = (lemnos_linux_sys::privilege::observe().unwrap().euid, 0);
+        // Not there yet: the first start.
+        assert_eq!(first_start(&socket, uid, gid), FirstStart::First);
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        let meta = std::fs::metadata(dir.join("run")).unwrap();
+        // Owned by someone else (the service manager's root): the first start.
+        assert_eq!(
+            first_start(&socket, meta.uid() + 1, meta.gid()),
+            FirstStart::First
+        );
+        // Already the daemon's: a restart.
+        assert_eq!(
+            first_start(&socket, meta.uid(), meta.gid()),
+            if meta.uid() == 0 {
+                FirstStart::First
+            } else {
+                FirstStart::Restart(dir.join("run"))
+            }
+        );
+        assert_eq!(
+            first_start(Path::new("lemnosd.sock"), uid, gid),
+            FirstStart::NoDirectory
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_group_without_a_user_is_refused() {

@@ -612,6 +612,8 @@ struct Slot {
     /// until this bind stamps it, and each bind sets it back to zero. The first stamp wins. See
     /// [`Inner::set_running_ok`].
     running_ok_ns: AtomicU64,
+    /// Whether this bind's first tick has been said to the start trace (see [`set_start_trace`]).
+    first_tick_traced: AtomicBool,
     /// Runs in a row that ended sooner than the retry cap after their bind. A driver that fails
     /// straight after each bind waits longer each time, as a bind that fails does.
     short_runs: AtomicU32,
@@ -850,6 +852,7 @@ impl Slot {
             tried_ns: AtomicU64::new(0),
             bound_ns: AtomicU64::new(0),
             running_ok_ns: AtomicU64::new(0),
+            first_tick_traced: AtomicBool::new(false),
             short_runs: AtomicU32::new(0),
             stalled: AtomicBool::new(false),
             last_stall: Mutex::new(None),
@@ -1318,6 +1321,24 @@ fn only_reads(instance: &dyn Instance, method: MethodId) -> bool {
 
 fn counts_as_gone(status: Status) -> bool {
     status == Status::IO || status == Status::NO_DEVICE || status == Status::TIMED_OUT
+}
+
+/// Where the start trace goes: set once by the daemon when asked for (see [`set_start_trace`]).
+static START_TRACE: OnceLock<fn(&str)> = OnceLock::new();
+
+/// Sends the host's start events to `sink`: each device's bind as it begins and ends, and its first
+/// tick after each bind. The daemon stamps them; a board run and the QEMU watchdog check read the
+/// gaps between them (how long after the start the watchdog is first fed). Off unless set. A
+/// second call is ignored.
+pub fn set_start_trace(sink: fn(&str)) {
+    let _ = START_TRACE.set(sink);
+}
+
+/// One start event, made only when the trace is on.
+fn start_trace(event: impl FnOnce() -> String) {
+    if let Some(sink) = START_TRACE.get() {
+        sink(&event());
+    }
 }
 
 /// A stall's reason when a device switched off or on by hand lets go of what a rebind kept.
@@ -2368,6 +2389,13 @@ impl Inner {
     fn bind(&'static self, slot: Arc<Slot>) {
         slot.tried_ns.store(self.clock.now_ns(), Ordering::Release);
         slot.running_ok_ns.store(0, Ordering::Release);
+        slot.first_tick_traced.store(false, Ordering::Release);
+        start_trace(|| {
+            format!(
+                "bind {} ({}) begins on lane {}",
+                slot.spec.id, slot.spec.driver, slot.lane_key
+            )
+        });
         // A device whose settings its driver refuses is never made. It shows failed, with the
         // reason, and is retried under the failure rule like any device that fails to bind.
         if let Some(reason) = &slot.refusal {
@@ -2485,7 +2513,19 @@ impl Inner {
                 Err(_) => Err(Status::PANIC),
             }
         }));
-        match lane.run(&[], &mut [], self.options.call_deadline, work) {
+        let ran = lane.run(&[], &mut [], self.options.call_deadline, work);
+        start_trace(|| {
+            format!(
+                "bind {} {}",
+                slot.spec.id,
+                if matches!(ran, Ok(Ok(_))) {
+                    "ok"
+                } else {
+                    "failed"
+                }
+            )
+        });
+        match ran {
             Ok(Ok(kept)) => {
                 slot.errors.store(0, Ordering::Relaxed);
                 slot.bound_ns.store(self.clock.now_ns(), Ordering::Release);
@@ -2565,6 +2605,9 @@ impl Inner {
             instance.board(&BoardRead { inner: self });
         }
         let next = instance.tick(now_ns);
+        if !slot.first_tick_traced.swap(true, Ordering::AcqRel) {
+            start_trace(|| format!("first tick {} returned", slot.spec.id));
+        }
         self.stamp_running_ok(slot, instance, slot.is_running());
         if instance.endpoints_ended() {
             slot.end_close();

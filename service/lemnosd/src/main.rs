@@ -155,6 +155,14 @@ fn test_boot_roots() {
 }
 
 fn main() -> ExitCode {
+    // The start trace (`LEMNOSD_START_TRACE=1`): the start's steps and each device's bind and first
+    // tick, stamped, for the watchdog hand-over's gap to be measured in its pieces.
+    let tracing = std::env::var_os("LEMNOSD_START_TRACE").is_some_and(|v| !v.is_empty());
+    if tracing {
+        lemnosd::start_trace_on();
+        lemnos_host::set_start_trace(lemnosd::start_trace_line);
+        lemnosd::start_trace_line("exec");
+    }
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     let mut board = var("LEMNOSD_BOARD", DEFAULT_BOARD);
     let mut socket = var("LEMNOSD_SOCKET", DEFAULT_SOCKET);
@@ -257,6 +265,9 @@ fn main() -> ExitCode {
         }
         (_, Err(error)) => return complain(&format!("reading the credentials: {error}")),
     }
+    if tracing {
+        lemnosd::start_trace_line("root phase done (the drop included, when asked)");
+    }
     // A device the root phase could not set up is refused, and the daemon starts without it.
     for line in &root.warnings {
         let _ = writeln!(std::io::stderr(), "lemnosd: {board}: {line}");
@@ -296,7 +307,14 @@ fn main() -> ExitCode {
         },
         options: Options::default(),
     };
-    let mut service = match Service::start_with_packages(config, packages) {
+    if tracing {
+        lemnosd::start_trace_line("host start begins: binds in board order");
+    }
+    let started = Service::start_with_packages(config, packages);
+    if tracing {
+        lemnosd::start_trace_line("host started: every bind made");
+    }
+    let mut service = match started {
         Ok(service) => service,
         Err(error) => return complain(&error.to_string()),
     };

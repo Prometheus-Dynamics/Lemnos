@@ -14,5 +14,5 @@ pub use contain::{MAX_RETRY_CAP, Options};
 pub use host::{
     Binder, DeviceInfo, DeviceState, DriverEntry, Host, HostError, Instance, JOB_RESULT_MAX,
     JobEvent, JobUpdate, Liveness, MAX_JOBS, OffReason, Stall, check_settings, entry,
-    settings_refusals, with_device_config,
+    set_start_trace, settings_refusals, with_device_config,
 };

@@ -11,3 +11,4 @@ workspace = true
 
 [dependencies]
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+libc.workspace = true

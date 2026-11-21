@@ -145,20 +145,21 @@ qemu_part() { local d; d=$(kernel modules kernel.config) || return 1
   local r=$?; [ $r = 124 -o $r = 137 ] && echo "lander: qemu exceeded its bound of 1000 s (killed)" >> "$L/qemu.log"; return $r; }
 off_part() { local d; d=$(kernel off kernel-modules-off.config --modules-off) || return 1
   export KERNEL=$d/build/arch/x86/boot/bzImage CARGO_TARGET_DIR=$LAND_SCRATCH/target-off CARGO_BUILD_JOBS=$LAND_JOBS_OFF CC="zig cc -target x86_64-linux-musl"
-  # The built-in boots and the three watchdog modes run side by side on the lane's cores (OFF-SIDE,
+  # The built-in boots and the watchdog modes run side by side on the lane's cores (OFF-SIDE,
   # notes/OFF-SIDE.md: same margins as one after another). Each part logs to off-<part>.log; off.log gets
   # every part's log under its rc, then one verdict line naming each part that failed (the red summary
   # greps off.log and shows its tail). Each script has its own mktemp work dir; the watchdog's LOGS names
   # its files per mode, and the guests' cargo builds share the target under cargo's own lock.
-  local names=(builtin slot-init normal stall) pids=() i r bad=()
+  local wdt=(slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop) names=(builtin) pids=() i r bad=()
+  names+=("${wdt[@]}")
   taskset -c $LAND_CPUS_OFF timeout -k 20 600 testing/qemu/run-builtin.sh > "$L/off-builtin.log" 2>&1 & pids+=($!)
-  for i in slot-init normal stall; do LOGS="$L/qemu-watchdog-$i" MODES=$i taskset -c $LAND_CPUS_OFF timeout -k 20 600 testing/qemu/run-watchdog.sh > "$L/off-$i.log" 2>&1 & pids+=($!); done
+  for i in "${wdt[@]}"; do LOGS="$L/qemu-watchdog-$i" MODES=$i taskset -c $LAND_CPUS_OFF timeout -k 20 600 testing/qemu/run-watchdog.sh > "$L/off-$i.log" 2>&1 & pids+=($!); done
   : > "$L/off.log"
-  for i in 0 1 2 3; do wait "${pids[$i]}"; r=$?
+  for i in "${!pids[@]}"; do wait "${pids[$i]}"; r=$?
     { echo "=== off ${names[$i]}: rc $r ($L/off-${names[$i]}.log)"; cat "$L/off-${names[$i]}.log"; } >> "$L/off.log"
     [ $r = 124 -o $r = 137 ] && echo "lander: off ${names[$i]} exceeded its bound of 600 s (killed)" >> "$L/off.log"
     [ $r = 0 ] || bad+=("${names[$i]}"); done
-  [ ${#bad[@]} = 0 ] && { echo "off: passed (builtin slot-init normal stall side by side)" >> "$L/off.log"; return 0; }
+  [ ${#bad[@]} = 0 ] && { echo "off: passed (${names[*]} side by side)" >> "$L/off.log"; return 0; }
   for i in "${bad[@]}"; do echo "off: FAILED: $i: $(tail -1 "$L/off-$i.log" | cut -c1-160)"; done >> "$L/off.log"; return 1; }
 ( part qemu qemu_part ) &
 ( part off off_part ) &
