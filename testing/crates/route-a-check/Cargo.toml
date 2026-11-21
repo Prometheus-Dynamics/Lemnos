@@ -4,17 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The route-A check, test only: the engine host with system-slots on another system's slots state, run in the QEMU guest"
+description = "The route-A check, test only: the real lemnosd under the packaged unit's launcher with system-slots on another system's boot records and on ours, run in the QEMU guest"
 
 [lints]
 workspace = true
 
 [dependencies]
-lemnos-core = { path = "../../../engine/core" }
-lemnos-host = { path = "../../../engine/host" }
-lemnos-linux = { path = "../../../backends/linux" }
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-driver-system-slots = { path = "../../../drivers/system-slots" }
-# The `testing` feature is the boot-chain seam (`boot_node::TEST_ROOTS`): an x86 guest has no device
-# tree, so the check stands the chain in. Never in a shipped binary, and built apart from lemnosd
-# (testing/qemu/run.sh) so the feature never reaches the guest's daemon.
-lemnos-slot-store = { path = "../../../drivers/slot-store", features = ["testing"] }
+lemnos-slot-store = { path = "../../../drivers/slot-store" }

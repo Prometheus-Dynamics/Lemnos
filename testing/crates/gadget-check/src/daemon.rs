@@ -48,7 +48,9 @@ impl Lemnosd {
         // unit's bounding set and no_new_privs (testing/crates/unit-check, its `exec` role).
         let mut command = Command::new(self.program.with_file_name("lemnos-unit-check"));
         command
-            .args(["exec", "--with", "gadget", "--"])
+            .args(["exec", "--with", "gadget", "--runtime-dir"])
+            .arg(self.socket.parent().unwrap_or(Path::new("/run")))
+            .arg("--")
             .arg(&self.program)
             .arg("--board")
             .arg(&self.board)

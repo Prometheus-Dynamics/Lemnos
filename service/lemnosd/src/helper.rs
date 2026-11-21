@@ -306,6 +306,13 @@ impl<M: Mounts> Ops for System<M> {
                     gadget.udc
                 ));
             }
+            Outcome::TakenOver => {
+                lemnos_linux_sys::stderr::line(&format!(
+                    "lemnosd-gadget: gadget {}: the FunctionFS instance was still held {} s after it was first found held: unbound and made again; the holder's endpoints are broken",
+                    gadget.udc,
+                    lemnos_linux::HELD_LIMIT.as_secs()
+                ));
+            }
             Outcome::Remade => {
                 lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd-gadget: gadget {}: the tree that was there differed and was unbound: made again",

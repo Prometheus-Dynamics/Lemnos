@@ -18,6 +18,10 @@ orion-precheck = ["dep:lemnos-driver-orion-precheck", "lemnos-shipped-features/o
 # generated: end features
 # Serves the fake devices from `testing/crates/fake-devices`.
 fake-devices = ["dep:lemnos-fake-devices"]
+# The QEMU route-A check's boot-chain seam: `LEMNOSD_TEST_BOOT_ROOTS=CHOSEN:SYS:DEV` stands in the
+# device tree, sysfs and /dev the slot drivers read (an x86 guest has no device tree). Never in a
+# shipped binary: testing/qemu/run.sh builds it apart, as /lemnosd-route-a.
+testing-boot-roots = ["dep:lemnos-slot-store", "lemnos-slot-store/testing"]
 
 [dependencies]
 # The shipped programs' feature baseline (service/shipped-features): the same features whichever programs are built together.
@@ -32,6 +36,7 @@ lemnos-sim = { path = "../../backends/sim" }
 lemnos-linux = { path = "../../backends/linux" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices", optional = true }
+lemnos-slot-store = { path = "../../drivers/slot-store", optional = true }
 toml.workspace = true
 # generated: begin drivers
 lemnos-driver-a733-di = { path = "../../drivers/a733-di" }

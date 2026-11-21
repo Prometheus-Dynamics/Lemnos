@@ -301,8 +301,42 @@ fn shell_quoted(value: &str) -> String {
     }
 }
 
-/// Replaces `path` whole: a power cut leaves the old file or the new one.
+/// The last failed write in each directory, until a write there succeeds: every state, meta, log and
+/// marker file goes through [`replace`], so a caller that drops a write's result still leaves it here,
+/// for the driver's health and `info` ([`write_failure`]). Touched only by writes, never per frame.
+static FAILED: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn note_write(dir: &Path, path: &Path, result: &io::Result<()>) {
+    let Ok(mut failed) = FAILED.lock() else {
+        return;
+    };
+    failed.retain(|(d, _)| d != dir);
+    if let Err(error) = result {
+        failed.push((dir.to_path_buf(), format!("{}: {error}", path.display())));
+    }
+}
+
+/// The last write that failed in `dir` (its file and the error), `None` once a later write there
+/// succeeded or when none failed.
+pub fn write_failure(dir: &Path) -> Option<String> {
+    FAILED
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(d, _)| d == dir)
+        .map(|(_, text)| text.clone())
+}
+
+/// Replaces `path` whole: a power cut leaves the old file or the new one. A failure is kept for
+/// [`write_failure`] until the next write in the same directory succeeds.
 pub fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let result = replace_now(path, bytes);
+    note_write(dir, path, &result);
+    result
+}
+
+fn replace_now(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?
@@ -518,5 +552,24 @@ mod tests {
         assert_eq!(utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(utc(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(utc(1_794_355_200 + 3_723), "2026-11-11T01:02:03Z");
+    }
+}
+
+#[cfg(test)]
+mod write_failure_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_replace_is_kept_until_the_next_write_in_its_dir_succeeds() {
+        let dir = std::env::temp_dir().join(format!("store-write-failure-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".state.env.new")).unwrap();
+        assert!(replace(&dir.join("state.env"), b"x").is_err());
+        let kept = write_failure(&dir).expect("kept");
+        assert!(kept.contains("state.env"), "{kept}");
+        fs::remove_dir(dir.join(".state.env.new")).unwrap();
+        replace(&dir.join("other"), b"y").unwrap();
+        assert_eq!(write_failure(&dir), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

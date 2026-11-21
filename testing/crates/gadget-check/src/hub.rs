@@ -18,6 +18,8 @@
 //!   IN endpoint, checking the bytes; retried until the device is configured again.
 //! - `mount`: mounts the gadget's FunctionFS instance on its mount point.
 //! - `umount`: unmounts the mount point; `detach`: unmounts it lazily (`MNT_DETACH`).
+//! - `ns PID`: moves into the mount namespace of process PID, the daemon's: the mounts above are
+//!   then the ones the daemon sees, as a unit's own mounts are only its own.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -106,6 +108,13 @@ fn command(line: &str) -> io::Result<()> {
         Some("unhalt") => endpoint_feature(CLEAR_FEATURE, EP_OUT),
         Some("ctl") => request_interface(),
         Some("bulk") => bulk(),
+        Some("ns") => {
+            let pid: u32 = words
+                .next()
+                .and_then(|word| word.parse().ok())
+                .ok_or_else(|| io::Error::from_raw_os_error(EINVAL))?;
+            lemnos_linux_sys::sandbox::enter_mount_namespace(pid)
+        }
         Some("mount") => mount::functionfs(UDC, &target(), ""),
         Some("umount") => mount::unmount(&target()),
         Some("detach") => mount::detach(&target()),

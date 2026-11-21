@@ -127,11 +127,14 @@ fi
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-unit-check" "$root/"
-# The route-A check stands the boot chain in with slot-store's `testing` seam: it is built on its own, so
-# the feature never reaches the lemnosd built above.
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
+# The route-A check runs the real daemon with its boot chain stood in (lemnosd's `testing-boot-roots`
+# feature). That daemon is built on its own, after the shipped one is copied above, and goes in as
+# /lemnosd-route-a: the feature never reaches /lemnosd.
 (cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-route-a-check --target "$target")
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-route-a-check" "$root/"
-cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnosd --features testing-boot-roots --target "$target")
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/lemnosd-route-a"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-stream-compose-check" "$root/"
 # The lend check through lemnosd is Rust (CZ-GUEST); init runs it as /lemnos-lend-raw-check.
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-lend-raw-check" "$root/"
@@ -208,11 +211,16 @@ case "$nandsim" in
   *.xz) xz -d -c "$nandsim" >"$root/nandsim.ko" ;;
   *) cp "$nandsim" "$root/nandsim.ko" ;;
 esac
-# The Rust checks (CZ-GUEST-2) are static binaries with debug info, about 5 MB each unstripped. No check reads
-# their symbols or line tables (they compare output lines), so they are stripped here to keep the initramfs
-# within the guest's memory. The workspace's debug profile is unchanged.
-for guest in init lemnos-unit-check lemnos-route-a-check lemnos-lend-raw-check lemnos_pisp_be_version_check lemnos_claim_check lemnos_unbind_check lemnos_gpio_check lemnos_power_check lemnos_irq_check lemnos_bus_check lemnos_board_check lemnos_check lemnos_regjob_check lemnos_regjob_isp_check lemnos_pio_check lemnos_lend_check lemnos_pisp_be_check lemnos_pisp_fe_check lemnos_stream_check lemnos_gsdma_check lemnos_vip_check lemnos_rp1_csi2_check; do
-  strip "$root/$guest"
+# The guest's programs are static binaries with debug info, many MB each unstripped (lemnosd about 55 MB).
+# No check reads their symbols or line tables (they compare output lines), so every one of them is stripped
+# here to keep the initramfs within the guest's memory: its root is a tmpfs of half the guest's RAM, and a
+# full one fails the guest's first mkdir. The kernel modules (*.ko) keep their symbols: the kernel needs
+# them to load. The workspace's debug profile is unchanged.
+for guest in "$root"/*; do
+  [[ -f "$guest" && "$guest" != *.ko ]] || continue
+  if [[ "$(head -c 4 "$guest" | od -An -c | tr -d ' ')" == '177ELF' ]]; then
+    strip "$guest"
+  fi
 done
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
 

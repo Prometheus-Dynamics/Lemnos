@@ -35,6 +35,7 @@ pub mod privilege;
 pub mod process;
 pub mod rootfs;
 pub mod rp1_pio;
+pub mod sandbox;
 pub mod scm;
 pub mod seccomp;
 pub mod serial;

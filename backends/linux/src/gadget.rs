@@ -118,7 +118,7 @@ use lemnos_linux_sys::functionfs::{self, CompatEntry, Endpoint, Ep0, Event, ExtP
 use crate::Claim;
 
 mod tree;
-pub use tree::{Outcome, Trees};
+pub use tree::{HELD_LIMIT, Outcome, Trees};
 
 /// Whether a gadget's tree carries a USB serial string: what a helper's setup tells the daemon,
 /// from the tree it made or adopted, not from the settings it was asked for.

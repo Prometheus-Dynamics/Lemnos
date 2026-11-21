@@ -288,6 +288,44 @@ impl Boot<'_> {
         self.data_writable.get() && !self.foreign.get()
     }
 
+    /// Gives the slots state dir and the image dir to the user lemnosd drops to (its ids from the slot's
+    /// own root), so the daemon writes them after its drop without any grant of its own. Only when the
+    /// state is ours to write ([`Boot::state_writable`]): another system's dirs are never touched. The
+    /// dirs themselves only, never what they hold (the daemon replaces a file by renaming over it, which
+    /// needs the dir alone), and never through a link: a path that is not a plain directory is refused
+    /// by name. A dir already the user's is left as it is.
+    fn give_state_dirs(&self, new_root: &Path) {
+        if !self.state_writable() {
+            return;
+        }
+        let Some((uid, gid)) = root_check::ids(new_root) else {
+            self.log(&format!(
+                "the slot's root names no {} uid or {} gid: the slots dirs are left as they are, and lemnosd can't write them",
+                root_check::USER,
+                root_check::GROUP
+            ));
+            return;
+        };
+        for dir in [self.layout.state_dir(), self.layout.images()] {
+            let given = lemnos_slot_store::owner::give_dir(&dir, uid, gid, |d, u, g| {
+                self.ops.chown_dir(d, u, g)
+            });
+            match given {
+                Ok(lemnos_slot_store::owner::Given::Already) => {}
+                Ok(lemnos_slot_store::owner::Given::Given) => self.log(&format!(
+                    "{} is given to {} ({uid}:{gid})",
+                    dir.display(),
+                    root_check::USER
+                )),
+                Err(error) => self.log(&format!(
+                    "couldn't give {} to {} ({uid}:{gid}): {error}; lemnosd can't write it",
+                    dir.display(),
+                    root_check::USER
+                )),
+            }
+        }
+    }
+
     /// Writes a marker under `board/slots`; a read-only data partition just logs it.
     fn mark(&self, name: &str, text: &str) {
         if !self.state_writable() {
@@ -1474,6 +1512,7 @@ impl Boot<'_> {
                 ));
             }
         }
+        self.give_state_dirs(&new_root);
         let moved_data = new_root.join("data");
         if let Err(error) = self.ops.move_mount(&self.layout.data, &moved_data) {
             self.ops.umount(&new_root);

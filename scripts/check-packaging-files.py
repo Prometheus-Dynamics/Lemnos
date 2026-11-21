@@ -13,7 +13,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIST = os.path.join(ROOT, "packaging", "files.txt")
-VOCAB = {"always", "soc", "systemd", "busybox", "udev", "orion", "gadget", "health-tcp", "kmod", "uboot", "ubi", "never"}
+VOCAB = {"always", "soc", "systemd", "busybox", "udev", "orion", "gadget", "health-tcp", "slots", "security", "kmod", "uboot", "ubi", "never"}
 MODES = {"0644", "0755", "append"}
 ALTERNATIVES = {frozenset({"uboot", "ubi"})}  # install paths two lines may share, by their `when`
 SOCS = "/usr/share/lemnos/socs"  # where lemnosd reads the SoC maps (service/lemnosd/src/main.rs)
@@ -97,6 +97,62 @@ for name in sorted(os.listdir(os.path.join(ROOT, "socs"))):
 with open(os.path.join(ROOT, "service", "lemnosd", "src", "main.rs"), encoding="utf-8") as f:
     if f'"{SOCS}"' not in f.read():
         fail(f"service/lemnosd/src/main.rs no longer reads the SoC maps from {SOCS}")
+
+# Each board file in testing/boards/ is checked against the drop-ins its devices need. A board
+# with a system-slots device needs slots.conf, listed under `slots`, granting that device's state and
+# image dirs (<data>/board/slots and <data>/slots). A board with a [security] table needs
+# security.conf, listed under `security`, granting /run/board and the record's directory when the
+# record is a file. Without the grant the daemon's write is refused under ProtectSystem=strict, so
+# each gap fails here by the board's name.
+import tomllib
+
+
+def read_paths(source):
+    """The ReadWritePaths of a drop-in, without the `-` that makes a path optional."""
+    paths = []
+    with open(os.path.join(ROOT, source), encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("ReadWritePaths="):
+                paths += [p.lstrip("-") for p in line.split("=", 1)[1].split()]
+    return paths
+
+
+def granted(path, paths):
+    return any(path == p or path.startswith(p.rstrip("/") + "/") for p in paths)
+
+
+DROPINS = {
+    "slots": "packaging/systemd/lemnosd.service.d/slots.conf",
+    "security": "packaging/systemd/lemnosd.service.d/security.conf",
+}
+for word, source in DROPINS.items():
+    if source not in entries or word not in entries[source][2].split(","):
+        fail(f"{source} is not listed under `{word}` in packaging/files.txt")
+boards = os.path.join(ROOT, "testing", "boards")
+for name in sorted(os.listdir(boards)):
+    if not name.endswith(".toml"):
+        continue
+    with open(os.path.join(boards, name), "rb") as f:
+        board = tomllib.load(f)
+    where = f"testing/boards/{name}"
+    for device in board.get("devices", []):
+        if device.get("driver") != "system-slots":
+            continue
+        data = device.get("config", {}).get("data", "/data").rstrip("/")
+        paths = read_paths(DROPINS["slots"]) if os.path.isfile(os.path.join(ROOT, DROPINS["slots"])) else []
+        for need in (f"{data}/board/slots", f"{data}/slots"):
+            if not granted(need, paths):
+                fail(f"{where}: system-slots device {device.get('id')!r} writes {need}, which no slots drop-in grants ({DROPINS['slots']})")
+    security = board.get("security")
+    if security is not None:
+        paths = read_paths(DROPINS["security"]) if os.path.isfile(os.path.join(ROOT, DROPINS["security"])) else []
+        needs = ["/run/board"]
+        record = security.get("record", "")
+        if record and record != "boot":
+            needs.append(os.path.dirname(record))
+        for need in needs:
+            if not granted(need, paths):
+                fail(f"{where}: [security] writes {need}, which no security drop-in grants ({DROPINS['security']})")
 
 if failures:
     for msg in failures:

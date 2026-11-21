@@ -2503,6 +2503,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-daemon-ready",
  "lemnos-hal",
+ "lemnos-linux",
  "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnosd",
@@ -2951,10 +2952,10 @@ dependencies = [
 name = "lemnos-route-a-check"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-client",
  "lemnos-core",
+ "lemnos-daemon-ready",
  "lemnos-driver-system-slots",
- "lemnos-host",
- "lemnos-linux",
  "lemnos-slot-store",
 ]
 
@@ -3266,6 +3267,7 @@ dependencies = [
  "lemnos-package",
  "lemnos-shipped-features",
  "lemnos-sim",
+ "lemnos-slot-store",
  "lemnos-wire",
  "shm-ring",
  "shm-ring-buffers",

@@ -231,6 +231,9 @@ fn start_daemon(lemnosd: &Path, dir: &Path, board: &str) -> Result<(Daemon, Path
     let socket = dir.join("sock");
     let _ = std::fs::remove_file(&socket);
     let ready = Ready::new()?;
+    // ROOT-STANZA: /dev/lemnos and the test module's receiver nodes stay root 0600 in the guest (no udev)
+    // On a board 70-lemnos.rules gives them to the daemon's group; the unit's start of the daemon is
+    // checked by unit-check, gadget-check, orion-link-check and route-a-check.
     let mut command = Command::new(lemnosd);
     command
         .arg("--board")

@@ -382,10 +382,7 @@ impl BootSwitch {
 
     /// The record's device and its first sector, opened for reading, or for writing too.
     fn open(&self, write: bool) -> Result<(Device, Pair), RecordFault> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(write)
-            .open(&self.node)
+        let mut file = crate::boot_node::open(&self.node, write)
             .map_err(|error| RecordFault::Damaged(format!("the image can't be opened: {error}")))?;
         let name = Kind::SECURITY
             .file_name()

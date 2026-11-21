@@ -254,9 +254,13 @@ fn a_failed_render_leaves_the_view_pending_and_the_retry_brings_it_current() {
         flow.view_pending(),
         "the record is written; the view is not"
     );
+    // The pending view names why: the render's directory and the error.
     assert!(
         flow.state_lines(Board::default())
-            .contains(&"view pending".to_string())
+            .iter()
+            .any(|line| line.starts_with("view pending: ") && line.len() > "view pending: ".len()),
+        "{:?}",
+        flow.state_lines(Board::default())
     );
     fs::create_dir(&render).unwrap();
     flow.retry_render();
@@ -962,9 +966,13 @@ fn a_cut_after_the_record_and_before_the_view_leaves_the_view_pending_and_the_au
         flow.view_pending(),
         "the record is off; the view is not written"
     );
+    // The pending view names why: the render's directory and the error.
     assert!(
         flow.state_lines(Board::default())
-            .contains(&"view pending".to_string())
+            .iter()
+            .any(|line| line.starts_with("view pending: ") && line.len() > "view pending: ".len()),
+        "{:?}",
+        flow.state_lines(Board::default())
     );
     // A restart after the crash: the record is the truth; the old authorization is refused.
     let mut restarted = Flow::open(&record, &render, false);

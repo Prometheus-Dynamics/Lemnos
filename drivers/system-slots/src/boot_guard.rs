@@ -29,7 +29,8 @@ pub fn read_raw(node: &Node, path: &str) -> Result<Option<Vec<u8>>, String> {
     let node = node.as_ref().map_err(|why| {
         format!("the boot partition's device isn't known, so its files can't be read: {why}")
     })?;
-    let mut file = fs::File::open(node).map_err(|e| format!("{}: {e}", node.display()))?;
+    let mut file = lemnos_slot_store::boot_node::open(node, false)
+        .map_err(|e| format!("{}: {e}", node.display()))?;
     lemnos_slot_store::bootcheck::fat_read(&mut file, path)
 }
 

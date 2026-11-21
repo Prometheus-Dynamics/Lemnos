@@ -206,6 +206,10 @@ impl Ops for System {
         rootfs::sync();
     }
 
+    fn chown_dir(&self, dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
+        lemnos_slot_store::owner::lchown(dir, uid, gid)
+    }
+
     fn restart(&self, argument: Option<&str>) {
         let error = rootfs::restart(argument);
         self.log(&format!("slot-init: the restart failed: {error}"));

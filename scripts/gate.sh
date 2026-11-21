@@ -422,6 +422,8 @@ side_lane() {
   lane_step packaging 180 scripts/check-packaging.sh # lander green max 5 s
   # Every file under packaging/ is listed in packaging/files.txt (installed, or marked never), and the list is well formed.
   lane_step packaging-files 180 scripts/check-packaging-files.py # lander green max 1 s
+  # Every QEMU stanza that starts lemnosd starts it through the unit launcher, or says why it is root.
+  lane_step root-stanzas 180 scripts/check-root-stanzas.py
   # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
   # Also checks that docs/building.md lists each of them.
   lane_step shipped 180 scripts/check-shipped.sh # lander green max 12 s

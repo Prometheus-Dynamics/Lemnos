@@ -4908,7 +4908,9 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "trial_block_text",
             "trial_block_detail",
             "grow_state",
-            "foreign"
+            "foreign",
+            "state_unwritable",
+            "write_failed"
         ]
     );
     let a = json.get("last_attempt").unwrap();
@@ -6200,4 +6202,66 @@ fn a_config_txt_without_the_select_lines_leaves_the_driver_running_degraded_and_
     assert!(slots.set_default("os-1", false).is_err());
     let mut raw = lemnos_slot_store::boot_raw::Boot::open(&node).unwrap();
     assert_eq!(raw.config_text().unwrap(), b"kernel=board.img\n");
+}
+
+/// A refused write of the state is never only dropped: health says `write-failed` and `info` names
+/// the file and the error, until a later write in the same dir succeeds.
+#[test]
+fn a_failed_state_write_shows_in_health_and_info_until_one_succeeds() {
+    let mut board = Board::new("os-1");
+    // The write beside settings.env can't be made: a directory sits where its temporary file goes,
+    // which refuses root as well as anyone.
+    let blocker = board.layout().marker(".settings.env.new");
+    fs::create_dir_all(&blocker).unwrap();
+    assert!(board.slots.set_keep(2).is_err());
+    assert_eq!(board.slots.health(), Health::Degraded(crate::WRITE_FAILED));
+    let info = board.slots.info_json();
+    assert!(
+        info.contains("\"write_failed\":\"") && info.contains("settings.env"),
+        "{info}"
+    );
+    fs::remove_dir(&blocker).unwrap();
+    board.slots.set_keep(2).unwrap();
+    assert_ne!(board.slots.health(), Health::Degraded(crate::WRITE_FAILED));
+    assert!(board.slots.info_json().contains("\"write_failed\":\"\""));
+}
+
+/// While the daemon can't write its state dir, a call that would switch a boot record is refused
+/// before it touches one: the record never says what the state could not follow. A grant given
+/// since is taken at the next call.
+#[test]
+fn an_unwritable_state_dir_refuses_a_switch_before_any_boot_record_is_written() {
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    // Booted well once, so it may be made the default directly.
+    board.slots.trial("os-2", true, false, false).unwrap();
+    board.boot_into("os-2");
+    board.slots.confirm().unwrap();
+    board.told.take();
+    // The probe file can't be made: a directory sits at its name, which refuses root as well.
+    let probe = board
+        .layout()
+        .state_dir()
+        .join(format!(".lemnosd-write-check-{}", std::process::id()));
+    fs::create_dir_all(&probe).unwrap();
+    board.slots.state_unwritable = Some("the state dir".into());
+    assert_eq!(
+        board.slots.set_default("os-2", false),
+        Err(Status::FAILED_PRECONDITION)
+    );
+    assert!(board.told.take().is_empty());
+    assert_eq!(board.state().default, "os-1");
+    assert_eq!(
+        board.slots.health(),
+        Health::Degraded(crate::STATE_UNWRITABLE)
+    );
+    fs::remove_dir(&probe).unwrap();
+    board.slots.set_default("os-2", false).unwrap();
+    assert_eq!(board.told.take(), ["default os-2"]);
+    assert!(
+        board
+            .slots
+            .info_json()
+            .contains("\"state_unwritable\":\"\"")
+    );
 }

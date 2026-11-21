@@ -3,8 +3,9 @@
 //! security switch on a slot board), so that each finds it the same way. Every refusal is named.
 
 use crate::disk::{self, Table};
-use std::path::PathBuf;
-#[cfg(feature = "testing")]
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Where the boot chain's source and the boot disk are read from: the device tree's `chosen` node,
@@ -93,4 +94,65 @@ pub fn disk_for_table(table: &Table) -> Result<PathBuf, String> {
 pub fn node_for_items(items: &[&str]) -> Result<PathBuf, String> {
     let table = Table::parse(items)?;
     node_for_table(&table)
+}
+
+/// A boot node the daemon's root phase opened before it dropped to its own user: the dropped daemon
+/// can't open the node by name (it is `root:disk 0660`), so every reader and writer of the boot
+/// partition goes through [`open`], which hands out a copy of this one.
+struct Handed {
+    node: PathBuf,
+    file: File,
+    write: bool,
+}
+
+static HANDED: Mutex<Vec<Handed>> = Mutex::new(Vec::new());
+
+/// Keeps `file`, opened on `node` by the root phase, for [`open`]. `write` says whether it was
+/// opened read-write: only when the boot records on it are ours. A later hand-over of the same node
+/// replaces the earlier one. The file is close-on-exec (the standard library opens every file so,
+/// and [`File::try_clone`] keeps it), so no child process inherits it.
+pub fn hand_over(node: &Path, file: File, write: bool) {
+    let mut handed = HANDED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    handed.retain(|h| h.node != node);
+    handed.push(Handed {
+        node: node.to_path_buf(),
+        file,
+        write,
+    });
+}
+
+/// Whether the root phase handed `node` over, and if so whether read-write.
+#[must_use]
+pub fn handed(node: &Path) -> Option<bool> {
+    let handed = HANDED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    handed.iter().find(|h| h.node == node).map(|h| h.write)
+}
+
+/// Why a write to a node handed over read only is refused.
+pub const READ_ONLY: &str = "the daemon holds the boot partition read only: its root phase found the boot records are not ours, so nothing on it is written";
+
+/// The boot node `node`, for reading, or for writing too: a copy of the file the root phase handed
+/// over when it did (a write is refused when that file is read only), else the node opened by name
+/// (a daemon that runs as root, or a test).
+///
+/// # Errors
+///
+/// A write on a node handed over read only, or the open's own error.
+pub fn open(node: &Path, write: bool) -> io::Result<File> {
+    {
+        let handed = HANDED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(h) = handed.iter().find(|h| h.node == node) {
+            if write && !h.write {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, READ_ONLY));
+            }
+            return h.file.try_clone();
+        }
+    }
+    OpenOptions::new().read(true).write(write).open(node)
 }

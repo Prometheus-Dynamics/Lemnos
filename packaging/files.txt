@@ -18,6 +18,8 @@
 #                 orion    an image that ships lemnos-orion
 #                 gadget   a board whose board file has a usb-gadget device (`driver = "usb-gadget"`)
 #                 health-tcp  a board whose board file names a `tcp:` health source (system-slots `health`)
+#                 slots    a board whose board file has a system-slots device (`driver = "system-slots"`)
+#                 security a board whose board file has a [security] table
 #                 kmod     an image that ships lemnos.ko
 #                 uboot    a U-Boot board that boots from a boot partition (boot.scr)
 #                 ubi      a U-Boot board that boots from raw NAND with UBI (boot.scr from boot-ubi.cmd)
@@ -42,6 +44,8 @@ packaging/systemd/lemnos-orion.env.example       /etc/lemnos/lemnos-orion.env   
 packaging/systemd/lemnos-module.conf             /usr/lib/modules-load.d/lemnos.conf            0644  systemd,kmod
 packaging/systemd/lemnosd.service.d/gadget.conf  /etc/systemd/system/lemnosd.service.d/gadget.conf 0644 systemd,gadget
 packaging/systemd/lemnosd.service.d/health-tcp.conf  /etc/systemd/system/lemnosd.service.d/health-tcp.conf 0644 systemd,health-tcp
+packaging/systemd/lemnosd.service.d/slots.conf   /etc/systemd/system/lemnosd.service.d/slots.conf 0644 systemd,slots
+packaging/systemd/lemnosd.service.d/security.conf  /etc/systemd/system/lemnosd.service.d/security.conf 0644 systemd,security
 packaging/udev/70-lemnos.rules                   /usr/lib/udev/rules.d/70-lemnos.rules          0644  udev
 packaging/init/S50lemnosd                        /etc/init.d/S50lemnosd                         0755  busybox
 packaging/init/S51lemnos-orion                   /etc/init.d/S51lemnos-orion                    0755  busybox,orion

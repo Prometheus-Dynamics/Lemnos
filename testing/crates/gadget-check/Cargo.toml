@@ -16,5 +16,6 @@ lemnos-client = { path = "../../../engine/client" }
 lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-hal = { path = "../../../engine/hal" }
 lemnos-core = { path = "../../../engine/core" }
+lemnos-linux = { path = "../../../backends/linux" }
 lemnos-linux-stream = { path = "../../../backends/linux-stream" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }
