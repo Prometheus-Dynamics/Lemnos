@@ -4,7 +4,28 @@ Status: **untested on board.** Nothing here has run on a board. The QEMU checks 
 modes `daemon-loop` and `daemon-loop-bind`, with the stand-in manager) and the host's own systemd user manager
 are the only evidence so far. No board was touched for this item.
 
-## What the board check must show
+## 0. The namespace still applies under `DefaultDependencies=no` (host, not a board)
+
+Run on the host's user manager (systemd 259), not a board and not the system manager, with a transient unit:
+`systemd-run --user --wait --collect -p DefaultDependencies=no -p ProtectSystem=strict -p PrivateTmp=yes
+-p ReadWritePaths=/run/user/1000/wdt-ns <probe>`. The probe writes under `/usr`, reads `/tmp` for a marker the
+host wrote, and writes into `/tmp`. Its output, verbatim:
+
+```
+inside: whoami=sozo pid=1934760
+/run/user/1000/wdt-ns/probe.sh: line 5: /usr/wdt-probe-write: Read-only file system
+inside: write under /usr: refused
+inside: /tmp sees the host marker: NO (private)
+inside: wrote /tmp/wdt-unit-tmp-probe.txt (private /tmp)
+```
+
+Afterwards the host has neither `/usr/wdt-probe-write` nor `/tmp/wdt-unit-tmp-probe.txt`. So the namespace applies
+(`/usr` is read-only, `/tmp` is private) under `DefaultDependencies=no`. The analyzer's score does not show it, which
+is why `scripts/check-packaging.sh` scores that unit without the line. This is evidence for the user manager only;
+the system manager on a board is still to be checked with the board run below.
+
+## 1. Checks for the board
+
 
 On a slot board built with the image contract for `lemnosd.service` (`DefaultDependencies=no`,
 `After=systemd-sysusers.service`, `FileDescriptorStoreMax=4`, no `RuntimeDirectoryPreserve=`):

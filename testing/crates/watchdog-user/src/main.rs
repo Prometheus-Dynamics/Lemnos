@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0);
 
-    if mode.starts_with("daemon") {
+    if mode.starts_with("daemon") || mode.starts_with("pid1-") {
         daemon::run(mode, last);
     }
     if mode == "stall" {

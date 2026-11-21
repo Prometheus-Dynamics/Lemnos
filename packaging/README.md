@@ -198,6 +198,11 @@ the restart delay is a constant 1 s.
 
 Three rules follow, and the OS must keep them:
 
+- **Single owner.** On a Lemnos board, Lemnos alone owns the hardware watchdog, in this order: slot-init, then
+  lemnosd's root phase, then the daemon through the store. PID 1 never opens it, and nothing it runs does. The image
+  must leave `RuntimeWatchdogSec=` and `ShutdownWatchdogSec=` unset for that node whatever the init does; a board
+  that sets them is outside the chain. The QEMU modes `pid1-hang`, `pid1-hang-stop` and `pid1-dead` show what PID 1's
+  state does to the feed (`docs/slots.md`, "The watchdog chain").
 - **Do not give the watchdog to systemd.** The device has exactly two openers, in order: slot-init (the
   initramfs `/init` of a slot, from its open to its `switch_root`) and then lemnosd (its root phase opens
   and feeds it as root, and the `hw-watchdog` driver's bind takes that descriptor). Leave `RuntimeWatchdogSec=` and `ShutdownWatchdogSec=` unset in

@@ -102,9 +102,24 @@ if [[ "$systemd_major" -ge 254 ]]; then
   }
   # Every unit's rows and overall score, one unit at a time.
   bad=0
+  # Scored on a copy without the line `DefaultDependencies=no`. systemd-analyze treats a unit with that line as
+  # early-boot and stops crediting its namespacing (ProtectSystem=, PrivateTmp=, ProtectHome=, RootDirectory=)
+  # as protection, so the shipped unit would score above its limit for a reason that is not a weaker sandbox.
+  # systemd still applies the namespacing to such a unit: this is the analyzer's view, not the runtime's (the
+  # namespace was shown to apply under DefaultDependencies=no, board-runs/WDT-ORDER.md, section 0). The limit
+  # stays at 2.5; the shipped unit must keep the three directives below, which are asserted by name.
+  for shipped in ProtectSystem=strict PrivateTmp=yes ProtectHome=yes; do
+    grep -qx -- "$shipped" "$work/lemnosd.service" || {
+      echo "packaging: lemnosd.service does not set $shipped; the exposure score is scored without DefaultDependencies=no, so the namespacing must be asserted by name" >&2
+      exit 1
+    }
+  done
   for unit in "$work"/*.service; do
     name="$(basename "$unit")"
-    out="$(systemd-analyze security --offline=true "$unit" 2>&1)"
+    mkdir -p "$work/score"
+    scored="$work/score/$name"
+    grep -vx -- 'DefaultDependencies=no' "$unit" >"$scored"
+    out="$(systemd-analyze security --offline=true "$scored" 2>&1)"
     score="$(awk '/Overall exposure level/ { print $7 }' <<<"$out")"
     [[ -n "$score" ]] || { echo "packaging: no exposure level read for $name"; exit 1; }
     rows="$(awk '/^✗/ { print $2 ";" $NF }' <<<"$out")"

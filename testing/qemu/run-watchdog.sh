@@ -34,6 +34,13 @@
 #   daemon-stop  as daemon-root, and lemnosd is stopped (SIGSTOP) as soon as its root phase has fed: the
 #              daemon hangs before it is healthy. Passes when the guest does not stay up, nothing feeds
 #              after the root phase, and the reset comes within the period of the root phase's feed.
+#   pid1-hang  as daemon-root, and PID 1 (this stand-in) hangs: its main thread blocks for good, reaping nothing. lemnosd
+#              is healthy and feeds on. Passes when the guest stays up 45 s with PID 1 hung, and every piece is on the console:
+#              the watchdog is fed by lemnosd, not by PID 1. (Nothing in Lemnos feeds the device on PID 1's behalf.)
+#   pid1-hang-stop  as pid1-hang, and lemnosd is stopped (SIGSTOP) as soon as its root phase has fed. Nothing feeds: the reset
+#              must come within the period of the root phase's feed, with PID 1 hung. Passes as daemon-stop does.
+#   pid1-dead  as daemon-root, and PID 1 exits 3 s after lemnosd starts. The kernel panics ("Attempted to kill init") and,
+#              with panic=-1, reboots at once: the guest ends within 5 s of PID 1's exit, by the panic, not by the timeout.
 #   daemon-loop  node root 0600 (only a root-phase hold can feed); lemnosd is killed at the end of its root phase on every start and
 #              started again 1 s later (Restart=always, RestartSec=1s). The stand-in manager keeps the descriptor lemnosd stores,
 #              and each restart takes it back: passes when only the first start fed, every restart said it adopted the stored
@@ -75,7 +82,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 KERNEL="${KERNEL:?set KERNEL to the bzImage of a kernel with CONFIG_I6300ESB_WDT=y}"
 CARGO="${CARGO:-cargo}"
-MODES="${MODES:-slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop daemon-loop-bind}"
+MODES="${MODES:-slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop daemon-loop-bind pid1-hang pid1-hang-stop pid1-dead}"
 LOGS="${LOGS:-${TMPDIR:-/tmp}/qemu-watchdog}"
 target=x86_64-unknown-linux-musl
 DOG_SECONDS=15
@@ -131,7 +138,7 @@ run_mode() {
     slot-init) cp "$slot_init" "$root/init" ;;
     normal) cp "$work/watchdog-init" "$root/init"; cp "$work/watchdog-user" "$root/sbin/watchdog-user"; level=2 ;;
     stall) cp "$work/watchdog-init" "$root/init"; cp "$work/watchdog-user" "$root/sbin/watchdog-user"; extra="lemnos.watchdog=stall"; level=2 ;;
-    daemon|daemon-late|daemon-root|daemon-hang|daemon-stop|daemon-loop|daemon-loop-bind)
+    daemon|daemon-late|daemon-root|daemon-hang|daemon-stop|daemon-loop|daemon-loop-bind|pid1-hang|pid1-hang-stop|pid1-dead)
       cp "$work/watchdog-init" "$root/init"; cp "$work/watchdog-user" "$root/sbin/watchdog-user"
       cp "$work/lemnosd" "$root/sbin/lemnosd"; cp "$work/lemnos-unit-check" "$root/sbin/lemnos-unit-check"
       mkdir -p "$root"/{run,tmp}
@@ -282,6 +289,35 @@ for mode in $MODES; do
       starts="$(grep -c 'killed after its watchdog bind' "$text" || true)"
       echo "qemu-watchdog: daemon-loop-bind: ${starts} starts, one fed; the guest ended ${elapsed} s after that feed (due by ${window} s)" >&2
       awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "daemon-loop-bind: the guest ended ${elapsed} s after the first start's feed, past ${window} s"
+      ;;
+    pid1-hang)
+      expect "$mode" "$text" "user: daemon (pid1-hang): PID 1 is hung"
+      expect "$mode" "$text" "user: daemon (pid1-hang): the guest stayed up 45 s with PID 1 hung; powering off"
+      pieces "$mode" "$text"
+      fed="$(piece "$text" 'root-phase feed')"
+      first="$(piece "$text" 'watchdog first feed')"
+      awk -v f="$fed" -v g="$first" -v t="$DOG_SECONDS" 'BEGIN{exit !(g - f < t)}' || fail "pid1-hang: the first tick ${first} s is not within the period of the root phase's feed ${fed} s"
+      echo "qemu-watchdog: pid1-hang: PID 1 hung; lemnosd kept the board up: root phase's feed ${fed} s, first tick ${first} s after the hook's last feed" >&2
+      ;;
+    pid1-hang-stop)
+      expect "$mode" "$text" "user: daemon (pid1-hang-stop): PID 1 is hung"
+      expect "$mode" "$text" "user: daemon (pid1-hang-stop): lemnosd stopped after its root phase's feed"
+      if grep -qF "stayed up 45 s with PID 1 hung" "$text"; then fail "pid1-hang-stop: the guest stayed up with lemnosd stopped"; fi
+      if [[ -n "$(piece "$text" 'watchdog first feed')" ]]; then fail "pid1-hang-stop: the watchdog was fed after the root phase with lemnosd stopped"; fi
+      fedat="$(awk '/user: piece: root-phase feed/ {print $1; exit}' "$work/console-$mode.stamped")"
+      elapsed="$(awk -v a="$fedat" -v b="$end" 'BEGIN{printf "%.1f", b-a}')"
+      window=$((DOG_SECONDS + TIMING_SLACK))
+      echo "qemu-watchdog: pid1-hang-stop: PID 1 hung and lemnosd stopped: the guest ended ${elapsed} s after the root phase's feed (due by ${window} s)" >&2
+      awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "pid1-hang-stop: the guest ended ${elapsed} s after the root phase's feed, past ${window} s"
+      ;;
+    pid1-dead)
+      expect "$mode" "$text" "user: daemon (pid1-dead): PID 1 exits now"
+      expect "$mode" "$text" "Kernel panic - not syncing: Attempted to kill init"
+      if grep -qF "the guest stayed up" "$text"; then fail "pid1-dead: the guest stayed up after PID 1 exited"; fi
+      exitedat="$(awk '/user: daemon \(pid1-dead\): PID 1 exits now/ {print $1; exit}' "$work/console-$mode.stamped")"
+      elapsed="$(awk -v a="$exitedat" -v b="$end" 'BEGIN{printf "%.1f", b-a}')"
+      echo "qemu-watchdog: pid1-dead: the guest ended ${elapsed} s after PID 1 exited; the kernel's panic reset it" >&2
+      awk -v e="$elapsed" 'BEGIN{exit !(e <= 5)}' || fail "pid1-dead: the guest ended ${elapsed} s after PID 1 exited, not at once"
       ;;
   esac
   passed+=("$mode")

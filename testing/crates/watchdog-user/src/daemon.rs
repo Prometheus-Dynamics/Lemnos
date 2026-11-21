@@ -49,6 +49,8 @@ const BOARD_PATH: &str = "/run/wdt-board.toml";
 const DAEMON: u32 = 999;
 /// How long the guest stays up on lemnosd's feeding: three times the hook's 15 s period.
 const STAY_SECONDS: u64 = 45;
+/// When `pid1-dead` exits PID 1, after lemnosd has fed the watchdog (its root phase is long over by then).
+const PID1_EXIT_AFTER: u64 = 3;
 /// The unit's restart delay (`RestartSec=1s`), for `daemon-loop`.
 const RESTART: Duration = Duration::from_secs(1);
 /// When udev "finishes" in `daemon-late`, after lemnosd is started.
@@ -306,7 +308,7 @@ pub fn run(mode: &str, last: f64) -> ! {
     }
     let stderr = child.stderr.take();
     let pid = i32::try_from(child.id()).unwrap_or(0);
-    let stop = mode == "daemon-stop";
+    let stop = mode == "daemon-stop" || mode == "pid1-hang-stop";
     thread::spawn(move || {
         let Some(stderr) = stderr else { return };
         let mut binds_before = 0u32;
@@ -355,6 +357,30 @@ pub fn run(mode: &str, last: f64) -> ! {
             }
         }
     });
+    if mode == "pid1-dead" {
+        // PID 1 exits: the kernel panics ("Attempted to kill init") and, with panic=-1, reboots at once.
+        // The daemon's feeding ends with the system, not by a timeout of its own.
+        thread::sleep(Duration::from_secs(PID1_EXIT_AFTER));
+        say("user: daemon (pid1-dead): PID 1 exits now");
+        std::process::exit(0);
+    }
+    if mode.starts_with("pid1-hang") {
+        // PID 1 hangs: its main thread blocks for good, reaping nothing. A helper thread ends the run
+        // after STAY_SECONDS, with the power-off, so the check can tell a feed that went on from a reset.
+        say(&format!(
+            "user: daemon ({mode}): PID 1 is hung (its main thread blocks; nothing reaps or waits)"
+        ));
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(STAY_SECONDS));
+            say(&format!(
+                "user: daemon ({mode}): the guest stayed up {STAY_SECONDS} s with PID 1 hung; powering off"
+            ));
+            let _ = guest::power_off();
+        });
+        loop {
+            thread::park();
+        }
+    }
     thread::sleep(Duration::from_secs(STAY_SECONDS));
     say(&format!(
         "user: daemon ({mode}): the guest stayed up {STAY_SECONDS} s on lemnosd's feeding; powering off"
