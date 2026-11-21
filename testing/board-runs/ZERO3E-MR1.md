@@ -155,6 +155,11 @@ unpooled results as evidence for this tree (WORKER-RULES correction, 2026-11-21)
 - PREDICTION MISS, stated: predicted reset about 1.4 s after the probe; the reset instant was NOT logged, and the link
   was down at the poll, so the reset time is not measured. The 5 s "no reset" STOP did not fire because the board was
   unreachable, not up. The pass is on the boot_id change and the anchors, not on the 1.4 s figure.
+- Helios ruling (2026-11-21): the reset instant was NOT measured. The link was down when the poll began, so the pass
+  rests on the boot_id change plus the anchors, not on timing.
+- Next run measures it: poll the link (a timestamped ping or ssh probe once a second) from BEFORE the timeout is set,
+  so the last answer before the drop and the first answer after it bracket the reset. Each poll line gets a timestamp.
+  This is a rule for the next watchdog run on any board: poll from before the arming, not after.
 - Result: PASS on the stated criteria. The watchdog-return line is therefore cleared for the next session.
 
 ## 3. Option A stub (built and rehearsed on the PC)
