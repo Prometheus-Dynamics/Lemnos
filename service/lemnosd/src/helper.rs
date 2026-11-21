@@ -1485,7 +1485,8 @@ mod tests {
         assert!(replies.starts_with("1 ok\n0 refused"), "{replies}");
         // A call the list does not allow: the child is killed before it runs.
         let forbidden = seccomp::run_forked(|| {
-            if seccomp::install(&calls()).is_err() {
+            // The child dies on purpose: no core dump, so no crash handler starts for it.
+            if privilege::no_core_dump().is_err() || seccomp::install(&calls()).is_err() {
                 return 2;
             }
             let _ = std::process::id();

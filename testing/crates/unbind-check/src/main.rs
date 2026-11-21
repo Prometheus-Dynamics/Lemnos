@@ -133,6 +133,10 @@ fn main() -> ExitCode {
     // The register mapping, read in a child that shares it: a fault ends that child by SIGBUS.
     let reader = privilege::fork();
     if let Ok(0) = reader {
+        // This child faults on purpose (SIGBUS): no core dump, so no crash handler starts for it.
+        if privilege::no_core_dump().is_err() {
+            guest::exit_now(2);
+        }
         match regs.as_ref().ok().and_then(|m| m.read32(0)) {
             Some(v) => {
                 say(&format!("FAIL the register mapping still reads 0x{v:08x}"));

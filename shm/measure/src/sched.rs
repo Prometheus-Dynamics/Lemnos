@@ -56,6 +56,14 @@ pub fn without_system_calls(body: impl FnOnce() -> bool) -> SystemCalls {
         return SystemCalls::Failed;
     }
     if child == 0 {
+        // A body that makes a system call dies on purpose, so this child sets its core limit to 1
+        // first: the kernel then writes no core dump and starts no crash handler for it.
+        let no_core = libc::rlimit {
+            rlim_cur: 1,
+            rlim_max: 1,
+        };
+        // SAFETY: `setrlimit` reads one `rlimit` through the pointer, which lives for the call.
+        let _ = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const no_core) };
         // SAFETY: a plain `prctl` with integer arguments.
         let no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
         // SAFETY: `program` and the filter it points at outlive the call, which only reads them.

@@ -594,6 +594,28 @@ pub fn die_with_parent() -> io::Result<()> {
     prctl_flag(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong).map(|_| ())
 }
 
+/// Sets this process's core-dump limit to one byte, soft and hard. The kernel reads a limit of 1
+/// as "do not dump", even when `core_pattern` pipes dumps to a handler, so the process ends with
+/// no dump and no handler started. Call it only in a child that is meant to die by a signal (a
+/// filter's kill, a deliberate fault), right before that death: a crash that is not on purpose
+/// must still dump.
+///
+/// # Errors
+///
+/// `setrlimit` fails.
+pub fn no_core_dump() -> io::Result<()> {
+    let none = libc::rlimit {
+        rlim_cur: 1,
+        rlim_max: 1,
+    };
+    // SAFETY: `setrlimit` reads one `rlimit` through the pointer, which lives for the call.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const none) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// Ignores `signal` for the calling process (`SIG_IGN`).
 ///
 /// # Errors
@@ -750,5 +772,24 @@ mod tests {
         assert_eq!(user_ids("root").expect("lookup"), Some((0, 0)));
         assert_eq!(group_id("root").expect("lookup"), Some(0));
         assert_eq!(user_ids("no-such-user-lemnos-test").expect("lookup"), None);
+    }
+
+    #[test]
+    fn no_core_dump_sets_both_limits_to_one_in_a_child() {
+        // Forked, so the limit is lowered for the child only.
+        let exit = crate::seccomp::run_forked(|| {
+            if no_core_dump().is_err() {
+                return 2;
+            }
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: `getrlimit` writes one `rlimit` into `limit`, which is valid for the call.
+            let rc = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &raw mut limit) };
+            i32::from(!(rc == 0 && limit.rlim_cur == 1 && limit.rlim_max == 1))
+        })
+        .unwrap();
+        assert_eq!(exit, crate::seccomp::Exit::Code(0));
     }
 }

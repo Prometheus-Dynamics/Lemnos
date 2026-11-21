@@ -439,6 +439,10 @@ mod tests {
         assert_eq!(allowed, Exit::Code(7));
         // `getpid` is not allowed: the kernel kills the child with SIGSYS before the call runs.
         let forbidden = run_forked(|| {
+            // The child dies on purpose: no core dump, so no crash handler starts for it.
+            if crate::privilege::no_core_dump().is_err() {
+                return 2;
+            }
             install(&[nr::EXIT, nr::EXIT_GROUP]).unwrap();
             let _ = std::process::id();
             0
