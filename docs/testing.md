@@ -73,6 +73,41 @@ through the back end's `input` stream instead, and checks the refusal of one len
 (`bad-config`). `LEMNOS_TEST_NO_DMA_HEAP=1` makes the host look as if it has no usable heap, so a
 dma-heap machine runs the memfd path, as a CI runner without a heap does. Nothing else changes.
 
+### The camera simulator
+
+`testing/crates/camera-sim` runs the camera chain on this machine: the real service, sensor and PiSP
+drivers over simulated buses, a receiver stand-in, and the PiSP blocks. It has two ways in.
+
+- **An instance** (`lemnos_camera_sim::Sim`, in process): `Sim::builder()` starts the service on a
+  socket in a temporary directory, over the sensor, power switch and receiver of the reference board.
+  Its state is its own: two instances in one test process share no clock, sensor bus, sensor-start
+  queue, switches or frame log. A driver finds its instance by the board's name, which the builder
+  makes unique; that name lookup is the only process-wide thing, and it holds no instance state.
+  The PiSP blocks are not in an instance (the driver installs its simulated block once per process).
+- **The process's own chain** (the crate's root functions and `offboard-daemon`): one per process,
+  with the PiSP blocks. The chain proof uses it.
+
+The frames come in three paces. **Real** frames fall on the sensor's frame period, which is its frame
+length times its line time from its registers (`(vts - 1) x hts + global` clocks at 96 MHz for the
+reference board's mode, 33 336 333 ns). Each frame is stamped with its grid time: one period after the
+sensor starts streaming, then each period, on the host's `CLOCK_MONOTONIC` or on a clock the test
+injects. A frame that falls due with no buffer free is dropped and counted; nothing waits for a
+consumer, and nothing is queued past the ring. **Lock-step** frames are made one per grant: `Consumer::next`
+grants one frame and waits for it, and a control posted for frame `k` (exposure, gain) lands on exactly
+frame `k`. A control for a granted frame is refused as late, and an out-of-range value is refused by value.
+**Event-driven** (the daemon's default, `offboard-daemon --pace lockstep`) is what the chain proof runs
+on: the sim clock moves with the sensor's starts, and a frame is made when a buffer is free.
+
+The scenes are a static ramp with bands every eight rows (lock-step frames: their mean is the black
+level 64 plus 400 times the exposure and gain relative to the reference, within rounding), a replay of
+given frames (`frames[n % len]`), and paced frames whose bytes are a function of their identity.
+
+The instance's switches: a sensor fault (failed, or gone and spent once seen), the receiver's next
+starts refused with `IO`, a silent receiver (no frames, no fault, its first unmade frame recorded), a
+receiver gone for good (`Health::Gone`, which under `auto_off_after` ends its stream), and a consumer
+fault (ended on the next tick). The table of which test pins which claim is in
+`testing/crates/camera-sim/README.md`.
+
 ### A consumer's tests: `lemnos-standin`
 
 A program that uses Lemnos tests against a real service with `lemnos-standin`

@@ -1,7 +1,13 @@
 //! The off-board daemon: the real `lemnosd` service over the simulated camera chain
 //! ([`lemnos_camera_sim`]).
 //!
-//! usage: offboard-daemon --board FILE --socket PATH [--claims on|off] [--model B1|A|M0] [--check]
+//! usage: offboard-daemon --board FILE --socket PATH [--claims on|off] [--model B1|A|M0]
+//!                        [--pace real|lockstep] [--check]
+//!
+//! `--pace lockstep` (the default) is the event-driven clock the chain proof uses: the sim clock
+//! moves with the sensor's starts and a frame is made when a buffer is free. `--pace real` paces the
+//! frames on the sensor's frame period against the daemon's tick (`CLOCK_MONOTONIC`), dropping and
+//! counting a frame that falls due with no buffer free.
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -9,11 +15,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, PoisonError};
 
-use lemnos_camera_sim::{Board, Model, SimBuffers, WORLD, drivers, new_world, world};
+use lemnos_camera_sim::{
+    Model, Pace, SimBuffers, WORLD, drivers, new_world, provider, set_pace, world,
+};
 use lemnos_host::Options;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
-use lemnos_sim::SimBoard;
 use lemnosd::{Config as ServiceConfig, Service};
 
 fn say(text: std::fmt::Arguments<'_>) {
@@ -30,6 +37,7 @@ fn main() -> ExitCode {
     // The kernel module's per-address claim is the board's behaviour: on unless a run says otherwise.
     let mut claims = std::env::var("OFFBOARD_CLAIMS").map_or(true, |v| v != "off");
     let mut check = false;
+    let mut pace = Pace::Demand;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -37,6 +45,15 @@ fn main() -> ExitCode {
             "--socket" => socket = args.next().unwrap_or_default(),
             "--claims" => claims = args.next().as_deref() == Some("on"),
             "--check" => check = true,
+            "--pace" => {
+                pace = match args.next().as_deref() {
+                    Some("real") => Pace::Real,
+                    Some("lockstep") => Pace::Demand,
+                    _ => {
+                        return complain("--pace takes real or lockstep");
+                    }
+                }
+            }
             "--model" => {
                 model = match args.next().as_deref() {
                     Some("M0") => Model::M0,
@@ -46,7 +63,7 @@ fn main() -> ExitCode {
             }
             _ => {
                 return complain(
-                    "usage: offboard-daemon --board FILE --socket PATH [--claims on|off] [--model B1|A|M0]",
+                    "usage: offboard-daemon --board FILE --socket PATH [--claims on|off] [--model B1|A|M0] [--pace real|lockstep]",
                 );
             }
         }
@@ -93,8 +110,7 @@ fn main() -> ExitCode {
             w.streaming = regs.get(&0x0100).is_some_and(|v| v & 1 == 1);
         });
     }
-    let lines = SimBoard::new();
-    lines.add_line("gpio:pinctrl-rp1:34");
+    set_pace(pace);
     let signals = match SignalFd::new(&[SIGTERM, SIGINT]) {
         Ok(s) => s,
         Err(e) => return complain(&format!("signals: {e}")),
@@ -104,7 +120,7 @@ fn main() -> ExitCode {
         name: board_file.board.id.clone(),
         board: board_file,
         drivers: drivers(),
-        backend: Box::new(Board { lines }),
+        backend: Box::new(provider()),
         options: Options::default(),
     };
     if !lemnos_camera_sim::pisp::install() {

@@ -9,15 +9,36 @@
 //!
 //! The kernel module's per-address I2C claim is modelled too (`claims`): one holder of `i2c-<bus>:0x<addr>`
 //! at a time, held until the holder's bus handle is dropped.
+//!
+//! # Two ways to run it
+//!
+//! * [`Sim`] is an instance: its own service on its own socket, its own sensor, clock, receiver
+//!   and switches, in a test process with any number of others. Its state is its own; nothing is
+//!   shared between two instances, and the process keeps none of it. It has the receiver and the
+//!   sensor only (no PiSP blocks, which the driver installs once per process). Its frames are paced
+//!   on the sensor's frame period against the host's clock ([`Pace::Real`]), or granted one at a time
+//!   ([`Pace::Lockstep`], with controls for a named frame), and its faults are switches on the
+//!   instance ([`Sim::sensor_fault`], [`Sim::refuse_receiver_starts`], and the rest).
+//! * The root functions here ([`world`], [`sensor_step`], [`time`], [`WORLD`]) act on the
+//!   process's own chain, for the chain proof and the off-board daemon: one chain per process, the
+//!   PiSP blocks included. That chain's frames are on demand (the default), on the sensor's steps
+//!   ([`pisp::set_paced`]), or against the host's clock ([`set_pace`]).
+//!
+//! The frame period is the sensor's: its frame length in lines times the line time its registers
+//! give ([`period_ns`]). Frame stamps are the sensor-start times on the host's `CLOCK_MONOTONIC`
+//! (or on the injected clock of an instance): the start of the first frame is one period after the
+//! receiver started, and frame `k` is stamped at `start + (k + 1) x period`, never 0.
 
+pub mod chain;
 pub mod pisp;
 pub mod profile;
 pub mod scene;
+pub mod sim;
 pub mod time;
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 use lemnos_contract_camera_isp::CameraIsp;
 use lemnos_contract_camera_receiver::{
@@ -25,13 +46,19 @@ use lemnos_contract_camera_receiver::{
     Packing,
 };
 use lemnos_core::{
-    Config, ConfigError, Dev, Key, Kind, Lifecycle, Provider, Result, Status, StreamHandle, driver,
+    Config, ConfigError, Dev, Health, Key, Kind, Lifecycle, Provider, Result, Status, StreamHandle,
+    driver,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_hal::i2c::{ErrorType, I2c as HalI2c, Operation};
 use lemnos_host::{DriverEntry, entry};
 use lemnos_sim::SimBoard;
+
+pub use chain::{Chain, Control, Faults, Home, Meta, Pace, SensorFault};
+pub use sim::{ClockSource, Consumer, Event, Memory, Refusal, Sim, SimBuilder, SimFrame};
+
+use chain::LEGACY;
 
 // ---------------------------------------------------------------- the sensor model
 const SYSCLK_HZ: u128 = 96_000_000;
@@ -61,6 +88,8 @@ pub struct World {
     model: Model,
     /// 0x0100 on i2c-10:0x60 is 1.
     pub streaming: bool,
+    /// When the sensor last started streaming, on the chain's clock (ns; 0 before it has).
+    pub started_at: u64,
     transactions: u64,
     /// Writes captured between the group hold's start and end, applied together at the launch.
     held: Option<BTreeMap<u16, u8>>,
@@ -74,7 +103,8 @@ pub struct World {
     pub latch_frames: u64,
 }
 
-pub static WORLD: Mutex<Option<World>> = Mutex::new(None);
+/// The process's own chain's world (see [`chain`]). A test sets it with [`new_world`].
+pub static WORLD: &Mutex<Option<World>> = &LEGACY.world;
 
 /// The module's exclusion, as `kernel/rs/rp1_csi2.rs` and `kernel/rs/pisp_fe.rs` make it: the
 /// receiver's raw `frames` stream and the front end are never running together (the receiver's
@@ -82,8 +112,8 @@ pub static WORLD: Mutex<Option<World>> = Mutex::new(None);
 /// runs), because in front-end mode the CSI-2 channel feeds the front end instead of memory. The
 /// module takes the decision under one lock; here it is one compare-and-swap, so the later of two
 /// starts always sees the earlier. A process holds one simulated chain, so this is process-wide;
-/// [`new_world`] clears it.
-pub static EXCLUSIVE: AtomicU8 = AtomicU8::new(NOBODY);
+/// [`new_world`] clears it. An instance has its own.
+pub static EXCLUSIVE: &AtomicU8 = &LEGACY.exclusive;
 /// [`EXCLUSIVE`]: nothing streams.
 pub const NOBODY: u8 = 0;
 /// [`EXCLUSIVE`]: the receiver's raw stream runs.
@@ -94,21 +124,24 @@ pub const FRONT_END: u8 = 2;
 /// Takes the block for `who`, `Err` (`EBUSY`) if the other one has it. Taking it again is fine for
 /// the front end (a restart); for the raw stream the receiver's own `running` check refuses it.
 pub fn take(who: u8) -> Result<()> {
-    match EXCLUSIVE.compare_exchange(NOBODY, who, Ordering::SeqCst, Ordering::SeqCst) {
-        Ok(_) => Ok(()),
-        Err(held) if held == who && who == FRONT_END => Ok(()),
-        Err(_) => Err(Status::BUSY),
-    }
+    LEGACY.take(who)
 }
 
 /// Lets go of the block if `who` holds it.
 pub fn release(who: u8) {
-    let _ = EXCLUSIVE.compare_exchange(who, NOBODY, Ordering::SeqCst, Ordering::SeqCst);
+    LEGACY.release(who);
 }
 
+/// Puts the process's own chain's frames on `pace` (the daemon's `--pace`). [`Pace::Demand`] is the
+/// event-driven clock; [`Pace::Real`] paces the frames on the daemon's tick. The PiSP front ends
+/// follow the sensor's steps when [`pisp::set_paced`] says so, whatever this is.
+pub fn set_pace(pace: Pace) {
+    LEGACY.set_pace(pace);
+}
+
+/// The process's own chain's world.
 pub fn world<R>(f: impl FnOnce(&mut World) -> R) -> R {
-    let mut guard = WORLD.lock().unwrap_or_else(PoisonError::into_inner);
-    f(guard.as_mut().expect("world"))
+    LEGACY.with_world(f)
 }
 
 fn put(regs: &mut BTreeMap<u16, u8>, at: u16, bytes: &[u8]) {
@@ -117,8 +150,16 @@ fn put(regs: &mut BTreeMap<u16, u8>, at: u16, bytes: &[u8]) {
     }
 }
 
+/// The process's own chain's world, with the sensor and the bus claims as `claims_on` and `model`
+/// say. Clears the exclusion of the raw stream and the front end.
 pub fn new_world(claims_on: bool, model: Model) -> World {
     EXCLUSIVE.store(NOBODY, Ordering::SeqCst);
+    new_world_in(claims_on, model)
+}
+
+/// A world with the chips of the reference board's camera bus and power, and no shared state.
+#[must_use]
+pub fn new_world_in(claims_on: bool, model: Model) -> World {
     let mut buses = BTreeMap::new();
     // i2c-10, 0x60: the OV9782 as the board's records show it at rest (BR1 2026-11-13, raze2-p2).
     let mut regs = BTreeMap::new();
@@ -166,6 +207,7 @@ pub fn new_world(claims_on: bool, model: Model) -> World {
         claims_on,
         model,
         streaming: false,
+        started_at: 0,
         transactions: 0,
         held: None,
         capturing: false,
@@ -199,60 +241,6 @@ impl World {
     }
 }
 
-/// The sensor's next start is taken by every consumer of a sensor step ([`sensor_step`]): the front
-/// ends by a call, each running receiver through this queue. The receiver's tick takes the starts
-/// and says when each is made, so a step returns only once the receiver has made its frame.
-struct Steps {
-    pending: std::collections::VecDeque<u64>,
-    /// Steps asked for, and steps the receiver has made.
-    issued: u64,
-    done: u64,
-    /// Receivers running in this process.
-    receivers: usize,
-}
-
-static STEPS: (Mutex<Steps>, std::sync::Condvar) = (
-    Mutex::new(Steps {
-        pending: std::collections::VecDeque::new(),
-        issued: 0,
-        done: 0,
-        receivers: 0,
-    }),
-    std::sync::Condvar::new(),
-);
-
-/// How long a sensor step waits for a receiver's tick before it is named as stuck.
-const STEP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-fn steps() -> std::sync::MutexGuard<'static, Steps> {
-    STEPS.0.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// A receiver started (`true`) or stopped (`false`) in this process.
-fn receivers(started: bool) {
-    let mut s = steps();
-    if started {
-        s.receivers += 1;
-    } else {
-        s.receivers = s.receivers.saturating_sub(1);
-        // Starts it would have made are not waited for any more.
-        s.pending.clear();
-        s.done = s.issued;
-        STEPS.1.notify_all();
-    }
-}
-
-/// The receiver's next step to make, if one was asked for.
-fn take_step() -> Option<u64> {
-    steps().pending.pop_front()
-}
-
-/// The receiver has made the step it took.
-fn finish_step() {
-    steps().done += 1;
-    STEPS.1.notify_all();
-}
-
 /// One sensor start, shared by every consumer of the sensor. The clock moves to the start; each
 /// front end with a job queued makes its frame, and each with none drops the start; each running
 /// receiver makes its frame (or drops it, with no buffer). Returns once every one has done so.
@@ -260,30 +248,9 @@ fn finish_step() {
 /// # Panics
 /// A running receiver does not take the step within ten seconds: its daemon's tick is not running.
 pub fn sensor_step() -> u64 {
-    let start = time::take_start(period_ns());
-    time::advance_to(start);
+    let start = LEGACY.sensor_start();
     pisp::step_front_ends(start);
-    let mut s = steps();
-    if s.receivers == 0 {
-        return start;
-    }
-    s.issued += 1;
-    let wanted = s.issued;
-    s.pending.push_back(start);
-    STEPS.1.notify_all();
-    let deadline = std::time::Instant::now() + STEP_WAIT;
-    while s.done < wanted {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        assert!(
-            !left.is_zero(),
-            "sensor start {start} was not taken by the receiver within {STEP_WAIT:?}: its tick is not running"
-        );
-        s = STEPS
-            .1
-            .wait_timeout(s, left)
-            .unwrap_or_else(PoisonError::into_inner)
-            .0;
-    }
+    LEGACY.step_receivers(start);
     start
 }
 
@@ -295,32 +262,35 @@ pub fn period_ns() -> u64 {
 
 /// The frame period in ps from the model's registers.
 pub fn period_ps() -> u128 {
-    world(|w| {
-        let regs = &w.buses["i2c-10"].targets[&0x60].regs;
-        let word = |at: u16| {
-            u128::from(*regs.get(&at).unwrap_or(&0)) << 8
-                | u128::from(*regs.get(&(at + 1)).unwrap_or(&0))
-        };
-        let (hts, vts, global) = (word(0x380c), word(0x380e), word(0x382c));
-        let sysclk = match w.model {
-            Model::M0 => vts * hts,
-            Model::A => (vts + 1) * hts,
-            Model::B1 => (vts - 1) * hts + global,
-        };
-        // The system clock is the PLL2 multiplier's (24 MHz / 3 * multiplier / 8: RAW10's mode runs
-        // 80 MHz, RAW8's 96 MHz). A chip that was never given one (the board's rest state) is at 96.
-        let multiplier = u128::from(
-            *regs
-                .get(&lemnos_driver_ov9782::chip::PLL2_MULTIPLIER)
-                .unwrap_or(&0),
-        );
-        let sysclk_hz = if multiplier == 0 {
-            SYSCLK_HZ
-        } else {
-            24_000_000 / 3 * multiplier / 8
-        };
-        sysclk * 1_000_000_000_000 / sysclk_hz
-    })
+    world(|w| period_ps_in(w))
+}
+
+/// The frame period in ps from a world's registers.
+pub fn period_ps_in(w: &World) -> u128 {
+    let regs = &w.buses["i2c-10"].targets[&0x60].regs;
+    let word = |at: u16| {
+        u128::from(*regs.get(&at).unwrap_or(&0)) << 8
+            | u128::from(*regs.get(&(at + 1)).unwrap_or(&0))
+    };
+    let (hts, vts, global) = (word(0x380c), word(0x380e), word(0x382c));
+    let sysclk = match w.model {
+        Model::M0 => vts * hts,
+        Model::A => (vts + 1) * hts,
+        Model::B1 => (vts - 1) * hts + global,
+    };
+    // The system clock is the PLL2 multiplier's (24 MHz / 3 * multiplier / 8: RAW10's mode runs
+    // 80 MHz, RAW8's 96 MHz). A chip that was never given one (the board's rest state) is at 96.
+    let multiplier = u128::from(
+        *regs
+            .get(&lemnos_driver_ov9782::chip::PLL2_MULTIPLIER)
+            .unwrap_or(&0),
+    );
+    let sysclk_hz = if multiplier == 0 {
+        SYSCLK_HZ
+    } else {
+        24_000_000 / 3 * multiplier / 8
+    };
+    sysclk * 1_000_000_000_000 / sysclk_hz
 }
 
 // ---------------------------------------------------------------- the bus handle
@@ -330,6 +300,7 @@ pub fn period_ps() -> u128 {
 struct Handle {
     bus: String,
     own: HashSet<u8>,
+    home: Home,
 }
 
 impl ErrorType for Handle {
@@ -342,13 +313,26 @@ impl HalI2c for Handle {
         address: u8,
         ops: &mut [Operation<'_>],
     ) -> core::result::Result<(), ErrorKind> {
-        world(|w| {
+        let home = self.home.clone();
+        home.chain().with_world(|w| {
             w.transactions += 1;
             if w.claims_on && !self.own.contains(&address) {
                 if !w.claims.insert((self.bus.clone(), address)) {
                     return Err(ErrorKind::Busy);
                 }
                 self.own.insert(address);
+            }
+            if address == 0x60 && self.bus == "i2c-10" {
+                // A sensor fault: failed answers until it is cleared; gone once, and spent.
+                let mut faults = home.chain().faults();
+                match faults.sensor {
+                    Some(SensorFault::Failed(_)) => return Err(ErrorKind::Failed),
+                    Some(SensorFault::Gone(_)) => {
+                        faults.sensor = None;
+                        return Err(ErrorKind::NotFound);
+                    }
+                    None => {}
+                }
             }
             let streaming_before = w.streaming;
             let sensor = address == 0x60 && self.bus == "i2c-10";
@@ -419,13 +403,17 @@ impl HalI2c for Handle {
             w.capturing = capturing;
             if launched {
                 let units = w.exposure_regs();
-                w.launches.push((time::now(), units));
+                w.launches.push((home.chain().clock.now(), units));
             }
             if address == 0x60 && self.bus == "i2c-10" {
                 if let Some(v) = mode_select {
                     w.streaming = v & 1 == 1;
                 } else {
                     w.streaming = streaming_before;
+                }
+                if w.streaming && !streaming_before {
+                    // The sensor's start, as the clock of its chain reads it: the frames fall from here.
+                    w.started_at = home.chain().source_now();
                 }
             }
             Ok(())
@@ -435,7 +423,7 @@ impl HalI2c for Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        world(|w| {
+        self.home.chain().with_world(|w| {
             for a in self.own.drain() {
                 w.claims.remove(&(self.bus.clone(), a));
             }
@@ -446,23 +434,25 @@ impl Drop for Handle {
 // ---------------------------------------------------------------- the backend
 pub struct Board {
     pub lines: SimBoard,
+    home: Home,
 }
 
 impl Provider for Board {
     fn provided(&self, need: &str) -> bool {
-        world(|w| w.buses.contains_key(need)) || self.lines.provided(need)
+        self.home.chain().with_world(|w| w.buses.contains_key(need)) || self.lines.provided(need)
     }
     fn device(&mut self, _need: &str, _tag: lemnos_core::Tag) -> Result<lemnos_core::LocalCaller> {
         Err(Status::NOT_SUPPORTED)
     }
     fn i2c(&mut self, need: &str) -> Result<lemnos_core::I2c> {
-        if !world(|w| w.buses.contains_key(need)) {
+        if !self.home.chain().with_world(|w| w.buses.contains_key(need)) {
             return Err(Status::NOT_FOUND);
         }
         Ok(lemnos_core::I2c(lemnos_core::Held::boxed(Box::new(
             Handle {
                 bus: need.to_string(),
                 own: HashSet::new(),
+                home: self.home.clone(),
             },
         ))))
     }
@@ -471,11 +461,31 @@ impl Provider for Board {
     }
 }
 
+impl Board {
+    /// A backend over `lines` on `home`'s chain.
+    #[must_use]
+    pub fn on(home: Home, lines: SimBoard) -> Self {
+        Self { lines, home }
+    }
+}
+
 // ---------------------------------------------------------------- the receiver ("rp1-csi2" stand-in)
 const RKEYS: &[Key] = &[
     Key::optional("device", Kind::Str),
     Key::optional("embedded_bytes", Kind::Int),
 ];
+
+/// What a frame shows, when the receiver makes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shows {
+    /// The process's chain: the picture is the sensor's exposure level, or the shared scene when the
+    /// test pattern is on (as it always was).
+    Legacy,
+    /// Paced: deterministic bytes of the frame's identity ([`scene::fill_paced`]).
+    Paced,
+    /// Lock-step: the instance's scene at the exposure and gain the frame was given.
+    Scene,
+}
 
 #[driver("rp1-csi2", provides = [CameraReceiver])]
 pub struct SimReceiver {
@@ -494,6 +504,12 @@ pub struct SimReceiver {
     latest_ns: u64,
     /// The shared scene as packed RAW10, made once, for a test pattern.
     scene: Option<Vec<u8>>,
+    /// Which chain this receiver is on.
+    home: Home,
+    /// Paced by the clock: the next frame's start (ns on the clock the chain reads).
+    real_next: Option<u64>,
+    /// One frame's bytes, made once and reused by the paced and lock-step frames.
+    scratch: Vec<u8>,
 }
 
 impl Lifecycle for SimReceiver {
@@ -502,7 +518,7 @@ impl Lifecycle for SimReceiver {
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
         cfg.check_keys(RKEYS)
     }
-    fn start(needs: SimReceiverNeeds, _cfg: &Config<'_>) -> Result<Self> {
+    fn start(needs: SimReceiverNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
             frames: needs.frames,
             _isp: needs._isp,
@@ -514,7 +530,20 @@ impl Lifecycle for SimReceiver {
             emitted: 0,
             latest_ns: 0,
             scene: None,
+            home: Home::lookup(cfg.board()),
+            real_next: None,
+            scratch: Vec::new(),
         })
+    }
+    fn health(&self) -> Health {
+        let mut faults = self.home.chain().faults();
+        match faults.gone {
+            Some(why) => {
+                faults.gone_reports += 1;
+                Health::Gone(why)
+            }
+            None => Health::Ok,
+        }
     }
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         profile::timed("sim-receiver", || self.step(now_ns))
@@ -522,34 +551,104 @@ impl Lifecycle for SimReceiver {
 }
 
 impl SimReceiver {
+    /// How this receiver makes its frames now: the process's own chain follows the sensor's steps
+    /// when a test puts them on it, and otherwise its pace.
+    fn pace(&self) -> Pace {
+        if !self.home.is_instance() && pisp::is_paced() {
+            return Pace::Stepped;
+        }
+        self.home.chain().pace()
+    }
+
     /// One tick of the receiver: the sensor's starts since the last tick become frames.
     fn step(&mut self, now_ns: u64) -> Option<u64> {
         if !self.running {
             return None;
         }
         let again = Some(now_ns + 1_000_000);
-        if !world(|w| w.streaming) {
+        let home = self.home.clone();
+        let chain = home.chain();
+        {
+            let mut faults = chain.faults();
+            if faults.consumer {
+                faults.consumer = false;
+                drop(faults);
+                if let Some(frames) = self.frames.as_mut() {
+                    let _ = frames.fault_consumer();
+                }
+                return again;
+            }
+        }
+        if !chain.with_world(|w| w.streaming) {
             // A sensor step with the receiver not streaming makes no frame, but it is still taken.
-            while let Some(_at) = take_step() {
-                finish_step();
+            while chain.take_step().is_some() {
+                chain.finish_step();
             }
             return again;
         }
-        if pisp::is_paced() {
-            // Paced: one frame per sensor start the test steps, in the order they were stepped.
-            while let Some(at) = take_step() {
-                self.start_frame(at, true);
-                finish_step();
+        match self.pace() {
+            Pace::Real => {
+                self.tick_real(&home, now_ns);
+                return again;
             }
-            return again;
-        }
-        // Demand: the next start is made when a buffer is free for it, and waits for one otherwise.
-        let period = period_ns();
-        let at = time::peek_start(period);
-        if self.start_frame(at, false) {
-            let _ = time::take_start(period);
+            Pace::Stepped => {
+                // Paced: one frame per sensor start the test steps, in the order they were stepped.
+                while let Some(at) = chain.take_step() {
+                    let shows = if home.is_instance() {
+                        Shows::Paced
+                    } else {
+                        Shows::Legacy
+                    };
+                    self.start_frame(chain, at, false, shows);
+                    chain.finish_step();
+                }
+            }
+            Pace::Lockstep => {
+                // One frame per grant: a grant waits for its buffer and is taken when its frame is made.
+                while let Some(at) = chain.take_step() {
+                    if !self.start_frame(chain, at, true, Shows::Scene) {
+                        chain.untake_step(at);
+                        break;
+                    }
+                    chain.finish_step();
+                }
+            }
+            Pace::Demand => {
+                // Demand: the next start is made when a buffer is free for it, and waits for one otherwise.
+                let period = chain.period_ns();
+                let at = chain.clock.peek_start(period);
+                if self.start_frame(chain, at, true, Shows::Legacy) {
+                    let _ = chain.clock.take_start(period);
+                }
+            }
         }
         again
+    }
+
+    /// Makes the frames that have fallen due on the clock since the last tick. The grid starts a
+    /// period after the sensor's start (`World::started_at`), and runs on while the sensor streams:
+    /// when it stops, the grid is forgotten, and a new start begins a new one. Each due frame is
+    /// stamped with its own grid time and made if a buffer is free; with none it is dropped and
+    /// counted. Nothing waits and nothing is queued past the ring.
+    fn tick_real(&mut self, home: &Home, now_ns: u64) {
+        let chain = home.chain();
+        let (streaming, started) = chain.with_world(|w| (w.streaming, w.started_at));
+        if !streaming {
+            self.real_next = None;
+            return;
+        }
+        let now = if chain.injected() {
+            chain.clock.now()
+        } else {
+            now_ns
+        };
+        let period = chain.period_ns();
+        let mut next = self.real_next.unwrap_or(started + period);
+        while next <= now {
+            self.start_frame(chain, next, false, Shows::Paced);
+            next += period;
+        }
+        self.real_next = Some(next);
     }
 }
 
@@ -564,22 +663,37 @@ impl SimReceiver {
     fn halt(&mut self) {
         if self.running {
             self.running = false;
-            receivers(false);
+            self.home.chain().receivers(false);
         }
     }
 
-    /// Makes the frame for the sensor start `at` (sim ns) if a buffer is free. Paced, a start with
-    /// no buffer is dropped and counted; demand, it is left for the next tick. Returns whether the
-    /// start was taken.
-    fn start_frame(&mut self, at_ns: u64, paced: bool) -> bool {
+    /// Makes the frame for the sensor start `at_ns` (sim ns) if a buffer is free. With `wait` a
+    /// start with no buffer is left for later (`false` is returned); without it the start is
+    /// dropped and counted. Returns whether the start was taken.
+    ///
+    /// A silent receiver takes every start and makes none, and keeps the first frame it did not make.
+    fn start_frame(&mut self, chain: &Chain, at_ns: u64, wait: bool, shows: Shows) -> bool {
+        let id = self.emitted;
+        {
+            let mut faults = chain.faults();
+            if faults.silent {
+                faults.first_unmade.get_or_insert(id);
+                drop(faults);
+                self.emitted += 1;
+                self.latest_ns = at_ns;
+                return true;
+            }
+        }
         let Some(frames) = self.frames.as_mut() else {
             self.counters.errors += 1;
             return true;
         };
-        time::advance_to(at_ns);
+        if shows != Shows::Paced {
+            chain.clock.advance_to(at_ns);
+        }
         let buffer = match frames.next_buffer() {
             Ok(Some(buffer)) => buffer,
-            Ok(None) if paced => {
+            Ok(None) if !wait => {
                 self.counters.dropped += 1;
                 self.emitted += 1;
                 self.latest_ns = at_ns;
@@ -592,11 +706,67 @@ impl SimReceiver {
             }
         };
         let size = self.layout.map_or(0, |l| l.size);
-        // A test pattern is a static picture the sensor makes itself: with the pattern on
-        // (`0x5e00` bit 7) the frames are the shared scene as packed RAW10, the same picture the
-        // simulated front end writes, so a frame saved from the receiver is a reference for the
-        // front end's. With the pattern off the picture is the exposure's level, as before.
-        let pattern = world(|w| {
+        let meta = match shows {
+            Shows::Legacy => {
+                self.write_legacy(chain, buffer, size, at_ns);
+                None
+            }
+            Shows::Paced => {
+                if self.scratch.len() != size as usize {
+                    self.scratch.resize(size as usize, 0);
+                }
+                scene::fill_paced(id, &mut self.scratch);
+                self.write_scratch(buffer)
+            }
+            Shows::Scene => {
+                let meta = lock_frame(chain, id, at_ns);
+                if self.scratch.len() != size as usize {
+                    self.scratch.resize(size as usize, 0);
+                }
+                match &*chain.scene() {
+                    scene::Scene::Pattern => scene::render_pattern(
+                        &mut self.scratch,
+                        meta.exposure_us,
+                        meta.analogue_gain_milli,
+                    ),
+                    scene::Scene::Replay(frames) => {
+                        let frame = frames.get(id as usize % frames.len().max(1));
+                        self.scratch.fill(0);
+                        if let Some(frame) = frame {
+                            let n = frame.len().min(self.scratch.len());
+                            self.scratch[..n].copy_from_slice(&frame[..n]);
+                        }
+                    }
+                }
+                self.write_scratch(buffer);
+                Some(meta)
+            }
+        };
+        let frames = match self.frames.as_mut() {
+            Some(frames) => frames,
+            None => return true,
+        };
+        let frame = StreamFrame {
+            buffer,
+            bytes: size,
+            sequence: id,
+            identity: 0,
+            timestamp_ns: at_ns.max(1),
+            end_ns: 0,
+        };
+        match frames.publish(frame) {
+            Ok(()) => self.counters.frames += 1,
+            Err(_) => self.counters.errors += 1,
+        }
+        let _ = meta;
+        self.emitted += 1;
+        self.latest_ns = at_ns;
+        true
+    }
+
+    /// The process's own chain's frame: the shared scene with the test pattern on, else the level.
+    fn write_legacy(&mut self, chain: &Chain, buffer: u32, size: u32, at_ns: u64) {
+        let pattern = chain.with_world(|w| {
             w.buses["i2c-10"].targets[&0x60]
                 .regs
                 .get(&lemnos_driver_ov9782::chip::TEST_PATTERN)
@@ -605,35 +775,61 @@ impl SimReceiver {
         let scene_frame = (pattern
             && size as usize == scene::RAW10_STRIDE * scene::HEIGHT as usize)
             .then(|| &*self.scene.get_or_insert_with(scene::reference_raw10));
-        // The picture's brightness is the sensor's exposure as it latched (`World::level_for_frame_at`).
-        let period = period_ns();
-        let level = world(|w| w.level_for_frame_at(at_ns, period));
-        let Some(frames) = self.frames.as_mut() else {
-            return true;
-        };
-        let wrote = match scene_frame {
-            Some(picture) => frames.write(buffer, 0, picture),
-            None => frames.write(buffer, 0, &vec![level; size as usize]),
-        };
-        if wrote.is_err() {
+        let period = chain.period_ns();
+        let level = chain.with_world(|w| w.level_for_frame_at(at_ns, period));
+        if let Some(frames) = self.frames.as_mut() {
+            let wrote = match scene_frame {
+                Some(picture) => frames.write(buffer, 0, picture),
+                None => frames.write(buffer, 0, &vec![level; size as usize]),
+            };
+            if wrote.is_err() {
+                self.counters.errors += 1;
+            }
+        }
+    }
+
+    /// Writes the scratch frame into `buffer`, returning nothing; a failed write is counted.
+    fn write_scratch(&mut self, buffer: u32) -> Option<Meta> {
+        if let Some(frames) = self.frames.as_mut()
+            && frames.write(buffer, 0, &self.scratch).is_err()
+        {
             self.counters.errors += 1;
         }
-        let frame = StreamFrame {
-            buffer,
-            bytes: size,
-            sequence: self.emitted,
-            identity: 0,
-            timestamp_ns: at_ns,
-            end_ns: 0,
-        };
-        match frames.publish(frame) {
-            Ok(()) => self.counters.frames += 1,
-            Err(_) => self.counters.errors += 1,
-        }
-        self.emitted += 1;
-        self.latest_ns = at_ns;
-        true
+        None
     }
+}
+
+/// Makes frame `id`'s exposure and gain (the controls that land on it take effect first), and logs
+/// the frame. The meta is what the frame was made with.
+fn lock_frame(chain: &Chain, id: u64, at_ns: u64) -> Meta {
+    let mut lock = chain.lock();
+    let mut applied = [None, None];
+    if let Some(list) = lock.pending.remove(&id) {
+        for (slot, control) in applied.iter_mut().zip(list.iter()) {
+            match *control {
+                Control::Exposure(us) => lock.exposure_us = us,
+                Control::Gain(milli) => lock.gain_milli = milli,
+            }
+            *slot = Some(*control);
+        }
+    }
+    let meta = Meta {
+        exposure_us: lock.exposure_us,
+        analogue_gain_milli: lock.gain_milli,
+        applied,
+        sensor_timestamp_ns: at_ns,
+    };
+    lock.meta.insert(id, meta);
+    while lock.meta.len() as u64 > chain::META_KEEP {
+        let first = lock.meta.keys().next().copied();
+        match first {
+            Some(k) => {
+                lock.meta.remove(&k);
+            }
+            None => break,
+        }
+    }
+    meta
 }
 
 impl CameraReceiver for SimReceiver {
@@ -683,18 +879,28 @@ impl CameraReceiver for SimReceiver {
         if self.running {
             return Err(Status::BUSY);
         }
+        let chain = self.home.chain();
+        {
+            // A refused start: the next N starts fail with `IO`, and the host tries again.
+            let mut faults = chain.faults();
+            if faults.refusals > 0 {
+                faults.refusals -= 1;
+                return Err(Status::IO);
+            }
+        }
         // The module's rule (see `EXCLUSIVE`): no raw stream while the front end streams.
-        take(RAW)?;
+        chain.take(RAW)?;
         self.counters = Counters::default();
         self.emitted = 0;
-        time::reset_schedule();
+        chain.clock.reset_schedule();
         self.running = true;
-        receivers(true);
+        self.real_next = None;
+        chain.receivers(true);
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
         self.halt();
-        release(RAW);
+        self.home.chain().release(RAW);
         Ok(())
     }
     fn counters(&mut self) -> Result<Counters> {
@@ -733,8 +939,8 @@ impl CameraReceiver for SimReceiver {
 }
 
 // ---------------------------------------------------------------- the daemon's parts
-/// Every driver the simulated board runs: the real sensor, power switch, raw bus and PiSP
-/// drivers, and the receiver stand-in.
+/// Every driver the simulated board runs: the real sensor, power switch and raw bus drivers, the
+/// receiver stand-in, and the real PiSP drivers.
 #[must_use]
 pub fn drivers() -> Vec<DriverEntry> {
     vec![
@@ -744,6 +950,17 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<SimReceiver>(),
         entry::<lemnos_driver_pisp::PispFe>(),
         entry::<lemnos_driver_pisp::PispBe>(),
+    ]
+}
+
+/// The drivers an instance runs: the sensor, power switch, raw bus and receiver (no PiSP blocks).
+#[must_use]
+pub fn instance_drivers() -> Vec<DriverEntry> {
+    vec![
+        entry::<lemnos_driver_ov9782::Ov9782>(),
+        entry::<lemnos_driver_raw_bus::RawBus>(),
+        entry::<lemnos_driver_gpio_power_switch::GpioPowerSwitch>(),
+        entry::<SimReceiver>(),
     ]
 }
 
@@ -769,6 +986,20 @@ impl SimBuffers {
         Self {
             heaps: usable.then_some(heaps),
         }
+    }
+
+    /// Sealed memfds, whatever the host has.
+    #[must_use]
+    pub fn memfd() -> Self {
+        Self { heaps: None }
+    }
+
+    /// The host's dma-heap, or `None` when it has none that works.
+    #[must_use]
+    pub fn dma_heap() -> Option<Self> {
+        let heaps = lemnosd::DmaHeaps::at("/dev/dma_heap");
+        let usable = lemnosd::BufferSource::allocate(&heaps, "system", 4096, 1).is_ok();
+        usable.then_some(Self { heaps: Some(heaps) })
     }
 
     /// What the buffers are.
@@ -823,10 +1054,11 @@ pub fn chain_board(reference: &str) -> std::result::Result<lemnos_host::board::B
     Ok(board)
 }
 
-/// A simulated board's [`Provider`]: the sensor's bus and the power switch's line.
+/// A simulated board's [`Provider`] on the process's own chain: the sensor's bus and the power
+/// switch's line.
 #[must_use]
 pub fn provider() -> Board {
     let lines = SimBoard::new();
     lines.add_line("gpio:pinctrl-rp1:34");
-    Board { lines }
+    Board::on(Home::Legacy, lines)
 }

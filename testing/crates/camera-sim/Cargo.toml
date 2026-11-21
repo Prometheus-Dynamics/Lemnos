@@ -16,6 +16,9 @@ lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
 lemnos-sim = { path = "../../../backends/sim" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }
 lemnos-sim-clock = { path = "../sim-clock" }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-linux-stream = { path = "../../../backends/linux-stream" }
+lemnos-contract-camera-sensor = { path = "../../../contracts/camera-sensor" }
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-contract-camera-isp = { path = "../../../contracts/camera-isp" }
 lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }

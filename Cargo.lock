@@ -1052,8 +1052,10 @@ dependencies = [
 name = "lemnos-camera-sim"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-client",
  "lemnos-contract-camera-isp",
  "lemnos-contract-camera-receiver",
+ "lemnos-contract-camera-sensor",
  "lemnos-core",
  "lemnos-driver-gpio-power-switch",
  "lemnos-driver-ov9782",
@@ -1064,6 +1066,7 @@ dependencies = [
  "lemnos-driver-rp1-csi2",
  "lemnos-hal",
  "lemnos-host",
+ "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnos-sim",
  "lemnos-sim-clock",
