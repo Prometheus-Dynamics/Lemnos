@@ -30,4 +30,17 @@ image starts.
 
 ## Result
 
-Not run. **untested on board**
+Run on Raze #2, 2026-11-21 (boot b34fee0e-2dc9-4da1-a77f-791d01632baf, rev origin/next 0d37cc55), read-only,
+both board locks held by flock over ssh. `pidof lemnosd` named one process (1376).
+
+| Read | Expected | Observed | Verdict |
+|---|---|---|---|
+| `grep Seccomp: /proc/1376/status` | `Seccomp: 2` | `Seccomp: 0` | **FAIL** |
+| `systemctl show lemnosd -p SystemCallFilter` | non-empty list | `SystemCallFilter=~` (empty list, no names) | **FAIL** |
+
+The hypothesis said mode 0 or an empty property means the image's unit does not carry the filter, and the run stops
+there and reports. This is that result: the image's `lemnosd` runs with no seccomp filter, and its unit has no
+`SystemCallFilter` entries. Nothing was changed or restarted to take it. Reported, not rerun.
+
+**untested on board** is replaced by this failing result. The PC-side allowlists are still tested on the PC only.
+

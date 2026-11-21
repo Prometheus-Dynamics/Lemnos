@@ -166,3 +166,11 @@ recorded as they were (see the rerun 4 section).
 
 Restore: lemnosd and lemnos-orion active, `systemctl --failed` 0, helios-engine active, failsafe stopped, the remote run
 directory removed.
+
+## Not run in the 2026-11-21 sweep (reported first, not run)
+
+`bench.sh --real` was not run on Raze #2 this session. Reading `testing/bench/bench.sh` at origin/next 0d37cc55:
+`--real` stops every service matching `lemnos*` on the board (lemnosd is one of them), starts them again on exit,
+and writes its run under `${BENCH_BOARD_DIR:-/var/tmp/lemnos-bench}`, not the data partition. Both conflict with the
+sweep's ruling (stop and report first; scratch file on the data partition only). Not run; reported to the
+coordinator for a decision.

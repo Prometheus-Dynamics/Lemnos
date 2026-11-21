@@ -351,5 +351,22 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`FL1.md`](../testing/board-runs/FL1.md) | The flash wire and the on-chip stage's device side: every timing (init budget, first window from send-end, reply bound, the phase deadlines, the storage budget) is checked in simulation only; the controller command times, address-before-status, the speed encoding, the stop procedure and the 64 KiB storage budget on a slow card are untested on board. The surplus bytes of an overlong transfer are open. Nothing has been run on the board; **untested on board** |
 | [`FEL.md`](../testing/board-runs/FEL.md) | The Allwinner FEL thunk (armv7 and AArch64): the pinned bytes run correctly under user-mode emulation, and the build reproduces them; the return into the boot ROM's FEL loop, the instruction set the A733's FEL loop runs, the SoC's watchdog values and the bad-table reset are untested on board. Nothing has been run on the board; **untested on board** |
 | [`R2-CFG.md`](../testing/board-runs/R2-CFG.md) | The board kit's kernel-config step accepts the one toolchain-detected line (`CONFIG_RUST_IS_AVAILABLE=y`) and nothing else; PC tests against the real CONFIG_RUST configurations only. Kit outside this repository. **untested on board** |
-| [`DAEMON-SECCOMP.md`](../testing/board-runs/DAEMON-SECCOMP.md) | The daemon under its unit's syscall filter on the board image: the kernel's seccomp mode of the running daemon (expected 2) and the unit's `SystemCallFilter` as loaded (expected non-empty). Two read-only reads, written, not run. **untested on board** |
+| [`DAEMON-SECCOMP.md`](../testing/board-runs/DAEMON-SECCOMP.md) | The daemon under its unit's syscall filter on the board image: the kernel's seccomp mode of the running daemon (expected 2) and the unit's `SystemCallFilter` as loaded (expected non-empty). Run 2026-11-21 on the bench board: seccomp mode 0 (expected 2) and an empty SystemCallFilter (expected non-empty): FAIL, reported. **untested on board** |
 | [`R2-PREV.md`](../testing/board-runs/R2-PREV.md) | The Pi form's previous slot at counts 4 to 7 (before flashing mode): the count's pick is the firmware's and is sim-only, since a trial slot does not go through `[boot_count&4]`; slot-init's side is tested in simulation. The check is written, not run. **untested on board** |
+
+## bench read-only sweep, 2026-11-21
+
+Records from [`RAZE2-SWEEP.md`](../testing/board-runs/RAZE2-SWEEP.md), the index of every row listed above that the
+sweep ran or held. Board state was left unchanged.
+
+| Check | Result |
+|---|---|
+| [`RAZE2-SWEEP.md`](../testing/board-runs/RAZE2-SWEEP.md) | The sweep index: each untested row with its run, partly-run, held or not-run reason. |
+| [`CMA-READ.md`](../testing/board-runs/CMA-READ.md) | CMA on the image after boot: 48308 kB of 65536 kB free, 12 blocks of order 9 or more. The after-a-day reading waits for uptime to reach a day. |
+| [`S-CAM.md`](../testing/board-runs/S-CAM.md) | A camera sensor is present and bound on the bench board (ov9782 at 10-0060, driver ov9282). Its chip id is read by its driver, not on the bus. Camera rows held for a stream. |
+| [`DTB-NAME-RUN-A.md`](../testing/board-runs/DTB-NAME-RUN-A.md) | Partly run: no firmware-log reader on the image, so the loaded DTB name is not read. Revision `c04180`. |
+| [`SLOT-MACHINE-ID.md`](../testing/board-runs/SLOT-MACHINE-ID.md) | Partly run (steps 1, 2, 3, 5). The machine-id differs from the derived id for this serial. Steps 4 and 6 not run. |
+| [`WDT-CHAIN.md`](../testing/board-runs/WDT-CHAIN.md) | Partly run: the watchdog's start is in the journal; the hand-over gap is not measured. |
+| [`BENCHREF.md`](../testing/board-runs/BENCHREF.md) | Not run this sweep: `bench.sh --real` stops the lemnos units. Reported first. |
+| [`B8.md`](../testing/board-runs/B8.md) | Checks 9 to 12 on the bench board held: they need the image's lemnosd stopped. Reported first. |
+

@@ -46,3 +46,24 @@ watchdog is left armed. If a boot does not come back on its own, the board's rec
 
 **Record.** Save the output of each step under `testing/board-runs/` in a new record, and do not change this plan's
 steps when you run them.
+
+## Partial read on Raze #2, 2026-11-21 (boot b34fee0e-2dc9-4da1-a77f-791d01632baf, rev origin/next 0d37cc55)
+
+Read-only, both board locks held by flock over ssh. Steps 1, 2 (findmnt only), 3 and 5 of this sheet were read. Not run:
+step 2's `touch` probe (a write attempt, not needed for the read-only mount), step 4 (needs the bridge and Orion's
+identity device on the board), and step 6 (a reboot). The record stays open.
+
+| Step | Read | Result |
+|---|---|---|
+| 1 | `cat /etc/machine-id` | `13fe474f6a30fd29cc0d8bbf8dbe04d4`: 32 lowercase hex digits and a newline. Pass. |
+| 2 | `findmnt -no OPTIONS /etc/machine-id` | `ro,...`: the file is a read-only bind. Pass (the `touch` probe not run). |
+| 3 | `journalctl -k` for `slot-init: (machine id|MACHINE-ID)` | Only `slot-init: starting slot helios-2026.2.0-dev.993-styx-e1097ec7 (helios, trial 0)`. No machine-id line. **Not as expected.** |
+| 4 | bridge `.call machine_id 64` | Not run. |
+| 5 | `ls /var/log/journal/` | One directory, `13fe474f6a30fd29cc0d8bbf8dbe04d4`, equal to the machine-id. Pass. |
+| 6 | reboot and repeat | Not run (reboot). |
+
+Finding for step 4: `dca6dc837fafca90a391f2fde9c20a6e` is the id M41 derives for this serial (`derive(serial)`), and it
+differs from the id the board holds. The board's id is the image's own; the derivation is not what the image wrote.
+Not a verdict on step 4, which needs the bridge. Reported.
+
+Board clock: the board has no RTC and reads 2026-11-08 at the read, so journal timestamps are not wall-clock times.

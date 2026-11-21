@@ -66,3 +66,17 @@ The test is run only after the return path above has been run once, with the wat
 
 The run directory on the board is removed as the last step of the script, after its stamps are copied
 into this record. Nothing else on the board is removed.
+
+## Read on Raze #2, 2026-11-21 (boot b34fee0e-2dc9-4da1-a77f-791d01632baf, rev origin/next 0d37cc55)
+
+Read-only, both locks held by flock over ssh. `/dev/watchdog` and `/dev/watchdog0` were listed, never opened.
+
+The journal of this boot shows: `bcm2835-wdt`: Broadcom BCM2835 watchdog timer; `slot-init: starting slot
+helios-2026.2.0-dev.993-styx-e1097ec7 (helios, trial 0)`; systemd `Using hardware watchdog /dev/watchdog0`,
+`Watchdog running with a hardware timeout of 15s`; and `orion-node ... watchdog_interval_ms=15000`.
+
+The hand-over gap (slot-init's exec to lemnosd's first feed) has no stamp in the journal: no line from lemnosd's
+root-phase feed was found. Board clock is wrong (2026-11-08 at the read), so no interval can be computed.
+
+Result: partly read. The chain's start (probe, the 15 s period, slot-init's start) is in the log; the gap and the
+steady feeding are **not measured**. Reboot-dependent steps are not run.
