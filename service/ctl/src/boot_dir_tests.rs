@@ -1,7 +1,7 @@
 //! `tree --boot-dir`: the firmware files for a board whose record is `tryboot`, golden text, and
 //! the check that the fixed text and the slots' own reading of it are one constant.
 
-use super::boot_dir::{HEADER, OVERLAY_README_TEXT};
+use super::boot_dir::HEADER;
 use super::boot_partition::board_parts;
 use lemnos_host::board::{self, BoardFile};
 use lemnos_slot_store::bootimage::Family;
@@ -32,8 +32,9 @@ fn the_config_files_are_the_fixed_text_then_the_board_lines() {
         root_text(&parts, "tryboot.txt"),
         format!("{HEADER}{TRYBOOT_TXT}gpio=5=op,dh\n")
     );
-    assert_eq!(parts.fixed.len(), 1);
-    assert_eq!(parts.fixed[0].bytes, OVERLAY_README_TEXT.as_bytes());
+    // The firmware form: the device tree under the board's default names, no other copy.
+    assert_eq!(parts.layout.form, lemnos_slot_store::bays::Form::Firmware);
+    assert_eq!(parts.layout.dtbs, ["bcm2712-rpi-5-b.dtb"]);
 }
 
 /// Without board lines the files are the fixed text exactly.
@@ -164,16 +165,16 @@ fn tree_refuses_boot_dir_and_writes_nothing() {
     assert!(!dir.exists());
 }
 
-/// The reader takes version 5 only, and refuses 4 and 6 by version.
+/// The reader takes version 6 only, and refuses 5 and 7 by version.
 #[test]
-fn the_layout_reader_reads_version_5_and_refuses_4_and_6() {
+fn the_layout_reader_reads_version_6_and_refuses_5_and_7() {
     use super::boot_dir::{LAYOUT, read_layout};
-    assert!(LAYOUT.contains("\nversion = 5\n"));
+    assert!(LAYOUT.contains("\nversion = 6\n"));
     assert!(read_layout(LAYOUT).is_ok());
-    for v in ["version = 4", "version = 6"] {
-        let bad = LAYOUT.replacen("version = 5", v, 1);
+    for v in ["version = 5", "version = 7"] {
+        let bad = LAYOUT.replacen("version = 6", v, 1);
         let why = read_layout(&bad).unwrap_err();
-        assert!(why.contains("reads 5"), "{v}: {why}");
+        assert!(why.contains("reads 6"), "{v}: {why}");
     }
 }
 
@@ -209,7 +210,7 @@ mod layout {
     #[test]
     fn the_contract_reads_and_its_rpi_list_is_the_slot_store_constants() {
         let files = read_layout(LAYOUT).unwrap();
-        assert_eq!(files.len(), 8);
+        assert_eq!(files.len(), 9);
         assert_eq!(
             required_for(&files, "rpi-tryboot"),
             names::RPI_TRYBOOT_REQUIRED
@@ -220,17 +221,18 @@ mod layout {
     }
 
     #[test]
-    fn a_version_other_than_five_is_refused() {
+    fn a_version_other_than_six_is_refused() {
         for other in [
             "version = 1",
             "version = 2",
             "version = 3",
             "version = 4",
-            "version = 6",
+            "version = 5",
+            "version = 7",
         ] {
-            let text = LAYOUT.replace("version = 5", other);
+            let text = LAYOUT.replace("version = 6", other);
             let why = read_layout(&text).unwrap_err();
-            assert!(why.contains("reads 5"), "{why}");
+            assert!(why.contains("reads 6"), "{why}");
         }
     }
 
@@ -246,7 +248,7 @@ mod layout {
     }
 
     #[test]
-    fn the_generated_file_is_the_readme_and_the_others_are_build() {
+    fn the_generated_files_are_the_readme_the_boot_texts_and_the_member_list() {
         let files = read_layout(LAYOUT).unwrap();
         let generated: Vec<&str> = files
             .iter()
@@ -258,6 +260,7 @@ mod layout {
             [
                 names::OVERLAY_README,
                 "extlinux/extlinux.conf",
+                lemnos_slot_store::bays::FIRMWARE_LIST,
                 "uboot-env.txt"
             ]
         );
@@ -613,7 +616,12 @@ fn uboot_board_with(keys: &str) -> BoardFile {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../testing/boards/reference.toml");
     let text = std::fs::read_to_string(path).unwrap();
-    board::parse(&text.replace("record = \"tryboot\"", keys)).unwrap()
+    // The firmware's own files are the Pi form's: the U-Boot form stores none.
+    board::parse(&text.replace("record = \"tryboot\"", keys).replace(
+        "firmware_files = [\"overlay_map.dtb\", \"hat_map.dtb\"]\n",
+        "",
+    ))
+    .unwrap()
 }
 
 fn uboot_board() -> BoardFile {
@@ -723,6 +731,7 @@ fn the_contract_names_the_locator_for_the_uboot_kind() {
         uboot,
         [
             "extlinux/extlinux.conf",
+            lemnos_slot_store::bays::FIRMWARE_LIST,
             lemnos_slot_store::uboot_env::LOCATOR
         ]
     );

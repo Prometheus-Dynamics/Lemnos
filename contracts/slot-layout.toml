@@ -1,6 +1,6 @@
 # The files of one slot's boot files on the boot partition, and the names that the image builder
 # (`lemnos-ctl boot-partition`), the installer, the bundle manifest check and the every-boot check all
-# use. Version 5. A reader refuses any other version and any key it does not know. The Rust constants
+# use. Version 6. A reader refuses any other version and any key it does not know. The Rust constants
 # in drivers/slot-store/src/layout.rs are tested against this file.
 #
 # What changed from version 2 (unreleased): a new top-level table `[[record]]` (the boot partition's
@@ -39,6 +39,25 @@
 # (`lemnos-ctl boot-partition`). The reader (service/ctl/src/boot_dir.rs `read_layout`) accepts
 # version 5 only.
 #
+# What changed from version 5 (BAY-EXACT, this version, 6). Version 5 readers refuse it, by version and
+# by the new keys:
+#   1. Exact files. A set's files are no longer pre-created at the bay sizes and padded: each file the
+#      firmware reads is written at its exact size, under its own vfat-style name. The bay sizes are
+#      caps. Each set owns one contiguous region of clusters ([bay] `region_align` clusters aligned, a
+#      whole number of `region_align` clusters, so the FAT sectors that map it hold only its entries);
+#      the clusters of the region no file holds belong to the set's `reserve` file ([bay] `reserve`).
+#      An install writes inside the region, the set's FAT sectors and the set's directories only.
+#   2. Device tree names. The device tree entry has the new key `named_by`: the board's [boot] key
+#      whose names the set stores the device tree under (each a copy), so the firmware loads it by its
+#      own default name and no `device_tree=` line is written. `name` is the bundle's name for it and
+#      the name stored where the key is unset (the U-Boot form only).
+#   3. The member list. `firmware-overlays.txt` (scope = "volume", generated) is always written: the
+#      set's form, the device tree names, the firmware config digest, the firmware overlays and files.
+#      Readers derive a set's paths from it.
+#   4. The bay record keeps the set's region, the slot, each file's length and a hash prefix in written
+#      order, and the SHA-256 of the path/length/hash list (drivers/slot-store/src/bays.rs `Info`).
+# The reader (service/ctl/src/boot_dir.rs `read_layout`) accepts version 6 only.
+#
 # Rule for every contracts/*.toml file: any new key, table or key meaning is a new version of that
 # file, and its reader refuses the old version and any key it does not know. Nothing is added to a
 # version in place.
@@ -68,7 +87,7 @@
 # what the generator writes and what a script sees) and the FAT directory name that name stands for
 # (drivers/slot-store/src/twocopy.rs, `Kind::visible_name` and `Kind::file_name`). `scope` = "volume"
 # is the boot partition's root; `scope` = "set" is each bay set's directory.
-version = 5
+version = 6
 
 [bay]
 dir = "slots/bay{n}"
@@ -77,6 +96,8 @@ info = "bayinfo.rec"
 info_bytes = 1024
 pointer_bytes = 1024
 pointers = ["default.txt", "previous.txt", "trial.txt"]
+region_align = 256
+reserve = "reserve"
 
 [volume]
 fat = 16
@@ -108,6 +129,7 @@ firmware = ["rpi-tryboot"]
 required = true
 scope = "set"
 source = "build"
+named_by = "device_tree_names"
 
 [[file]]
 name = "cmdline.txt"
@@ -139,6 +161,14 @@ role = "extlinux"
 firmware = ["uboot"]
 required = true
 scope = "set"
+source = "generated"
+
+[[file]]
+name = "firmware-overlays.txt"
+role = "member-list"
+firmware = ["rpi-tryboot", "uboot"]
+required = false
+scope = "volume"
 source = "generated"
 
 [[file]]

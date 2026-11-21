@@ -8,7 +8,8 @@
 //! tried in order (default `kernel_2712.img`, then `kernel8.img`); `--needs-overlay NAME` an overlay
 //! the firmware applies by itself. The last line is `firmware-layout rule N: PASS` or `FAIL`.
 
-use lemnos_firmware_check::{Filters, RULE_VERSION, Request, check};
+use lemnos_firmware_check::{Filters, RULE_VERSION, Report, Request, check};
+use lemnos_host::board::BootSpec;
 use lemnos_slot_store::bootimage::Mem;
 use std::io::Write;
 
@@ -76,6 +77,43 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     let image = image.ok_or("firmware-check needs an IMAGE")?;
     let bytes = std::fs::read(&image).map_err(|e| format!("{image}: {e}"))?;
     let report = check(&mut Mem(bytes), &req);
+    let bad = print(&req, &report, out)?;
+    if bad == 0 {
+        Ok(())
+    } else {
+        Err(format!("{image}: {bad} rule(s) failed"))
+    }
+}
+
+/// The default view of a board's image as its firmware reads it: `config.txt`, the board's model
+/// filters, its default device tree names and the overlays its firmware applies by itself.
+pub(crate) fn board_request(boot: &BootSpec) -> Request {
+    Request {
+        config: "config.txt".to_string(),
+        prefix: None,
+        filters: Filters {
+            on: boot.firmware_filters.clone(),
+            trial: false,
+            boot_count: 0,
+        },
+        kernels: DEFAULT_KERNELS.iter().map(|k| k.to_string()).collect(),
+        dtbs: boot.device_tree_names.clone(),
+        needs_overlays: boot.firmware_applied.clone(),
+    }
+}
+
+/// Checks `image` with `req`: the number of rules that fail, every line printed.
+pub(crate) fn check_image(
+    image: Vec<u8>,
+    req: &Request,
+    out: &mut dyn Write,
+) -> Result<usize, String> {
+    let report = check(&mut Mem(image), req);
+    print(req, &report, out)
+}
+
+/// Prints a report, one line per rule and the verdict last: the number of rules that fail.
+fn print(req: &Request, report: &Report, out: &mut dyn Write) -> Result<usize, String> {
     let w = |out: &mut dyn Write, line: String| writeln!(out, "{line}").map_err(|e| e.to_string());
     w(
         out,
@@ -98,12 +136,11 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     let bad = report.findings.iter().filter(|f| !f.ok).count();
     if bad == 0 {
         w(out, format!("firmware-layout rule {RULE_VERSION}: PASS"))?;
-        Ok(())
     } else {
         w(
             out,
             format!("firmware-layout rule {RULE_VERSION}: FAIL ({bad} BAD)"),
         )?;
-        Err(format!("{image}: {bad} rule(s) failed"))
     }
+    Ok(bad)
 }

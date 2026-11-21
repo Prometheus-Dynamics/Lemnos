@@ -1270,51 +1270,98 @@ procedure in `testing/board-runs/I5i.md` measures.
 
 ### The boot partition: payload bays
 
-A slot's boot files (kernel, initramfs, device tree, command line, board overlay) are not written under
-the slot's name. The boot partition holds **three bay sets**, `slots/bay0/` to `slots/bay2/`, each a
-pre-created directory of fixed-size, contiguous files (the layout contract, `contracts/slot-layout.toml`
-version 5): `kernel8.img`, `initramfs.cpio`, `board.dtb`, `cmdline.txt`, `overlays/lemnos-board.dtbo`,
-`overlays/README`, `bayinfo.rec` (the set's record: the slot in the set and each file's stored length and
-SHA-256), and for the U-Boot form `extlinux/extlinux.conf`. Three sets are the default, the previous, and
-the one being installed or on trial; no other slot has boot files on the partition, so the partition does
-not grow with the keep count. Each file's size is the board's: `[boot] bay_kernel_bytes`,
-`bay_initramfs_bytes`, `bay_device_tree_bytes`, `bay_cmdline_bytes` and `bay_overlay_bytes`
-([Boards](boards.md)), with no default. **Each is the size of the STORED file**: the bytes of the file as
-the slot bundle carries it, written into the bay as they are, then padded with zeros to the bay's size.
-Nothing is decompressed or recompressed on the way in. So on the Pi firmware form `kernel8.img` is what
-the firmware loads: a gzip-compressed kernel as the bundle ships it (the firmware decompresses it), and
-`bay_kernel_bytes` is that compressed size, not the size of the raw `Image`. On the U-Boot form the
-kernel is stored raw (a compressed one is refused by name: `booti` needs per-slot decompression
-addresses), so there `bay_kernel_bytes` is the raw size. The rule for choosing a size: a bay must hold the
-largest file a future slot may bring for that role, so take the largest file of the role over every slot
-you expect to install, add margin (the board file's comment says 10 %), and round up. A bay cannot grow
-after the image is built. A bundle whose file exceeds its bay is refused by name at install, before
-anything is written and with the default still booting: `<slot>: the kernel payload is <n> bytes but its
-bay holds <m>: nothing was written, the default keeps booting; rebuild the image with a larger kernel bay
-or a smaller payload` (and `lemnos-ctl boot-partition --payload DIR` names the role at build, `the payload
-of kernel is bigger than its bay: rebuild with a larger bay or a smaller payload`). The image builder. The image builder writes the whole volume (`lemnos-ctl
-boot-partition`): FAT16 with two FAT copies and the smallest power-of-two cluster of at least 512 bytes
-that gives fewer than 65,525 clusters, the firmware text, the pointers, the records, and the first slot in
-`bay0`. `--min-size` prints the smallest `--size` for the board's bays, one line of digits (with `--payload DIR`,
-that line first, then one line per role, `role stored_bytes bay_bytes`, and a non-zero exit naming a role
-whose payload is bigger than its bay; the formats of every mode are in [Building](building.md)). `--verify FILE` reads an image or a dump of a real partition and prints one `ok`/`BAD` line per
-finding. A payload that does not fit its bay is refused by name at build and at install; nothing is
-written.
+A slot's boot files are not written under the slot's name. The boot partition holds **three bay sets**,
+`slots/bay0/` to `slots/bay2/` (the layout contract, `contracts/slot-layout.toml` version 6). Three sets
+are the default, the previous, and the one being installed or on trial; no other slot has boot files on
+the partition, so the partition does not grow with the keep count. A set is the directory a pointer
+names (`os_prefix=slots/bayN/`), so every file in it is under the name the firmware reads by default,
+**at its exact size**: the firmware sizes a kernel from the end of its file and a device tree from its
+header, and a padded file fails both (see "Firmware layout" below).
 
-**Install.** Nothing here creates, renames or deletes a file: every write is a sector inside a file that
-already exists. The caller says which bays must not be touched (`bays::Protected`: the default's, the
-previous's, the trial's, and a pending trial with attempts left); the Pi form takes them from the pointers
-and the trial record, the U-Boot form from the environment (`default_bay`, `previous_bay`, `trial_bay`,
-`trial`, `trial_attempts`). The order is: refuse a slot that is on trial, the previous's or the trial's bay, a payload bigger than its
-bay, and a default bay that holds the slot with a stored hash that differs from the payload's, all before any
-write (the hashes are compared by `bays::compare_hashes`, which a data-partition writer can reuse; the
-payloads are the bundle's boot files, which the bundle check has matched to `slot.json`); clear the set's old
-record if it holds one; write each
-file padded to its fixed size; read each back and compare its hash; commit `bayinfo.rec`; read it back.
-Switching the default or the trial is a separate step that moves a pointer (Pi) or environment variables
-(U-Boot) and no payload. A power cut at any moment, including during an install, leaves the default
-bootable and the boot partition booting: the bay being written is never one a pointer names, and a set
-whose record is not committed is not a slot. A removal clears a set's record and nothing else.
+**What a set holds.** On the Pi firmware form: `kernel8.img`, `initramfs.cpio`, the device tree under
+each of the board's default names (`[boot] device_tree_names`, for example `bcm2712-rpi-5-b.dtb`; each
+name a copy of the bundle's `board.dtb`), `cmdline.txt`, `overlays/lemnos-board.dtbo`, each firmware
+overlay the board declares (`overlays/<name>.dtbo`), each firmware file the board declares
+(`[boot] firmware_files`, under `overlays/`: on the Raspberry Pi 5 `overlay_map.dtb` and `hat_map.dtb`,
+which the firmware reads from the prefix, built from the pinned kernel tree by
+`scripts/firmware-maps.sh`), the generated `overlays/README` (it makes `os_prefix` apply to overlays),
+`bayinfo.rec` and `reserve`. On the U-Boot form: the five roles under the names above, with the device
+tree as `board.dtb`, the generated `extlinux/extlinux.conf`, `bayinfo.rec` and `reserve`. No `kernel=`,
+`cmdline=` or `device_tree=` line names a file: the firmware's default names are the only names.
+
+**The region.** Each set owns, for the life of the image, one contiguous run of clusters that starts on
+a multiple of 256 and is a multiple of 256 long: on FAT16 a FAT sector holds 256 entries, so the FAT
+sectors that describe a region hold nothing else. The region is big enough for every file of the set at
+the largest size the board allows it at once: `[boot] bay_kernel_bytes`, `bay_initramfs_bytes`,
+`bay_device_tree_bytes` (for each default name), `bay_cmdline_bytes` and `bay_overlay_bytes` (for the
+board overlay and each firmware overlay and file), each rounded up to whole clusters, the sum rounded up
+to 256 clusters ([Boards](boards.md), no default). Each is the size of the **stored** file: the bytes as
+the slot bundle carries them, written as they are. Nothing is decompressed or recompressed, so on the Pi
+form `kernel8.img` is the gzip kernel the firmware decompresses and `bay_kernel_bytes` is that compressed
+size; on the U-Boot form the kernel is stored raw (a compressed one is refused by name: `booti` needs
+per-slot decompression addresses). The rule for choosing a size: take the largest file of the role over
+every slot you expect to install, add margin (the board file's comment says 10 %), and round up. A
+region cannot grow after the image is built. A bundle whose file is bigger than its role's size is
+refused by name at install, before anything is written and with the default still booting (`<slot>: the
+kernel payload is <n> bytes but its bay holds <m>: nothing was written, the default keeps booting;
+rebuild the image with a larger kernel bay or a smaller payload`), and `lemnos-ctl boot-partition
+--payload DIR` names the role at build. Whatever the files leave of the region is the file `reserve`, so
+no cluster of a region is ever free and nothing else on the volume can take it.
+
+**The record.** `bayinfo.rec` (two copies, like every record) keeps the set's region, the slot it holds
+(none for an empty set), each file's length and the first eight bytes of its SHA-256, at most 30 files,
+and the SHA-256 of the whole list (each path, its length and its full hash). A set whose record names no
+slot holds no slot, whatever its files are. The payload begins with the byte `L` and the layout
+version (6). A record of layout version 5 or before begins with its slot name's length (0 to 64), so it
+is never read as a record of this layout. A partition whose set records are not this layout's is not
+Lemnos's to write: the daemon's root phase hands its node over read only, the writer does not open it,
+and the installer, a free and `--add-to` each refuse it by the record's path before their first write.
+
+**The directory form.** In each set directory, and in each of its subdirectories, the entries an install
+never changes come first (`.`, `..`, `bayinfo.rec`, the subdirectories), padded with deleted entries to
+the end of their sector; the files and `reserve` start on the next sector. The image builder lays out
+the empty sets in this form, and an install writes only the directory sectors whose bytes change, so the
+sector holding the record's entry is never written after the image is built.
+
+**Install.** The caller says which sets must not be touched (`bays::Protected`: the default's, the
+previous's, the trial's, and a pending trial with attempts left); the Pi form takes them from the
+pointers and the trial record, the U-Boot form from the environment (`default_bay`, `previous_bay`,
+`trial_bay`, `trial`, `trial_attempts`). Each step is durable before the next:
+
+1. refuse, before any write: a pending trial; the previous's or the trial's set; a payload bigger than
+   its role's size; files that do not fit the region; and a default set that holds the slot with a boot
+   file whose stored hash differs from the payload's (the hashes are compared by
+   `bays::compare_hashes`, which a data-partition writer can reuse; the payloads are the bundle's boot
+   files, which the bundle check has matched to `slot.json`);
+2. (a) write the set's record empty (it keeps the region), so the set holds no slot;
+3. (b) write the files' data into the region;
+4. (c) write the region's FAT sectors, the second FAT copy, then the first;
+5. (d) write the set's directory sectors that change, the `reserve` entry last;
+6. (e) read every file back through the FAT, parsed again, and compare its hash;
+7. (f) commit the record (the slot, each file's length and hash) and read it back.
+
+Nothing outside the set's region, its FAT sectors and its directories is written. Switching the default
+or the trial is a separate step that moves a pointer (Pi) or environment variables (U-Boot) and no
+payload. A removal clears a set's record and nothing else.
+
+**A power cut at every step.** A cut at any write of an install leaves: the default booting (nothing it
+reads is written); every sector outside the set byte-identical; the cut set reading as uncommitted
+(its record names no slot); and the next install into that set repairing it whole. The slot-store tests
+cut the install at every write, and again at sampled bytes of the real-size image, and check those four
+facts at each cut.
+
+**The image builder** (`lemnos-ctl boot-partition`) writes the whole volume: FAT16 with two FAT copies
+and the smallest power-of-two cluster of at least 512 bytes that gives fewer than 65,525 clusters, the
+firmware text, the pointers, the records, the three regions, and the first slot in `bay0`. On the Pi form
+it runs the firmware-layout check (below) on the image it made and writes no file when a rule fails.
+`--min-size` prints the smallest `--size` for the board's bays, one line of digits (with `--payload DIR`,
+that line first, then one line per role, `role stored_bytes bay_bytes`, and a non-zero exit naming a
+role whose payload is bigger than its bay; the formats of every mode are in [Building](building.md)).
+`--verify FILE` reads an image or a dump of a real partition and prints one `ok`/`BAD` line per finding:
+each set's region, each committed set's files against its record, the pointers, the records and the
+generated root files. An image written by `--out` is a standalone FAT image of the boot partition: the
+whole partition is replaced when it is written, which is **option R** of the boot-partition plan. Adding
+to a partition that another system boots from is `--add-to`, below.
 
 **The U-Boot form.** The environment is U-Boot's own, written raw as before; the variables are `default`,
 `default_bay`, `previous_bay`, `trial`, `trial_bay` and `trial_attempts`, and `lemnos_env`, which the first
@@ -1328,16 +1375,19 @@ has not saved is refused, and `packaging/uboot/boot.cmd` reads `slots/${trial_ba
 third is the step in "Previous before flashing mode" below). The bay's
 `extlinux/extlinux.conf` is composed from the slot's command line and names the bay's own files by
 relative path (`../kernel8.img`, `../initramfs.cpio`), with no `fdt` line: the script loads
-`board.dtb` and names the boot source in it. The install rewrites that one fixed-size file before the set's
-record. A compressed kernel is refused by name on this form (`booti` needs `kernel_comp_addr_r` and
+`board.dtb` and names the boot source in it. The install writes it with the set's other files, before
+the set's record. A compressed kernel is refused by name on this form (`booti` needs `kernel_comp_addr_r` and
 `kernel_comp_size` set per slot); the Pi firmware form takes a gzip kernel.
 
 **Records on the volume.** The Pi form has `trial.rec`, `reason.rec` and `episodes.rec`; the U-Boot form
 has `reason.rec` only (its trial and default are in the environment, and
 `lemnos_slot_store::boot_raw::open_records` opens whichever the image has).
 
-**The every-boot check** (lemnosd's `boot_guard` and slot-init's) finds a slot's bay through the set
-records and hashes only the stored bytes of each file, not its padding.
+**The every-boot check** (lemnosd's `boot_guard` and slot-init's) finds a slot's set through the set
+records and hashes each file the set stores at its recorded length: a file the manifest lists against
+the manifest's hash, each copy of the device tree against `board.dtb`'s, and `overlays/README` against its
+fixed text (`extlinux/extlinux.conf` is checked entry by entry against the slot's files and command
+line). A stored file the manifest does not list, or a listed file the set does not store, fails it.
 
 **Not built: raw NAND.** Payload bays on NAND (UBI volumes) are parked. The `ubi` record keeps its files
 under `slots/<id>` on its UBIFS boot volume as before, and its install is refused by name (the message
@@ -1379,15 +1429,17 @@ The gzip end is found by inflating the stream (miniz_oxide, decompress only): no
 a gzip stream ends.
 
 **Where a bad payload is stopped.** At creation, never on the device. The image builder (`lemnos-ctl
-boot-partition`) and the bundle step (`lemnos-ctl bundle`), which is where a PC check runs, check the
-payload and record the rule version they checked at in the signed manifest (`firmware_layout`). On the
-device, the install verifies the signature and the sizes only, and refuses by name a bundle whose manifest
-has no `firmware_layout` or an older one, so a bundle made before a rule is refused rather than installed.
+boot-partition`) runs the check on every Pi-form image it makes and writes nothing when a rule fails:
+it prints the check's lines, then `the image fails <n> firmware-layout rule(s) (listed above): <file> was
+not written`. Not built yet: the bundle step (`lemnos-ctl bundle`) running the same check and recording
+the rule version in the signed manifest (`firmware_layout`), and the device's install refusing by name a
+bundle whose manifest has no `firmware_layout` or an older one. Until then the device install verifies
+the signature and the sizes only.
 The check and its inflate are host-side: lemnos-ctl links them (and lemnos-ctl ships on images), the
 daemon and slot-init never do, and `scripts/check-shipped.sh` holds that for lemnosd, lemnos-slot-init,
 lemnos-good-boot and lemnos-orion, together with a licence allow-list for the check's dependency tree.
-The manifest key, the builder's check and the device's refusal come with layout version 6 (each file at
-its exact size, below); the padded layout above fails this check, which is why it is replaced.
+Layout version 6 (each file at its exact size, above) is the layout that passes this check; version 5
+padded each file to its bay's size and failed it.
 
 ### Adding to an existing boot partition
 
@@ -1455,7 +1507,7 @@ give the same three files.
 **What it adds.** Every file the image builder emits for the board, taken from the builder's own tree
 (`bootimage::tree`), except `default.txt` and `config.txt`. Those two are the existing system's: they are
 never created, replaced or resized. For a Pi firmware board that is `slot-layout.toml`,
-`firmware-overlays.txt` when the board declares overlays or config lines, `previous.txt`, the records
+`firmware-overlays.txt`, `previous.txt`, the records
 (`trial.rec`, `reason.rec`, `episodes.rec`, `count.rec`, `SECURE.REC`), and under `slots/` the three bay
 sets `bay0` to `bay2` with every bay file, `overlays/README`, each firmware overlay's bay and
 `bayinfo.rec`. `--slot` is installed into bay set `--set N` (0 when not given) by the installer's write
@@ -1472,13 +1524,13 @@ file with the size and SHA-256 it had. `trial.txt` written here names the set of
 **A second slot.** On a dump that already holds every one of these files (the result of an earlier run),
 the command adds nothing and installs the slot into the set of `--set`, which must be empty; the slot must
 not be in another set. The other sets are not written. A dump that holds some of the files and not others
-is refused.
+is refused. A dump whose set records are another layout version's (layout version 5 and before) is
+refused by the first record's path, and nothing is written.
 
-**`bayinfo.rec` has no place in it.** The record is a two-copy record of kind `BAY_INFO` whose payload is
-the slot id and each member's stored length and SHA-256 (a firmware overlay also by its path under the
-set). It carries no set number and no sector address, so the same slot in `bay0` of one volume and `bay2`
-of another has the same record bytes, and a set's files and record copied to another set's place are that
-set, committed.
+**`bayinfo.rec` names its own region.** The record is a two-copy record of kind `BAY_INFO` (the
+record form above): the region's first cluster and cluster count, the slot id, and each member's stored
+length and the first eight bytes of its SHA-256. It carries no set number, so the same slot in the same
+region has the same record bytes on any volume.
 
 **Allocation.** The free map is read from the FAT: a cluster is free only when its entry is 0 in every
 FAT copy, and a volume whose copies differ is refused. Each file is one contiguous run, first fit: the
@@ -2001,18 +2053,23 @@ depends on it. The board check is `testing/board-runs/GROW.md`, untested on boar
 
 ### The slot layout (Pi firmware form)
 
-`contracts/slot-layout.toml` (version 5) lists every file of a slot's bay set (`slots/bayN/`) on the
-boot partition for the `rpi-tryboot` form, with its role, whether it is required, and its `source`:
-the kernel (`kernel8.img`), the initramfs (`initramfs.cpio`), the device tree the slot's kernel built
-(`board.dtb`) and `cmdline.txt` are `build` (the image builder supplies them), and `overlays/lemnos-board.dtbo`
-is `build` too (the compiled board overlay, see [the board overlay file](boards.md#the-board-overlay-file)).
-`overlays/README` is `generated`: it makes `os_prefix` apply to overlays, and `lemnos-ctl boot-partition`
-writes it into every bay set, one fixed line.
-The generated `config.txt` and `tryboot.txt` name these with the same spelling, and the constants in
-`drivers/slot-store/src/layout.rs` are tested against the file. `boot-partition` writes a copy as
-`slot-layout.toml` and checks it against the code before it builds an image. The reader refuses any
-version but 5 (4 and 6 included), any unknown key, and a `source` other than `build` or `generated`. What
-version 5 changed from 4 is stated in the file's header.
+`contracts/slot-layout.toml` (version 6) lists every file of a slot's bay set (`slots/bayN/`) on the
+boot partition, with its role, the forms that store it, whether it is required, and its `source`: the
+kernel (`kernel8.img`), the initramfs (`initramfs.cpio`), the device tree the slot's kernel built
+(`board.dtb`, stored under each of the board's default names: its entry says `named_by =
+"device_tree_names"`) and `cmdline.txt` are `build` (the image builder supplies them), and
+`overlays/lemnos-board.dtbo` is `build` too (the compiled board overlay, see [the board overlay
+file](boards.md#the-board-overlay-file)). `overlays/README` is `generated`: it makes `os_prefix` apply to
+overlays, and `lemnos-ctl boot-partition` writes it into every Pi-form bay set, one fixed line.
+`firmware-overlays.txt` at the root is `generated` too: the member list (the form, the device tree's
+names, the config digest, each firmware overlay and file), which the driver reads to know a set's files.
+Its `[bay]` table states the region's alignment (`region_align = 256`) and the name of the file that
+holds the rest of a region (`reserve = "reserve"`).
+The generated `config.txt` and `tryboot.txt` name the initramfs and the board overlay with the same
+spelling, and the constants in `drivers/slot-store/src/layout.rs` are tested against the file.
+`boot-partition` writes a copy as `slot-layout.toml` and checks it against the code before it builds an
+image. The reader refuses any version but 6 (5 and 7 included), any unknown key, and a `source` other
+than `build` or `generated`. What version 6 changed from 5 is stated in the file's header.
 
 A slot's manifest may carry `boot.overlay` (`{"board": ..., "sha256": ...}`): the board's overlay
 digest, which the live marker must equal (`docs/boards.md`). `lemnos-ctl tree BOARD --manifest-boot FILE`

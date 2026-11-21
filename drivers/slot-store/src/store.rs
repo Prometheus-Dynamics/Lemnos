@@ -123,11 +123,14 @@ impl Layout {
     }
 }
 
+/// The longest id [`valid_id`] accepts, in bytes.
+pub const MAX_ID_BYTES: usize = 64;
+
 /// A slot id as the board names files after it: `[a-z0-9._-]`, at most 64, not starting with
 /// a dot.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 64
+        && id.len() <= MAX_ID_BYTES
         && !id.starts_with('.')
         && id
             .bytes()

@@ -348,6 +348,11 @@ fn validate(text: &str) -> Result<String, String> {
         "--socket".to_string(),
         dir.join("nobody").display().to_string(),
         "validate".to_string(),
+        "--socs".to_string(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../socs")
+            .display()
+            .to_string(),
         path.display().to_string(),
     ];
     let result = lemnos_ctl::run(&args, &mut out).map(|()| String::from_utf8(out).unwrap());
@@ -356,6 +361,41 @@ fn validate(text: &str) -> Result<String, String> {
 }
 
 const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
+
+/// A board whose slot device keeps the tryboot record states what the Pi firmware reads by itself;
+/// `validate` refuses one that does not, by key, with the image builder's own rule.
+#[test]
+fn validate_refuses_a_tryboot_board_without_its_firmware_keys_by_name() {
+    let slots = "[[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\nconfig = { data = \"/data\", boot = \"/boot/firmware\", record = \"tryboot\", boot_sources = [\"rpi-boot-mode-1=/soc@107c000000/mmc@fff000\"], boot_args = \"os\", reserve_mb = 2048, keep = 3 }\n";
+    let head = HEAD.replace("id = \"t\"\n", "id = \"t\"\nsoc = \"bcm2712-rp1\"\n");
+    let names = "device_tree_names = [\"bcm2712-rpi-5-b.dtb\"]\n";
+    let files = "firmware_files = [\"overlay_map.dtb\", \"hat_map.dtb\"]\n";
+    let eeprom =
+        "[boot.eeprom]\nbuild = \"2026-05-12\"\nmax_restarts = 3\nreboot_on_fatal_error = true\n";
+    let board = |boot: &str, eeprom: &str| format!("{head}[boot]\n{boot}{eeprom}{slots}");
+    let why = validate(&board(files, eeprom)).unwrap_err();
+    assert!(why.ends_with("[boot] device_tree_names is not set: the firmware loads the device tree by its own default names for the board, and no device_tree= line is written; state them"), "{why}");
+    let why = validate(&board(names, eeprom)).unwrap_err();
+    assert!(
+        why.contains("[boot] firmware_files does not list overlay_map.dtb"),
+        "{why}"
+    );
+    let why = validate(&board(&format!("{names}{files}"), "")).unwrap_err();
+    assert!(why.ends_with("[boot.eeprom] is not set: a Raspberry Pi 5 board states what its bootloader EEPROM holds (build, max_restarts, reboot_on_fatal_error; a setting the EEPROM does not hold is \"not set\")"), "{why}");
+    // A description: a setting the EEPROM does not hold is "not set", and is accepted.
+    let unset = "[boot.eeprom]\nbuild = \"2025-12-08\"\nmax_restarts = \"not set\"\nreboot_on_fatal_error = \"not set\"\n";
+    validate(&board(&format!("{names}{files}"), unset)).unwrap();
+    // Each setting is stated: left out, the board file is refused.
+    let missing = unset.replace("max_restarts = \"not set\"\n", "");
+    assert!(
+        validate(&board(&format!("{names}{files}"), &missing))
+            .unwrap_err()
+            .contains("max_restarts")
+    );
+    let word = unset.replace("max_restarts = \"not set\"", "max_restarts = \"unset\"");
+    assert!(validate(&board(&format!("{names}{files}"), &word)).is_err());
+    validate(&board(&format!("{names}{files}"), eeprom)).unwrap();
+}
 
 #[test]
 fn validate_shows_the_defaults_with_no_host_section() {

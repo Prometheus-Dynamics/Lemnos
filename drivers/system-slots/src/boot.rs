@@ -79,8 +79,8 @@ pub trait BootRecord: Send {
     /// Writes a slot's five payloads (`ROLES` order) into a free bay set and commits its record. No
     /// pointer moves: the default and trial switches are separate calls. Nothing on the boot partition
     /// is written at file level.
-    /// The firmware overlays the boot partition declares (their paths under a set, in the layout's
-    /// order) and its firmware config digest: what a bundle's boot files and `boot.config` must match.
+    /// The files the boot partition declares beyond the five roles (firmware overlays and firmware
+    /// files, their paths under a set, in the layout's order) and its firmware config digest: what a bundle's boot files and `boot.config` must match.
     /// A form with no bays declares none.
     fn declared(&self) -> io::Result<(Vec<String>, Option<String>)> {
         Ok((Vec::new(), None))
@@ -391,16 +391,13 @@ impl BootRecord for Tryboot {
     }
 }
 
-/// The firmware overlay paths and the config digest of a bay layout, as [`BootRecord::declared`] gives them.
+/// The bundle paths a bay layout takes beyond the five roles (its firmware overlays, then its
+/// firmware files) and its config digest, as [`BootRecord::declared`] gives them.
 pub(crate) fn declared_of(
     layout: &lemnos_slot_store::bays::Layout,
 ) -> (Vec<String>, Option<String>) {
     (
-        layout
-            .firmware
-            .iter()
-            .map(|(path, _)| path.clone())
-            .collect(),
+        layout.paths()[lemnos_slot_store::bays::ROLES.len()..].to_vec(),
         layout.config.clone(),
     )
 }

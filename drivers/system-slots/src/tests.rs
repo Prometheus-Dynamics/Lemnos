@@ -1643,7 +1643,9 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
     // os-2 took the bay the environment names nothing for, and os-1's was not touched.
     let (dir, lengths) = board.slots.record.slot_bay("os-2").unwrap();
     assert_eq!(dir, "slots/bay1");
-    assert_eq!(lengths.len(), 5, "{lengths:?}");
+    // The five payloads and the set's generated extlinux.conf.
+    assert_eq!(lengths.len(), 6, "{lengths:?}");
+    assert_eq!(lengths[5].0, "extlinux/extlinux.conf");
     assert_eq!(board.slots.record.slot_bay("os-1").unwrap().0, "slots/bay0");
     board.slots.trial("os-2", false, false, false).unwrap();
     // The bay's composed extlinux file, read raw from the image: paths relative to the bay, and the
@@ -4656,13 +4658,27 @@ fn the_file_lemnos_ctl_bundle_wrote_installs_on_the_board_with_the_signature_enf
     for family in [Family::Tryboot, Family::UbootBlock] {
         let mut board = Board::new("os-1");
         real_record(&mut board, family);
+        if family == Family::Tryboot {
+            // The reference board's bays store the firmware's own files as well.
+            let files = ["overlay_map.dtb".to_string(), "hat_map.dtb".to_string()];
+            fs::write(
+                board.dir.0.join("boot.img"),
+                crate::bay_fixture::tryboot_image_with_files("os-1", &files),
+            )
+            .unwrap();
+        }
         let dir = board.dir.0.join("ctl");
         fs::create_dir_all(&dir).unwrap();
         let text = fs::read_to_string(repo.join("testing/boards/reference.toml")).unwrap();
         let text = if family == Family::UbootBlock {
+            // The firmware's own files are the Pi form's: the U-Boot form stores none.
             text.replace(
                 "record = \"tryboot\"",
                 "record = \"uboot\", uboot_env_size = 8192",
+            )
+            .replace(
+                "firmware_files = [\"overlay_map.dtb\", \"hat_map.dtb\"]\n",
+                "",
             )
         } else {
             text
@@ -4729,8 +4745,17 @@ fn the_file_lemnos_ctl_bundle_wrote_installs_on_the_board_with_the_signature_enf
         fs::set_permissions(&seed, fs::Permissions::from_mode(0o600)).unwrap();
         let key_id: [u8; 32] = Sha256::digest(key().verifying_key().as_bytes()).into();
         let bundle = dir.join("os-2.bundle");
+        // The Pi form's firmware files, which the bundle carries beside the payloads.
+        let firmware = dir.join("firmware");
+        fs::create_dir_all(&firmware).unwrap();
+        for name in parsed.boot.firmware_files.iter() {
+            fs::write(firmware.join(name), format!("{name} map")).unwrap();
+        }
+        let firmware = firmware.display().to_string();
         let (r, out) = run(&[
             "bundle",
+            "--firmware",
+            &firmware,
             "--layout-of",
             &board_file,
             "--socs",
@@ -4790,6 +4815,8 @@ fn the_file_lemnos_ctl_bundle_wrote_installs_on_the_board_with_the_signature_enf
         let unsigned = dir.join("unsigned.bundle");
         let (r, _) = run(&[
             "bundle",
+            "--firmware",
+            &firmware,
             "--layout-of",
             &board_file,
             "--socs",

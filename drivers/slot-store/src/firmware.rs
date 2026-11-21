@@ -24,13 +24,13 @@ pub const POINTER_FILE_BYTES: usize = 2 * POINTER_BYTES;
 /// The watchdog timeout the kernel driver reports on the board, in seconds (the SoC maximum is 16.8).
 pub const WATCHDOG_SECONDS: u8 = 15;
 
-/// The slot lines name the slot's files with fixed names (`layout.rs`): the only per-slot difference
-/// is the directory `os_prefix` selects, which the include before them sets. They are the same in
-/// both files. Their behaviour is from the documentation only until the board run in
-/// `testing/board-runs/I5i6.md`. Sources: `boot.adoc` in `raspberrypi/documentation` (`os_prefix`
-/// covers kernels, initramfs, cmdline.txt, .dtbs and overlays); `computers/configuration/reference.adoc`
-/// part 5.3 "Force a specific Device Tree" (`device_tree=<file>` loads that DTB). That part does not
-/// say whether `os_prefix` applies to `device_tree=`: that is an inference from the `.dtbs` line, unverified.
+/// The slot lines name no file: the firmware reads each of a set's files under its own default
+/// name (the kernel as `kernel_2712.img`, else `kernel8.img`; `cmdline.txt`; the board's default
+/// device tree names), under the directory `os_prefix` selects, which the include before them sets.
+/// Only the initramfs has a line (it has no default name), and the board overlay its `dtoverlay=`.
+/// They are the same in both files. Sources: `boot.adoc` in `raspberrypi/documentation`
+/// (`os_prefix` covers kernels, initramfs, cmdline.txt, .dtbs and overlays). A `kernel=`,
+/// `cmdline=` or `device_tree=` line is what the firmware-layout check (rule 1) refuses.
 /// The count fallback's threshold: the restarts without a good boot after which the firmware starts the
 /// previous slot. It is the design's trial attempt count (`trial_attempts`, 3 by default): boots 0 to 3
 /// run the default, boot 4 and later (up to the wrap at 256) the previous. The firmware's filter is
@@ -48,10 +48,7 @@ include default.txt\n\
 [boot_count>3]\n\
 include previous.txt\n\
 [all]\n\
-kernel=kernel8.img\n\
-cmdline=cmdline.txt\n\
 initramfs initramfs.cpio followkernel\n\
-device_tree=board.dtb\n\
 dtoverlay=lemnos-board\n";
 
 /// `config.txt` for a Raspberry Pi board whose firmware has no `boot_count` (every Pi before the Pi 5
@@ -60,10 +57,7 @@ dtoverlay=lemnos-board\n";
 pub const CONFIG_TXT_NO_COUNT: &str = "kernel_watchdog_timeout=15\n\
 include default.txt\n\
 [all]\n\
-kernel=kernel8.img\n\
-cmdline=cmdline.txt\n\
 initramfs initramfs.cpio followkernel\n\
-device_tree=board.dtb\n\
 dtoverlay=lemnos-board\n";
 
 /// The `config.txt` text for a board: with the count fallback (Pi 5 family) or without it.
@@ -78,10 +72,7 @@ pub const fn config_for(count_fallback: bool) -> &'static str {
 /// `tryboot.txt`: the trial, once, with no count filter.
 pub const TRYBOOT_TXT: &str = "kernel_watchdog_timeout=15\n\
 include trial.txt\n\
-kernel=kernel8.img\n\
-cmdline=cmdline.txt\n\
 initramfs initramfs.cpio followkernel\n\
-device_tree=board.dtb\n\
 dtoverlay=lemnos-board\n";
 
 /// The fixed files a board gets at image build for its firmware, `(file, text)`. Only `rpi-tryboot`

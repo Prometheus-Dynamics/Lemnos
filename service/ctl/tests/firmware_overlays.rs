@@ -8,6 +8,9 @@ use lemnos_slot_store::bootimage::Mem;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+#[path = "support/pi.rs"]
+mod pi;
+
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -17,6 +20,7 @@ fn socs() -> String {
 }
 
 fn run(args: &[&str]) -> (Result<(), String>, String) {
+    // Each test gives --firmware itself: what a missing directory does is tested here.
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let mut out = Vec::new();
     let r = lemnos_ctl::run(&args, &mut out);
@@ -70,13 +74,11 @@ fn write_board(dir: &Path, text: &str) -> String {
     path.display().to_string()
 }
 
-/// A firmware directory holding each named overlay's `.dtbo`.
+/// A firmware directory holding the maps and each named overlay's `.dtbo`.
 fn firmware_dir(dir: &Path, names: &[&str]) -> String {
     let fw = dir.join("firmware");
-    std::fs::create_dir_all(&fw).unwrap();
-    for name in names {
-        std::fs::write(fw.join(format!("{name}.dtbo")), format!("overlay {name}\n")).unwrap();
-    }
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    pi::write_firmware(&fw, &names);
     fw.display().to_string()
 }
 
@@ -120,10 +122,8 @@ fn payload(dir: &Path, board: &str, slot: &str) -> String {
     let p = dir.join("payload");
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
-    std::fs::write(p.join("kernel"), vec![0u8; 3000]).unwrap();
-    std::fs::write(p.join("initramfs"), b"initramfs").unwrap();
-    std::fs::write(p.join("device-tree"), b"device tree").unwrap();
-    std::fs::write(p.join("board-overlay"), b"overlay").unwrap();
+    pi::write_payload(&p, pi::CMDLINE, 4096);
+    pi::write_firmware(&pi::firmware_beside(&p), &[]);
     let line = p.join("cmdline");
     let (r, _) = run(&[
         "tree",
@@ -273,7 +273,8 @@ fn a_board_with_two_overlays_goes_from_tree_to_bundle_to_boot_partition_to_verif
         "{config}"
     );
     let list = String::from_utf8(text_of(&image, "firmware-overlays.txt").unwrap()).unwrap();
-    assert!(list.starts_with("config "), "{list}");
+    assert!(list.starts_with("form firmware\n"), "{list}");
+    assert!(list.contains("\nconfig "), "{list}");
     assert!(
         list.contains("overlay test-ramoops\noverlay test-gpu\n"),
         "{list}"
@@ -291,8 +292,7 @@ fn a_board_with_two_overlays_goes_from_tree_to_bundle_to_boot_partition_to_verif
     ]);
     r.unwrap_or_else(|e| panic!("verify: {e}\n{report}"));
     assert!(
-        report
-            .contains("bay0 (a1): the five payloads and 2 firmware overlay(s) match their record"),
+        report.contains("bay0 (a1): its 10 files match their record"),
         "{report}"
     );
     assert!(
@@ -504,18 +504,24 @@ fn a_bundle_whose_config_lines_differ_from_the_boot_partitions_is_refused_by_the
 fn a_board_with_neither_key_writes_no_firmware_list_and_its_bundle_has_no_config_digest() {
     let dir = scratch("nokeys");
     let board = write_board(&dir, &board_text(&[], &[]));
-    let (r, out, bundle_path) = bundle(&dir, &board, "a1", None);
+    // Only the firmware's own maps: the board declares no overlay.
+    let maps = firmware_dir(&dir, &[]);
+    let (r, out, bundle_path) = bundle(&dir, &board, "a1", Some(&maps));
     r.unwrap_or_else(|e| panic!("{e}\n{out}"));
     let (image, boot_out) = boot_image(
         &dir,
         &board,
         "a1",
         &dir.join("final").display().to_string(),
-        None,
+        Some(&maps),
     );
     let image = image.unwrap_or_else(|e| panic!("{e}\n{boot_out}"));
-    let mut mem = Mem(std::fs::read(&image).unwrap());
-    assert!(bootfat::read_file(&mut mem, "firmware-overlays.txt", 4096).is_err());
+    // The member list is written for every bay (it names the form, the tree's names and the
+    // firmware files), and it has no config line and no overlay.
+    let list = String::from_utf8(text_of(&image, "firmware-overlays.txt").unwrap()).unwrap();
+    assert!(!list.contains("config "), "{list}");
+    assert!(!list.contains("overlay "), "{list}");
+    assert!(list.contains("file overlay_map.dtb\n"), "{list}");
     let bundle_text = String::from_utf8_lossy(&std::fs::read(&bundle_path).unwrap()).into_owned();
     assert!(
         !bundle_text.contains("\"config\":"),
@@ -531,7 +537,9 @@ fn a_board_with_neither_key_writes_no_firmware_list_and_its_bundle_has_no_config
 // are applied in order with their config-line parameters, a failure is named, and `expect_nodes` is
 // checked in the merged tree. The real dtmerge is not on this host, so these tests did not run it.
 
-const BASE_DTS: &str = "/dts-v1/;\n/ {\n\tsoc {\n\t\tgpu {\n\t\t\tstatus = \"disabled\";\n\t\t};\n\t};\n\treserved-memory {\n\t};\n};\n";
+/// A labelled node, so dtc's `-@` writes `__symbols__` and the board overlay's label resolves, as on a
+/// real board tree.
+const BASE_DTS: &str = "/dts-v1/;\n/ {\n\tsoc {\n\t\tgpio: gpio {\n\t\t};\n\t\tgpu {\n\t\t\tstatus = \"disabled\";\n\t\t};\n\t};\n\treserved-memory {\n\t};\n};\n";
 /// `ram_size` is the test parameter: `__overrides__` maps it to the cell, as dtmerge reads it.
 const RAM_DTS: &str = "/dts-v1/;\n/plugin/;\n/ {\n\tfragment@0 {\n\t\ttarget-path = \"/reserved-memory\";\n\t\t__overlay__ {\n\t\t\ttest_ram: test-ram {\n\t\t\t\trecord-size = <0x4000>;\n\t\t\t};\n\t\t};\n\t};\n\t__overrides__ {\n\t\tram_size = <&test_ram>, \"record-size:0\";\n\t};\n};\n";
 const GPU_DTS: &str = "/dts-v1/;\n/plugin/;\n/ {\n\tfragment@0 {\n\t\ttarget-path = \"/soc/gpu\";\n\t\t__overlay__ {\n\t\t\tstatus = \"okay\";\n\t\t};\n\t};\n};\n";
@@ -623,7 +631,7 @@ fn host_case(
     let dir = scratch(name);
     let board = write_board(&dir, &board_with(lines, overlays, expect));
     let fw = dir.join("firmware");
-    std::fs::create_dir_all(&fw).unwrap();
+    pi::write_firmware(&fw, &[]);
     for (overlay, text) in dtbos {
         std::fs::write(
             fw.join(format!("{overlay}.dtbo")),
@@ -729,8 +737,10 @@ fn an_expected_node_value_the_merge_does_not_give_is_refused_with_both_values() 
     );
 }
 
+/// An overlay whose target is not in the tree: the image builder's firmware-layout check refuses
+/// it by name, so no image carries it to the host merge.
 #[test]
-fn an_overlay_that_does_not_apply_is_refused_by_name_and_the_bay_is_not_checked_further() {
+fn an_overlay_that_does_not_apply_is_refused_by_the_builder_by_name() {
     let expect = "expect_nodes = [{ path = \"/soc/gpu\", properties = { status = \"okay\" } }]\n";
     let case = host_case(
         "host-merge-missing",
@@ -742,22 +752,18 @@ fn an_overlay_that_does_not_apply_is_refused_by_name_and_the_bay_is_not_checked_
         expect,
         &[("test-ram", RAM_DTS), ("test-missing", MISSING_DTS)],
     );
-    let tool = merge_tool(&case.dir);
-    let image = host_image(&case, "a1").unwrap_or_else(|e| panic!("{e}"));
-    let (r, out) = verify_host(&case, &image, &tool);
-    assert!(r.is_err(), "{out}");
+    let why = host_image(&case, "a1").unwrap_err();
     assert!(
-        out.contains("ok  bay0 (a1): test-ram applies on host, not loaded by firmware"),
-        "{out}"
+        why.contains(
+            "BAD overlays: slots/bay0/overlays/test-missing.dtbo does not apply to slots/bay0/bcm2712-rpi-5-b.dtb: /fragment@0: target-path /no/such/node is not in the tree"
+        ),
+        "{why}"
     );
-    assert!(
-        out.contains("BAD bay0 (a1): test-missing does not apply on host, not loaded by firmware: dtmerge exited with 1"),
-        "{out}"
-    );
-    // The expected node is not checked once a merge has failed.
-    assert!(!out.contains("/soc/gpu status"), "{out}");
+    assert!(why.contains("was not written"), "{why}");
+    assert!(!case.dir.join("boot-a1.img").exists());
 }
 
+/// A device-tree payload that is not a tree: the image builder refuses it by name.
 #[test]
 fn a_base_tree_that_is_not_a_device_tree_is_refused_by_name() {
     let case = host_case(
@@ -767,7 +773,6 @@ fn a_base_tree_that_is_not_a_device_tree_is_refused_by_name() {
         "",
         &[("test-gpu", GPU_DTS)],
     );
-    let tool = merge_tool(&case.dir);
     let payloads = payload(&case.dir, &case.board, "a1");
     std::fs::write(Path::new(&payloads).join("device-tree"), b"not a tree").unwrap();
     let (r, out) = boot_image(
@@ -777,14 +782,13 @@ fn a_base_tree_that_is_not_a_device_tree_is_refused_by_name() {
         &payloads,
         Some(&case.firmware),
     );
-    r.unwrap_or_else(|e| panic!("boot-partition: {e}\n{out}"));
-    let image = case.dir.join("boot-a1.img").display().to_string();
-    let (r, out) = verify_host(&case, &image, &tool);
-    assert!(r.is_err(), "{out}");
+    let why = r.unwrap_err();
+    assert!(why.contains("firmware-layout rule"), "{why}");
     assert!(
-        out.contains("BAD bay0 (a1): test-gpu does not apply on host, not loaded by firmware"),
+        out.contains("BAD dtb: slots/bay0/bcm2712-rpi-5-b.dtb: no FDT magic"),
         "{out}"
     );
+    assert!(!case.dir.join("boot-a1.img").exists());
 }
 
 #[test]
@@ -792,7 +796,8 @@ fn a_board_with_no_overlays_is_verified_unchanged_even_when_a_tool_is_given() {
     let dir = scratch("host-merge-none-image");
     let board = write_board(&dir, &board_text(&[], &[]));
     let payloads = payload(&dir, &board, "a1");
-    let (r, out) = boot_image(&dir, &board, "a1", &payloads, None);
+    let maps = firmware_dir(&dir, &[]);
+    let (r, out) = boot_image(&dir, &board, "a1", &payloads, Some(&maps));
     let image = r.unwrap_or_else(|e| panic!("{e}\n{out}"));
     let (r, out) = run(&[
         "boot-partition",

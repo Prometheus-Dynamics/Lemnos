@@ -218,7 +218,8 @@ pub fn check_roles(manifest: &Manifest, declared: &[String]) -> Result<(), Strin
 }
 
 /// The set's form when the board is not given: the five roles, and beyond them only firmware overlay
-/// names (`overlays/<name>.dtbo`). Which overlays the board declares is checked with the board.
+/// names (`overlays/<name>.dtbo`) and firmware files (`overlays/<name>.dtb`). Which of them the board
+/// declares is checked with the board.
 ///
 /// # Errors
 ///
@@ -226,10 +227,10 @@ pub fn check_roles(manifest: &Manifest, declared: &[String]) -> Result<(), Strin
 pub fn check_roles_form(manifest: &Manifest) -> Result<(), String> {
     let mut declared: Vec<String> = role_files().iter().map(|p| p.to_string()).collect();
     for (name, _) in &manifest.boot_files {
-        if let Some(stem) = name
-            .strip_prefix("overlays/")
-            .and_then(|rest| rest.strip_suffix(".dtbo"))
-            && bays::valid_firmware_name(stem)
+        if let Some(stem) = name.strip_prefix("overlays/").and_then(|rest| {
+            rest.strip_suffix(".dtbo")
+                .or_else(|| rest.strip_suffix(".dtb"))
+        }) && bays::valid_firmware_name(stem)
             && !declared.contains(name)
         {
             declared.push(name.clone());

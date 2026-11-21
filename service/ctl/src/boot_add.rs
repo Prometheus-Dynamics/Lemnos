@@ -12,7 +12,7 @@
 use lemnos_slot_store::bootadd::{self, Mode, Request};
 use lemnos_slot_store::bootimage::Parts;
 use lemnos_slot_store::bundle::hex;
-use lemnos_slot_store::fatadd;
+use lemnos_slot_store::{bayfat, fatadd};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::os::unix::fs::FileTypeExt;
@@ -90,10 +90,7 @@ pub(crate) fn add(parts: &Parts, a: &Args<'_>, out: &mut dyn Write) -> Result<()
     }
     let dump = read_dump(a.dump)?;
     let payloads = super::boot_partition::read_payloads(Path::new(a.payload))?;
-    let firmware = super::boot_partition::read_firmware(
-        a.firmware,
-        &super::boot_partition::overlay_names(&parts.layout),
-    )?;
+    let firmware = super::boot_partition::read_firmware(a.firmware, &parts.layout)?;
     let refs: Vec<&[u8]> = payloads
         .iter()
         .chain(firmware.iter())
@@ -136,9 +133,18 @@ pub(crate) fn add(parts: &Parts, a: &Args<'_>, out: &mut dyn Write) -> Result<()
         done.free_after.clusters, done.free_after.runs, done.free_after.longest
     ));
     for f in &done.added {
+        // A set's region is added whole as `reserve`; the install then writes its files into the
+        // region and leaves `reserve` the rest, so the line gives the region, not the file's size.
+        let region = !f.is_dir && f.path.ends_with(&format!("/{}", bayfat::RESERVE));
         line(format!(
             "{} {} {} {} {}",
-            if f.is_dir { "added-dir" } else { "added" },
+            if f.is_dir {
+                "added-dir"
+            } else if region {
+                "added-region"
+            } else {
+                "added"
+            },
             f.path,
             f.size,
             f.first,

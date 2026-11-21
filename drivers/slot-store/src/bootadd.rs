@@ -13,7 +13,8 @@
 //! [`crate::fatadd`] passes, the volume is sound when read again with every earlier entry where it
 //! was, and the image builder's own verification shows exactly the lines expected.
 
-use crate::bays::{self, Done, INFO_BYTES, INFO_NAME, POINTER_BYTES, Protected, SETS};
+use crate::bayfat;
+use crate::bays::{self, Done, INFO_NAME, POINTER_BYTES, Protected, SETS};
 use crate::bootfat::{self, ReadAt, Refusal};
 use crate::bootimage::{self, Family, Finding, Mem, Parts};
 use crate::fatadd::{self, Added, Alloc, Change, DirAt, Editor, FreeMap, Replaced};
@@ -106,7 +107,11 @@ fn flatten<'n>(nodes: &'n [Node], dir: &str, out: &mut Vec<(String, &'n [u8])>) 
     for node in nodes {
         match node {
             Node::File { name, data } => out.push((join(dir, name), data.as_slice())),
-            Node::Dir { name, children } => flatten(children, &join(dir, name), out),
+            Node::Dir { name, children } | Node::DirOf { name, children, .. } => {
+                flatten(children, &join(dir, name), out)
+            }
+            // A set's region is sized by the volume's clusters: it is added, not listed.
+            Node::Region { .. } => {}
         }
     }
 }
@@ -170,16 +175,6 @@ pub fn add_to_with(
     }
     bays::check_install(&parts.layout, req.set, req.slot, req.payloads)
         .map_err(|e| e.to_string())?;
-    for f in &parts.fixed {
-        if f.bytes.len() as u64 > f.size {
-            return Err(format!(
-                "{}: {} bytes do not fit {}",
-                f.path,
-                f.bytes.len(),
-                f.size
-            ));
-        }
-    }
     let nodes = our_tree(parts, req.set)?;
     let mut files = Vec::new();
     flatten(&nodes, "", &mut files);
@@ -216,6 +211,23 @@ pub fn add_to_with(
         }
     };
 
+    // A set directory is ours only with its record: a fresh add never moves into one it finds.
+    if mode == Mode::Added {
+        for set in 0..bays::SETS {
+            let dir = bays::set_dir(set);
+            if ed
+                .survey
+                .entries
+                .iter()
+                .any(|e| e.path.eq_ignore_ascii_case(&dir))
+            {
+                return Err(format!(
+                    "{dir} is already on the volume and is not a bay set of ours (it holds no {INFO_NAME}): nothing was written"
+                ));
+            }
+        }
+    }
+
     // The trial pair: added when absent, left when it is already what we would write, replaced on
     // request, and otherwise left as the existing system's.
     let mut add_pair: Vec<&str> = Vec::new();
@@ -237,7 +249,7 @@ pub fn add_to_with(
         }
         let ours = bootfat::locate_path(&mut view, name, want.len() as u64)
             .ok()
-            .and_then(|f| bays::read_file(&mut view, f.first_lba, want.len() as u64).ok())
+            .and_then(|_| bootfat::read_file(&mut view, name, want.len() as u64).ok())
             .is_some_and(|have| have == *want);
         if ours {
             continue;
@@ -267,33 +279,50 @@ pub fn add_to_with(
             ed.add_nodes(&DirAt::Root, "", &nodes, &keep)?;
         }
         Mode::InstalledOnly => {
+            // The sets must be this layout's: a dump made for another layout version is not written.
+            if let Some(why) = bays::records_version(&mut view)? {
+                return Err(why);
+            }
             // The set must be empty, and the slot in no set: this installs, it never reinstalls.
-            let sets = bays::place_sets(&mut view, &parts.layout)
-                .map_err(|e| format!("{e}: nothing was written"))?;
+            let sets =
+                bays::place_sets(&mut view).map_err(|e| format!("{e}: nothing was written"))?;
+            let mut region = None;
             for set in 0..SETS {
-                let info = bays::read_info(&mut view, sets[set as usize].1)
+                let info = bays::read_info(&mut view, sets[set as usize])
                     .map_err(|e| format!("bay{set}: {e}: nothing was written"))?;
                 match info {
-                    Some(i) if set == req.set => {
+                    Some(bays::Info {
+                        slot: Some(held), ..
+                    }) if set == req.set => {
                         return Err(format!(
-                            "bay{set} already holds the slot {}: --add-to installs into an empty bay set only: nothing was written",
-                            i.slot
+                            "bay{set} already holds the slot {held}: --add-to installs into an empty bay set only: nothing was written"
                         ));
                     }
-                    Some(i) if i.slot == req.slot => {
+                    Some(bays::Info {
+                        slot: Some(held), ..
+                    }) if held == req.slot => {
                         return Err(format!(
                             "the slot {} is already in bay{set}: nothing was written",
                             req.slot
                         ));
                     }
+                    Some(i) if set == req.set => region = Some(i.region),
                     _ => {}
                 }
             }
-            let (members, info) = &sets[req.set as usize];
-            for (i, &lba) in members.iter().enumerate() {
-                ed.allow_own(lba, parts.layout.member_bytes(i));
+            let region = region.ok_or_else(|| {
+                format!(
+                    "bay{}'s record names no region: the dump's bays were not made for layout version {}: nothing was written",
+                    req.set,
+                    bays::LAYOUT_VERSION
+                )
+            })?;
+            let owned =
+                bayfat::owned_sectors(&mut view, &bays::set_dir(req.set), INFO_NAME, region)
+                    .map_err(|e| format!("{e}: nothing was written"))?;
+            for lba in owned {
+                ed.allow_own(lba, SECTOR as u64);
             }
-            ed.allow_own(*info, INFO_BYTES);
             let keep = |path: &str| add_pair.contains(&path);
             ed.add_nodes(&DirAt::Root, "", &nodes, &keep)?;
         }
@@ -306,13 +335,18 @@ pub fn add_to_with(
     // The slot, by the installer's write part: the payloads in place, read back by hash, then the
     // set's record. No pointer is moved: default.txt is the existing system's.
     let mut mem = Mem(std::mem::take(&mut ed.work));
+    if mode == Mode::Added {
+        // The sets just made: each record names the region its `reserve` holds.
+        bays::write_empty_records(&mut mem).map_err(|e| format!("{e}: nothing was written"))?;
+        bays::lay_out_empty_sets(&mut mem, &parts.layout)
+            .map_err(|e| format!("{e}: nothing was written"))?;
+    }
     let done = bays::stage_with(
         &mut mem,
         &parts.layout,
         req.set,
         req.slot,
         req.payloads,
-        None,
         &Protected::default(),
     )
     .map_err(|e| format!("{e}: nothing was written"))?;
@@ -330,10 +364,20 @@ pub fn add_to_with(
     // The volume read again: sound, and every entry it had is where and what it was.
     let after = fatadd::survey(&ed.work)
         .map_err(|e| format!("the result does not read as a sound volume ({e})"))?;
+    // The set the slot goes into is the install's to rewrite: its files and its `reserve` (its
+    // directories and its record stay where they were).
+    let own_prefix = format!("{}/", bays::set_dir(req.set)).to_ascii_uppercase();
     for old in &ed.survey.entries {
         let moved = replaced
             .iter()
             .any(|r| r.name.eq_ignore_ascii_case(&old.path));
+        let upper = old.path.to_ascii_uppercase();
+        if upper.starts_with(&own_prefix)
+            && !old.is_dir
+            && !upper.ends_with(&format!("/{}", INFO_NAME.to_ascii_uppercase()))
+        {
+            continue;
+        }
         let same = after.entries.iter().any(|new| new == old);
         if !moved && !same {
             return Err(format!(
@@ -346,7 +390,8 @@ pub fn add_to_with(
     let placed = ed
         .added
         .iter()
-        .filter(|a| !a.is_dir)
+        // A set's `reserve` is the install's to reshape: it holds what the files left of the region.
+        .filter(|a| !a.is_dir && !a.path.ends_with(&format!("/{}", bayfat::RESERVE)))
         .map(|a| (a.path.clone(), a.size, a.first))
         .chain(replaced.iter().map(|r| (r.name.clone(), r.size, r.first)));
     for (path, size, first) in placed {

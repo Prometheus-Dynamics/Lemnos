@@ -118,6 +118,12 @@ pub fn clusters_needed(root: &[Node], spc: u64) -> u64 {
         .map(|node| match node {
             Node::File { data, .. } => data.len().div_ceil(cluster_bytes).max(1) as u64,
             Node::Dir { children, .. } => 1 + clusters_needed(children, spc),
+            Node::DirOf {
+                entries, children, ..
+            } => dir_clusters(*entries, spc) + clusters_needed(children, spc),
+            Node::Region { caps, .. } => {
+                region_clusters(caps, spc) + crate::bayfat::FAT16_PER_SECTOR - 1
+            }
         })
         .sum()
 }
@@ -140,6 +146,37 @@ pub enum Node {
         /// The entries inside.
         children: Vec<Node>,
     },
+    /// A directory with room for at least `entries` 32-byte entries (`.` and `..` included), in
+    /// contiguous clusters: a bay set's directory, which an install rewrites in place and never grows.
+    DirOf {
+        /// The name.
+        name: &'static str,
+        /// The entries it must hold.
+        entries: usize,
+        /// The entries inside at build.
+        children: Vec<Node>,
+    },
+    /// A bay set's region, held by one file of zeros: contiguous clusters that start on a multiple of
+    /// [`crate::bayfat::FAT16_PER_SECTOR`] and number a multiple of it, enough for every cap in `caps`
+    /// (bytes, each rounded up to whole clusters). The clusters skipped to align it stay free.
+    Region {
+        /// The file's name (`reserve`).
+        name: &'static str,
+        /// The largest size of each file the region must hold.
+        caps: Vec<u64>,
+    },
+}
+
+/// The clusters a region of `caps` takes at `spc` sectors per cluster (see [`Node::Region`]).
+pub fn region_clusters(caps: &[u64], spc: u64) -> u64 {
+    let cb = spc * 512;
+    let n: u64 = caps.iter().map(|c| c.div_ceil(cb)).sum();
+    n.max(1).next_multiple_of(crate::bayfat::FAT16_PER_SECTOR)
+}
+
+/// The clusters a directory of `entries` entries takes at `spc` sectors per cluster.
+pub fn dir_clusters(entries: usize, spc: u64) -> u64 {
+    ((entries * 32) as u64).div_ceil(spc * 512).max(1)
 }
 
 /// Whether `name` is stored as an 8.3 entry alone, as Linux vfat stores it: it fits 8.3, and its
@@ -321,30 +358,75 @@ impl Filler {
                     ));
                 }
                 Node::Dir { name, children } => {
-                    let c = self.next;
-                    self.next += 1;
-                    self.set_fat(c, 0xFFFF);
-                    let sub = self.fill(children, Some(c), own.unwrap_or(0));
-                    assert!(
-                        sub.len() <= self.dir_entries,
-                        "directory {name} holds at most {} entries",
-                        self.dir_entries
-                    );
-                    let mut block = vec![0u8; (self.spc * 512) as usize];
-                    for (i, e) in sub.iter().enumerate() {
-                        block[i * 32..i * 32 + 32].copy_from_slice(e);
+                    entries.extend(self.dir(name, 1, children, own));
+                }
+                Node::DirOf {
+                    name,
+                    entries: want,
+                    children,
+                } => {
+                    let n = dir_clusters(*want, self.spc);
+                    entries.extend(self.dir(name, n, children, own));
+                }
+                Node::Region { name, caps } => {
+                    let n = region_clusters(caps, self.spc);
+                    let first = self.next.next_multiple_of(crate::bayfat::FAT16_PER_SECTOR);
+                    for k in 0..n {
+                        let c = first + k;
+                        self.set_fat(c, if k + 1 == n { 0xFFFF } else { (c + 1) as u16 });
                     }
-                    let at = self.cluster_at(c);
-                    self.image[at..at + block.len()].copy_from_slice(&block);
+                    self.next = first + n;
                     let sfn = short_name(name);
                     if !is_83(name) {
                         entries.extend(long_entries(name, &sfn));
                     }
-                    entries.push(named_entry(name, &sfn, 0x10, c as u32, 0));
+                    let size = n * self.spc * 512;
+                    entries.push(named_entry(name, &sfn, 0x20, first as u32, size as u32));
                 }
             }
         }
         entries
+    }
+
+    /// One directory of `n` contiguous clusters holding `children`: its own entry in the parent.
+    fn dir(
+        &mut self,
+        name: &'static str,
+        n: u64,
+        children: &[Node],
+        own: Option<u64>,
+    ) -> Vec<[u8; 32]> {
+        let c = self.next;
+        self.next += n;
+        for k in 0..n {
+            self.set_fat(
+                c + k,
+                if k + 1 == n {
+                    0xFFFF
+                } else {
+                    (c + k + 1) as u16
+                },
+            );
+        }
+        let sub = self.fill(children, Some(c), own.unwrap_or(0));
+        let room = self.dir_entries * n as usize;
+        assert!(
+            sub.len() <= room,
+            "directory {name} holds at most {room} entries"
+        );
+        let mut block = vec![0u8; (n * self.spc * 512) as usize];
+        for (i, e) in sub.iter().enumerate() {
+            block[i * 32..i * 32 + 32].copy_from_slice(e);
+        }
+        let at = self.cluster_at(c);
+        self.image[at..at + block.len()].copy_from_slice(&block);
+        let sfn = short_name(name);
+        let mut out = Vec::new();
+        if !is_83(name) {
+            out.extend(long_entries(name, &sfn));
+        }
+        out.push(named_entry(name, &sfn, 0x10, c as u32, 0));
+        out
     }
 }
 
@@ -434,13 +516,13 @@ pub const ROUTE_A_SLOT: &str = "ours-1";
 /// finds it is not ours. For the tests of a system started on such a disk.
 pub fn route_a_system() -> Vec<u8> {
     use crate::bays::Layout;
-    use crate::bootimage::{Family, Fixed, Parts};
+    use crate::bootimage::{Family, Parts};
     let parts = Parts {
         family: Family::Tryboot,
         layout: Layout::new([11_534_336, 1_048_576, 90_112, 4096, 4096])
             .expect("the reference board's bays"),
         root: vec![
-            ("slot-layout.toml", b"version = 5\n".to_vec()),
+            ("slot-layout.toml", b"version = 6\n".to_vec()),
             (
                 "config.txt",
                 b"kernel_watchdog_timeout=15\ninclude default.txt\n".to_vec(),
@@ -450,11 +532,6 @@ pub fn route_a_system() -> Vec<u8> {
                 b"kernel_watchdog_timeout=15\ninclude trial.txt\n".to_vec(),
             ),
         ],
-        fixed: vec![Fixed {
-            path: "overlays/README",
-            bytes: b"Generated: os_prefix applies to overlays.\n".to_vec(),
-            size: 42,
-        }],
     };
     let payloads: Vec<Vec<u8>> = (0..parts.layout.count())
         .map(|i| {

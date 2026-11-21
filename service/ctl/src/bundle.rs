@@ -19,7 +19,7 @@
 //! is unsigned, and the output says so.
 
 use crate::boot_dir;
-use crate::boot_partition::{board_parts, load_board, overlay_names, read_firmware, read_payloads};
+use crate::boot_partition::{board_parts, load_board, read_firmware, read_payloads};
 use ed25519_dalek::{Signer as _, SigningKey};
 use lemnos_driver_system_slots::{TrustedKey, parse_keys, signature_check};
 use lemnos_slot_store::bays::ROLES;
@@ -179,9 +179,9 @@ fn write_bundle(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     let table = lemnos_slot_store::verity::Table::parse(&table_text)
         .map_err(|e| format!("{table_path}: {e}"))?;
     // The boot files in the boot partition's order: the five roles, then the board's firmware overlays
-    // from `--firmware DIR`, so the installed slot holds exactly the files the bay holds.
+    // and files from `--firmware DIR`, so the installed slot holds exactly the files the bay holds.
     let roles = read_payloads(Path::new(payload_dir))?;
-    let overlays = read_firmware(o.firmware.as_deref(), &overlay_names(&rules.layout))?;
+    let overlays = read_firmware(o.firmware.as_deref(), &rules.layout)?;
     let payloads: Vec<Vec<u8>> = roles.into_iter().chain(overlays).collect();
     let mut rootfs = std::fs::File::open(rootfs_path).map_err(|e| format!("{rootfs_path}: {e}"))?;
     let key_id = key

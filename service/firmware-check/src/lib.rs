@@ -31,6 +31,7 @@ mod view;
 #[cfg(test)]
 mod tests;
 
+pub mod sample;
 pub use config::{Filters, Settings, Source};
 pub use view::{Finding, Report, Request, check};
 

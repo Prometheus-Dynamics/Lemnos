@@ -100,13 +100,59 @@ pub fn overlay_mismatch(
     }
 }
 
-/// Checks every listed boot file of a bay set. `dir` is the set's directory (`slots/bayN`), `boot_files`
-/// the manifest's list (a path under the set and its SHA-256, 64 lowercase hex digits), and `lengths`
-/// each file's stored length from the set's record (a bay file is padded to its fixed size, so only
-/// the stored bytes are hashed; a file with no entry is hashed whole). `read` returns a file's bytes,
-/// given its path relative to the boot partition's root, or the reason it can't.
+/// Where a file a bay stores comes from: a file the manifest lists under its own name, a copy of
+/// one (the device tree, stored under each of the board's default names), or a file the image
+/// builder generates (`overlays/README`, `extlinux/extlinux.conf`), which no bundle carries.
+enum Source<'a> {
+    Listed,
+    Copy(&'a str, &'a str),
+    Generated,
+    Unknown,
+}
+
+fn source_of<'a>(name: &str, boot_files: &'a [(String, String)]) -> Source<'a> {
+    if boot_files.iter().any(|(n, _)| n == name) {
+        return Source::Listed;
+    }
+    if name == crate::bays::OVERLAY_README || name == crate::bays::EXTLINUX {
+        return Source::Generated;
+    }
+    let tree = crate::bays::ROLES[2].path;
+    if !name.contains('/')
+        && name.ends_with(".dtb")
+        && let Some((n, sha)) = boot_files.iter().find(|(n, _)| n == tree)
+    {
+        return Source::Copy(n, sha);
+    }
+    Source::Unknown
+}
+
+/// The stored bytes of `bytes`: a bay file's first `len` bytes, `None` when it is shorter.
+fn stored(mut bytes: Vec<u8>, len: Option<u64>) -> Option<Vec<u8>> {
+    if let Some(len) = len {
+        let len = len as usize;
+        if bytes.len() < len {
+            return None;
+        }
+        bytes.truncate(len);
+    }
+    Some(bytes)
+}
+
+/// Checks every boot file of a bay set. `dir` is the set's directory (`slots/bayN`), `boot_files`
+/// the manifest's list (a path in the bundle and its SHA-256, 64 lowercase hex digits), and
+/// `lengths` each file the set stores, by its path under the set, with its stored length from the
+/// set's record (only the stored bytes are hashed; with no entries, each listed file is read under
+/// its own name and hashed whole). `read` returns a file's bytes, given its path relative to the
+/// boot partition's root, or the reason it can't.
 ///
-/// Returns the mismatches in list order; an empty list means every file matches.
+/// A bay stores the device tree under the board's default names, each a copy of the bundle's
+/// device tree: each copy is held to that file's hash. `overlays/README` is held to its fixed text;
+/// `extlinux/extlinux.conf` is [`uboot_check`]'s. Any other stored file the manifest does not list,
+/// and any listed file the bay does not store, is a mismatch.
+///
+/// Returns the mismatches, the listed files first in list order; an empty list means every file
+/// matches.
 pub fn check<F>(
     dir: &str,
     boot_files: &[(String, String)],
@@ -117,39 +163,52 @@ where
     F: FnMut(&str) -> Result<Option<Vec<u8>>, String>,
 {
     let mut out = Vec::new();
-    // A bay form (the set's record gives lengths) stores the role files and nothing else.
+    // A bay form (the set's record gives lengths) stores exactly the layout's files.
     let stored_only = !lengths.is_empty();
-    let declared: Vec<String> = lengths.iter().map(|(n, _)| n.clone()).collect();
+    let mut declared: Vec<String> = lengths.iter().map(|(n, _)| n.clone()).collect();
+    let copies: Vec<&str> = lengths
+        .iter()
+        .filter(|(n, _)| matches!(source_of(n, boot_files), Source::Copy(..)))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if let Some(Source::Copy(tree, _)) = copies.first().map(|n| source_of(n, boot_files)) {
+        declared.push(tree.to_string());
+    }
     let stores = declared.join(", ");
     let unstored = crate::bays::unstored(boot_files, &declared);
+    let len_of = |name: &str| lengths.iter().find(|(n, _)| n == name).map(|(_, l)| *l);
+    let mut hash = |name: &str, len: Option<u64>, want: &str, out: &mut Vec<Mismatch>| match read(
+        &format!("{dir}/{name}"),
+    ) {
+        Ok(None) => out.push(Mismatch::Missing(name.to_string())),
+        Err(why) => out.push(Mismatch::Unreadable(name.to_string(), why)),
+        Ok(Some(bytes)) => match stored(bytes, len) {
+            Some(bytes) if sha256_hex(&bytes) == want => {}
+            _ => out.push(Mismatch::Changed(name.to_string())),
+        },
+    };
     for (name, want) in boot_files {
         if stored_only && unstored.contains(&name.as_str()) {
             out.push(Mismatch::NotStored(name.clone(), stores.clone()));
             continue;
         }
-        let path = format!("{dir}/{name}");
-        match read(&path) {
-            Ok(None) => out.push(Mismatch::Missing(name.clone())),
-            Err(why) => out.push(Mismatch::Unreadable(name.clone(), why)),
-            Ok(Some(mut bytes)) => {
-                if let Some((_, len)) = lengths.iter().find(|(n, _)| n == name) {
-                    let len = *len as usize;
-                    if bytes.len() < len {
-                        out.push(Mismatch::Changed(name.clone()));
-                        continue;
-                    }
-                    bytes.truncate(len);
-                }
-                if sha256_hex(&bytes) != *want {
-                    out.push(Mismatch::Changed(name.clone()));
-                }
-            }
+        // Stored only as copies: each copy is checked below.
+        if stored_only && len_of(name).is_none() {
+            continue;
         }
+        hash(name, len_of(name), want, &mut out);
     }
     if stored_only {
-        for (name, _) in lengths {
-            if !boot_files.iter().any(|(listed, _)| listed == name) {
-                out.push(Mismatch::Unlisted(name.clone()));
+        for (name, len) in lengths {
+            match source_of(name, boot_files) {
+                Source::Listed => {}
+                Source::Copy(_, want) => hash(name, Some(*len), want, &mut out),
+                Source::Generated if name == crate::bays::OVERLAY_README => {
+                    let want = sha256_hex(crate::bays::OVERLAY_README_TEXT.as_bytes());
+                    hash(name, Some(*len), &want, &mut out);
+                }
+                Source::Generated => {}
+                Source::Unknown => out.push(Mismatch::Unlisted(name.clone())),
             }
         }
     }

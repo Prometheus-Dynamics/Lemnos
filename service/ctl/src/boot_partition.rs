@@ -17,26 +17,12 @@
 //! ([`crate::boot_add`]).
 
 use crate::boot_dir::{self, with_fragment};
-use lemnos_host::board::{BoardFile, BootSpec};
+use lemnos_host::board::{BoardFile, BootSpec, EepromSetting};
 use lemnos_slot_store::bays::{self, Layout, ROLES};
-use lemnos_slot_store::bootimage::{self, Committed, Family, Finding, Fixed, Parts};
+use lemnos_slot_store::bootimage::{self, Committed, Family, Finding, Parts};
 use lemnos_slot_store::firmware::{TRYBOOT_TXT, config_for};
-use lemnos_slot_store::layout::OVERLAY_README;
 use std::io::Write;
 use std::path::Path;
-
-/// The firmware overlay names of a layout (`overlays/<name>.dtbo` to `<name>`), in the layout's order.
-pub(crate) fn overlay_names(layout: &Layout) -> Vec<String> {
-    layout
-        .firmware
-        .iter()
-        .map(|(path, _)| {
-            path.trim_start_matches("overlays/")
-                .trim_end_matches(".dtbo")
-                .to_string()
-        })
-        .collect()
-}
 
 /// The board's `[boot] config_lines` and `firmware_overlays`, checked by name before any image is
 /// made: each line is one line; each name is a firmware overlay name and listed once; a `dtoverlay=`
@@ -79,36 +65,158 @@ pub(crate) fn check_boot_keys(boot: &BootSpec) -> Result<(), String> {
         }
         loaded.push(name);
     }
-    for name in &boot.firmware_overlays {
-        if !loaded.contains(&name.as_str()) {
+    for name in &boot.firmware_applied {
+        if !boot.firmware_overlays.contains(name) {
             return Err(format!(
-                "[boot] firmware_overlays lists {name:?}, and no config_lines entry loads it (dtoverlay={name})"
+                "[boot] firmware_applied lists {name:?}, and firmware_overlays does not: the bays carry only listed overlays"
+            ));
+        }
+        if loaded.contains(&name.as_str()) {
+            return Err(format!(
+                "[boot] firmware_applied lists {name:?}, which the firmware applies by itself, and a config_lines entry loads it too: it would apply twice"
+            ));
+        }
+    }
+    for name in &boot.firmware_overlays {
+        if !loaded.contains(&name.as_str()) && !boot.firmware_applied.contains(name) {
+            return Err(format!(
+                "[boot] firmware_overlays lists {name:?}, and no config_lines entry loads it (dtoverlay={name}) nor does firmware_applied name it"
+            ));
+        }
+    }
+    check_names("device_tree_names", &boot.device_tree_names, ".dtb")?;
+    check_names("firmware_files", &boot.firmware_files, "")?;
+    for name in &boot.firmware_files {
+        if name.eq_ignore_ascii_case("README")
+            || boot
+                .firmware_overlays
+                .iter()
+                .any(|o| name.eq_ignore_ascii_case(&format!("{o}.dtbo")))
+        {
+            return Err(format!(
+                "[boot] firmware_files lists {name:?}, a name the bay's overlays/ already has"
+            ));
+        }
+    }
+    for (i, f) in boot.firmware_filters.iter().enumerate() {
+        let ok = !f.is_empty()
+            && f.len() <= 40
+            && f.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !ok || f.eq_ignore_ascii_case("all") || boot.firmware_filters[..i].contains(f) {
+            return Err(format!(
+                "[boot] firmware_filters {f:?} is not a model filter name (letters, digits, '-' and '_', listed once, not \"all\")"
             ));
         }
     }
     crate::boot_merge::check_expect(boot)
 }
 
-/// The firmware overlay files a board declares, read from `dir` (`<name>.dtbo`, in the layout's
-/// order). Refused by name when a declared overlay is missing, or when the board declares some and no
-/// directory is given.
-pub(crate) fn read_firmware(dir: Option<&str>, names: &[String]) -> Result<Vec<Vec<u8>>, String> {
+/// A list of file names in `[boot]`: each a plain file name a set can hold, ending in `suffix`,
+/// listed once whatever its case (the partition's names are not case-sensitive).
+fn check_names(key: &str, names: &[String], suffix: &str) -> Result<(), String> {
+    for (i, name) in names.iter().enumerate() {
+        if !bays::valid_file_name(name) || !name.ends_with(suffix) {
+            return Err(format!(
+                "[boot] {key} {name:?} is not a file name a bay holds{}",
+                if suffix.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ending in {suffix}")
+                }
+            ));
+        }
+        if names[..i].iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            return Err(format!("[boot] {key} lists {name:?} twice"));
+        }
+    }
+    Ok(())
+}
+
+/// `[boot.eeprom]` for a board of `family` with SoC `soc`: required for the firmware record on the
+/// Raspberry Pi 5 family, refused on any other SoC. It describes the board (each setting its value or
+/// `"not set"`), so only its form is checked: the build is a date. Nothing is assumed about which
+/// builds know which setting.
+pub(crate) fn check_eeprom(boot: &BootSpec, family: Family, soc: &str) -> Result<(), String> {
+    let pi5 = soc.starts_with("bcm2712");
+    let Some(e) = &boot.eeprom else {
+        if family == Family::Tryboot && pi5 {
+            return Err(
+                "[boot.eeprom] is not set: a Raspberry Pi 5 board states what its bootloader EEPROM holds (build, max_restarts, reboot_on_fatal_error; a setting the EEPROM does not hold is \"not set\")"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    };
+    // The Pi 5 bootloader runs first on every bcm2712 board, whichever record it starts: a board
+    // that loads U-Boot may state it too.
+    if !pi5 {
+        return Err(format!(
+            "[boot.eeprom] is the Raspberry Pi 5 bootloader's: this board's soc is {soc:?}"
+        ));
+    }
+    let b = e.build.as_bytes();
+    let date = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+    if !date {
+        return Err(format!(
+            "[boot.eeprom] build {:?} is not a date (YYYY-MM-DD)",
+            e.build
+        ));
+    }
+    Ok(())
+}
+
+/// The line the image builder prints about the EEPROM: what the board file says it holds, and that
+/// the firmware-layout check assumes nothing from it.
+pub(crate) fn eeprom_line(boot: &BootSpec) -> String {
+    let Some(e) = &boot.eeprom else {
+        return "eeprom: not described by the board file; the firmware-layout check assumes nothing from it".to_string();
+    };
+    fn word<T: std::fmt::Display>(s: &EepromSetting<T>) -> String {
+        match s {
+            EepromSetting::Set(v) => v.to_string(),
+            EepromSetting::NotSet(_) => {
+                "not set (the bootloader's own default applies)".to_string()
+            }
+        }
+    }
+    format!(
+        "eeprom: as the board file describes it, not read from a board: build {}, MAX_RESTARTS {}, REBOOT_ON_FATAL_ERROR {}; the firmware-layout check assumes nothing from it",
+        e.build,
+        word(&e.max_restarts),
+        word(&e.reboot_on_fatal_error)
+    )
+}
+
+/// The firmware overlays and files a board declares, read from `dir` in the layout's payload order
+/// (`<name>.dtbo` for an overlay, the file's own name for a file). Refused by name when one is
+/// missing, or when the board declares some and no directory is given.
+pub(crate) fn read_firmware(dir: Option<&str>, layout: &Layout) -> Result<Vec<Vec<u8>>, String> {
+    let names: Vec<String> = layout.paths()[ROLES.len()..]
+        .iter()
+        .map(|p| p.trim_start_matches("overlays/").to_string())
+        .collect();
     if names.is_empty() {
         return Ok(Vec::new());
     }
     let dir = dir.ok_or_else(|| {
         format!(
-            "this board declares the firmware overlays {}: give --firmware DIR, the directory holding their .dtbo files",
+            "this board declares the firmware files {}: give --firmware DIR, the directory holding them",
             names.join(", ")
         )
     })?;
     names
         .iter()
         .map(|name| {
-            let path = Path::new(dir).join(format!("{name}.dtbo"));
+            let path = Path::new(dir).join(name);
             std::fs::read(&path).map_err(|e| {
                 format!(
-                    "{}: the firmware overlay {name} is missing from {dir} ({e}): it needs {name}.dtbo there",
+                    "{}: the firmware file {name} is missing from {dir} ({e})",
                     path.display()
                 )
             })
@@ -116,10 +224,11 @@ pub(crate) fn read_firmware(dir: Option<&str>, names: &[String]) -> Result<Vec<V
         .collect()
 }
 
-/// The board's family and its payload bays, each refused by name when a key is missing.
-pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, String> {
-    // The contract the image carries is checked against the code that writes the volume first.
-    boot_dir::check_contract()?;
+/// The board's boot family, with every `[boot]` key rule that needs no payload checked, each refused
+/// by name: the firmware lines, the EEPROM keys, the count fallback, the device tree's default names
+/// and the firmware's own files. `lemnos-ctl validate` runs it on a board with a slot device, and the
+/// image, bundle and data-partition builders through [`board_parts`].
+pub(crate) fn check_board_boot(board: &BoardFile) -> Result<Family, String> {
     let record = boot_dir::record_of(board)?;
     let family = match record.as_str() {
         "tryboot" => Family::Tryboot,
@@ -132,20 +241,18 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
     };
     let boot = &board.boot;
     check_boot_keys(boot)?;
+    check_eeprom(boot, family, board.board.soc.as_deref().unwrap_or_default())?;
     if family == Family::UbootBlock && !boot.config_lines.is_empty() {
         return Err(
             "[boot] config_lines are firmware lines in config.txt: this board's record is \"uboot\", which has no config.txt"
                 .to_string(),
         );
     }
-    // The firmware config digest and the firmware text: the board's lines follow the fixed text of
-    // both config files, inside `[all]`, so they apply to every boot of either pointer.
     // The count fallback (`[boot_count>3]`) is the Raspberry Pi 5 family's: `boot_count` exists there and
     // nowhere else. A board that asks for it elsewhere is refused by name, and no other Pi gets the filter.
     let soc = board.board.soc.clone().unwrap_or_default();
     let pi5 = soc.starts_with("bcm2712");
-    let count_fallback = boot.count_fallback.unwrap_or(pi5);
-    if count_fallback && !pi5 {
+    if boot.count_fallback == Some(true) && !pi5 {
         return Err(format!(
             "[boot] count_fallback = true: the firmware's boot_count exists on the Raspberry Pi 5 family only, and this board's soc is {soc:?}: remove count_fallback, or set it to false"
         ));
@@ -156,6 +263,45 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
                 .to_string(),
         );
     }
+    if family == Family::Tryboot && boot.device_tree_names.is_empty() {
+        return Err(
+            "[boot] device_tree_names is not set: the firmware loads the device tree by its own default names for the board, and no device_tree= line is written; state them"
+                .to_string(),
+        );
+    }
+    if family == Family::Tryboot {
+        for map in ["overlay_map.dtb", "hat_map.dtb"] {
+            if !boot.firmware_files.iter().any(|f| f == map) {
+                return Err(format!(
+                    "[boot] firmware_files does not list {map}: the firmware reads it from each bay's overlays/ (os_prefix applies to overlays), so the bay carries it from --firmware DIR"
+                ));
+            }
+        }
+    }
+    if family == Family::UbootBlock && !boot.firmware_files.is_empty() {
+        return Err(
+            "[boot] firmware_files are the Raspberry Pi firmware's: this board's record is \"uboot\""
+                .to_string(),
+        );
+    }
+    Ok(family)
+}
+
+/// The board's family and its payload bays, each refused by name when a key is missing.
+pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, String> {
+    // The contract the image carries is checked against the code that writes the volume first.
+    boot_dir::check_contract()?;
+    let family = check_board_boot(board)?;
+    let boot = &board.boot;
+    // The firmware config digest and the firmware text: the board's lines follow the fixed text of
+    // both config files, inside `[all]`, so they apply to every boot of either pointer.
+    let pi5 = board
+        .board
+        .soc
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("bcm2712");
+    let count_fallback = boot.count_fallback.unwrap_or(pi5);
     let config = bays::config_digest(&boot.config_lines);
     let mut lines = fragment.to_string();
     for line in &boot.config_lines {
@@ -178,59 +324,46 @@ pub(crate) fn board_parts(board: &BoardFile, fragment: &str) -> Result<Parts, St
     ];
     // The bay order of ROLES is kernel, initramfs, device-tree, cmdline, board-overlay.
     let names: Vec<String> = boot.firmware_overlays.clone();
+    // A tryboot board states its names ([`check_board_boot`]); the U-Boot form's script loads
+    // `board.dtb`.
+    let dtbs = if boot.device_tree_names.is_empty() {
+        vec!["board.dtb".to_string()]
+    } else {
+        boot.device_tree_names.clone()
+    };
     let layout = Layout::new([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]])?
-        .with_firmware(&names, config.clone());
+        .with_firmware(&names, config.clone())
+        .with_dtbs(&dtbs)
+        .with_files(&boot.firmware_files)
+        .with_form(family.form());
     let layout_file = boot_dir::LAYOUT.as_bytes().to_vec();
-    // The root list of the declared set: written only when the board declares overlays or lines.
-    let mut list_file = Vec::new();
-    if let Some(text) = bays::firmware_list_text(&names, config.as_deref()) {
-        list_file.push((bays::FIRMWARE_LIST, text.into_bytes()));
-    }
     match family {
         Family::Tryboot => Ok(Parts {
             family,
             layout,
-            root: [
-                vec![
-                    ("slot-layout.toml", layout_file),
-                    (
-                        "config.txt",
-                        with_fragment(boot_dir::HEADER, config_for(count_fallback), &lines),
-                    ),
-                    (
-                        "tryboot.txt",
-                        with_fragment(boot_dir::HEADER, TRYBOOT_TXT, &lines),
-                    ),
-                ],
-                list_file,
-            ]
-            .concat(),
-            fixed: vec![Fixed {
-                path: OVERLAY_README,
-                bytes: boot_dir::OVERLAY_README_TEXT.as_bytes().to_vec(),
-                size: boot_dir::OVERLAY_README_TEXT.len() as u64,
-            }],
+            root: vec![
+                ("slot-layout.toml", layout_file),
+                (
+                    "config.txt",
+                    with_fragment(boot_dir::HEADER, config_for(count_fallback), &lines),
+                ),
+                (
+                    "tryboot.txt",
+                    with_fragment(boot_dir::HEADER, TRYBOOT_TXT, &lines),
+                ),
+            ],
         }),
         Family::UbootBlock => Ok(Parts {
             family,
             layout,
-            root: [
-                vec![
-                    ("slot-layout.toml", layout_file),
-                    (
-                        lemnos_slot_store::uboot_env::LOCATOR,
-                        boot_dir::uboot_place(board)?.encode().into_bytes(),
-                    ),
-                    ("boot.cmd", boot_dir::uboot_script(board)?.into_bytes()),
-                ],
-                list_file,
-            ]
-            .concat(),
-            fixed: vec![Fixed {
-                path: bootimage::EXTLINUX,
-                bytes: Vec::new(),
-                size: bootimage::EXTLINUX_BYTES,
-            }],
+            root: vec![
+                ("slot-layout.toml", layout_file),
+                (
+                    lemnos_slot_store::uboot_env::LOCATOR,
+                    boot_dir::uboot_place(board)?.encode().into_bytes(),
+                ),
+                ("boot.cmd", boot_dir::uboot_script(board)?.into_bytes()),
+            ],
         }),
     }
 }
@@ -434,13 +567,25 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
         ));
     }
     let payloads = read_payloads(Path::new(payload_dir))?;
-    let firmware = read_firmware(o.firmware.as_deref(), &overlay_names(&parts.layout))?;
+    let firmware = read_firmware(o.firmware.as_deref(), &parts.layout)?;
     let refs: Vec<&[u8]> = payloads
         .iter()
         .chain(firmware.iter())
         .map(Vec::as_slice)
         .collect();
     let image = bootimage::build(&parts, size, slot, &refs)?;
+    // The image is read as the board's firmware reads it before it is written: an image the
+    // firmware would load a short or wrong file from is never made.
+    if parts.family == Family::Tryboot {
+        writeln!(out, "{}", eeprom_line(&board.boot)).map_err(|e| e.to_string())?;
+        let req = crate::firmware_check::board_request(&board.boot);
+        let bad = crate::firmware_check::check_image(image.clone(), &req, out)?;
+        if bad > 0 {
+            return Err(format!(
+                "the image fails {bad} firmware-layout rule(s) (listed above): {file} was not written"
+            ));
+        }
+    }
     std::fs::write(file, &image).map_err(|e| format!("{file}: {e}"))?;
     writeln!(
         out,
@@ -467,7 +612,7 @@ fn min_size(
     // per role and one per firmware overlay.
     writeln!(out, "{}", bootimage::min_size(parts)?).map_err(|e| e.to_string())?;
     let payloads = read_payloads(Path::new(dir))?;
-    let overlays = read_firmware(firmware, &overlay_names(&parts.layout))?;
+    let overlays = read_firmware(firmware, &parts.layout)?;
     let mut over = Vec::new();
     for (i, r) in ROLES.iter().enumerate() {
         let stored = payloads[i].len() as u64;
@@ -556,6 +701,16 @@ mod count_fallback_tests {
                 .join("../../testing/boards/reference.toml"),
         )
         .unwrap();
+        // Another SoC has no Pi 5 bootloader, so the reference board's EEPROM keys go.
+        let text = if soc.starts_with("bcm2712") {
+            text
+        } else {
+            let at = text.find("[boot.eeprom]\n").unwrap();
+            let end = text[at + 1..]
+                .find("\n[")
+                .map_or(text.len(), |e| at + 2 + e);
+            format!("{}{}", &text[..at], &text[end..])
+        };
         let text = text
             .replace("soc = \"bcm2712-rp1\"", &format!("soc = \"{soc}\""))
             .replacen("[boot]\n", &format!("[boot]\n{count}\n"), 1);
