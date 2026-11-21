@@ -4,7 +4,9 @@
 # Starts as root and drops to the lemnos user itself (`--user lemnos --group lemnos`): the root phase
 # runs the privileged start, then lemnosd keeps only CAP_SYS_RAWIO (service/lemnosd/src/privilege.rs).
 # The unit gives it no User= and no AmbientCapabilities=. Device nodes are reached through group
-# `lemnos` (packaging/udev/70-lemnos.rules).
+# `lemnos` (packaging/udev/70-lemnos.rules). The unit sets no DevicePolicy, so a node is reached by its
+# group grant alone. Every grant, its driver and its unit or udev line is in packaging/systemd/grants.toml,
+# which scripts/check-unit-grants.py checks against the drivers.
 # Change this unit with a drop-in (/etc/systemd/system/lemnosd.service.d/*.conf), not an edited copy.
 # The hardware watchdog has two openers, in order: slot-init (the initramfs, until its exec) and then
 # lemnosd's hw-watchdog driver (docs/slots.md, "The watchdog chain"). The OS must not set

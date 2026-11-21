@@ -31,6 +31,12 @@
 # The hardware watchdog, /dev/watchdog0 (or /dev/watchdog): the hw-watchdog driver's node.
 ^watchdog[0-9]*$        root:lemnos 0660
 
+# The RP1 PIO block's node, /dev/pio0 (udev: SUBSYSTEM=="misc", KERNEL=="pio0").
+^pio0$                  root:lemnos 0660
+
+# Raw NAND partitions, /dev/mtdN (udev: SUBSYSTEM=="mtd"): a first flash writes one. Not the read-only mtdNro nodes.
+^mtd[0-9]+$             root:lemnos 0660
+
 # USB: the usbfs nodes /dev/bus/usb/BBB/DDD, one per device (not per interface).
 ^bus/usb/[0-9]+/[0-9]+$ root:lemnos 0660
 

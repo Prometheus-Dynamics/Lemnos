@@ -35,6 +35,7 @@
 packaging/README.md                              -                                              -     never
 packaging/shipped.txt                            -                                              -     never
 packaging/files.txt                              -                                              -     never
+packaging/systemd/grants.toml                    -                                              -     never
 packaging/systemd/lemnosd.service                /usr/lib/systemd/system/lemnosd.service        0644  systemd
 packaging/systemd/lemnos-orion.service           /usr/lib/systemd/system/lemnos-orion.service   0644  systemd,orion
 packaging/systemd/lemnos-good-boot.service        /usr/lib/systemd/system/lemnos-good-boot.service 0644 systemd

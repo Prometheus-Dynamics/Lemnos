@@ -69,6 +69,10 @@ pub const STEPS: &[Step] = &[
         name: "pwm channels",
         run: pwm_channels,
     },
+    Step {
+        name: "hwmon fans",
+        run: hwmon_fans,
+    },
 ];
 
 /// The PWM channels the board names, granted before the drop (`pwm::grant`): each channel is
@@ -98,6 +102,56 @@ fn pwm_channels(cx: &Context<'_>) -> io::Result<Refusals> {
                     );
                     refused.push((device.id.clone(), format!("{need}: {why}")));
                 }
+            }
+        }
+    }
+    Ok(refused)
+}
+
+/// The hwmon fans the board names, granted before the drop (`lemnos_driver_hwmon_fan::grant_before_drop`):
+/// each fan's `pwm1` and `pwm1_enable` go to root:`lemnos` mode 0660, so the daemon's user can write the
+/// duty and the mode. A fan that cannot be granted (no `pwm1` in its directory yet, or an attribute that
+/// can't be changed) refuses its device by name; the daemon keeps running and the others start.
+fn hwmon_fans(cx: &Context<'_>) -> io::Result<Refusals> {
+    use std::io::Write;
+    let mut refused = Vec::new();
+    for device in cx
+        .board
+        .devices
+        .iter()
+        .filter(|d| d.refused.is_none() && d.driver == "hwmon-fan")
+    {
+        let granted = lemnos_host::with_device_config(cx.board, device, |cfg| {
+            lemnos_driver_hwmon_fan::grant_before_drop(cfg, (0, cx.gid))
+        });
+        match granted {
+            Ok(Ok(dir)) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "lemnosd: root phase: {}: fan: {}: granted to 0:{}",
+                    device.id,
+                    dir.display(),
+                    cx.gid
+                );
+            }
+            Ok(Err(why)) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "lemnosd: root phase: {}: fan: {why}",
+                    device.id
+                );
+                refused.push((device.id.clone(), format!("fan: {why}")));
+            }
+            Err(why) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "lemnosd: root phase: {}: fan: its settings can't be read: {why}",
+                    device.id
+                );
+                refused.push((
+                    device.id.clone(),
+                    format!("fan: its settings can't be read: {why}"),
+                ));
             }
         }
     }

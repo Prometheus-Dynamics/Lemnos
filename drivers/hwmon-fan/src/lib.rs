@@ -60,10 +60,13 @@
 //! Failure rule: an attribute that cannot be read or written fails that call and is tried again
 //! on the next one. The driver never switches itself off.
 
+mod grant;
 mod sysfs;
 
 #[cfg(test)]
 mod tests;
+
+pub use grant::grant_before_drop;
 
 use lemnos_contract_fan::{Fan, OVERRIDE_MAX_MS, OVERRIDE_MIN_MS};
 use lemnos_contract_self_test::{
@@ -406,18 +409,7 @@ impl Lifecycle for HwmonFan {
     }
 
     fn start(_needs: HwmonFanNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let sys = Path::new(cfg.str("sys_root").unwrap_or("/sys"));
-        let hwmon = sys.join("class/hwmon");
-        let fan = match cfg.str("hwmon") {
-            Some(dir) => {
-                let fan = hwmon.join(dir);
-                if !fan.join("pwm1").exists() {
-                    return Err(Status::NOT_FOUND);
-                }
-                fan
-            }
-            None => find(&hwmon, cfg.str("name"))?.ok_or(Status::NOT_FOUND)?,
-        };
+        let fan = fan_dir(cfg)?;
         let mut driver = Self::new(&fan);
         driver.reads_only = cfg.host_owned();
         driver.rpm_limits = rpm_limits(cfg)?;
@@ -847,6 +839,28 @@ fn test_settings(cfg: &Config<'_>) -> Result<TestSettings> {
         _ => None,
     };
     Ok(TestSettings { duty, rpm })
+}
+
+/// The hwmon directory of the fan a board file names: `sys_root`'s `class/hwmon/<hwmon>` (which must have a
+/// `pwm1`), or the first directory there with a `pwm1` and the `name` given. The root phase resolves the same
+/// directory (`grant_before_drop`), so the attributes it hands over are the ones the driver writes.
+///
+/// # Errors
+///
+/// No such directory, or the directory can't be listed.
+pub fn fan_dir(cfg: &Config<'_>) -> Result<PathBuf> {
+    let sys = Path::new(cfg.str("sys_root").unwrap_or("/sys"));
+    let hwmon = sys.join("class/hwmon");
+    match cfg.str("hwmon") {
+        Some(dir) => {
+            let fan = hwmon.join(dir);
+            if !fan.join("pwm1").exists() {
+                return Err(Status::NOT_FOUND);
+            }
+            Ok(fan)
+        }
+        None => find(&hwmon, cfg.str("name"))?.ok_or(Status::NOT_FOUND),
+    }
 }
 
 /// The first hwmon directory under `hwmon` that has a `pwm1` and, if `name` is given, a `name`

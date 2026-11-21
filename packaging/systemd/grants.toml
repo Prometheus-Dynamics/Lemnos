@@ -1,0 +1,164 @@
+# What the packaged lemnosd unit grants, and what each grant is for. Checked by scripts/check-unit-grants.py
+# (the gate runs it). Read it with packaging/systemd/lemnosd.service and its drop-ins beside it.
+#
+# One row per grant or per thing a driver reaches. Fields:
+#   path     what is reached: a device node (`/dev/...`, a glob with `*`), a directory or file, a capability
+#            (`CAP_...`), a syscall group or call (`@setuid`, `mount`), or an address family (`AF_UNIX`).
+#   kind     device | root (one directory, exact) | path (a directory: everything under it) | file | cap |
+#            syscall | family.
+#   access   ro | rw. A rw row must be writable under the unit: under /dev or /run (the writable API and
+#            runtime trees), or a ReadWritePaths grant over it.
+#   how      udev  a group grant in packaging/udev/70-lemnos.rules (`token` is the rule line, `subsystem`
+#                  its SUBSYSTEM, `node` a node the rule matches);
+#            unit  a directive of packaging/systemd/lemnosd.service (`token` is `Directive:value`);
+#            drop-in  the same, in a drop-in of packaging/systemd/lemnosd.service.d/ (`when` is its
+#                  `when` in packaging/files.txt: the boards that install it);
+#            none  the base unit allows it already (a read, or a write under /dev or /run);
+#            image the grant is the image's, not this package's (a vendor node the image adds, see
+#                  packaging/udev/70-lemnos.rules; `reason` says which), so the gate lists it and does not check it;
+#            generated  the board's own fragment (`lemnos-ctl tree BOARD --udev`), listed for the same reason.
+#   drivers  the crates (directories) that reach it. The gate fails if a crate lemnosd links reaches a path no
+#            row covers for that crate, or if a row no crate reaches (a grant nothing needs).
+#   needle   for a grant with no literal path in the source (a capability, a syscall, a family, a
+#            configured node): a text that must appear in one of its drivers' production source.
+#   reason   why. Required for `image` and `generated`, and for every `none` row.
+#
+# Scope: the lemnosd process and the crates it links (the path closure of service/lemnosd, tests and
+# examples left out, `#[cfg(test)]` blocks left out). The root phase's helpers (gadget helper, supervisor)
+# are lemnosd's own children and sit in the same closure. slot-init, good-boot, orion and their units are
+# not in this table: each has its own unit. A path a board names in its config, not as a literal in the
+# source (a system-flash `path`, a serial `path`), is covered by the row of its driver's node family.
+#
+# Limits: `access` is the author's declaration, not inferred from the code. Syscall and family rows are
+# checked for their needle, not for every call a driver makes; the QEMU stanza `unit` runs the real unit
+# and its filter.
+
+grant = [
+  # --- the unit: the runtime directory, capabilities, syscalls, families
+  {path = "/run/lemnos", kind = "path", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "RuntimeDirectory:lemnos", drivers = ["service/lemnosd"], reason = "the socket directory; systemd makes it, the root phase hands it to lemnos"},
+  {path = "CAP_CHOWN", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_CHOWN", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_CHOWN", reason = "the root phase changes the owner of the runtime directory before the drop"},
+  {path = "CAP_SETGID", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SETGID", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_SETGID", reason = "the root phase's group change, and the gadget supervisor's"},
+  {path = "CAP_SETUID", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SETUID", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_SETUID", reason = "the root phase's change of user (`--user lemnos`)"},
+  {path = "CAP_SETPCAP", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SETPCAP", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_SETPCAP", reason = "the drop: the bounding set, and the gadget helper's CAP_SETPCAP clear"},
+  {path = "CAP_SYS_RAWIO", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SYS_RAWIO", drivers = ["backends/linux-sys", "backends/linux", "service/lemnosd"], needle = "CAP_SYS_RAWIO", reason = "the one the daemon keeps: the module's register mapping through /dev/lemnos"},
+  {path = "AF_UNIX", kind = "family", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "RestrictAddressFamilies:AF_UNIX", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "AF_UNIX", reason = "the client socket under /run/lemnos"},
+  {path = "AF_NETLINK", kind = "family", access = "ro", how = "unit", via = "packaging/systemd/lemnosd.service", token = "RestrictAddressFamilies:AF_NETLINK", drivers = ["backends/linux-sys", "backends/linux-hotplug"], needle = "AF_NETLINK", reason = "the kernel's uevent socket for hotplug"},
+  {path = "@system-service", kind = "syscall", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "SystemCallFilter:@system-service", drivers = ["backends/linux-sys"], needle = "ioctl(", reason = "the daemon's own calls: device requests, mappings, sockets"},
+  {path = "@setuid", kind = "syscall", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "SystemCallFilter:@setuid", drivers = ["backends/linux-sys"], needle = "setuid", reason = "the root phase's id change"},
+  {path = "@chown", kind = "syscall", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "SystemCallFilter:@chown", drivers = ["backends/linux-sys"], needle = "fchown", reason = "the owner of the runtime directory and of the slot dirs the root phase hands over"},
+  {path = "prctl", kind = "syscall", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "SystemCallFilter:prctl", drivers = ["backends/linux-sys"], needle = "prctl", reason = "capability and no_new_privs settings at the drop"},
+
+  # --- the gadget drop-in (installed on a board with a usb-gadget device)
+  {path = "CAP_SYS_ADMIN", kind = "cap", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/gadget.conf", token = "CapabilityBoundingSet:CAP_SYS_ADMIN", when = "gadget", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_SYS_ADMIN", reason = "the gadget helper's FunctionFS mount and unmount; the daemon drops it"},
+  {path = "mount", kind = "syscall", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/gadget.conf", token = "SystemCallFilter:mount", when = "gadget", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "mount(", reason = "the FunctionFS mount"},
+  {path = "umount2", kind = "syscall", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/gadget.conf", token = "SystemCallFilter:umount2", when = "gadget", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "umount2", reason = "the FunctionFS unmount"},
+  {path = "/sys/kernel/config/usb_gadget", kind = "path", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/gadget.conf", token = "ReadWritePaths:/sys/kernel/config/usb_gadget", when = "gadget", drivers = ["service/lemnosd"], needle = "usb_gadget", reason = "the gadget's configfs tree and its UDC attribute, written by the gadget helper"},
+
+  # --- the health-tcp drop-in (a board with a tcp: health source)
+  {path = "AF_INET", kind = "family", access = "ro", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/health-tcp.conf", token = "RestrictAddressFamilies:AF_INET", when = "health-tcp", drivers = ["backends/linux-sys", "drivers/system-slots"], needle = "AF_INET", reason = "a tcp: health source's connect to a port on the board"},
+  {path = "AF_INET6", kind = "family", access = "ro", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/health-tcp.conf", token = "RestrictAddressFamilies:AF_INET6", when = "health-tcp", drivers = ["backends/linux-sys", "drivers/system-slots"], needle = "AF_INET", reason = "the same connect over IPv6"},
+
+  # --- the security drop-in (a board with a [security] table)
+  {path = "/var/lib/lemnos", kind = "path", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/security.conf", token = "ReadWritePaths:/var/lib/lemnos", when = "security", drivers = ["drivers/slot-store", "drivers/system-security"], needle = '"record"', reason = "the security switch's record, when the board's record is a file"},
+  {path = "/run/board", kind = "path", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/security.conf", token = "ReadWritePaths:/run/board", when = "security", drivers = ["drivers/slot-store"], reason = "the rendered security view (`/run/board/security`)"},
+
+  # --- the slots drop-in (a board with a system-slots device)
+  {path = "/data/board/slots", kind = "path", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/slots.conf", token = "ReadWritePaths:/data/board/slots", when = "slots", drivers = ["drivers/slot-store", "drivers/system-slots"], needle = "board/slots", reason = "the slot driver's state (`<data>/board/slots`), given to lemnos by slot-init"},
+  {path = "/data/slots", kind = "path", access = "rw", how = "drop-in", via = "packaging/systemd/lemnosd.service.d/slots.conf", token = "ReadWritePaths:/data/slots", when = "slots", drivers = ["drivers/slot-store", "drivers/system-slots"], needle = '"slots"', reason = "the slot images (`<data>/slots`), given to lemnos by slot-init"},
+
+  # --- device nodes the packaged udev rules grant (packaging/udev/70-lemnos.rules)
+  {path = "/dev/lemnos", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="misc", KERNEL=="lemnos", GROUP="lemnos", MODE="0660"', subsystem = "misc", node = "lemnos", drivers = ["drivers/a733-video", "drivers/k230-capture", "drivers/k230isp", "drivers/pisp", "drivers/vip9000"], reason = "the kernel module's control node", mdev = '^lemnos$'},
+  {path = "/dev/lemnos-*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="misc", KERNEL=="lemnos-*", GROUP="lemnos", MODE="0660"', subsystem = "misc", node = "lemnos-rp1-csi2-0", drivers = ["drivers/pisp", "drivers/rp1-csi2"], reason = "the CSI-2 receiver's nodes the module makes", mdev = '^lemnos-.*$'},
+  {path = "/dev/dma_heap", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="dma_heap", GROUP="lemnos", MODE="0660"', subsystem = "dma_heap", node = "dma_heap/system", drivers = ["drivers/pisp", "drivers/vip9000", "service/lemnosd"], reason = "the DMA heaps for dma-buf streams", mdev = '^dma_heap/.*$'},
+  {path = "/dev/i2c-*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="i2c-dev", GROUP="lemnos", MODE="0660"', subsystem = "i2c-dev", node = "i2c-1", drivers = ["backends/linux-sys"], needle = "I2C_SLAVE", reason = "I2C buses", mdev = '^i2c-[0-9]+$'},
+  {path = "/dev/spidev*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="spidev", GROUP="lemnos", MODE="0660"', subsystem = "spidev", node = "spidev0.0", drivers = ["backends/linux-sys"], needle = "SPI_IOC_MESSAGE", reason = "SPI buses", mdev = '^spidev[0-9]+\.[0-9]+$'},
+  {path = "/dev/gpiochip*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="lemnos", MODE="0660"', subsystem = "gpio", node = "gpiochip4", drivers = ["backends/linux"], reason = "GPIO character devices", mdev = '^gpiochip[0-9]+$'},
+  {path = "/dev/ttyS*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="tty", KERNEL=="ttyS*", GROUP="lemnos", MODE="0660"', subsystem = "tty", node = "ttyS0", drivers = ["backends/linux"], needle = "TtyUart", reason = "a UART the board file names", mdev = '^ttyS[0-9]+$'},
+  {path = "/dev/ttyAMA*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="tty", KERNEL=="ttyAMA*", GROUP="lemnos", MODE="0660"', subsystem = "tty", node = "ttyAMA0", drivers = ["backends/linux"], needle = "TtyUart", reason = "a UART the board file names", mdev = '^ttyAMA[0-9]+$'},
+  {path = "/dev/ttyUSB*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="tty", KERNEL=="ttyUSB*", GROUP="lemnos", MODE="0660"', subsystem = "tty", node = "ttyUSB0", drivers = ["backends/linux"], needle = "TtyUart", reason = "a USB serial port the board file names", mdev = '^ttyUSB[0-9]+$'},
+  {path = "/dev/ttyACM*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="tty", KERNEL=="ttyACM*", GROUP="lemnos", MODE="0660"', subsystem = "tty", node = "ttyACM0", drivers = ["backends/linux"], needle = "TtyUart", reason = "a USB CDC serial port the board file names", mdev = '^ttyACM[0-9]+$'},
+  {path = "/dev/video*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="video4linux", GROUP="lemnos", MODE="0660"', subsystem = "video4linux", node = "video0", drivers = ["backends/v4l2", "backends/linux-sys"], needle = "VIDIOC_QUERYCAP", reason = "V4L2 capture and memory-to-memory nodes", mdev = '^video[0-9]+$'},
+  {path = "/dev/media*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="media", GROUP="lemnos", MODE="0660"', subsystem = "media", node = "media0", drivers = ["backends/v4l2", "backends/linux-sys"], needle = "MEDIA_IOC", reason = "the media controllers of those nodes", mdev = '^media[0-9]+$'},
+  {path = "/dev/bus/usb", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", GROUP="lemnos", MODE="0660"', subsystem = "usb", node = "bus/usb/001/002", drivers = ["backends/usb"], reason = "the usbfs node of each USB device, not of each interface", mdev = '^bus/usb/[0-9]+/[0-9]+$'},
+  {path = "/dev/watchdog*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="watchdog", GROUP="lemnos", MODE="0660"', subsystem = "watchdog", node = "watchdog0", drivers = ["drivers/hw-watchdog", "drivers/hw-watchdog-sys"], needle = "WDIOC_SETTIMEOUT", reason = "the hardware watchdog, armed by its open and fed by lemnosd", mdev = '^watchdog[0-9]*$'},
+  {path = "/dev/mtd*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="mtd", KERNEL=="mtd[0-9]", GROUP="lemnos", MODE="0660"', subsystem = "mtd", node = "mtd3", drivers = ["drivers/system-flash", "drivers/system-flash-sys"], needle = "MEMGETBADBLOCK", reason = "raw NAND partitions a first flash writes (system-flash kind mtd); single digits here, the read-only `mtdNro` nodes are not granted", mdev = '^mtd[0-9]+$'},
+  {path = "/dev/mtd*", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="mtd", KERNEL=="mtd[0-9][0-9]", GROUP="lemnos", MODE="0660"', subsystem = "mtd", node = "mtd12", drivers = ["drivers/system-flash", "drivers/system-flash-sys"], needle = "MEMGETBADBLOCK", reason = "the same, for partitions 10 to 99 (two rules, so `mtdNro` is never matched)", mdev = '^mtd[0-9]+$'},
+  {path = "/dev/pio0", kind = "device", access = "rw", how = "udev", via = "packaging/udev/70-lemnos.rules", token = 'SUBSYSTEM=="misc", KERNEL=="pio0", GROUP="lemnos", MODE="0660"', subsystem = "misc", node = "pio0", drivers = ["backends/linux"], needle = '"pio0"', reason = "the RP1 PIO block's node (the bus driver opens it as DEVNODE); untested on board: the SUBSYSTEM is the RP1 PIO driver's misc registration, to check with udevadm on the board", mdev = '^pio0$'},
+
+  # --- the same nodes, as the slot drivers name them but never open
+  {path = "/dev/mtd", kind = "device", access = "ro", how = "none", drivers = ["drivers/slot-store"], reason = "named only to refuse a raw block write to a NAND node by name (uboot_env.rs needs_erase); never opened"},
+  {path = "/dev/ubi", kind = "device", access = "ro", how = "none", drivers = ["drivers/slot-store"], reason = "named only to refuse a raw block write to a UBI volume by name (uboot_env.rs needs_erase); never opened"},
+
+  # --- nodes the image adds (packaging/udev/70-lemnos.rules says so: vendor nodes are the image's)
+  {path = "/dev/g2d", kind = "device", access = "rw", how = "image", drivers = ["drivers/g2d-sys"], reason = "the 2D engine's node on a board with one; the image adds it"},
+  {path = "/dev/deinterlace", kind = "device", access = "rw", how = "image", drivers = ["drivers/a733-di-sys"], reason = "the deinterlacer's node (A733); the image adds it"},
+  {path = "/dev/cedar_dev_ve2", kind = "device", access = "rw", how = "image", drivers = ["drivers/a733-video"], reason = "the video engine's node (A733); the image adds it"},
+  {path = "/dev/vvcam-isp.0", kind = "device", access = "rw", how = "image", drivers = ["drivers/k230-capture", "drivers/k230isp"], reason = "the K230 ISP's vendor node; the image adds it"},
+  {path = "/dev/vvcam-mipi.0", kind = "device", access = "rw", how = "image", drivers = ["drivers/k230-capture"], reason = "the K230 MIPI receiver's vendor node; the image adds it"},
+  {path = "/dev/mpp_service", kind = "device", access = "rw", how = "image", drivers = ["drivers/rk-iep", "drivers/rk-mpp-codec"], reason = "the Rockchip MPP service node; the image adds it"},
+  {path = "/dev/rga", kind = "device", access = "rw", how = "image", drivers = ["drivers/rga"], reason = "the Rockchip RGA node; the image adds it"},
+  {path = "/dev/dri", kind = "path", access = "rw", how = "image", drivers = ["drivers/rknpu"], reason = "the DRM render nodes the NPU uses; the image adds them"},
+  {path = "/dev/vcio", kind = "device", access = "rw", how = "image", drivers = ["drivers/rpi-firmware-sys"], reason = "the Raspberry Pi firmware mailbox node; the image adds it"},
+  {path = "/dev/vg_lite", kind = "device", access = "rw", how = "image", drivers = ["drivers/vglite-sys"], reason = "the VGLite node; the image adds it"},
+  {path = "/dev/vipcore", kind = "device", access = "rw", how = "image", drivers = ["drivers/vip9000"], reason = "the VIP9000 NPU node; the image adds it"},
+  {path = "/dev/console", kind = "device", access = "rw", how = "image", drivers = ["backends/linux-sys"], reason = "the console a guest child is given (guest.rs); the packaged unit grants nothing for it"},
+  {path = "/dev/ptmx", kind = "device", access = "rw", how = "none", drivers = ["backends/linux-sys"], reason = "pty pairs for tests (test_pty.rs); the daemon does not open them; /dev is writable under the base unit"},
+  {path = "/dev/pts", kind = "path", access = "rw", how = "none", drivers = ["backends/linux-sys"], reason = "the pty slaves of those tests; /dev is writable under the base unit"},
+  {path = "/dev/usb-ffs", kind = "path", access = "rw", how = "none", drivers = ["service/lemnosd"], reason = "the FunctionFS mount point, made by the root gadget helper under CAP_SYS_ADMIN (gadget.conf); /dev is writable under the base unit"},
+
+  # --- reads: the base unit allows them
+  {path = "/dev", kind = "root", access = "ro", how = "none", drivers = ["backends/linux", "backends/linux-hotplug", "backends/v4l2", "drivers/m2m-decode", "drivers/rkvpss", "drivers/rp1-csi2", "drivers/slot-store", "drivers/system-slots", "drivers/hw-watchdog", "service/lemnosd"], reason = "the device directory, read to find nodes"},
+  {path = "/sys", kind = "root", access = "ro", how = "none", drivers = ["backends/linux", "backends/linux-hotplug", "drivers/host-clock", "drivers/hw-watchdog", "drivers/hwmon-fan", "drivers/rk-mpp-sys", "drivers/rknpu", "drivers/rknpu-sys", "drivers/rkvpss-sys", "drivers/slot-store", "drivers/system-flash", "drivers/system-slots"], reason = "the sysfs root, read; ProtectKernelTunables makes it read-only"},
+  {path = "/sys/class", kind = "path", access = "ro", how = "none", drivers = ["backends/linux-hotplug"], reason = "sysfs class tree, read by hotplug"},
+  {path = "/sys/bus", kind = "path", access = "ro", how = "none", drivers = ["backends/linux-hotplug"], reason = "sysfs bus tree, read by hotplug"},
+  {path = "/sys/class/udc", kind = "path", access = "ro", how = "none", drivers = ["service/lemnosd"], reason = "the UDC state the gadget reads; the write goes through the gadget helper's configfs"},
+  {path = "/sys/class/video4linux", kind = "path", access = "ro", how = "none", drivers = ["drivers/rkvpss"], reason = "the video nodes' sysfs names, read"},
+  {path = "/sys/class/watchdog", kind = "path", access = "ro", how = "none", drivers = ["drivers/system-slots"], reason = "the watchdog's sysfs, read to name it"},
+  {path = "/sys/class/regulator", kind = "path", access = "ro", how = "none", drivers = ["service/lemnosd"], reason = "regulator sysfs, read"},
+  {path = "/sys/class/block", kind = "path", access = "ro", how = "none", drivers = ["drivers/slot-store"], reason = "block devices, read to find the boot and data partitions (the grow)"},
+  {path = "/sys/block", kind = "path", access = "ro", how = "none", drivers = ["drivers/named-files", "drivers/slot-store", "drivers/system-slots"], reason = "block devices, read"},
+  {path = "/sys/dev/block", kind = "path", access = "ro", how = "none", drivers = ["drivers/system-flash"], reason = "a partition's major and minor, read"},
+  {path = "/sys/dev/char", kind = "path", access = "ro", how = "none", drivers = ["backends/v4l2"], reason = "a character device's uevent, read"},
+  {path = "/sys/bus/usb/devices", kind = "path", access = "ro", how = "none", drivers = ["backends/usb"], reason = "the USB device tree, read"},
+  {path = "/sys/bus/platform/devices", kind = "path", access = "ro", how = "none", drivers = ["service/lemnosd"], reason = "the platform devices, read to match the board file"},
+  {path = "/sys/kernel/debug/gpio", kind = "path", access = "ro", how = "none", drivers = ["service/lemnosd"], reason = "the GPIO debugfs listing, read for the live tree"},
+  {path = "/dev/disk", kind = "path", access = "ro", how = "none", drivers = ["drivers/system-slots"], reason = "the partition links by part-uuid, read (udev makes them)"},
+  {path = "/sys/kernel/config", kind = "root", access = "ro", how = "none", drivers = ["service/lemnosd"], reason = "the configfs root, read to find the gadget tree (writes are /sys/kernel/config/usb_gadget only)"},
+  {path = "/sys/module/lemnos", kind = "path", access = "ro", how = "none", drivers = ["drivers/named-files"], reason = "the module's parameters, read"},
+  {path = "/proc/device-tree", kind = "path", access = "ro", how = "none", drivers = ["drivers/slot-store", "drivers/system-slots", "service/lemnosd", "engine/identity"], reason = "the device tree, read"},
+  {path = "/proc/cpuinfo", kind = "file", access = "ro", how = "none", drivers = ["engine/identity"], reason = "the CPU's serial, read"},
+  {path = "/proc/cmdline", kind = "file", access = "ro", how = "none", drivers = ["engine/identity"], reason = "the kernel command line, read"},
+  {path = "/proc/mounts", kind = "file", access = "ro", how = "none", drivers = ["drivers/slot-store"], reason = "the mount table, read (the grow)"},
+  {path = "/proc/self/mountinfo", kind = "file", access = "ro", how = "none", drivers = ["drivers/system-flash", "drivers/system-slots"], reason = "the daemon's own mount table, read"},
+  {path = "/proc/sys/kernel/random/boot_id", kind = "file", access = "ro", how = "none", drivers = ["drivers/system-slots"], reason = "the boot id, read; /proc/sys is read-only under ProtectKernelTunables"},
+  {path = "/proc/self/fd", kind = "path", access = "ro", how = "none", drivers = ["backends/linux-sys", "drivers/codec-jobs", "engine/abi", "shm/ring"], reason = "a descriptor's path, read (the daemon's own fds)"},
+  {path = "/proc/*/ns/mnt", kind = "path", access = "ro", how = "none", drivers = ["backends/linux-sys"], reason = "a sandboxed child's mount namespace, read"},
+  {path = "/proc/*/*", kind = "path", access = "ro", how = "none", drivers = ["backends/linux-sys"], reason = "a sandboxed child's status and namespace files (seccomp.rs names them), read"},
+  {path = "/data", kind = "root", access = "ro", how = "none", drivers = ["drivers/named-files", "drivers/system-identity", "drivers/system-slots"], reason = "the data partition's root, read; the writes are the two granted dirs"},
+  {path = "/boot/firmware", kind = "path", access = "ro", how = "none", drivers = ["drivers/named-files", "drivers/system-slots"], reason = "the boot partition, read (the firmware's files and the board's records)"},
+  {path = "/etc/machine-id", kind = "file", access = "ro", how = "none", drivers = ["drivers/system-identity"], reason = "the machine id, read; slot-init binds it read-only"},
+  {path = "/etc/group", kind = "file", access = "ro", how = "none", drivers = ["drivers/system-slots"], reason = "the daemon's group id, read to give the slot dirs"},
+  {path = "/etc/board", kind = "path", access = "ro", how = "none", drivers = ["drivers/slot-store"], reason = "the security view's reader path (the image links it to /run/board); read only"},
+  {path = "/etc/lemnos/board.toml", kind = "file", access = "ro", how = "none", drivers = ["service/lemnosd"], reason = "the board file, read"},
+  {path = "/usr/share/lemnos/socs", kind = "path", access = "ro", how = "none", drivers = ["service/lemnosd"], reason = "the SoC maps, read"},
+
+  # --- paths the source builds from sysfs or from the board's config, and the grants the root phase makes
+  # (`how = "root-phase"`: the root phase hands them over before the drop, through the named call, `wired`,
+  # in service/lemnosd/src/privilege.rs; `site` and `needle` are the code that makes it). A `dynamic` row has
+  # no package grant: it is tagged `open` with the work that owns it, and the gate prints it.
+  # The PWM channel's attributes: the chown lands on the device behind /sys/class/pwm, under
+  # /sys/devices/platform. /sys is writable under the base unit (ProtectKernelTunables=yes leaves it rw on
+  # systemd 259.10, PWM-SYSFS-UNIT's guest run), so no unit or drop-in line grants it.
+  {path = "/sys/devices/platform", kind = "path", access = "rw", how = "root-phase", site = "backends/linux/src/pwm.rs", needle = "pub(crate) fn grant", wired = "grant_pwm_before_drop", drivers = ["backends/linux"], reason = "PWM channel attributes (period, duty_cycle, polarity, enable) are chowned by the root phase to root:lemnos 0660 before the drop (PWM-SYSFS-UNIT); the daemon stays --user lemnos and writes them as group lemnos"},
+  # The fan's attributes (pwm1, pwm1_enable): the same grant, by the root phase's hwmon step. Untested on board
+  # (testing/board-runs/UNIT-GRANTS.md).
+  {path = "/sys/class/hwmon", kind = "path", access = "rw", how = "root-phase", site = "drivers/hwmon-fan/src/grant.rs", needle = "pub fn grant_before_drop", wired = "lemnos_driver_hwmon_fan::grant_before_drop", drivers = ["drivers/hwmon-fan"], reason = "a hwmon fan's pwm1 and pwm1_enable are chowned by the root phase to root:lemnos 0660 before the drop: the duty and mode writes of the fan driver, which is root's otherwise"},
+  # The U-Boot environment's copies, on the boot disk (GPT form) or a named device: the daemon's `uboot` record
+  # opens the node by name, which it may not (root:disk), so its writes are refused by name today. Built, not granted.
+  {path = "config:uboot_env_device", kind = "device", access = "rw", how = "dynamic", open = "UNIT-GRANTS-designs: U-Boot env write path", site = "drivers/system-slots/src/uboot.rs", needle = "FileEnv::open_sized", drivers = ["drivers/system-slots"], reason = "the U-Boot environment's node, named by the board's config (the boot disk's GPT partition, or uboot_env_device): the daemon's `uboot` record writes its copies there, and slot-init writes them in its own unit; no package line grants the daemon the node"},
+  # UBI volumes and the control node on raw NAND: the System writer's ioctls and volume opens. Built, not granted.
+  {path = "/dev/ubi*", kind = "device", access = "rw", how = "dynamic", open = "UNIT-GRANTS-designs: UBI helper", site = "drivers/slot-store/src/ubi.rs", needle = "pub trait UbiWrite", drivers = ["drivers/slot-store"], reason = "UBI control and volume nodes (the raw NAND slot images and the boot record's volume): the ioctls need the control node and the volume nodes, which no package line grants; the helper is the design's"},
+  # The boot partition: root:disk, so the root phase opens it before the drop and hands the file over. The
+  # `tryboot` record's root phase (system-slots) makes the hand-over; the daemon never opens it by name.
+  {path = "boot partition node (root-phase hand-over)", kind = "device", access = "rw", how = "root-phase", site = "drivers/slot-store/src/boot_node.rs", needle = "pub fn hand_over", wired = "lemnos_driver_system_slots::root_phase", drivers = ["drivers/slot-store"], reason = "the boot partition is root:disk: the root phase opens it before the drop and hands the descriptor over (system-slots' root phase); the daemon never opens it by name"},
+]

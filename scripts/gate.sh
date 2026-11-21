@@ -294,6 +294,10 @@ side_lane() {
   lane_step packaging 180 scripts/check-packaging.sh
   # Every file under packaging/ is listed in packaging/files.txt (installed, or marked never), and the list is well formed.
   lane_step packaging-files 180 scripts/check-packaging-files.py
+  # The grants the packaged unit and udev rules make (packaging/systemd/grants.toml) against the paths the daemon's crates
+  # reach, and the checker's own cases (testing/unit-grants: each planted change must fail by name; the real tree holds).
+  lane_step unit-grants 180 scripts/check-unit-grants.py
+  lane_step unit-grants-tests 180 python3 -I testing/unit-grants/test_check_unit_grants.py
   # Every QEMU stanza that starts lemnosd starts it through the unit launcher, or says why it is root.
   lane_step root-stanzas 180 scripts/check-root-stanzas.py
   # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.

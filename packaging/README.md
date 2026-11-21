@@ -110,6 +110,11 @@ match. `scripts/check-packaging-files.py` fails by the board's name when a board
 has a `system-slots` device whose dirs the drop-in does not grant. Without the drop-in, or with the dirs
 still root's, the driver's health says `state-unwritable` and no slot is installed, switched or confirmed.
 
+A hwmon fan needs no unit change either. Before the drop, lemnosd's `hwmon fans` step (`lemnos_driver_hwmon_fan::grant_before_drop`,
+the fan's directory found as the driver finds it: `hwmon` or `name` under `sys_root`) gives the fan's `pwm1` to root:`lemnos`, mode 0660,
+and `pwm1_enable` the same when the kernel has it. A fan whose directory has no `pwm1` yet is refused by name; the daemon keeps running.
+Untested on board (`testing/board-runs/UNIT-GRANTS.md`).
+
 A board with a PWM channel needs no unit change. The daemon stays `lemnos` under the base unit, unchanged: its
 `ExecStart`, bounding set, capabilities and `ProtectKernelTunables=yes` are as shipped. The PWM channels are granted by
 the root phase instead. Before the drop, lemnosd's `pwm channels` step (`service/lemnosd/src/privilege.rs`,
@@ -145,6 +150,14 @@ daemon's user: `/run/board` is its `RuntimeDirectory` (mode 0775) and the record
 name by the generator and by `scripts/check-packaging-files.py`. When the record can't be written, the
 change is refused with `missing: the record was not written: <error>`; a view that can't be rendered is
 `view pending: <dir>: <error>` in the device's state, and is rendered again before each change and read.
+
+**The grants.** [`systemd/grants.toml`](systemd/grants.toml) is the table of what the unit and the udev rules grant:
+each device node, directory, capability, syscall group and address family, the driver that reaches it, and the
+line of the unit, drop-in or rule that grants it. `scripts/check-unit-grants.py` (the gate runs it) fails when a
+crate the daemon links reaches a path no row covers, when a row no crate needs stays in the table, and when the
+packaged files make a grant no row names. A grant the image adds (a vendor node) or the board's generated fragment
+is a row too, with its reason, and the gate lists it without checking it. A new device node the daemon opens is a
+udev line and a row in the same change.
 
 **The exposure limit.** `scripts/check-packaging.sh` reads each unit's score from `systemd-analyze security`.
 The base units stay at 2.5 with nothing added. Each fragment is checked on top of the base unit, and
