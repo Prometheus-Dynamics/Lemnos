@@ -1,12 +1,18 @@
 # RKJPEGE: the encoder's read bound is board-blocked (K1b probe)
 
-Status: parked. Not done on the PC, and no bound is written. Untested on board.
+Status: partly done. The PC part is done: the job builder refuses a source plane that, from its
+offset, reaches past its buffer for the encoded picture (the picture rounded up to the MCU). Commit
+`baeac12a` (RKJPEGE) added the two tests in `drivers/rkjpege/tests/builder.rs`
+(`a_chroma_plane_that_reaches_past_its_buffer_is_refused`,
+`a_luma_plane_placed_past_the_start_of_its_buffer_is_checked_at_its_offset`), each failing with its
+own term removed. What stays parked is the hardware reach and the ECS buffer, below. Untested on
+board.
 
 ## What is missing
 
-`drivers/rkjpege/src/job.rs` checks each source plane against the encoded picture (the picture
-rounded up to the MCU), and it leaves the ECS length buffer unplaced. Two hardware facts that
-decide the read bound are not in any source the repository or the vendor tree holds:
+`drivers/rkjpege/src/job.rs` leaves the ECS length buffer unplaced, and it claims no reach for the
+encoder beyond the encoded picture. Two hardware facts that decide the rest of the bound are not in
+any source the repository or the vendor tree holds:
 
 1. How far the encoder reads past the encoded picture (for example the frame's padding rows).
    The vendor HAL (`hal_jpege_vpu720.c`, in the K1b reference tree) programs the picture as
