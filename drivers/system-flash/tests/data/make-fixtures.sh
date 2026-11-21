@@ -4,8 +4,9 @@
 #
 #   sh make-fixtures.sh [OUT_DIR]          OUT_DIR defaults to this directory
 #
-# Written here: threaded-recipe-64m.img.xz, blocks-8192.img.xz, blocks-8193.img.xz and
-# threaded-record.xz. The tests never run xz or openssl.
+# Written here: threaded-recipe-64m.img.xz, blocks-8192.img.xz, blocks-8193.img.xz,
+# threaded-record.xz, multi-block.img.xz and multi-block-signed.img.xz. The tests never run xz or
+# openssl.
 #
 # Not written here: threaded-64m.img.xz, which the image builder made from its own raw image. Its
 # sha256 is checked below. `xz -6 --check=crc64 --block-size=64MiB -T2` on that raw image gives the
@@ -97,4 +98,42 @@ cmp "$TMP/vector.bin" "$DIR/vector-record.bin" || { echo "the record steps do no
 record 167772160 326c678268e0a2ca05ce03d3c5cc2b0737f6137bb484a53017a998cfd507a16f "$TMP/sample.bin"
 xz -0 --check=crc64 -c "$TMP/sample.bin" > "$OUT/threaded-record.xz"
 
-echo "wrote threaded-recipe-64m.img.xz, blocks-8192.img.xz, blocks-8193.img.xz, threaded-record.xz"
+# The multi-block image: one stream of four blocks at 64 MiB (three full blocks and a short
+# fourth of 2 MiB + 513 bytes), CRC64, LZMA2 preset 6 (8 MiB dictionary). Each block starts with
+# 16 KiB of hash-chain bytes (not compressible); block 1 is all zeros; block 2 has a 1 MiB text
+# run after its chain bytes; block 3's last 513 bytes are a text line. The raw image is built here
+# and deleted; it is never in the repository.
+$PYTHON -I - "$TMP/multi.img" <<'PY'
+import hashlib, sys
+MIB = 1 << 20
+BLOCK = 64 * MIB
+def chain(seed, n):
+    out, h = bytearray(), seed
+    while len(out) < n:
+        h = hashlib.sha256(h).digest()
+        out += h
+    return bytes(out[:n])
+line = b"the multi-block fixture repeats this line\n"
+with open(sys.argv[1], "wb") as f:
+    for block, length in enumerate([BLOCK, BLOCK, BLOCK, 2 * MIB + 513]):
+        body = bytearray(length)
+        if block != 1:
+            body[: 16 << 10] = chain(b"lemnos multi-block fixture %d" % block, 16 << 10)
+        if block == 2:
+            body[MIB : 2 * MIB] = (line * (MIB // len(line) + 1))[:MIB]
+        if block == 3:
+            body[-513:] = (line * 13)[:513]
+        f.write(body)
+PY
+$XZ_CMD -c "$TMP/multi.img" > "$OUT/multi-block.img.xz"
+MULTI_LEN=$(stat -c %s "$TMP/multi.img")
+MULTI_SHA=$(sha256sum "$TMP/multi.img" | cut -d' ' -f1)
+echo "multi-block.img.xz: $MULTI_LEN bytes, sha256 $MULTI_SHA"
+rm -f "$TMP/multi.img"
+# The signed file: the image's stream, then the record for it as a second stream (the same
+# Ed25519 seed as the vector and the threaded record).
+record "$MULTI_LEN" "$MULTI_SHA" "$TMP/multi-record.bin"
+xz -0 --check=crc64 -c "$TMP/multi-record.bin" > "$TMP/multi-record.xz"
+cat "$OUT/multi-block.img.xz" "$TMP/multi-record.xz" > "$OUT/multi-block-signed.img.xz"
+
+echo "wrote threaded-recipe-64m.img.xz, blocks-8192.img.xz, blocks-8193.img.xz, threaded-record.xz, multi-block.img.xz, multi-block-signed.img.xz"

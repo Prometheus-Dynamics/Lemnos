@@ -365,3 +365,62 @@ fn the_contract_dictionary_limit_is_the_decoders_limit() {
         })
     );
 }
+
+/// The four-block stream's image: its length and sha256 (`multi-block.img.xz`, made by
+/// `make-fixtures.sh`: three 64 MiB blocks and a short fourth).
+const MULTI_LEN: u64 = 203_424_257;
+const MULTI_SHA: &str = "d452e842e04ae0d07d79907d5ee388c552cf7de3e97ea9519d7a8519cbe636f6";
+
+/// Decodes `input` in pieces, hashing each stream's bytes as they come (nothing is kept): the
+/// length and sha256 of stream 0, and the bytes of every other stream.
+fn digest_both(input: &[u8], piece: usize) -> Result<(u64, String, Vec<u8>), Error> {
+    use sha2::{Digest, Sha256};
+    let mut decoder = Decoder::new(EIGHT_MIB);
+    let (mut hasher, mut count, mut record) = (Sha256::new(), 0u64, Vec::new());
+    for chunk in input.chunks(piece.max(1)) {
+        decoder.push(chunk, &mut |stream, bytes| {
+            if stream == 0 {
+                hasher.update(bytes);
+                count += bytes.len() as u64;
+            } else {
+                record.extend_from_slice(bytes);
+            }
+            Ok(())
+        })?;
+    }
+    decoder.finish()?;
+    let digest = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok((count, digest, record))
+}
+
+#[test]
+fn a_four_block_stream_decodes_to_its_image_whatever_the_piece_size() {
+    for piece in [4096, 1 << 20] {
+        let (count, digest, record) = digest_both(&data("multi-block.img.xz"), piece).unwrap();
+        assert_eq!(
+            (count, digest.as_str()),
+            (MULTI_LEN, MULTI_SHA),
+            "piece {piece}"
+        );
+        assert!(record.is_empty());
+    }
+}
+
+#[test]
+fn a_four_block_signed_file_is_the_image_then_one_record_stream() {
+    let (count, digest, record) = digest_both(&data("multi-block-signed.img.xz"), 4096).unwrap();
+    assert_eq!((count, digest.as_str()), (MULTI_LEN, MULTI_SHA));
+    assert_eq!(record.len(), 108);
+}
+
+#[test]
+fn a_flipped_byte_inside_a_later_block_fails_its_check() {
+    let mut input = data("multi-block.img.xz");
+    let middle = input.len() / 2;
+    input[middle] ^= 0x40;
+    assert!(digest_both(&input, 4096).is_err());
+}

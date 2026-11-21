@@ -1316,3 +1316,54 @@ fn a_stream_of_8193_blocks_is_refused_by_name() {
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("more blocks than the board takes"));
 }
+
+/// The four-block stream's image (`multi-block.img.xz`, from `make-fixtures.sh`).
+const MULTI_LEN: u64 = 203_424_257;
+const MULTI_SHA: &str = "d452e842e04ae0d07d79907d5ee388c552cf7de3e97ea9519d7a8519cbe636f6";
+
+#[test]
+fn a_four_block_xz_image_is_written_block_by_block_and_verified() {
+    let rig = Rig::new("multi-block", MULTI_LEN + 4096);
+    let stream_bytes = fixture("multi-block.img.xz");
+    let mut driver = ready(&rig, MULTI_SHA, MULTI_LEN);
+    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    stream(&mut driver, &stream_bytes, 4096).unwrap();
+    assert_eq!(
+        job_result(&mut driver, job),
+        (Status::OK, written(MULTI_LEN, 1))
+    );
+    assert_eq!(sha_hex(&rig.file_bytes()[..MULTI_LEN as usize]), MULTI_SHA);
+
+    let check = driver.verify().unwrap();
+    let (status, reply, _) = run_to_end(&mut driver, check);
+    assert_eq!(
+        (status, reply),
+        (Status::OK, MULTI_LEN.to_le_bytes().to_vec())
+    );
+    assert!(info(&mut driver).contains("\"state\":\"verified\""));
+}
+
+#[test]
+fn a_four_block_signed_image_verifies_and_is_written_with_its_record() {
+    let mut rig = Rig::new("multi-block-signed", MULTI_LEN + 4096);
+    rig.trust(&[vector_key()]);
+    let mut driver = rig.start();
+    driver.caller(CallerId(1));
+    let record = record_by(&vector_key(), rig.board, MULTI_LEN, MULTI_SHA);
+    driver
+        .manifest(
+            &manifest_json(rig.board, MULTI_LEN, MULTI_SHA, None),
+            &record,
+        )
+        .unwrap();
+    assert!(info(&mut driver).contains("\"signed\":\"verified\""));
+
+    let stream_bytes = fixture("multi-block-signed.img.xz");
+    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    stream(&mut driver, &stream_bytes, 4096).unwrap();
+    assert_eq!(
+        job_result(&mut driver, job),
+        (Status::OK, written(MULTI_LEN, 0))
+    );
+    assert_eq!(sha_hex(&rig.file_bytes()[..MULTI_LEN as usize]), MULTI_SHA);
+}
