@@ -6,6 +6,11 @@ by time on top. These crates depend on `libc`, on `serde` (optionally, for
 some of them. Nothing else in this repository is a dependency of theirs, so another project can
 depend on them at a locked revision and get exactly this.
 
+The gate keeps it so. `scripts/check-boundaries.sh` fails when a crate in this family depends on anything
+outside `shm/` or on a `lemnos` crate, dev and build dependencies included. `scripts/check-shm-one-source.sh`
+fails when a lock holds two copies, or two versions, of an `shm-*` package. The gate builds
+`shm-ring`, `shm-ring-time` and `shm-sample-time` for Windows and macOS (`scripts/gate.sh`).
+
 | Crate | Folder | What it is |
 | --- | --- | --- |
 | `shm-sample-time` | [`sample-time`](sample-time) | `SampleTime`: `CLOCK_MONOTONIC` nanoseconds, and `now()`. `no_std` |
@@ -25,7 +30,8 @@ macOS (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, `x86_64-apple-darwin`),
 parts behind `cfg`: `shm-sample-time`, `shm-ring` and `shm-ring-time`. `shm-ring-buffers`,
 `shm-ring-doorbell` and `shm-ring-holds` are Linux only, and build to nothing elsewhere (the whole
 crate is behind `cfg(target_os = "linux")`). `shm-fdpass` uses Unix descriptors, so it is Unix only.
-The others have no `cfg` of their own: they build wherever the crates they use do.
+`shm-measure` has one Linux-only module, `sched`. The others (`shm-ring-latest`, `shm-ring-model` and
+`shm-ring-bench`) have no `cfg` of their own: they build wherever the crates they use do.
 
 - `shm-sample-time`: `SampleTime::now()` on every platform. Linux and macOS read `CLOCK_MONOTONIC`
   through `clock_gettime`; Windows reads `QueryPerformanceCounter`. Times from different machines
@@ -424,7 +430,7 @@ value; an additive change that an older side ignores does not, and says so here.
 | Sample time | the 8 bytes of a sample's time | none of its own | `CLOCK_MONOTONIC` nanoseconds on Linux and macOS. Windows reads `QueryPerformanceCounter`, which is a different clock, so Linux and Windows rings do not compare | No change on Linux |
 | Descriptor messages (`shm-fdpass`) | the message's ancillary data | none of its own | Unnumbered; the same since the first publish | No |
 | Kernel module's copies | `kernel/rs/stream_ring.rs`: `SHM_LAYOUT`, `MARKS_LAYOUT` | 2, 2 | The same values as the rows above | Carried, and checked: a reader's marks page of another layout is refused with a log line naming both |
-| Wire part `shared-rings` | its hash, folds [`ring::layouts`](../engine/wire/src/ring.rs) | `0x81a5753a1c9576e6` | A peer whose layout differs has a different hash, so the part is refused by name | Moved by P2s: the layouts were not folded before. Moved again by M34 (`0x8b6a280430008fea` to `0x81a5753a1c9576e6`): the ring's frame metadata and job end |
+| Wire part `shared-rings` | its hash, folds [`ring::layouts`](../engine/wire/src/ring.rs) | `0x981c6833e8330a91` | A peer whose layout differs has a different hash, so the part is refused by name | Moved by P2s: the layouts were not folded before. Moved again by M34 (`0x8b6a280430008fea` to `0x81a5753a1c9576e6`): the ring's frame metadata and job end. Moved again since: the value now is `0x981c6833e8330a91`, the one `engine/wire`'s test pins and [`docs/wire.md`](../docs/wire.md#core-and-parts) records |
 
 A reader refuses a value it does not implement, with `RingError::Layout`. Readers built from 0aa30510 do not
 check the value at all, so they read a layout 2 ring as layout 1: that is the one direction this layout cannot

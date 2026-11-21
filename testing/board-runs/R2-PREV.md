@@ -15,8 +15,7 @@ The brief offered "a trial slot, or else sim-only". A trial does not go through 
   firmware's tryboot flag is set.
 
 So an unreadable kernel on a trial exercises the tryboot fallback, not `previous.txt` picked by the
-count. The rule in `docs/prs/` and PARKED.md ("if not the same path: mark sim-only") applies. The
-count-picked previous is therefore sim-only; this file records what a board would have to show.
+count. So the count-picked previous is marked sim-only, as PARKED.md says for R2-PREV. This file records what a board would have to show.
 
 ## What the sim covers (run on the PC, see the PR body)
 

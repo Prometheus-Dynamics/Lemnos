@@ -1299,6 +1299,51 @@ mod layout {
         );
     }
 
+    /// The core hash and the part hashes below are the values `docs/wire.md` records, under "Core and
+    /// parts". Each is pinned here beside the shared-rings and consumer-hold pins, so a change that
+    /// moves one shows in the test, and the doc is updated with it in the same change.
+    #[test]
+    fn the_core_hash_is_the_recorded_one() {
+        assert_eq!(
+            CORE_HASH, 0x40b5_b529_0df3_2c80,
+            "the core hash moved: {CORE_HASH:#018x}"
+        );
+    }
+
+    /// The part hashes `docs/wire.md` records, each by its name in [`PART_NAMES`].
+    #[test]
+    fn the_stream_handles_part_hash_is_the_recorded_one() {
+        assert_recorded_part("stream-handles", 0x5b32_fb2e_c8df_a5ed);
+    }
+
+    #[test]
+    fn the_packages_part_hash_is_the_recorded_one() {
+        assert_recorded_part("packages", 0x818f_26c4_04b4_f968);
+    }
+
+    #[test]
+    fn the_jobs_part_hash_is_the_recorded_one() {
+        assert_recorded_part("jobs", 0x3530_3586_6faf_89f5);
+    }
+
+    #[test]
+    fn the_endpoints_part_hash_is_the_recorded_one() {
+        assert_recorded_part("endpoints", 0x0360_3423_62a7_f9d9);
+    }
+
+    /// The hash of the part called `name` is `expected`: the value `docs/wire.md` records.
+    fn assert_recorded_part(name: &str, expected: u64) {
+        let index = PART_NAMES
+            .iter()
+            .position(|part| *part == name)
+            .unwrap_or_else(|| panic!("the {name} part"));
+        assert_eq!(
+            PART_HASHES[index], expected,
+            "the {name} part hash moved: {:#018x}",
+            PART_HASHES[index]
+        );
+    }
+
     /// BOARD_ID is a feature bit of the Welcome, not a part: it is not one of the parts' bits, has no
     /// hash of its own, and so moves none.
     #[test]
