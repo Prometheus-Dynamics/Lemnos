@@ -246,11 +246,20 @@ fn send_jobs(core: &Core, updates: &mut Vec<JobUpdate>) {
                 done: *done,
                 total: *total,
             }),
-            JobEvent::Finished { status, result } => client.event(&Frame::JobDone {
-                job: update.job,
-                status: status.0,
-                bytes: result,
-            }),
+            JobEvent::Finished { status, result } => {
+                // A job the host ended with a reason (its driver was lost) says it in the log too.
+                if *status == lemnos_core::Status::INTERRUPTED && !result.is_empty() {
+                    let devices = core.host.devices();
+                    if let Some(info) = devices.iter().find(|info| info.index == update.device) {
+                        core.log_line(&job_ended_line(&info.id, update.job, *status, result));
+                    }
+                }
+                client.event(&Frame::JobDone {
+                    job: update.job,
+                    status: status.0,
+                    bytes: result,
+                });
+            }
         }
     }
 }
@@ -383,4 +392,17 @@ mod figures_tests {
             "no frame start: restarting the sensor (silent_ms 300, frame_length 1742)"
         );
     }
+}
+
+/// The log line for a job the host ended with a reason: which device, which job, and the words.
+fn job_ended_line(device: &str, job: u64, status: lemnos_core::Status, reason: &[u8]) -> String {
+    format!(
+        "device {device}: job {job:#x} ended {}: {}",
+        if status == lemnos_core::Status::INTERRUPTED {
+            "interrupted"
+        } else {
+            "failed"
+        },
+        String::from_utf8_lossy(reason)
+    )
 }

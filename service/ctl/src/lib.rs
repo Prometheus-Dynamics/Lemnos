@@ -1448,7 +1448,15 @@ impl Tool<'_> {
                     }
                     _ => "",
                 };
-                return Err(format!("job {job:#x} failed: status {}{how}", status.0));
+                // A job the host ended with a reason says it in its result (UTF-8).
+                let why = match std::str::from_utf8(&result) {
+                    Ok(text) if !text.is_empty() => format!(": {text}"),
+                    _ => String::new(),
+                };
+                return Err(format!(
+                    "job {job:#x} failed: status {}{how}{why}",
+                    status.0
+                ));
             }
             let hex = result
                 .iter()

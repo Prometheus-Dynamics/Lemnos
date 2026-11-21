@@ -1462,6 +1462,12 @@ impl Inner {
 
     /// Ends every open job of `device` with `status`: its driver has gone.
     fn end_jobs(&self, slot: &Slot, status: Status) {
+        self.end_jobs_because(slot, status, &[]);
+    }
+
+    /// `end_jobs` with the reason the device was lost, as UTF-8 in each job's end result:
+    /// the words the caller and the daemon's log show, rather than an empty result.
+    fn end_jobs_because(&self, slot: &Slot, status: Status, reason: &[u8]) {
         self.end_started(slot);
         if slot.open_jobs.load(Ordering::Acquire) == 0 {
             return;
@@ -1482,7 +1488,7 @@ impl Inner {
                 owner: job.owner,
                 event: JobEvent::Finished {
                     status,
-                    result: Vec::new(),
+                    result: reason.to_vec(),
                 },
             });
         }
@@ -1867,8 +1873,8 @@ impl Inner {
     /// up to the cap, so no driver can keep the host binding it.
     fn fault(&self, slot: &Slot, reason: &str) {
         slot.stop_wait();
-        // Whatever the driver was doing for its callers went with it.
-        self.end_jobs(slot, Status::INTERRUPTED);
+        // Whatever the driver was doing for its callers went with it, and the job's end says why.
+        self.end_jobs_because(slot, Status::INTERRUPTED, reason.as_bytes());
         let mut state = lock(&slot.state);
         let attempts = match &*state {
             DeviceState::Off(_) => return,

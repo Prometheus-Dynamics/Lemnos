@@ -489,7 +489,9 @@ lemnos-ctl read counter count
 Calls any method by name, whether or not an item names it. When two contracts on the device have a
 method of the same name, write `TAG:NAME`. The reply is printed unless the method returns nothing.
 A long job (`describe` shows it as `-> job`) prints its number, then its progress as it comes, then
-its result in hex when it ends. Interrupting the tool ends the connection, which cancels the job.
+its result in hex when it ends. A job the host ends as `INTERRUPTED` because its driver was lost has no
+result but the reason, in UTF-8 (`lemnos-ctl` prints it on the failure line, `job 0x... failed: status -4
+(interrupted): the driver panicked`), and the daemon's log says it too (`device NAME: job 0x... ended interrupted: ...`). Interrupting the tool ends the connection, which cancels the job.
 A device that is not running (off, or retrying its bind or start-up) refuses a call, and the refusal
 says its state and reason, as `read` does, rather than only that the call failed.
 
