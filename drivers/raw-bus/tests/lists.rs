@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::{client, wired};
+use common::{all_buses_down, client, wired};
 use lemnos_contract_raw_bus::{
     I2cOp, MAX_I2C_OPS, MAX_SPI_TRANSFERS, RawBus as _, SpiTransfer, encode_i2c_ops,
     encode_spi_transfers,
@@ -72,6 +72,27 @@ fn an_i2c_list_that_writes_after_a_read_needs_writes_on_the_device() {
         Ok(1)
     );
     assert_eq!(wiring.i2c.byte(0x50, 0x20), Some(0x42));
+}
+
+/// A list with no read part is a write, so with `writes` off it is refused. Every bus is down, so a
+/// call that got past the policy would return `BUSY` instead of `NOT_PERMITTED`.
+#[test]
+fn an_i2c_list_with_no_read_part_is_refused_with_writes_off_and_reaches_no_bus() {
+    let mut wiring = wired();
+    let mut driver = common::bind(&mut wiring.board, &READS_ONLY).unwrap();
+    all_buses_down(&wiring);
+    let before = wiring.i2c.transactions();
+    let ops = i2c_list(&[I2cOp::Write(&[0x20, 0x42])]);
+    assert_eq!(
+        client(&mut driver).i2c_transactions(0x50, &ops, &mut []),
+        Err(Status::NOT_PERMITTED),
+        "a list with no read part is a write"
+    );
+    assert_eq!(
+        wiring.i2c.transactions(),
+        before,
+        "refused: no bus was reached"
+    );
 }
 
 #[test]
