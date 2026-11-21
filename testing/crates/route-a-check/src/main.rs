@@ -426,6 +426,12 @@ fn main() -> ExitCode {
         if let Err(why) = run(&mut c) {
             c.check(false, &format!("{name}: {why}"));
         }
+        // Each half's board goes before the next is stood in: the guest's /run is small.
+        if let Ok(dir) = fs::read_dir(root_dir()) {
+            for entry in dir.flatten() {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
     }
     *TEST_ROOTS.lock().unwrap_or_else(|p| p.into_inner()) = None;
     let _ = fs::remove_dir_all(root_dir());
