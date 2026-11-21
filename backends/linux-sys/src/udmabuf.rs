@@ -92,6 +92,7 @@ mod tests {
 
     /// Opens `/dev/udmabuf`, or says by name why it could not: the real device is the only object
     /// that decides whether a memfd is a valid source. `None` is a stated skip, printed as one.
+    #[allow(clippy::print_stdout)] // the skip is printed by name, so a log shows it was not run
     fn udmabuf_device() -> Option<OwnedFd> {
         let path = c"/dev/udmabuf";
         // SAFETY: `path` is a valid C string; the flags take no pointers.
