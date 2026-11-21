@@ -44,7 +44,7 @@ The code finds each consumer's files by name from that directory. Nothing in the
 A train runs four lanes at once, each with its own CPU set and its own bound:
 
 - `gate`: `scripts/gate.sh` in the stack worktree, with `CARGO_BUILD_JOBS` from `LAND_JOBS_GATE`, on
-  `LAND_CPUS_GATE`. Bound 3600 s.
+  `LAND_CPUS_GATE`. Bound: 109164 s, 4 x the sum of the gate's step budgets (a backstop; each step is bounded by its CPU budget and its progress watch).
 - `qemu`: the modules QEMU harness, on `LAND_CPUS_QEMU`. Its kernel comes from `LAND_QK_DIR`, built when missing.
   Bound 1000 s.
 - `off`: the modules-off kernel and the built-in and three watchdog runs, side by side on `LAND_CPUS_OFF`.

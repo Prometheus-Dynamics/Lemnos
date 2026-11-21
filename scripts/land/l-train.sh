@@ -14,7 +14,14 @@ RMT=$LAND_REMOTE; RN=refs/land/remote
 # only once next has reached that base. LTRAIN_AFTER: the unit of the train ahead, waited for before the push.
 BASE_REF=${LTRAIN_BASE:-$RN/next}
 cred=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+# The gate's backstop (seconds). It is 4 x the sum of the gate's step budgets (scripts/gate.sh, CPU-seconds, with
+# loop bodies counted per run): 27291 x 4 = 109164. A progressing gate never reaches it; a step that stops
+# progressing is killed by its own watch long before. Its only other job is to stop a gate the watch cannot see.
+GATE_BACKSTOP_S=109164
+. "$HERE/gate-attempts.sh"
+export QUEUE_STOP_FILE="$LAND_STATE_DIR/QUEUE-STOPPED"
 exec 8>>"$LAND_LOCK_FILE"; flock 8
+if [ -s "$QUEUE_STOP_FILE" ]; then echo "queue stopped: $(cat "$QUEUE_STOP_FILE"); clear it by hand before landing"; exit 2; fi
 n=$(( $(cat "$T/counter" 2>/dev/null || echo 0) + 1 )); echo $n > "$T/counter"; L=$T/$n; mkdir -p "$L"
 echo "== ltrain $n $(date -u +%FT%TZ): $*"
 git -C "$REPO" fetch -q "$RMT" "+refs/heads/*:$RN/*" || { echo "fetch failed"; exit 2; }
@@ -136,7 +143,7 @@ part() { # <name> <command...>: runs it unless the tree is already green for it;
 # the QEMU guests (2 vCPUs each) ran on the same cores: since the gate went parallel (2026-11-18),
 # guest checks with waits in guest time failed here and there with no kernel change in the stack
 # (irq, pisp_fe, pisp_be, gadget). Gate 6-23, modules harness 24-27, modules-off 28-31.
-( part gate bash -c 'CARGO_TARGET_DIR=$0/target CARGO_BUILD_JOBS=$3 BUSYBOX_DIR=$1 taskset -c $4 /usr/bin/time -o "$2/gate.time" -f "%e %U %S" timeout -k 30 3600 ./scripts/gate.sh > "$2/gate.log" 2>&1; r=$?; [ $r = 124 -o $r = 137 ] && echo "lander: gate exceeded its bound of 3600 s (killed)" >> "$2/gate.log"; exit $r' "$W" "$LAND_BUSYBOX_DIR" "$L" "$LAND_JOBS_GATE" "$LAND_CPUS_GATE" ) &
+( part gate gate_attempts "$L" bash -c 'CARGO_TARGET_DIR=$0/target CARGO_BUILD_JOBS=$3 BUSYBOX_DIR=$1 taskset -c $4 /usr/bin/time -o "$2/gate.time" -f "%e %U %S" timeout -k 30 $5 ./scripts/gate.sh; r=$?; [ $r = 124 -o $r = 137 ] && echo "lander: gate exceeded its bound of $5 s (killed)"; exit $r' "$W" "$LAND_BUSYBOX_DIR" "$L" "$LAND_JOBS_GATE" "$LAND_CPUS_GATE" "$GATE_BACKSTOP_S" ) &
 qemu_part() { local d; d=$(kernel modules kernel.config) || return 1
   # LAND_SCRATCH: where the harness writes (its work dir and cargo target), when the stack's own disk is unwell.
   local sc=$LAND_SCRATCH; mkdir -p "$sc/qemu-tmp"

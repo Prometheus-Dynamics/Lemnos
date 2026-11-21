@@ -4,13 +4,13 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
-# Every step has a hard bound, in seconds, written beside it. A bound is 3 times the slowest green time of
-# that step, and never less than 180 s: the floor for a cold cache (a fresh target dir compiles the
-# dependencies first). The green times are from the lander's gate.log of each green train whose run log
-# says LANDED (58 trains, 2026-11-18); each step's "lander green max" comment gives the slowest of them.
-# A step still running at its bound is killed with its whole process group, and any process it started
-# that left the group is killed too. Then the gate fails and names the step. A bound is not a retry and
-# not a tolerance: a green step finishes well inside it.
+# Every step has a CPU budget, written beside it in CPU-seconds, and no step has a wall-clock bound. A budget is
+# 3 times the largest CPU (or wall, where larger) that the step used in any green train on the lander, and never
+# less than 180 CPU-s: the floor for a cold cache (a fresh target dir compiles the dependencies first). The
+# figures are from the lander's gate.log of the 141 green trains. A step that passes its budget is killed with
+# its whole process group, and so is one that stops making progress (no CPU and nothing runnable for
+# GATE_STALL_SAMPLES samples). Either way the gate fails and names the step. Load does not change either test:
+# a slow step under load keeps using CPU or stays runnable. The process control is in scripts/gate-bounds.sh.
 GATE_KILL_GRACE=3
 
 gate_out="$(mktemp -d "${TMPDIR:-/tmp}/gate-out.XXXXXX")"
@@ -83,134 +83,8 @@ ccache_growth() {
 
 trap 'stop_lanes; rm -rf -- "$gate_out"; clean_step_dirs' EXIT
 
-# gate_sweep <token> <signal>: sends the signal to each process whose environment carries the token. A step's
-# processes all inherit its token, so this also finds those that left its process group (a new session, a
-# daemon the step's child reparented). Only /proc is read.
-gate_sweep() {
-  local tok="$1" sig="$2" hits f x e
-  # One grep finds the candidates; each is then matched on its whole entry, so a longer token never matches.
-  hits="$(grep -alF -- "GATE_STEP_TOKEN=$tok" /proc/[0-9]*/environ 2>/dev/null || true)"
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    mapfile -d '' -t e 2>/dev/null <"$f" || continue
-    for x in "${e[@]}"; do
-      if [ "$x" = "GATE_STEP_TOKEN=$tok" ]; then
-        f="${f#/proc/}"
-        kill -"$sig" "${f%%/*}" 2>/dev/null || true
-        break
-      fi
-    done
-  done <<<"$hits"
-}
-
-# stop_step <pgid> <token>: ends a step's processes. TERM to the group and to the token's processes, then,
-# after the grace, KILL to both. The step's output is a file, so nothing left running can hold the gate open.
-stop_step() {
-  local pgid="$1" token="$2"
-  kill -TERM -- "-$pgid" 2>/dev/null || true
-  gate_sweep "$token" TERM
-  sleep "$GATE_KILL_GRACE"
-  kill -KILL -- "-$pgid" 2>/dev/null || true
-  gate_sweep "$token" KILL
-}
-
-# bounded <key> <bound> <command...>: runs the command as step <key>, in its own process group, with stdin from
-# /dev/null and its output in $gate_out/<key>.out. The output is a file, never a pipe. Sets step_rc (the status,
-# or 124 when the bound ran out and the step was killed) and step_killed (1 when it was killed). Keys are unique
-# within a run, so the .done file is not there before the step writes it.
-bounded() {
-  local key="$1" bound="$2" token pid start=$SECONDS steptmp before
-  shift 2
-  token="gate.$$.$key.$RANDOM$RANDOM"
-  step_rc=0 step_killed=0
-  steptmp="$(step_dir "g$key")"
-  rm -rf -- "$steptmp"; mkdir -p -- "$steptmp"
-  before="$(ccache_names || true)"
-  set -m
-  (
-    export GATE_STEP_TOKEN="$token" TMPDIR="$steptmp"
-    rc=0
-    "$@" || rc=$?
-    # The step's CPU: bash's times, whose second line is the children this subshell waited for (user, then
-    # system). Straight to a file: in a pipeline, times would run in a new subshell that has no children.
-    times >"$gate_out/$key.cpu"
-    echo "$rc" >"$gate_out/$key.done"
-  ) </dev/null >"$gate_out/$key.out" 2>&1 &
-  pid=$!
-  set +m
-  echo "$pid $token" >"$gate_out/$key.pid"
-  while [ ! -e "$gate_out/$key.done" ]; do
-    if [ $((SECONDS - start)) -ge "$bound" ]; then
-      step_killed=1
-      break
-    fi
-    sleep 0.2
-  done
-  if [ "$step_killed" = 1 ]; then
-    stop_step "$pid" "$token"
-    step_rc=124
-  else
-    step_rc="$(cat "$gate_out/$key.done")"
-  fi
-  wait "$pid" 2>/dev/null || true
-  : >"$gate_out/$key.pid"
-  if ! step_tmp_check "$(cat "$gate_out/$key.label")" "$steptmp" >>"$gate_out/$key.out" 2>&1; then
-    [ "$step_rc" != 0 ] || step_rc=1
-  fi
-  ccache_growth "$(cat "$gate_out/$key.label")" "$before" >>"$gate_out/$key.out"
-  return 0
-}
-
-# unit <key> <label> <bound> <command...>: runs one step bounded, and records it as $gate_out/<key>.*: its output,
-# seconds, bound, whether it was killed, and its status last (a step is finished when .rc exists).
-unit() {
-  local key="$1" label="$2" bound="$3" start=$SECONDS
-  shift 3
-  echo "$label" >"$gate_out/$key.label"
-  echo "$bound" >"$gate_out/$key.bound"
-  unit_out="$gate_out/$key.out"
-  bounded "$key" "$bound" "$@"
-  echo "$((SECONDS - start))" >"$gate_out/$key.secs"
-  echo "$step_killed" >"$gate_out/$key.killed"
-  echo "$step_rc" >"$gate_out/$key.rc"
-  return "$step_rc"
-}
-
-# finish <key>: prints a finished step as the gate shows it. A failing step names itself and stops the gate.
-finish() {
-  local key="$1" label rc
-  label="$(cat "$gate_out/$key.label")"
-  rc="$(cat "$gate_out/$key.rc")"
-  echo "==> $label"
-  cat "$gate_out/$key.out"
-  if [ "$rc" != 0 ]; then
-    if [ "$(cat "$gate_out/$key.killed")" = 1 ]; then
-      echo "gate: $label exceeded its bound of $(cat "$gate_out/$key.bound") s (killed)" >&2
-    fi
-    echo "gate: $label failed (exit $rc)" >&2
-    stop_lanes
-    exit 1
-  fi
-  echo "    $label: $(cat "$gate_out/$key.secs") s, $(step_cpu "$key") CPU-s"
-}
-
-# step_cpu <key>: the step's user plus system CPU in whole seconds, from bash's times ("0m1.234s 0m0.567s").
-step_cpu() {
-  local line m s total=0
-  line="$(sed -n 2p "$gate_out/$1.cpu" 2>/dev/null)"
-  [ -n "$line" ] || { echo "?"; return; }
-  for t in $line; do
-    m="${t%%m*}"; s="${t#*m}"; s="${s%s}"
-    total=$(awk -v t="$total" -v m="$m" -v s="$s" 'BEGIN { printf "%.3f", t + m * 60 + s }')
-  done
-  awk -v t="$total" 'BEGIN { printf "%d", t + 0.5 }'
-}
-
-# step <label> <bound> <command...>: a step run before the lanes, bounded and shown like a lane step.
-step() {
-  unit top "$1" "$2" "${@:3}" || true
-  finish top
-}
+# The process control (CPU budgets, the progress watch, the stop of a step) is in gate-bounds.sh.
+. "$(dirname "${BASH_SOURCE[0]}")/gate-bounds.sh"
 
 # Cargo.lock is tracked. A dependency change that did not update it fails here, before any
 # other cargo command could rewrite it: --locked refuses to change the lock.
@@ -221,7 +95,7 @@ lockfile() {
     return 1
   fi
 }
-step lockfile 180 lockfile # lander green max 4 s
+step lockfile 180 lockfile
 
 # GATE_PART picks a part of the gate, so CI can run the parts side by side (.github/workflows/next.yml):
 #   unset or "all"   everything, in order (what to run locally)
@@ -264,7 +138,7 @@ case "$part" in
     if [ "${#shard[@]}" -eq 0 ]; then echo "GATE_PART=$part: the shard has no package" >&2; exit 1; fi
     echo "shard $k of $n: $((${#shard[@]} / 2)) of ${#packages[@]} packages"
     # No shard has its own green time yet: a shard gets the bound of the whole workspace test step.
-    step "tests, shard $k of $n" 2442 cargo test "${shard[@]}"
+    step "tests, shard $k of $n" 7437 cargo test "${shard[@]}"
     echo "gate part $part passed"
     exit 0
     ;;
@@ -292,7 +166,7 @@ cargo_lane() {
   local n=0
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "c$(printf %03d "$n")" "$@"; }
-  lane_step clippy 180 cargo clippy --workspace --all-targets -- -D warnings # lander green max 32 s
+  lane_step clippy 1032 cargo clippy --workspace --all-targets -- -D warnings
   # The tail lane builds beside the running tests, so a thread per core oversubscribes the cores and
   # the contention is paid in CPU time. Measured warm on 18 cores (lander, fcaae491, 2 runs each):
   # 18 threads 133 s / 1538 CPU-s, 12 threads 143 s / 1363 CPU-s, 9 threads 159 s / 1299 CPU-s.
@@ -320,31 +194,31 @@ cargo_lane() {
     touch "$gate_out/tests.over"
     return "$rc"
   }
-  [ "$part" = checks ] || lane_step tests 2442 workspace_tests # lander green max 814 s
+  [ "$part" = checks ] || lane_step tests 7437 workspace_tests
 
-  lane_step "counters on" 180 cargo test -q -p lemnos-measure --features perf,alloc-count # lander green max 2 s
+  lane_step "counters on" 180 cargo test -q -p lemnos-measure --features perf,alloc-count
   # A setting's meaning never depends on a feature: the same board text runs the same tests with and
   # without `std` (the generic sensors' `description_file`, the gadget's `interfaces_file`).
-  lane_step "generic sensor, no std" 180 cargo test -q -p lemnos-driver-generic-sensor # lander green max 14 s
-  lane_step "generic sensor, std" 180 cargo test -q -p lemnos-driver-generic-sensor --features std # lander green max 7 s
-  lane_step "usb gadget, alloc" 180 cargo test -q -p lemnos-driver-usb-gadget # lander green max 38 s (label was "usb gadget, no std")
-  lane_step "usb gadget, std" 180 cargo test -q -p lemnos-driver-usb-gadget --features std # lander green max 8 s
-  lane_step "client on tokio" 180 cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings # lander green max 25 s
-  lane_step "client on tokio" 180 cargo test -q -p lemnos-client --features tokio # lander green max 25 s
-  lane_step "C surface, shared form" 453 cargo test -q -p lemnos-capi --features shared # lander green max 151 s
+  lane_step "generic sensor, no std" 180 cargo test -q -p lemnos-driver-generic-sensor
+  lane_step "generic sensor, std" 180 cargo test -q -p lemnos-driver-generic-sensor --features std
+  lane_step "usb gadget, alloc" 180 cargo test -q -p lemnos-driver-usb-gadget
+  lane_step "usb gadget, std" 180 cargo test -q -p lemnos-driver-usb-gadget --features std
+  lane_step "client on tokio" 180 cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
+  lane_step "client on tokio" 180 cargo test -q -p lemnos-client --features tokio
+  lane_step "C surface, shared form" 204 cargo test -q -p lemnos-capi --features shared
   # The vendor-header layouts: with no header given, the tool says per variant which header it needs and
   # compares nothing (the drivers' own layout assertions are compiled and tested above).
-  lane_step "layout headers, not run in the gate" 180 cargo run -q -p lemnos-layout-check # lander green max 15 s
+  lane_step "layout headers, not run in the gate" 180 cargo run -q -p lemnos-layout-check
 
   # The generated overlays compile with the dtc the contract names (built from its pinned release) with
   # every warning class an error, and apply to a base built from their SoC map (testing/devtree/check.sh).
-  lane_step devtree 180 testing/devtree/check.sh # lander green max 18 s
+  lane_step devtree 180 testing/devtree/check.sh
   # Every command in the documents runs against the simulated board, and every link leads somewhere.
-  lane_step documents 339 scripts/check-docs.py # lander green max 113 s
+  lane_step documents 222 scripts/check-docs.py
   # The mdev.conf that `lemnos-ctl tree --mdev` writes is run by BusyBox 1.37.0 and 1.38.0 (their
   # mdev, built from the pinned release tarballs), in a namespace, and each node's owner, group and mode
   # are checked against the udev rule for the same device. CI builds them first (BUSYBOX_DIR, cached).
-  lane_step mdev 1293 testing/mdev/check.sh # lander green max 431 s
+  lane_step mdev 180 testing/mdev/check.sh
 }
 
 # The cargo steps that can run beside the workspace tests. None builds a program the tests start,
@@ -362,7 +236,7 @@ tail_lane() {
   fi
   # cargo-nextest does not run doc tests, so they run here. (The plain form runs them with the tests.)
   if [ "$part" != checks ] && [ "$use_nextest" = 1 ]; then
-    lane_step "doc tests" 180 cargo test --workspace --doc # lander green max 49 s
+    lane_step "doc tests" 348 cargo test --workspace --doc
   fi
 
   # What must still build without std, on the targets a microcontroller host uses. Each of these checks
@@ -370,7 +244,7 @@ tail_lane() {
   no_std_crates=(lemnos-abi lemnos-hal lemnos-core lemnos-contract-accelerometer lemnos-contract-gyroscope lemnos-contract-magnetometer lemnos-contract-orientation lemnos-driver-orientation lemnos-host-static lemnos-mcu lemnos-driver-usb-gadget lemnos-driver-generic-sensor shm-sample-time)
   for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-linux-gnueabihf; do
     for crate in "${no_std_crates[@]}"; do
-      lane_step "$crate on $target" 180 cargo check -q -p "$crate" --no-default-features --target "$target" # lander green max 7 s
+      lane_step "$crate on $target" 180 cargo check -q -p "$crate" --no-default-features --target "$target"
     done
   done
 
@@ -380,14 +254,14 @@ tail_lane() {
   portable_crates=(shm-ring shm-ring-time shm-sample-time)
   for target in x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-apple-darwin; do
     for crate in "${portable_crates[@]}"; do
-      lane_step "$crate on $target" 180 cargo check -q -p "$crate" --target "$target" # lander green max 3 s
+      lane_step "$crate on $target" 180 cargo check -q -p "$crate" --target "$target"
     done
   done
 
   # The crates used as plain libraries, alone and without their driver halves.
-  lane_step libraries 828 scripts/check-libraries.sh # lander green max 276 s
+  lane_step libraries 1695 scripts/check-libraries.sh
   # The shipped programs (packaging/shipped.txt) agree: see scripts/check-products.sh.
-  lane_step products 582 scripts/check-products.sh # lander green max 194 s
+  lane_step products 606 scripts/check-products.sh
 }
 
 # The sets the workspace tests never build: each crate's tests in the exact set it ships with, and
@@ -401,41 +275,39 @@ features_lane() {
   if [ "$part" != checks ]; then
     until [ -f "$gate_out/tests.running" ] || [ -f "$gate_out/tests.over" ]; do sleep 0.2; done
   fi
-  # Bound: 3 x 408 s = 1224 s. 408 s is a full miss (every crate rebuilt), the step's slowest case.
-  # Full miss, debug info on, -j4 at load ~50, $H/NDF-CACHE logs; recompute from lander greens later.
-  lane_step features 1224 scripts/check-features.sh # lander green max 106 s (one green, before the cache)
+    lane_step features 1449 scripts/check-features.sh
 }
 
 side_lane() {
   local n=0
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "s$(printf %03d "$n")" "$@"; }
-  lane_step format 180 cargo fmt --all --check # lander green max 25 s
+  lane_step format 180 cargo fmt --all --check
   # The steps below are the gate's checks that run the same as before, in this lane: none builds.
-  lane_step boundaries 351 scripts/check-boundaries.sh # lander green max 117 s
+  lane_step boundaries 180 scripts/check-boundaries.sh
   # The bridge and Orion share one copy of each shm-* crate (the root Cargo.toml's patch of the Orion source).
-  lane_step orion-copies 180 scripts/check-orion-copies.sh # lander green max 8 s
+  lane_step orion-copies 180 scripts/check-orion-copies.sh
   # The consumer-lock checkers (scripts/check-lemnos-pin.sh, scripts/check-shm-one-source.sh) pass the pinned fixture lock
   # and fail the stray one, listing its strays (testing/lock-checks/). No lander measurement yet.
   lane_step lock-checks 180 testing/lock-checks/check.sh
   # The unit, udev and sysusers files; nothing is installed here.
-  lane_step packaging 180 scripts/check-packaging.sh # lander green max 5 s
+  lane_step packaging 180 scripts/check-packaging.sh
   # Every file under packaging/ is listed in packaging/files.txt (installed, or marked never), and the list is well formed.
-  lane_step packaging-files 180 scripts/check-packaging-files.py # lander green max 1 s
+  lane_step packaging-files 180 scripts/check-packaging-files.py
   # Every QEMU stanza that starts lemnosd starts it through the unit launcher, or says why it is root.
   lane_step root-stanzas 180 scripts/check-root-stanzas.py
   # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
   # Also checks that docs/building.md lists each of them.
-  lane_step shipped 180 scripts/check-shipped.sh # lander green max 12 s
+  lane_step shipped 180 scripts/check-shipped.sh
   # The module's CONFIG_ symbols are all in docs/kernel-config.md, and the QEMU harness enables the required ones.
-  lane_step kernel-config 180 scripts/check-kernel-config.py # lander green max 1 s
+  lane_step kernel-config 180 scripts/check-kernel-config.py
   # The module's C is one capped file of one-line shims (kernel/lemnos_helpers.c); nothing else.
-  lane_step kernel-helpers 180 scripts/check-kernel-helpers.py # lander green max 1 s
+  lane_step kernel-helpers 180 scripts/check-kernel-helpers.py
   # packaging/uboot/boot.cmd run by U-Boot itself: stock U-Boot v2026.10 under QEMU's raspi3b (the Pi 64-bit build from its pinned release
   # (testing/uboot/build-uboot.sh, cached in UBOOT_DIR), with the disk image as the SD card, runs the script over disk images with the slot files and
   # the uboot-env partition, boot by boot, and checks the slot each boot starts, the environment it leaves, and
   # the guards (the boot-count ladder, the rescue at 8, and the no-partition case). CI caches UBOOT_DIR.
-  lane_step uboot 1248 testing/uboot/check.sh # lander green max 416 s
+  lane_step uboot 1878 testing/uboot/check.sh
 }
 
 # The lanes start; the main shell prints each finished step, in its lane's order, as it finishes.
