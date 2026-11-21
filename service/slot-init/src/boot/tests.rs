@@ -3024,3 +3024,106 @@ fn unreadable_trial_records_with_no_firmware_trial_boot_the_default() {
     );
     assert!(!logs.contains("the firmware started a trial"), "{logs}");
 }
+
+/// Every entry under `root`, in path order: its path, whether it is a directory, its mode and bytes.
+fn state_tree(root: &Path) -> Vec<(PathBuf, bool, u32, Vec<u8>)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let meta = fs::symlink_metadata(&path).unwrap();
+        let rel = path.strip_prefix(root).unwrap().to_path_buf();
+        if meta.is_dir() {
+            for entry in fs::read_dir(&path).unwrap() {
+                stack.push(entry.unwrap().path());
+            }
+            out.push((rel, true, meta.mode(), Vec::new()));
+        } else {
+            out.push((rel, false, meta.mode(), fs::read(&path).unwrap()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A route-A board: the firmware started a trial of our slot from another system's disk, whose
+/// `default.txt` is that system's, and whose slots state is that system's own (its default is its
+/// slot, not ours, as an older build of it wrote it).
+fn route_a_board() -> Board {
+    let board = Board::new();
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    hand_written_default_txt(&board);
+    let other = lemnos_slot_store::fatimage::FOREIGN_SLOT;
+    board.write(
+        "data/board/slots/state.env",
+        format!("DEFAULT='{other}'\nPREVIOUS=''\nTRIAL=''\nSTAGED=''\nSTATE='idle'\nERROR=''\nPROGRESS='0'\nSTARTED_BY=''\n").as_bytes(),
+    );
+    board.write("data/board/slots/booted", format!("{other}\n").as_bytes());
+    board.write(
+        "data/board/slots/trial-keeps-default",
+        format!("{other}\n").as_bytes(),
+    );
+    board.write(
+        &format!("data/board/slots/{other}.meta"),
+        b"GOOD=yes\nFAILED=no\nSEQ=1\n",
+    );
+    board
+}
+
+/// Route A writes nothing under the other system's `board/slots`: no `trial-init`, no `booted`
+/// overwrite, no `trial-started`. The record goes to the console and kernel log only, and its line
+/// ends in the stable words that say so.
+#[test]
+fn a_route_a_boot_writes_nothing_under_the_other_systems_state_dir() {
+    let board = route_a_board();
+    let data = board.env.at("data");
+    let before = state_tree(&data);
+    let (fake, why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert_eq!(why, "", "the trial starts: {logs}");
+    assert_eq!(state_tree(&data), before, "{logs}");
+    assert!(
+        !board.env.at("newroot/data/board").exists(),
+        "nothing written after the data partition moved: {logs}"
+    );
+    let line = logs
+        .lines()
+        .find(|l| l.contains("the firmware started a trial"))
+        .unwrap_or_else(|| panic!("no route-A line: {logs}"));
+    assert!(
+        line.starts_with(
+            "slot-init: the firmware started a trial, and the trial records can't be read: "
+        ),
+        "{line}"
+    );
+    assert!(
+        line.contains("default.txt record file is 55 bytes, expected 1024: the image is not ours"),
+        "{line}"
+    );
+    assert!(
+        line.ends_with(&format!(
+            "; it runs with no attempt taken and can't be confirmed (confirming writes those records); the next restart starts the default; {}",
+            crate::boot::STATE_UNTOUCHED
+        )),
+        "{line}"
+    );
+}
+
+/// The fail path on route A keeps no kernel-log file and records no failure there either: the
+/// line names the failure on the console, and the state dir is as it was.
+#[test]
+fn a_route_a_boot_that_fails_keeps_its_log_off_the_other_systems_state_dir() {
+    let board = route_a_board();
+    // The slot's manifest is gone: the slot can't start.
+    fs::remove_file(board.env.at("data/slots/os-2.json")).unwrap();
+    let data = board.env.at("data");
+    let before = state_tree(&data);
+    let (fake, _why) = board.boot(&[]);
+    let logs = fake.logs.borrow().join("\n");
+    assert!(logs.contains("slot os-2 can't start"), "{logs}");
+    assert_eq!(state_tree(&data), before, "{logs}");
+    assert!(!data.join("board/slots").join(DATA_LOG).exists(), "{logs}");
+}

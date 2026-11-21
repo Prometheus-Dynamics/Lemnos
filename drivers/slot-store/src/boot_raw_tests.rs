@@ -898,3 +898,55 @@ fn a_naive_single_sector_switch_breaks_the_agreement_at_a_cut() {
         "the naive write landed, so the check above would not catch it: {views:?}"
     );
 }
+
+/// A device whose every read fails, as a dying card's does.
+struct Unreadable;
+
+impl ReadAt for Unreadable {
+    fn read_at(&mut self, _offset: u64, _buf: &mut [u8]) -> io::Result<()> {
+        Err(io::Error::other("the card does not answer"))
+    }
+}
+
+#[test]
+fn ownership_is_the_writers_own_test_ours_not_ours_or_unknown() {
+    use crate::bootimage::Mem;
+    use crate::fatimage::{foreign_system, route_a_system};
+    // The image builder's own partition: ours, and the writer opens it.
+    let ours = bay_image();
+    assert_eq!(ownership(&mut Mem(ours.clone())), Ownership::Ours);
+    assert!(Boot::on(Mem(ours)).is_ok());
+    // Route A: a slot of ours added to another system's partition. Our records are there; its
+    // pointers are the other system's 55-byte files. Not ours, by the pointer's name, and the
+    // writer refuses it with the same words.
+    let added = route_a_system();
+    let Ownership::NotOurs(why) = ownership(&mut Mem(added.clone())) else {
+        panic!("a route-A partition must not be ours");
+    };
+    assert!(why.starts_with("default.txt"), "{why}");
+    assert!(why.contains("the image is not ours"), "{why}");
+    let refused = Boot::on(Mem(added)).err().expect("the writer refuses it");
+    assert_eq!(refused, why);
+    // The other system's partition before any add: no records of ours at all.
+    let Ownership::NotOurs(why) = ownership(&mut Mem(foreign_system())) else {
+        panic!("another system's partition must not be ours");
+    };
+    assert!(why.contains("REC record file is missing"), "{why}");
+    // A device that can't be read says nothing about whose it is.
+    assert!(matches!(ownership(&mut Unreadable), Ownership::Unknown(_)));
+}
+
+#[test]
+fn ownership_of_a_node_opens_it_read_only_and_writes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::tests::TempDir::new("boot-raw-owner");
+    let node = dir.0.join("boot.img");
+    let image = crate::fatimage::route_a_system();
+    std::fs::write(&node, &image).unwrap();
+    // Read only on disk too: a probe that asked for write access would be refused here.
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(matches!(ownership_of(&node), Ownership::NotOurs(_)));
+    assert_eq!(std::fs::read(&node).unwrap(), image);
+    let gone = dir.0.join("gone.img");
+    assert!(matches!(ownership_of(&gone), Ownership::Unknown(why) if why.contains("gone.img")));
+}

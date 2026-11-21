@@ -1120,6 +1120,12 @@ fn unit(c: &mut Checks) {
     c.check(run(&["/lemnos-unit-check"]) == 0, "lemnos_unit_check");
 }
 
+/// Route A: the slots driver on another system's slots state and boot partition, in real time
+/// past its uptime and its first slow check, and every call that would write: nothing is written.
+fn route_a(c: &mut Checks) {
+    c.check(run(&["/lemnos-route-a-check"]) == 0, "lemnos_route_a_check");
+}
+
 /// The USB gadget end to end: the daemon's root phase (under the unit's bounding set with the
 /// gadget drop-in), FunctionFS on dummy_hcd, and a host.
 fn gadget(c: &mut Checks) {
@@ -1337,6 +1343,12 @@ const STANZAS: &[Stanza] = &[
         block: None,
         needs: &[],
         run: unit,
+    },
+    Stanza {
+        name: "route-a",
+        block: None,
+        needs: &[],
+        run: route_a,
     },
     Stanza {
         name: "gadget",

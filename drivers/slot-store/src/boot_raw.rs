@@ -356,6 +356,43 @@ pub fn arm_trial_raw<D: Sectors>(
     records.set_trial(dev, slot, attempts)
 }
 
+/// Whether a boot partition's records and pointers are this system's, as the record writer decides
+/// it: every record and pointer file is found at the size the image builder writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ownership {
+    /// Every record and pointer file is there at its size.
+    Ours,
+    /// A record or pointer file is missing or another size: another system's boot partition (a
+    /// slot added with `--add-to`, whose `default.txt` is the existing system's). The text names it.
+    NotOurs(String),
+    /// The partition could not be read far enough to say (a device or FAT fault). The text names it.
+    Unknown(String),
+}
+
+/// Reads `dev` only and says whether its records and pointers are ours: the same placement
+/// [`Boot::on`] makes before any write, so a partition the writer would refuse as "not ours" is
+/// [`Ownership::NotOurs`] here, and one it would open is [`Ownership::Ours`].
+pub fn ownership<D: ReadAt>(dev: &mut D) -> Ownership {
+    let placed = Records::place_named(dev)
+        .map(drop)
+        .and_then(|()| Pointers::place(dev).map(drop));
+    match placed {
+        Ok(()) => Ownership::Ours,
+        Err((name, why @ (Refusal::Missing | Refusal::WrongSize { .. }))) => {
+            Ownership::NotOurs(format!("{name} {why}"))
+        }
+        Err((name, why)) => Ownership::Unknown(format!("{name} {why}")),
+    }
+}
+
+/// [`ownership`] of the boot partition at `node`, opened read only.
+pub fn ownership_of(node: &Path) -> Ownership {
+    match OpenOptions::new().read(true).open(node) {
+        Ok(file) => ownership(&mut FileSectors::new(file, 0)),
+        Err(e) => Ownership::Unknown(format!("{}: {e}", node.display())),
+    }
+}
+
 /// The boot partition's block node, opened for the raw records and pointers. Nothing mounts it.
 pub struct Boot<D = FileSectors> {
     dev: D,
