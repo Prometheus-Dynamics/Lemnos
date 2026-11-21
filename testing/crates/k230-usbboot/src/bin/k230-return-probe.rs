@@ -190,12 +190,14 @@ fn main() {
             },
             false,
         ),
-        // R1: the watchdog; the disappearance is 100 s to 420 s after the start, the return by 420 s.
+        // R1: the watchdog. Re-derived 2026-11-21 from the stage's accepted WDT clock range (wdt.rs: 1 MHz to 100 MHz):
+        // TOP 11 is 2^27 cycles, 1.342178 s at 100 MHz (the earliest it can fire) and 134.217728 s at 1 MHz (the latest).
+        // The old 100 s floor assumed 1 MHz only. The return is held to the user's 200 s bound.
         "report" => (
             Bounds {
-                disappear_max: 420.0,
-                disappear_min: 100.0,
-                return_max: 420.0,
+                disappear_max: 134.217728,
+                disappear_min: 1.342178,
+                return_max: 200.0,
             },
             true,
         ),
@@ -466,9 +468,9 @@ mod tests {
 
     fn report_bounds() -> Bounds {
         Bounds {
-            disappear_max: 420.0,
-            disappear_min: 100.0,
-            return_max: 420.0,
+            disappear_max: 134.217728,
+            disappear_min: 1.342178,
+            return_max: 200.0,
         }
     }
 
@@ -488,11 +490,11 @@ mod tests {
 
     #[test]
     fn a_run_that_never_printed_its_end_is_held_to_the_watchdog_bound() {
-        // No end line: a departure at 0.9 s is outside 100..420 s, so the run stops even though the board returned.
+        // No end line: a departure at 0.9 s is outside 1.342..134.2 s, so the run stops even though the board returned.
         let reason = judge(None, Some(0.9), Some((1.2, "K230")), &report_bounds()).unwrap_err();
         assert!(reason.contains("outside the step's bound"), "{reason}");
         // The same departure inside the bound passes.
-        assert!(judge(None, Some(150.0), Some((200.0, "K230")), &report_bounds()).is_ok());
+        assert!(judge(None, Some(60.0), Some((80.0, "K230")), &report_bounds()).is_ok());
     }
 
     #[test]

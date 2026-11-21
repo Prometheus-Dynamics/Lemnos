@@ -1657,3 +1657,22 @@ UART captures on both ports, and the reset each return took. Written to NVMe, no
   step) never reach identify.
 - **Status: rehearsed on qemu; untested on the board.** The first board run must read the line, and must record whether
   the trap path returns (the `mepc` step) on the real core.
+
+## FLASH-EXTENT R1: the floor re-derived (2026-11-21; the run sheet's R1 bound)
+
+- **The old bound.** R1 in `k230-return-probe` was disappearance 100 s to 420 s, return by 420 s. The 100 s floor came from a
+  1 MHz watchdog clock: TOP 11 is 2^27 cycles, 134.2 s at 1 MHz, and the bound was set around that.
+- **Why it was wrong.** The R1b to R1f runs (above) observed the reset at about 0.9 to 1.5 s after the start, which fits a
+  faster clock, not 1 MHz. A 100 s floor would stop every watchdog return the board has actually given.
+- **The derivation, from the stage's accepted clock range** (`testing/crates/k230-usbboot-stage/src/wdt.rs`, `CLOCK_HZ_MIN` =
+  1,000,000, `CLOCK_HZ_MAX` = 100,000,000, both marked UNVERIFIED): `period = 2^27 / clock`.
+  - at 100 MHz: 2^27 / 100e6 = **1.342178 s**, the earliest the watchdog can fire, so the new floor;
+  - at 1 MHz: 2^27 / 1e6 = **134.217728 s**, the latest, so the new disappearance ceiling;
+  - the return is held to the user's bound of **200 s** (the old 420 s is dropped).
+- **What the R0 soc read does and does not give.** The R0 record (`R0-soc.txt`, lock-held soc-mode run) shows the board gone at
+  0.204 s and back at 0.536 s after the start. That is a SoC reset, not a watchdog, so it carries no watchdog clock and cannot
+  fix the clock. The floor above is therefore taken from the stage's clock range, not from R0. This is a deviation from the
+  ruling's wording, stated here.
+- **Consequence.** A departure before 1.342 s with no end line is outside the bound and is a STOP. The R2 run's departure at
+  about 0.93 s (`R2-report.txt`) would be such a STOP. Either the clock is above 100 MHz or the reset is not the watchdog.
+- **Changed in code:** `testing/crates/k230-usbboot/src/bin/k230-return-probe.rs` (R1 bounds and the two unit-test values).

@@ -60,9 +60,9 @@ no extent check. Do not run a new host against an old stage image for a flash.
 ## The image
 
 - Load address `0x80360000` and job address `0x80380000`: unchanged.
-- File size: 67,996 bytes. The original card image was 65,376; this step's code (the extent checks, the guard,
+- File size: 67,996 bytes in an earlier build; measured at this rev on the first board-use PC build (`check.sh`, rustc 1.99.0): 70,196 bytes. The 2,200-byte difference is not explained (see `testing/board-runs/FLASH-EXTENT.md`). The original card image was 65,376; this step's code (the extent checks, the guard,
   the paint and the high-water line) adds the rest.
-- The image's own end (the statics) is `0x803709d0`, so 63,024 bytes are spare below `0x80380000`. The stack and its
+- The image's own end (the statics) is `0x803709d0` in the earlier build and `0x80371270` in the measured build, so 63,024 bytes (earlier) or 60,816 bytes (measured) are spare below `0x80380000`. The stack and its
   guard band are below the load address, not in that spare (see "The stack" above).
 - The stack reserve is 16 KiB, moved below the code and not cut from the image. It was 64 KiB in the image before the
   guard. The deepest mode's frames, summed down the image's direct-call graph, are an estimate of 3.5 KiB (the card
@@ -165,7 +165,7 @@ measurement that answers the last question on the board.
 the lowest word a run has written. The host records every console line, so this line is the figure. The job's reply
 has no spare word for it.
 
-**Measured.** No figure yet. The real image reads and writes the K230's registers and cannot run off-board; the QEMU in
+**Measured.** No stack figure yet: the first board-use run stopped before its end line (`testing/board-runs/FLASH-EXTENT.md`). The real image reads and writes the K230's registers and cannot run off-board; the QEMU in
 this environment has no model of them. The paint, guard and scan logic is tested on the host
 (`lemnos_k230_usbboot_stage::stack`, and `the_stack_guard_runs_before_every_write_command_and_never_before_a_read`).
 The static estimate is 3.5 KiB for the deepest mode (the card write piece), counting direct calls only.
