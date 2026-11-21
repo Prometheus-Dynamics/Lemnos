@@ -31,15 +31,29 @@ fn say(line: &str) {
     let _ = out.flush();
 }
 
-/// The stand-in's mode, from the command line: `lemnos.watchdog=stall` or the default `normal`.
+/// The stand-in's mode, from the command line: `lemnos.watchdog=<mode>` (a whole word) or the
+/// default `normal`.
 fn mode() -> &'static str {
     let line = fs::read("/proc/cmdline").unwrap_or_default();
     let line = &line[..line.len().min(511)];
-    if String::from_utf8_lossy(line).contains("lemnos.watchdog=stall") {
-        "stall"
-    } else {
-        "normal"
+    let line = String::from_utf8_lossy(line);
+    for mode in [
+        "stall",
+        "daemon-late",
+        "daemon-root",
+        "daemon-hang",
+        "daemon-stop",
+        "daemon-loop",
+        "daemon",
+    ] {
+        if line
+            .split_whitespace()
+            .any(|w| w == format!("lemnos.watchdog={mode}"))
+        {
+            return mode;
+        }
     }
+    "normal"
 }
 
 /// One feed: a single zero byte. Says so when the write fails.

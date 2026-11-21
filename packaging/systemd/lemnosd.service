@@ -32,6 +32,10 @@ EnvironmentFile=-/etc/lemnos/lemnosd.env
 # group lemnos may open the directory and connect to the socket.
 RuntimeDirectory=lemnos
 RuntimeDirectoryMode=0750
+# Kept across a restart, removed at a stop: a directory that is already lemnos's tells the root phase it
+# is a restart, which does not hold the watchdog, so a daemon that dies after its root phase is not fed
+# once a restart for good (docs/slots.md, "The watchdog chain", window 5).
+RuntimeDirectoryPreserve=restart
 
 # Stop is for shutdown only. It drops every driver; the hardware watchdog then reboots a board that
 # is still running, so the unit is never stopped on a live board. The stop bound is under the shortest

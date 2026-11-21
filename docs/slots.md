@@ -2002,8 +2002,8 @@ in the order a boot passes them:
 | 1 | Firmware or U-Boot arms the watchdog, before the kernel | the firmware: the device runs its own period, nothing feeds | the firmware's period (the board's boot setting; U-Boot's `CONFIG_WATCHDOG_TIMEOUT_MSECS` when the board sets it) | reset at that period; the firmware counts the restart |
 | 2 | Kernel probe to the first open | the kernel, with `CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED` | `CONFIG_WATCHDOG_OPEN_TIMEOUT`, 30 s from the driver's probe. After it the kernel stops feeding | reset at the device's period after the last kernel feed |
 | 3 | Slot-init from its open to `switch_root` | slot-init, at each log line and each wait (`service/slot-init/src/sys.rs`) | the applied period, read back from the device: 15 s asked, at most 30 s allowed (`service/slot-init/src/dog.rs`). A feed every min(5 s, half the applied period) | reset at the applied period after the last feed; the boot counters decide the next slot |
-| 4 | Unfed hand-over: from slot-init's last feed before the exec to lemnosd's first feed | nobody. The exec closes slot-init's descriptor without the magic close, so the device keeps running with no feeder | the applied period. The gap must be well under it (below) | reset; the restart starts the default or the previous slot |
-| 5 | lemnosd's bind to its first healthy tick | nobody yet. The bind opens the node; the first tick (the timeout request and the first feed) waits until the daemon is healthy | the same applied period; the daemon's healthy test (`service/lemnosd/src/liveness.rs`) | reset at the applied period, if lemnosd never becomes healthy |
+| 4 | Unfed hand-over: from slot-init's last feed before the exec to lemnosd's root-phase feed | nobody. The exec closes slot-init's descriptor without the magic close, so the device keeps running with no feeder. The gap holds systemd's start up to lemnosd's exec and lemnosd's root phase | the applied period. The gap must be well under it (below) | reset; the restart starts the default or the previous slot |
+| 5 | lemnosd's root-phase feed to its first healthy tick | nobody. The root phase opens the keep-alive watchdog as root and feeds it once; the host then binds the board (the watchdog's bind takes the root phase's descriptor) and the first tick waits until the daemon is healthy | the same applied period, from the root-phase feed; the daemon's healthy test (`service/lemnosd/src/liveness.rs`) | reset at the applied period after the root-phase feed, if lemnosd never becomes healthy |
 | 6 | Steady running | lemnosd, at half its timeout, only while it is healthy | `timeout_s` on the `hw-watchdog` device (15 s by default, read back) | a daemon that stops being healthy stops feeding: reset at `timeout_s` |
 
 The first-flash chain (below) has the same windows 1, 2, 5 and 6, and an unknown window 3.
@@ -2036,17 +2036,61 @@ it. Feeding stops, as before, when boot returns (`service/slot-init/src/main.rs`
 must reset the board, so this is the one place a device is left to its period on purpose.
 
 **Window 4, and the bound.** The gap starts at slot-init's last feed before the exec and ends at lemnosd's
-first feed. The bound is one third of the applied period: 5 s when the period is 15 s. The reason: the gap
+root-phase feed. The bound is one third of the applied period: 5 s when the period is 15 s. The reason: the gap
 is time nothing feeds, so it has to be well under the period, and the third leaves the rest of the period
 for the host's own delays (the stamps, a slow disk, a busy kernel). The bound is a named constant in the
 QEMU check (`testing/qemu/run-watchdog.sh`, `HANDOVER_GAP_DIVISOR`), which reads the applied period the
-guest reports. The QEMU check measures only the exec to the first feed of a stand-in. The real gap also
-contains systemd's start of lemnosd and lemnosd's bind, which no test here runs: the board run measures it
-(`testing/board-runs/WDT-CHAIN.md`).
+guest reports.
+
+The root phase holds the watchdog (`LinuxBoard::hold_before_drop`, `backends/linux/src/watchdog.rs`): for every
+keep-alive device, it opens the node its `uses` names as root, close-on-exec, writes one feed, and keeps the
+descriptor for the daemon's life. Each bind of the device takes a copy of that descriptor instead of opening the
+node by name. So the node's owner does not matter to the watchdog: devtmpfs makes `/dev/watchdogN` root 0600
+at the driver's probe, and the udev rule that gives it to group `lemnos` (`packaging/udev/70-lemnos.rules`) is
+off the watchdog's path. Without the hold, a rule that lands late cost its delay rounded up to the next bind
+retry (1 s, 2 s, 4 s, capped at 8 s). A keep-alive device named by its `device` setting instead of `uses` is not
+held: its bind opens the node by name.
+
+Only the boot's first start holds. Opening a running watchdog feeds it, so a lemnosd that died after its root
+phase, before it is healthy, would be fed once a restart (`Restart=always`, `RestartSec=1s`) for good, and the
+watchdog would never catch it. A restart is told by its runtime directory: the service manager makes
+`/run/lemnos` root's, the first start's root phase hands it to the daemon's user, and the unit keeps it across a
+restart (`RuntimeDirectoryPreserve=restart`), so a directory that is already the daemon's means an earlier start
+of this boot got that far. A restart opens the node at its bind, by name, as before the hold. The same holds for
+that open: a lemnosd that dies after its bind and before it is healthy is fed by each restart's bind. That is
+the open's own effect, not the hold's, and it is the case the QEMU check cannot close (`daemon-loop` runs with
+the node root's, so that only a hold could feed).
+
+The QEMU check runs the real lemnosd under its unit (`lemnos-unit-check exec`, as 999:999) behind a hook that
+arms the watchdog as slot-init does, with `LEMNOSD_START_TRACE=1`, and reads the pieces from the hook's last feed
+(measured on KVM; TCG in parentheses):
+
+| Piece | `daemon` (node 0660 to group) | `daemon-root` (node root 0600) |
+| --- | --- | --- |
+| lemnosd's exec | 0.041 s (0.848 s) | 0.084 s |
+| the root-phase feed: the unfed gap ends | 0.045 s | 0.095 s |
+| the drop | 0.047 s (1.217 s) | 0.099 s |
+| the watchdog's bind begins, one bind before it | 0.051 s (1.458 s) | 0.113 s |
+| the first tick | 0.064 s (1.723 s) | 0.164 s |
+
+The TCG column is from before the hold (the gap then ended at the first tick). The part before lemnosd's exec on a
+board, switch_root through systemd to the exec, is the image's: no test here runs it, and the board run measures it
+(`testing/board-runs/WDT-CHAIN.md`). The start trace splits lemnosd's own part on a board: set
+`LEMNOSD_START_TRACE=1` in `/etc/lemnos/lemnosd.env`, and lemnosd writes `lemnosd: start trace: <CLOCK_MONOTONIC s>
+<event>` for its exec, the root phase's feed, the end of the root phase, each bind as it begins and ends, and each
+device's first tick.
 
 **Window 5.** A keep-alive device is not ticked while the daemon is not healthy (`engine/host/src/host.rs`,
-`may_tick`). So the first feed, and the timeout request, come at the first healthy tick, not at the bind. A
-lemnosd that binds and never becomes healthy never feeds the device, and the device resets at its period.
+`may_tick`). Healthy means the daemon's main loop turns and its socket answers; neither starts before the host has
+made or cut every bind of the board. So the first tick comes at the first healthy turn after the start, and the
+root-phase feed is what covers the start: one applied period from it. There is no feeder in between on purpose. A
+feeder that ran while the daemon is not healthy would feed a lemnosd that hangs, which is the hang the watchdog is
+for. A bind that does not return is cut at the host's call deadline (2 s by default, `call_deadline_ms` in the
+board), and the next bind begins. The QEMU check proves both ends: a bind hung ahead of the watchdog is cut and the
+watchdog is fed after it (`daemon-hang`: the watchdog's bind began 2.46 s and its first tick 2.55 s after the hook's
+last feed), a lemnosd stopped right after its root-phase feed is reset one period later (`daemon-stop`: 15.1 s),
+and a lemnosd killed at the end of its root phase on every start and restarted is fed only by the first start
+and reset one period after it (`daemon-loop`: 14 starts, one fed, reset 15.7 s after that feed).
 
 **Which mechanism catches which hang.**
 

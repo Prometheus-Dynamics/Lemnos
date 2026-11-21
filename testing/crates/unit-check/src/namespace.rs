@@ -1,13 +1,18 @@
 //! The unit's file system sandbox, carried out as the service manager carries it out before the exec:
 //! a private mount namespace in which everything is read-only (`ProtectSystem=strict`) except `/dev`,
 //! `/proc`, the unit's runtime directory, a private `/tmp` and `/var/tmp` (`PrivateTmp=yes`) and its
-//! `ReadWritePaths=`; with `ProtectKernelTunables=yes`, `/sys` and `/proc/sys` are read-only too, and
-//! a `ReadWritePaths=` entry under `/sys` is the only writable piece of it.
+//! `ReadWritePaths=`. With `ProtectKernelTunables=yes`, the paths of systemd's tunables tables are
+//! read-only ([`TUNABLES`]: `/proc/sys` and its neighbours, `/sys/kernel/debug`, `/sys/kernel/tracing`),
+//! each bound onto itself first when it is not a mount, as the service manager does; `/sys` itself is
+//! left as it is mounted, read-write per mount, which is what systemd 259 leaves it (seen on 259.10 and
+//! on the image's systemd: the unit's own mountinfo reads `/sys rw`, `/proc/sys ro`). With
+//! `ProtectControlGroups=yes`, `/sys/fs/cgroup` is read-only.
 //!
 //! What it does not carry out: `ProtectHome=` (the guest has no home directories), `ProtectProc=`,
 //! and the other settings that hide rather than make read-only. A write the unit refuses is refused
-//! here with the same errno (`EROFS`), which is what the stanzas that start lemnosd through this
-//! launcher must see.
+//! here with the same errno (`EROFS`), and a write the unit lets through reaches the file's own mode
+//! (a sysfs `export`, 0200 root's, is `EACCES` for the daemon's user), which is what the stanzas that
+//! start lemnosd through this launcher must see.
 
 use std::fs;
 use std::path::Path;
@@ -15,6 +20,27 @@ use std::path::Path;
 use lemnos_linux_sys::sandbox::{self, Kept, Propagation};
 
 use crate::unit;
+
+/// The paths `ProtectKernelTunables=yes` makes read-only (systemd v259, `src/core/namespace.c`,
+/// `protect_kernel_tunables_proc_table` and `_sys_table`; `/proc/kallsyms` and `/proc/kcore` it
+/// makes inaccessible, which is not carried out here). A path that is not there is left out, as
+/// systemd's entries marked to be ignored when missing are.
+pub const TUNABLES: &[&str] = &[
+    "/proc/acpi",
+    "/proc/apm",
+    "/proc/asound",
+    "/proc/bus",
+    "/proc/fs",
+    "/proc/irq",
+    "/proc/latency_stats",
+    "/proc/mtrr",
+    "/proc/scsi",
+    "/proc/sys",
+    "/proc/sysrq-trigger",
+    "/proc/timer_stats",
+    "/sys/kernel/debug",
+    "/sys/kernel/tracing",
+];
 
 /// What the sandbox did, one line each, for the launcher to print.
 pub type Notes = Vec<String>;
@@ -60,19 +86,20 @@ fn mounts() -> Result<Vec<(String, String)>, String> {
         .collect())
 }
 
-/// Whether a mount at `point` is left writable: under a writable path, or under `/dev` or `/proc`
-/// (but not `/proc/sys` with the tunables protected), or under `/sys` without them.
-fn writable(point: &str, writable: &[String], tunables: bool) -> bool {
+/// Whether a mount at `point` is left writable: under a writable path, or under `/dev`, `/proc` or
+/// `/sys`, except the tunables table with the tunables protected and `/sys/fs/cgroup` with the
+/// control groups protected.
+fn writable(point: &str, writable: &[String], tunables: bool, cgroups: bool) -> bool {
     if writable.iter().any(|w| under(point, w)) {
         return true;
     }
-    if under(point, "/proc/sys") || under(point, "/proc/sysrq-trigger") {
-        return !tunables;
+    if tunables && TUNABLES.iter().any(|t| under(point, t)) {
+        return false;
     }
-    if under(point, "/sys") {
-        return !tunables;
+    if under(point, "/sys/fs/cgroup") {
+        return !cgroups;
     }
-    under(point, "/dev") || under(point, "/proc")
+    under(point, "/dev") || under(point, "/proc") || under(point, "/sys")
 }
 
 /// Shapes this process's mount namespace as the unit `files` shape it, with `runtime` standing for
@@ -89,6 +116,7 @@ pub fn enter(files: &[&str], runtime: &[String]) -> Result<Notes, String> {
         }
     }
     let tunables = unit::last(files, "ProtectKernelTunables") == Some("yes");
+    let cgroups = unit::last(files, "ProtectControlGroups") == Some("yes");
     let private_tmp = unit::last(files, "PrivateTmp") == Some("yes");
     // The places the stand-in needs before the namespace: the guest's root may lack them.
     for dir in runtime {
@@ -132,9 +160,19 @@ pub fn enter(files: &[&str], runtime: &[String]) -> Result<Notes, String> {
             .map_err(|e| format!("ReadWritePaths={}: {e}", entry.path))?;
         open.push(entry.path);
     }
+    if tunables {
+        // Each tunable that is not a mount of its own is bound onto itself, so it can be made
+        // read-only alone.
+        let points: Vec<String> = mounts()?.into_iter().map(|(point, _)| point).collect();
+        for path in TUNABLES {
+            if Path::new(path).exists() && !points.iter().any(|p| p == path) {
+                sandbox::bind_self(Path::new(path)).map_err(|e| format!("bind {path}: {e}"))?;
+            }
+        }
+    }
     let mut read_only = 0;
     for (point, options) in mounts()? {
-        if writable(&point, &open, tunables) {
+        if writable(&point, &open, tunables, cgroups) {
             continue;
         }
         let kept = Kept::parse(&options);
@@ -153,7 +191,7 @@ pub fn enter(files: &[&str], runtime: &[String]) -> Result<Notes, String> {
         } else {
             ""
         },
-        if tunables { "" } else { ", /sys" },
+        ", /sys",
         open.join(", ")
     ));
     Ok(notes)
@@ -172,22 +210,27 @@ mod tests {
     }
 
     #[test]
-    fn the_unit_leaves_dev_proc_and_its_paths_writable_and_sys_read_only() {
+    fn the_unit_leaves_dev_proc_sys_and_its_paths_writable_and_the_tunables_read_only() {
         let open = vec![
             "/run/lemnos".to_string(),
             "/sys/kernel/config/usb_gadget".to_string(),
         ];
-        assert!(writable("/dev", &open, true));
-        assert!(writable("/dev/pts", &open, true));
-        assert!(writable("/proc", &open, true));
-        assert!(!writable("/proc/sys", &open, true));
-        assert!(!writable("/sys", &open, true));
-        assert!(!writable("/sys/kernel/config", &open, true));
-        assert!(writable("/sys/kernel/config/usb_gadget", &open, true));
-        assert!(writable("/sys", &open, false));
-        assert!(!writable("/", &open, true));
-        assert!(!writable("/run", &open, true));
-        assert!(writable("/run/lemnos", &open, true));
+        assert!(writable("/dev", &open, true, true));
+        assert!(writable("/dev/pts", &open, true, true));
+        assert!(writable("/proc", &open, true, true));
+        assert!(!writable("/proc/sys", &open, true, true));
+        assert!(writable("/proc/sys", &open, false, true));
+        // systemd 259 leaves /sys as mounted under ProtectKernelTunables=yes.
+        assert!(writable("/sys", &open, true, true));
+        assert!(writable("/sys/kernel/config", &open, true, true));
+        assert!(writable("/sys/kernel/config/usb_gadget", &open, true, true));
+        assert!(!writable("/sys/kernel/debug", &open, true, true));
+        assert!(!writable("/sys/kernel/tracing", &open, true, true));
+        assert!(!writable("/sys/fs/cgroup", &open, true, true));
+        assert!(writable("/sys/fs/cgroup", &open, true, false));
+        assert!(!writable("/", &open, true, true));
+        assert!(!writable("/run", &open, true, true));
+        assert!(writable("/run/lemnos", &open, true, true));
     }
 
     #[test]

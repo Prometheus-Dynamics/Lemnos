@@ -411,3 +411,24 @@ impl Drop for Service {
         self.shut();
     }
 }
+
+/// Whether the start trace is on (`LEMNOSD_START_TRACE`).
+static TRACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One line of the start trace, when it is on: seconds on CLOCK_MONOTONIC (the clock the boot path's own stamps
+/// use), then the event.
+pub fn start_trace_line(event: &str) {
+    if !TRACING.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let now = lemnos_linux_sys::time::monotonic_now().map_or(0.0, |d| d.as_secs_f64());
+    let _ = io::Write::write_fmt(
+        &mut io::stderr(),
+        format_args!("lemnosd: start trace: {now:.6} {event}\n"),
+    );
+}
+
+/// Turns the start trace on (`LEMNOSD_START_TRACE`).
+pub fn start_trace_on() {
+    TRACING.store(true, std::sync::atomic::Ordering::Relaxed);
+}

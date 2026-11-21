@@ -6,6 +6,7 @@
 //!           last feed to its first open and to its first feed, feeds once a second for 45 s, then
 //!           powers off. The guest staying up that long is the check; the first-feed gap is checked
 //!           against the bound.
+//!   daemon, daemon-late, daemon-root, daemon-hang, daemon-stop, daemon-loop: the real lemnosd under its unit (see `daemon.rs`).
 //!   stall   never opens /dev/watchdog. Nothing feeds the device after the hook's last feed, so the
 //!           watchdog resets the guest within its timeout. The stall is reported before it starts.
 //!
@@ -19,11 +20,13 @@ use std::thread;
 use std::time::Duration;
 
 use lemnos_linux_sys::guest;
+
+mod daemon;
 use lemnos_linux_sys::time::monotonic_now;
 
 const STAY_SECONDS: u32 = 45;
 
-fn say(line: &str) {
+pub(crate) fn say(line: &str) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
@@ -31,7 +34,7 @@ fn say(line: &str) {
 
 /// Seconds on CLOCK_MONOTONIC since the hook's last feed, `last`. A clock that cannot be read
 /// counts as zero.
-fn since(last: f64) -> f64 {
+pub(crate) fn since(last: f64) -> f64 {
     monotonic_now().map_or(0.0, |d| d.as_secs_f64()) - last
 }
 
@@ -44,6 +47,9 @@ fn main() -> ExitCode {
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0);
 
+    if mode.starts_with("daemon") {
+        daemon::run(mode, last);
+    }
     if mode == "stall" {
         say(&format!(
             "user: stalled after the handover: /dev/watchdog is not opened; the last feed was {:.3} s ago",

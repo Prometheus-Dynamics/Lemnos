@@ -204,6 +204,22 @@ impl LinuxBoard {
         valid.then(|| (self.sys.join("class/pwm").join(chip), channel))
     }
 
+    /// Holds the node a need names across the drop, as lemnosd's root phase runs (still root): a
+    /// watchdog (`watchdog:<node>` or `watchdogN`) is opened and fed once, and its bind after the
+    /// drop takes the held descriptor (`watchdog.rs`). Returns the line the root phase logs, or
+    /// `None` for a need of a kind that is not held (it is opened by name at its bind).
+    ///
+    /// # Errors
+    /// A watchdog that is not there, or the open's or the feed's error, each by name.
+    pub fn hold_before_drop(&self, need: &str) -> core::result::Result<Option<String>, String> {
+        let Some(path) = self.watchdog_path(need) else {
+            return Ok(None);
+        };
+        watchdog::hold(&path)
+            .map(|()| Some(format!("{}: held across the drop and fed", path.display())))
+            .map_err(|e| format!("{}: not held: {e}", path.display()))
+    }
+
     /// The watchdog node a name means: `watchdog:<node>` by its device-tree node, or the numbered
     /// `watchdogN` as it is. Resolved now, not kept: the kernel may renumber.
     fn watchdog_path(&self, need: &str) -> Option<PathBuf> {
@@ -535,6 +551,39 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lemnos-linux-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         (LinuxBoard::at(&dir, &dir), dir)
+    }
+
+    #[test]
+    fn a_watchdog_held_before_the_drop_is_fed_once_and_its_bind_takes_the_held_descriptor() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut board, dir) = temp_board("held-watchdog");
+        let node = dir.join("watchdog7");
+        std::fs::write(&node, b"").unwrap();
+        let line = board.hold_before_drop("watchdog7").unwrap().unwrap();
+        assert!(line.contains("held across the drop and fed"), "{line}");
+        assert_eq!(std::fs::read(&node).unwrap(), [0u8], "the hold feeds once");
+        // The node is now closed to everyone by name, as a root 0600 node is to the daemon's user.
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let bound = board.watchdog("watchdog7");
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut watchdog = bound.expect("the bind takes the held descriptor, not an open by name");
+        watchdog.feed().unwrap();
+        assert_eq!(
+            std::fs::read(&node).unwrap(),
+            [0u8, 0u8],
+            "the bind feeds through the held file"
+        );
+        // A kind that is not held is left to its bind.
+        assert_eq!(board.hold_before_drop("i2c-3").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_watchdog_that_is_not_there_is_not_held_and_says_so() {
+        let (board, dir) = temp_board("absent-watchdog");
+        let why = board.hold_before_drop("watchdog9").unwrap_err();
+        assert!(why.contains("watchdog9: not held"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A machine whose `/dev` and `/sys` are a directory of the test's, with the I2C bus list in
