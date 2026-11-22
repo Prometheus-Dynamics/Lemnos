@@ -372,13 +372,16 @@ impl Magnetometer for Bmm150 {
     }
 }
 
-/// The bind's one ID read. A chip that does not acknowledge its address (or does not answer) is
+/// The bind's ID read. A chip that does not acknowledge its address (or does not answer) is
 /// absent; one that answers another ID is failed, and the sentence names both IDs; any other bus
-/// fault is failed. A refused bind is retried under the failure rule, so a chip whose supply comes
-/// up later binds on a later retry.
+/// fault is failed. A chip in suspend mode (its state after power-on) answers ID 0x00 with its power
+/// bit clear: it is there, and its ID is checked once the power-up has taken it out of suspend
+/// ([`chip::start_up`]). A refused bind is retried under the failure rule, so a chip whose supply
+/// comes up later binds on a later retry.
 fn identify_at_bind(bus: &mut I2c, address: u8, cfg: &Config<'_>) -> Result<()> {
     match chip::chip_id(bus, address) {
         Ok(chip::CHIP_ID) => Ok(()),
+        Ok(0x00) if matches!(chip::powered(bus, address), Ok(false)) => Ok(()),
         Ok(found) => Err(cfg.refuse(
             Status::NOT_SUPPORTED,
             RefusalKind::Failed,

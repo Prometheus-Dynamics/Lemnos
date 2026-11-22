@@ -336,6 +336,13 @@ fn identify(regs: &mut I2cRegisters<&mut I2c>) -> Result<Trim, Fault> {
     Ok(Trim::from_registers(x1y1, z4x2y2, rest))
 }
 
+/// Whether the chip is out of suspend mode (the power control bit, 0x4B bit 0), read with nothing
+/// written. In suspend mode, the state after power-on, only that register answers: the chip ID and
+/// every other register read 0x00.
+pub fn powered(bus: &mut I2c, address: u8) -> Result<bool, Fault> {
+    Ok(I2cRegisters::new(bus, address, AddressWidth::Bits8).read8(REG_POWER)? & 0x01 != 0)
+}
+
 /// The chip ID, read with nothing written. A self-test reads it this way, so a failed read
 /// leaves the driver's own power-up state as it was.
 pub fn chip_id(bus: &mut I2c, address: u8) -> Result<u8, Fault> {

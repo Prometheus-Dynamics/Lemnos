@@ -218,6 +218,8 @@ fn overflowed_axes_read_as_nan() {
 #[test]
 fn a_chip_with_another_id_is_refused_at_bind_as_failed_and_bound_once_it_reads_right() {
     let (mut board, sim) = chip();
+    // Out of suspend (its power bit set), yet answering 0x00: not the chip.
+    sim.set_bytes(ADDRESS, reg(REG_POWER), &[0x01]);
     sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[0x00]);
     let (bound, reasons) = bind_saying(&mut board);
     assert_eq!(bound.err(), Some(Status::NOT_SUPPORTED));
@@ -533,5 +535,27 @@ fn first_read_is_again_until_the_start_up_tick_then_reads_values() {
     Lifecycle::tick(&mut mag, POWER_ON_NS - 1);
     assert_eq!(mag.read(), Err(Status::AGAIN));
     Lifecycle::tick(&mut mag, POWER_ON_NS);
+    assert!(mag.read().is_ok());
+}
+
+/// The chip as power-on leaves it, on the board: in suspend mode only the power control register
+/// answers, so the chip ID reads 0x00 with the power bit clear. The bind takes it, the power-up
+/// writes the power bit, the chip then answers its ID (the sim has no write hooks, so the test plays
+/// the chip's wake-up), and the driver comes up.
+#[test]
+fn a_chip_in_suspend_mode_after_power_on_is_bound_and_its_id_is_checked_after_the_power_up() {
+    let (mut board, sim) = chip();
+    sim.set_bytes(ADDRESS, reg(REG_POWER), &[0x00]);
+    sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[0x00]);
+    let mut mag = bind(&mut board, &[]).expect("a suspended chip is there");
+    Lifecycle::tick(&mut mag, 0);
+    assert_eq!(
+        sim.byte(ADDRESS, reg(REG_POWER)),
+        Some(0x01),
+        "the power-up leaves suspend"
+    );
+    sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[CHIP_ID]);
+    sim.set_bytes(ADDRESS, reg(REG_DATA), &data(0, 0, 0, XYZ1));
+    up(&mut mag);
     assert!(mag.read().is_ok());
 }
