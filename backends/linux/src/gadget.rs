@@ -346,7 +346,15 @@ impl Plan {
         }
         let table: Vec<&str> = table.iter().map(String::as_str).collect();
         let language = set.language();
-        let flags = functionfs::VIRTUAL_ADDR | functionfs::ALL_CTRL_RECIP;
+        // No FUNCTIONFS_VIRTUAL_ADDR: with it the kernel writes the descriptors' own addresses back
+        // over the ones the controller gave (f_fs.c, `__ffs_func_bind_do_descs`), so the host is
+        // shown an address the endpoint doesn't have. Where they differ, the configuration can't
+        // be set: `config_ep_by_speed` finds no descriptor for the real endpoint and returns -EIO,
+        // and another function's real endpoint can carry the same address (a duplicate on the
+        // wire). A dwc2 controller gives the link ep1in and ep1out, where the descriptors say 0x81
+        // and 0x02. Without the flag the kernel writes the real addresses, and the endpoint files
+        // are numbered in descriptor order (`ep1`, `ep2`, ...).
+        let flags = functionfs::ALL_CTRL_RECIP;
         let invalid = |_| ErrorKind::InvalidInput;
 
         Ok(Self {
@@ -645,8 +653,10 @@ impl Paths {
         let ep0 = Ep0::open(&self.mount.join("ep0"))?;
         ep0.describe(&plan.descriptors, &plan.function_strings)?;
         let mut endpoints = Vec::with_capacity(plan.endpoints.len());
-        for (address, _) in &plan.endpoints {
-            let file = self.mount.join(format!("ep{address:02x}"));
+        // The kernel numbers a function's endpoint files in the order its descriptors list the
+        // endpoints, from 1 (f_fs.c: `ep%u`), which is the plan's order.
+        for (index, _) in plan.endpoints.iter().enumerate() {
+            let file = self.mount.join(format!("ep{}", index + 1));
             endpoints.push(Endpoint::open(&file)?);
         }
         let mut queues = Vec::with_capacity(endpoints.len());

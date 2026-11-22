@@ -94,7 +94,7 @@ impl Tree {
         fs::write(tree.gadget_dir().join("UDC"), "").unwrap();
         fs::write(tree.gadget_dir().join("max_speed"), "").unwrap();
         fs::create_dir_all(tree.mount()).unwrap();
-        for file in ["ep0", "ep81", "ep02"] {
+        for file in ["ep0", "ep1", "ep2"] {
             fs::write(tree.mount().join(file), "").unwrap();
         }
         fs::create_dir_all(tree.root.join("udc").join(UDC)).unwrap();
@@ -377,8 +377,8 @@ fn enable_writes_descriptors_to_ep0_then_binds_and_touches_no_configfs_directory
     let mut blob = Vec::new();
     blob.extend(3u32.to_le_bytes());
     blob.extend(0u32.to_le_bytes()); // the descriptors' length, set below
-    // FS | HS | MS OS | VIRTUAL_ADDR | ALL_CTRL_RECIP
-    blob.extend(91u32.to_le_bytes());
+    // FS | HS | MS OS | ALL_CTRL_RECIP
+    blob.extend(75u32.to_le_bytes());
     blob.extend(3u32.to_le_bytes());
     blob.extend(3u32.to_le_bytes());
     blob.extend(2u32.to_le_bytes()); // two Microsoft OS 1.0 sections
@@ -537,7 +537,7 @@ fn a_failure_part_way_undoes_the_steps_before_it() {
     let tree = Tree::new();
     setup(&tree);
     // The second endpoint file is not there: everything up to it has been done by then.
-    fs::remove_file(tree.mount().join("ep02")).unwrap();
+    fs::remove_file(tree.mount().join("ep2")).unwrap();
     let mut gadget = tree.gadget();
     assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound));
     assert_eq!(tree.attribute("UDC"), "\n", "no half-built gadget: unbound");
@@ -549,7 +549,7 @@ fn a_failure_part_way_undoes_the_steps_before_it() {
     assert_eq!(gadget.next_event(), Err(ErrorKind::Unavailable));
 
     // Once the piece is there the same call goes through.
-    fs::write(tree.mount().join("ep02"), "").unwrap();
+    fs::write(tree.mount().join("ep2"), "").unwrap();
     gadget.enable(&set()).unwrap();
     assert_eq!(tree.attribute("UDC"), "udc0\n");
 }
@@ -661,7 +661,7 @@ fn streaming(full: u16, high: u16) -> Vec<u8> {
 fn alternate_settings_and_isochronous_endpoints_are_carried() {
     let tree = Tree::new();
     setup(&tree);
-    for file in ["ep83", "ep84", "ep05"] {
+    for file in ["ep5", "ep3", "ep4"] {
         fs::write(tree.mount().join(file), "").unwrap();
     }
     let mut gadget = tree.gadget();
@@ -679,7 +679,7 @@ fn alternate_settings_and_isochronous_endpoints_are_carried() {
     // A write is at most one interval, at the larger speed's size.
     let interval = vec![7u8; 3072];
     assert_eq!(gadget.write(0x83, &interval, WAIT), Ok(3072));
-    assert_eq!(fs::read(tree.mount().join("ep83")).unwrap(), interval);
+    assert_eq!(fs::read(tree.mount().join("ep5")).unwrap(), interval);
     assert_eq!(
         gadget.write(0x83, &[0; 3073], WAIT),
         Err(ErrorKind::InvalidInput)
@@ -716,14 +716,14 @@ fn an_isochronous_out_endpoint_reads_one_interval_at_a_time() {
     for at in at {
         set[at] = 0x03;
     }
-    for file in ["ep03", "ep84", "ep05"] {
+    for file in ["ep5", "ep3", "ep4"] {
         fs::write(tree.mount().join(file), "").unwrap();
     }
     let mut gadget = tree.gadget();
     gadget.enable(&set).unwrap();
     tree.event(ENABLE);
     gadget.next_event().unwrap();
-    fs::write(tree.mount().join("ep03"), [5u8; 64]).unwrap();
+    fs::write(tree.mount().join("ep5"), [5u8; 64]).unwrap();
     let mut short = [0u8; 63];
     assert_eq!(
         gadget.read(3, &mut short, WAIT),
@@ -770,7 +770,7 @@ fn one_speed_and_no_strings_writes_only_what_the_set_has() {
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
     assert_eq!(
         ep0[8..16],
-        [89, 0, 0, 0, 3, 0, 0, 0],
+        [73, 0, 0, 0, 3, 0, 0, 0],
         "full speed only, with the OS sections"
     );
     assert_eq!(
@@ -860,11 +860,11 @@ fn events_requests_and_endpoint_bytes_go_through_the_files() {
     assert_eq!(gadget.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
 
     // The host's bytes on the OUT endpoint, and ours on the IN endpoint.
-    fs::write(tree.mount().join("ep02"), [1, 2, 3]).unwrap();
+    fs::write(tree.mount().join("ep2"), [1, 2, 3]).unwrap();
     assert_eq!(gadget.read(2, &mut data, WAIT), Ok(3));
     assert_eq!(data[..3], [1, 2, 3]);
     assert_eq!(gadget.write(0x81, &[4, 5], WAIT), Ok(2));
-    assert_eq!(fs::read(tree.mount().join("ep81")).unwrap(), [4, 5]);
+    assert_eq!(fs::read(tree.mount().join("ep1")).unwrap(), [4, 5]);
     assert_eq!(
         gadget.read(0x81, &mut data, WAIT),
         Err(ErrorKind::InvalidInput)
@@ -927,7 +927,7 @@ fn nothing_allocates_once_the_function_is_enabled() {
     gadget.enable(&set()).unwrap();
     tree.event(ENABLE);
     tree.kernel_says(&[0xc0, 8, 0, 0, 0, 0, 2, 0, 4, 0, 0, 0]);
-    fs::write(tree.mount().join("ep02"), [1, 2, 3]).unwrap();
+    fs::write(tree.mount().join("ep2"), [1, 2, 3]).unwrap();
     let mut data = [0u8; 8];
     let (done, count) = allocations(|| {
         let configured = gadget.next_event();

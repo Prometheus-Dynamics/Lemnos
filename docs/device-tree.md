@@ -96,7 +96,7 @@ reason = "the fan header's line: at full speed from power-on, until Lemnos's fan
 | SPI bus | `spidevB.C` | The SPI device | The alias `spiB` |
 | GPIO line | `gpio:LABEL:LINE` | A line of the GPIO chip whose label is `LABEL`. The map's `[chips]` table gives the labels | At bind: the chip with that label, found from its character device. Stable across boots |
 | PWM channel | `pwm:NODE:CHANNEL` | A channel of the PWM chip whose device-tree node is `NODE`, the node's path as the live tree shows it | At bind: the chip whose device's `of_node` is that path. Stable across boots |
-| Watchdog | `watchdog:NODE` | The hardware watchdog whose device-tree node is `NODE`. Named in a device's `uses` (as `watchdog = "watchdog:NODE"`), since the watchdog is the driver's optional need | At bind: the `/dev/watchdogN` whose class device's `of_node` is that path. Stable across boots |
+| Watchdog | `watchdog:NODE` | The hardware watchdog whose device-tree node is `NODE`. Named in a device's `uses` (as `watchdog = "watchdog:NODE"`), since the watchdog is the driver's optional need | At bind: the `/dev/watchdogN` whose device carries that `of_node`, or, when the device has none, whose device's parent does (a watchdog made as a cell of another device, such as a power-management block, has its node on that parent). Two watchdogs on one node match neither. When none matches, the hold fails and says so. Stable across boots |
 
 Example: `bus = "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1"` for channel 1 of the fan's PWM, and
 `uses = { line = "gpio:pinctrl-rp1:34" }` for line 34 of the RP1 GPIO chip labelled `pinctrl-rp1`.

@@ -151,11 +151,18 @@ fn chip_label(path: &Path) -> Option<String> {
     String::from_utf8(info.label[..end].to_vec()).ok()
 }
 
-/// The watchdog device node (`dev/watchdogN`) whose device-tree node is `node`, found under `sys`
-/// (`class/watchdog/watchdogN/device/of_node`, as the kernel links it). `None` when no watchdog
-/// has that node, or the name is not one of the kernel's `watchdogN`.
+/// The watchdog device node (`dev/watchdogN`) whose device-tree node is `node`, found under `sys`.
+/// A watchdog's node is the nearest `of_node` on its device's path: the device's own
+/// (`class/watchdog/watchdogN/device/of_node`), else its parent's. The parent case is a watchdog
+/// that is a cell of a multi-function device: the kernel gives such a cell no node of its own when
+/// it has no compatible (drivers/mfd/mfd-core.c), so the node is on the MFD (the Broadcom PM block's
+/// `bcm2835-wdt`: the node `watchdog@...` belongs to the PM device, the watchdog is its child).
+/// `None` when no watchdog has that node, when two do (the name can't say which), or when the name
+/// is not one of the kernel's `watchdogN`.
 pub(crate) fn watchdog_dev(dev: &Path, sys: &Path, node: &str) -> Option<PathBuf> {
     let live = sys.join("firmware/devicetree/base");
+    let want = node.trim_start_matches('/');
+    let mut found = None;
     for entry in std::fs::read_dir(sys.join("class/watchdog"))
         .ok()?
         .flatten()
@@ -165,17 +172,25 @@ pub(crate) fn watchdog_dev(dev: &Path, sys: &Path, node: &str) -> Option<PathBuf
         if !name.starts_with("watchdog") || name[8..].parse::<u32>().is_err() {
             continue;
         }
-        let Ok(of_node) = std::fs::canonicalize(entry.path().join("device/of_node")) else {
+        let Ok(device) = std::fs::canonicalize(entry.path().join("device")) else {
             continue;
         };
+        let nearest = [Some(device.as_path()), device.parent()]
+            .into_iter()
+            .flatten()
+            .find_map(|dir| std::fs::canonicalize(dir.join("of_node")).ok());
+        let Some(of_node) = nearest else { continue };
         let Ok(below) = of_node.strip_prefix(&live) else {
             continue;
         };
-        if below.to_str() == Some(node.trim_start_matches('/')) {
-            return Some(dev.join(name));
+        if below.to_str() == Some(want) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(dev.join(name));
         }
     }
-    None
+    found
 }
 
 /// The I2C adapter device (`dev/i2c-N`) whose device-tree node is `node`, found under `sys`
@@ -320,6 +335,27 @@ mod tests {
             Some(dev.join("watchdog0"))
         );
         // Missed: no watchdog has that node.
+        assert_eq!(
+            watchdog_dev(&dev, &sys, "/soc@107c000000/watchdog@7d900000"),
+            None
+        );
+        // A watchdog that is a cell of a multi-function device (the Broadcom PM block's
+        // bcm2835-wdt): its device has no of_node, its parent (the PM device) has the node.
+        let pm_node = sys.join("firmware/devicetree/base/soc@107c000000/watchdog@7d300000");
+        std::fs::create_dir_all(&pm_node).unwrap();
+        let pm = sys.join("devices/platform/soc@107c000000/107d300000.watchdog");
+        let cell = pm.join("bcm2835-wdt");
+        std::fs::create_dir_all(&cell).unwrap();
+        std::os::unix::fs::symlink(&pm_node, pm.join("of_node")).unwrap();
+        std::fs::create_dir_all(sys.join("class/watchdog/watchdog1")).unwrap();
+        std::os::unix::fs::symlink(&cell, sys.join("class/watchdog/watchdog1/device")).unwrap();
+        assert_eq!(
+            watchdog_dev(&dev, &sys, "/soc@107c000000/watchdog@7d300000"),
+            Some(dev.join("watchdog1"))
+        );
+        // Two watchdogs on one node: the name can't say which, so neither.
+        std::fs::create_dir_all(sys.join("class/watchdog/watchdog2")).unwrap();
+        std::os::unix::fs::symlink(&cell, sys.join("class/watchdog/watchdog2/device")).unwrap();
         assert_eq!(
             watchdog_dev(&dev, &sys, "/soc@107c000000/watchdog@7d300000"),
             None

@@ -25,7 +25,7 @@ struct FakeMounts;
 
 impl Mounts for FakeMounts {
     fn functionfs(&mut self, _source: &str, target: &Path, _options: &str) -> io::Result<()> {
-        for file in ["ep0", "ep81", "ep02"] {
+        for file in ["ep0", "ep1", "ep2"] {
             fs::write(target.join(file), "")?;
         }
         Ok(())
@@ -201,8 +201,8 @@ fn the_driver_builds_the_gadget_in_configfs_and_takes_it_down_when_it_goes() {
     // FunctionFS got the interface at both speeds and the four strings.
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
     assert_eq!(ep0[..4], [3, 0, 0, 0]);
-    // Flags 91: FS, HS, the Microsoft OS descriptors (8), virtual addresses and all recipients.
-    assert_eq!(ep0[8..20], [91, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0]);
+    // Flags 75: FS, HS, the Microsoft OS descriptors (8) and all recipients.
+    assert_eq!(ep0[8..20], [75, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0]);
     // Two Microsoft OS 1.0 sections (compatible ID, extended properties), counted before the descriptors.
     assert_eq!(ep0[20..24], [2, 0, 0, 0]);
     assert!(ep0.ends_with(b"Maker\0Thing\x000001\0data\0"));

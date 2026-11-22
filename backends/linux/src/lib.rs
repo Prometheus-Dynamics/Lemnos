@@ -218,6 +218,13 @@ impl LinuxBoard {
         stored: &mut Vec<std::fs::File>,
     ) -> core::result::Result<Option<Hold>, String> {
         let Some(path) = self.watchdog_path(need) else {
+            // A watchdog named by its node that no watchdog has is a watchdog that isn't fed:
+            // named, not passed over as a need of another kind.
+            if let Some(stable::Stable::Watchdog { node }) = stable::parse(need) {
+                return Err(format!(
+                    "{need}: not held: no watchdog in class/watchdog has the device-tree node {node} (its device's of_node, or its parent's)"
+                ));
+            }
             return Ok(None);
         };
         match watchdog::hold(&path, stored) {
