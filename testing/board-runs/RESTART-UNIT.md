@@ -59,6 +59,24 @@ Fail-before on origin/next `52ed5c2d` (the daemon with `systemctl reboot` as the
   `Refused { status: Status(-5) }`; the state stays `rebooting` with `slot_trial` install-1, no reboot within the bound, and the
   guest runs to the 900 s bound (the old daemon has no helper behind the trial).
 
+## The two proofs added by RESTART-PROOFS
+
+- g, the wrong-group plant on real systemd (guest PID 1, `CASES` default `gca`): PASS. A drop-in
+  `/run/systemd/system/lemnos-restart.socket.d/wrong-group.conf` sets `SocketGroup=root`; after `daemon-reload` and a
+  restart of the socket it is `root:root 660` (g0), and the daemon's check as `lemnos` is refused with
+  `Permission denied (os error 13)` on `/run/lemnos-restart.sock`. The trial of install-1 answers
+  `Refused { status: Status(-5) }` (g1); the state stays `staged` with the error naming the socket and the refusal, and no
+  trial is armed (g2). The boot partition's sha256 before and after the trial is the same,
+  `7cef9266303193033502edb0c84430ae2408c4258d7da4e76188b31b481492fc` (g4): the check refused before any write. A hash
+  that is empty or not 64 hex digits fails the case (the first run of g had no `sha256sum` in the guest and printed two
+  empty hashes; that run is not counted). With the plant removed the socket is `root:lemnos 660` again and the check
+  answers `ok` (g5).
+- The StartUnit twin of the sent-once test (`a_ping_is_retried_and_start_unit_is_sent_exactly_once` in
+  `service/restart-helper/src/dbus_tests.rs`): a stand-in manager ignores two Pings and answers the third, then answers
+  `StartUnit` late (300 ms) with `NoSuchUnit` and counts every message until the helper closes. Pings 3, StartUnit 1:
+  PASS. With the helper changed to send StartUnit again on a late answer (scratch mutation, not committed) the test
+  fails.
+
 ## BusyBox init (QEMU, not on the board)
 
 A static BusyBox 1.38.0 built with init and ash from the pinned tarball (`testing/qemu/build-busybox-init.sh`; the binary's

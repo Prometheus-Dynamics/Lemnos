@@ -217,6 +217,66 @@ fn a_ping_is_retried_and_the_call_is_sent_exactly_once() {
     peer.join().unwrap();
 }
 
+/// The twin of the test above for the call that restarts: the handshake's Pings are retried, and `StartUnit` is sent
+/// once. A manager that ignores the first two Pings answers the third, reads the one `StartUnit`, answers it late (with
+/// its recorded refusal, so nothing is started), and then reads on until the client hangs up: a second `StartUnit` at any
+/// point, before the answer or after it, is counted and fails the test.
+#[test]
+fn a_ping_is_retried_and_start_unit_is_sent_exactly_once() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut r = BufReader::new(server.try_clone().unwrap());
+        let mut w = server;
+        let mut nul = [0u8; 1];
+        r.read_exact(&mut nul).unwrap();
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        w.write_all(b"OK 0123456789abcdef0123456789abcdef\r\n")
+            .unwrap();
+        line.clear();
+        r.read_line(&mut line).unwrap();
+        w.write_all(b"AGREE_UNIX_FD\r\n").unwrap();
+        line.clear();
+        r.read_line(&mut line).unwrap();
+        assert_eq!(line, "BEGIN\r\n");
+        let (mut pings, mut starts, mut answered) = (0, 0, false);
+        // Every message until the client hangs up.
+        while let Ok(msg) = read_message(&mut r) {
+            match msg.member.as_deref() {
+                Some("Ping") => {
+                    pings += 1;
+                    if pings >= 3 {
+                        w.write_all(&ping_answer(msg.serial)).unwrap();
+                    }
+                }
+                Some("StartUnit") => {
+                    starts += 1;
+                    if !answered {
+                        // Late, but inside the call's wait.
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        w.write_all(&answering(NO_SUCH_UNIT, msg.serial)).unwrap();
+                        answered = true;
+                    }
+                }
+                other => panic!("unexpected call {other:?}"),
+            }
+        }
+        (pings, starts)
+    });
+    let mut m = Manager::over(client, uid(), Path::new("replay")).unwrap();
+    let e = m
+        .start_unit("lemnos-restart-test-no-such-unit.target", "replace")
+        .unwrap_err();
+    assert!(
+        matches!(&e, CallError::Refused { name, .. } if name == "org.freedesktop.systemd1.NoSuchUnit"),
+        "{e:?}"
+    );
+    drop(m);
+    let (pings, starts) = peer.join().unwrap();
+    assert_eq!(pings, 3, "pings read before the answered one");
+    assert_eq!(starts, 1, "StartUnit is sent exactly once");
+}
+
 /// A socket that is not there is named. (The handshake against a real systemd is proven in the
 /// QEMU systemd guest, testing/qemu/run-systemd-restart.sh: no test touches this PC's managers.)
 #[test]

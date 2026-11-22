@@ -6,6 +6,9 @@
 # (the guest's passwd); the helper's policy takes uid 900 and root. The guest's cases (guest/cases.sh) run on that daemon:
 #
 #   d  a peer in group lemnos that is not uid 900 or root is refused; a request that is not `<verb> <nonce>` is refused
+#   g  the wrong-group plant: the helper's socket with group root instead of lemnos; the daemon's trial is refused by its
+#      check before any write (no trial armed, the boot partition byte-identical), and the state names the socket and the
+#      refusal; the plant is removed and the check answers again
 #   c  StartUnit fails on the helper's connection (reboot.target's transaction is cyclic): the helper says accepted, then
 #      failed; the trial is disarmed, the state is restart-failed with the reason, and the caller gets the error
 #   b  accepted, then no stop request within the helper's bound (reboot.target waits on a unit that never starts): the
@@ -201,7 +204,7 @@ for bin in /usr/lib/systemd/systemd "$systemd_dir/systemd-executor" "$systemd_di
 	/usr/bin/systemctl /usr/bin/setpriv /usr/bin/bash /usr/bin/timeout /usr/bin/sleep /usr/bin/true \
 	/usr/bin/head /usr/bin/tr /usr/bin/grep /usr/bin/sed /usr/bin/awk /usr/bin/mkdir /usr/bin/rm /usr/bin/rmdir \
 	/usr/bin/cat /usr/bin/mount /usr/bin/chroot /usr/bin/cp /usr/bin/chown /usr/bin/journalctl /usr/bin/busctl \
-	/usr/bin/readlink /usr/bin/cut /usr/bin/seq /usr/bin/stat /usr/lib/systemd/systemd-journald /usr/bin/dbus-daemon; do
+	/usr/bin/readlink /usr/bin/cut /usr/bin/seq /usr/bin/stat /usr/bin/sha256sum /usr/lib/systemd/systemd-journald /usr/bin/dbus-daemon; do
 	inst "$bin"
 	libs_of "$bin"
 done
@@ -296,8 +299,8 @@ boot() {
 	echo "QEMU status $QSTATUS_LAST; console in $console"
 }
 
-# CASES: the stage-1 cases to run, letters of c, b, a (default "ca": a's reboot is the end of the stage, b's is a separate run).
-CASES="${CASES:-ca}"
+# CASES: the stage-1 cases to run, letters of g, c, b, a (default "gca": a's reboot is the end of the stage, b's is a separate run).
+CASES="${CASES:-gca}"
 verdict=0
 bad() {
 	echo "FAIL: $*"

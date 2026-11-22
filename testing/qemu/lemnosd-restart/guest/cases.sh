@@ -14,10 +14,10 @@ CHECK=/usr/bin/lemnos-restart-lemnosd-check
 PROBE=/usr/bin/lemnos-restart-probe
 SLOT=install-1
 stage=$(sed -n 's/.*rst\.stage=\([0-9]*\).*/\1/p' /proc/cmdline)
-# rst.cases: the letters of the stage-1 cases to run (c, b, a; default "ca"). Case a's reboot ends the stage, and case b's
+# rst.cases: the letters of the stage-1 cases to run (g, c, b, a; default "gca"). Case a's reboot ends the stage, and case b's
 # reboot ends it too, so the two run in separate boots (run-lemnosd-restart.sh, CASES).
 cases=$(sed -n 's/.*rst\.cases=\([a-z]*\).*/\1/p' /proc/cmdline)
-cases=${cases:-ca}
+cases=${cases:-gca}
 case_on() { case "$cases" in *"$1"*) return 0 ;; esac; return 1; }
 
 say() { echo "LEMNOSD-RESTART-GUEST $*"; }
@@ -106,6 +106,51 @@ else
 	say "FAIL old-path: systemctl reboot as lemnos was not refused (rc=$rc denied=$denied): $out"
 fi
 
+if case_on g; then
+# (g) The wrong-group plant: the helper's socket is planted with group root instead of lemnos (a drop-in on the packaged
+# lemnos-restart.socket), so the daemon, uid 900 in group lemnos, cannot connect. A trial must be refused by the daemon's
+# check before any write: the call is refused, the state's error names the socket and the refusal, no trial is armed, and
+# the boot partition (/dev/vda1, where the trial would be written) is byte-identical before and after. The plant is then
+# removed and the helper's check answers again, so the cases after this one run on the packaged socket.
+h0=$(sha256sum /dev/vda1 | cut -c1-64)
+mkdir -p /run/systemd/system/lemnos-restart.socket.d
+printf '[Socket]\nSocketGroup=root\n' > /run/systemd/system/lemnos-restart.socket.d/wrong-group.conf
+systemctl daemon-reload
+systemctl stop lemnos-restart.service lemnos-restart.socket
+systemctl start lemnos-restart.socket
+say "g0 the planted socket: $(stat -c '%U:%G %a' /run/lemnos-restart.sock); the daemon's check as lemnos: $(as $LEMNOS $LEMNOS $PROBE check 2>&1 | tr '\n' ' ')"
+out=$("$CHECK" trial "$SOCK" "$SLOT" 2>&1)
+h1=$(sha256sum /dev/vda1 | cut -c1-64)
+line=$(list_line)
+say "g1 trial with the planted socket: $out"
+say "g2 $(echo "$line" | grep -o '"state":"[^"]*","error":"[^"]*"')"
+ok=yes
+case "$out" in *"answered ok"*) ok=no; say "g3 the trial was accepted" ;; esac
+echo "$line" | grep -q "\"slot_trial\":\"$SLOT\"" && { ok=no; say "g3 a trial is armed"; }
+echo "$line" | grep -q "Permission denied" || { ok=no; say "g3 the state's error does not name the refusal"; }
+echo "$line" | grep -q "/run/lemnos-restart.sock" || { ok=no; say "g3 the state's error does not name the socket"; }
+# A hash that is not 64 hex digits is a hash not taken: never a pass.
+for h in "$h0" "$h1"; do
+	case "$h" in *[!0-9a-f]*|'') ok=no; say "g3 the boot partition was not hashed: '$h'" ;; esac
+	[ "${#h}" -eq 64 ] || { ok=no; say "g3 the boot partition's hash is not 64 hex digits: '$h'"; }
+done
+[ "$h0" = "$h1" ] || { ok=no; say "g3 the boot partition changed: $h0 -> $h1"; }
+say "g4 boot partition sha256 before $h0 after $h1"
+rm -f /run/systemd/system/lemnos-restart.socket.d/wrong-group.conf
+rmdir /run/systemd/system/lemnos-restart.socket.d 2>/dev/null
+systemctl daemon-reload
+systemctl stop lemnos-restart.socket
+systemctl start lemnos-restart.socket
+back=$(as $LEMNOS $LEMNOS $PROBE check 2>&1)
+say "g5 the packaged socket again: $(stat -c '%U:%G %a' /run/lemnos-restart.sock); check: $back"
+case "$back" in *"check: ok"*) ;; *) ok=no; say "g3 the helper did not answer again after the plant was removed" ;; esac
+if [ "$ok" = yes ]; then
+	say "PASS g wrong-group plant: the trial is refused before any write (no trial armed, the boot partition unchanged), the state names the socket and the refusal"
+else
+	say "FAIL g wrong-group plant"
+fi
+
+fi
 if case_on c; then
 # (c) StartUnit fails on the same connection: reboot.target is ordered after a unit that orders it before itself, so the
 # service manager refuses the transaction ("Transaction order is cyclic"). The helper says accepted, then failed; the

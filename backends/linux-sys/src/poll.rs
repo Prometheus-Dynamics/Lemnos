@@ -360,7 +360,12 @@ mod tests {
         drop(bw);
         let r = poll_ready(&[(a.as_fd(), Wait::READABLE), (b.as_fd(), Wait::NONE)], t).unwrap();
         assert!(r[0].readable && !r[0].hangup);
-        assert!(r[1].hangup, "{:?}", r[1]);
+        // b's hangup comes only when every copy of its write end is closed. A test on
+        // another thread that forks (seccomp, the listener's shell) holds a copy until
+        // its child execs or exits, so wait for the hangup, bounded, on b alone: a wait
+        // asking for nothing still reports the hangup, and one that never comes fails.
+        let r = poll_ready(&[(b.as_fd(), Wait::NONE)], Some(Duration::from_secs(10))).unwrap();
+        assert!(r[0].hangup, "{:?}", r[0]);
         assert_eq!(
             Wait::READABLE.union(Wait::PRIORITY).events(),
             POLLIN | POLLPRI
