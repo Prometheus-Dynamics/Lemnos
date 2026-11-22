@@ -49,13 +49,15 @@ Fail-before on origin/next `52ed5c2d` (the daemon with `systemctl reboot` as the
   `restart-failed` with the reason, and the caller gets the error.
 - a: PASS. Trial accepted, then SIGTERM under the reboot; the slow unit stops; the reboot goes through (QEMU 0); the boot
   partition verifies; the next boot's state still has install-1 on trial (a2 PASS). Run with CASES=ca.
-- b: FAIL on the bound, as observed (runs 14-16). The blocker is a slow stop ordered after lemnosd (its stop takes 40 s,
-  past the helper's 20 s bound). On systemd the reboot job starts the shutdown at once: the helper answers `stopping`, the
-  trial's reply is `answered ok`, and the state stays `rebooting` with `slot_trial` install-1 for all 40 s of the stop. The
-  bound never fires. lemnosd answers state queries throughout the stop, and stops after the blocker.
+- b, slow shutdown: PASS (run 18, CASES=b). The reboot is happening and a unit's stop is slow: the blocker is ordered after
+  lemnosd and its stop takes 40 s, past the helper's 20 s bound. The trial answers `ok`; lemnosd answers `"slot_trial":"install-1"
+  "state":"rebooting"` at the start, the middle and the end of the stop (t=1, t=20, t=40); lemnosd stops after the blocker; the
+  guest reboots; stage 2 still has install-1 on trial (a2). A reboot that is really happening keeps its trial armed. The helper's
+  20 s bound is for a reboot accepted but never begun, which systemd cannot produce from this guest: it is covered by the
+  helper's unit tests with a stand-in manager, and not by this board run.
 - Fail-before for b on origin/next `a8b857e0` (no RESTART-UNIT commits): the install passes and d passes; the trial answers
-  `Refused { status: Status(-5) }`; the state stays `rebooting` with `slot_trial` install-1, no restart-failed, and no reboot
-  (the guest runs to the 900 s bound).
+  `Refused { status: Status(-5) }`; the state stays `rebooting` with `slot_trial` install-1, no reboot within the bound, and the
+  guest runs to the 900 s bound (the old daemon has no helper behind the trial).
 
 ## BusyBox init (QEMU, not on the board)
 

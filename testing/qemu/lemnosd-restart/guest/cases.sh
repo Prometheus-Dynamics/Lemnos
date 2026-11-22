@@ -143,19 +143,18 @@ systemctl daemon-reload
 
 fi
 if case_on b; then
-# (b) accepted, then the system stops, and a unit stops slowly. lemnos-guest-blocker.service is ordered after lemnosd, so
-# systemd stops it before lemnosd, and its stop takes 40 s (testing/qemu/lemnosd-restart/guest/blocker-stop.sh), past the
-# helper's 20 s bound. The helper's bound is for the system not starting to stop: if the stop starts within the bound, the
-# helper answers stopping. The blocker's stop prints lemnosd's state every second while lemnosd is still up.
+# (b) slow shutdown. The reboot is happening, and a unit's stop is slow: lemnos-guest-blocker.service is ordered after
+# lemnosd.service, so the shutdown stops it first, and its stop takes 40 s (blocker-stop.sh), past the helper's 20 s bound.
+# A reboot that is really happening keeps its trial armed: the helper's bound is for a reboot accepted but never begun, which
+# systemd cannot produce from this guest (the helper's unit tests cover it). The blocker's stop prints lemnosd's trial state
+# each second; the host checks the start, the middle and the end of the stop, and that lemnosd stops after the blocker.
 say "b0 the blocker is $(systemctl is-active lemnos-guest-blocker.service); the helper's check before the trial: $(as $LEMNOS $LEMNOS $PROBE check 2>&1)"
 out=$("$CHECK" trial "$SOCK" "$SLOT" force 2>&1)
 say "b1 trial, the reboot with a slow blocker stop: $out"
-if wait_for_reason "did not start stopping within" 60; then
-	say "b2 $(list_line | grep -o '"state":"restart-failed","error":"[^"]*"')"
-	say "PASS b accepted, no stop within the bound: trial disarmed, state restart-failed with the reason"
-else
-	say "FAIL b the state did not become restart-failed within 60 s: $(state | tr '\n' ' ')"
-fi
+case "$out" in
+*"answered ok"*) say "PASS b slow shutdown: the trial answered ok; the reboot is under way and its stop is slow" ;;
+*) say "FAIL b slow shutdown: the trial did not answer ok: $out" ;;
+esac
 fi
 if case_on a; then
 # (a) accepted, then SIGTERM: the reboot is happening, so the trial stays armed. The slow unit stops for 5 s on the way

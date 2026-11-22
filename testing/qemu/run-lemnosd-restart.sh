@@ -318,6 +318,21 @@ done
 if grep -a -q '^LEMNOSD-RESTART-GUEST FAIL' "$c1"; then bad "the guest reports a FAIL (above)"; fi
 grep -a -q '^LEMNOSD-RESTART-GUEST CASES stage 1 socket up helper up' "$c1" || bad "the daemon's socket or the helper's was not up for the cases"
 case "$CASES" in *a*) grep -a -q 'SLOW-STOP-END' "$c1" || bad "a: the slow unit's stop did not end on the guest's console (the reboot did not go through the stop)" ;; esac
+case "$CASES" in *b*)
+	# b, slow shutdown: lemnosd answers the trial state at the start, the middle and the end of the blocker's stop; the
+	# blocker stops before lemnosd; lemnosd stops before the reboot. A failed line names the line it missed.
+	for t in 1 20 40; do
+		line=$(grep -a "^LEMNOSD-RESTART-GUEST BLOCKER-STOP t=$t " "$c1" || true)
+		case "$line" in *'"slot_trial":"install-1" "state":"rebooting"'*) ;; *) bad "b: at t=$t of the blocker's stop, lemnosd did not answer rebooting with install-1 on trial: ${line:-no line}" ;; esac
+	done
+	blocker_stopped=$(grep -an 'Stopped.*lemnos-guest-blocker' "$c1" | head -1 | cut -d: -f1 || true)
+	lemnosd_stopped=$(grep -an 'Stopped.*lemnosd.service' "$c1" | head -1 | cut -d: -f1 || true)
+	restarting=$(grep -an 'reboot: Restarting system' "$c1" | head -1 | cut -d: -f1 || true)
+	if [ -n "$blocker_stopped" ] && [ -n "$lemnosd_stopped" ] && [ -n "$restarting" ] && [ "$blocker_stopped" -lt "$lemnosd_stopped" ] && [ "$lemnosd_stopped" -lt "$restarting" ]; then :; else
+		bad "b: the order is not blocker stopped (${blocker_stopped:-none}) < lemnosd stopped (${lemnosd_stopped:-none}) < restart (${restarting:-none})"
+	fi
+	;;
+esac
 if [ "$q1" -ne 0 ]; then bad "boot 1: QEMU did not exit 0 through the reboot (status $q1)"; fi
 if grep -a -q 'Kernel panic' "$c1"; then bad "boot 1: the guest panicked"; fi
 
@@ -326,7 +341,8 @@ dd if="$WORK/disk.img" of="$WORK/boot-after.img" bs=512 skip=$p1 count=$boot_sec
 "$ctl" boot-partition --socs "$socs" --verify "$WORK/boot-after.img" --layout-of "$WORK/board.toml" > "$WORK/out/boot-verify-after.txt" 2>&1 \
 	&& echo "boot partition after boot 1 verifies" || bad "the boot partition after boot 1 does not verify"
 
-if [ "${CASES#*a}" != "$CASES" ]; then
+# b's slow shutdown and a's reboot both leave the trial armed; boot 2 reads it back (a2) for either.
+if [ "${CASES#*a}" != "$CASES" ] || [ "${CASES#*b}" != "$CASES" ]; then
 boot 2
 q2=$QSTATUS_LAST
 c2="$WORK/out/console-2.log"
