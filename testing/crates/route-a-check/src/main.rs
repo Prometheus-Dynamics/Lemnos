@@ -310,7 +310,6 @@ fn first_difference(before: &Tree, after: &Tree) -> String {
 fn board_text() -> String {
     let root = root_dir();
     let none = root.join("none");
-    let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/lemnos-route-a-check"));
     format!(
         r#"format = "lemnos.board"
 schema_version = 1
@@ -321,13 +320,35 @@ id = "{BOARD_ID}"
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], systemctl = "{me}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0, confirm_uptime_s = {UPTIME_S}, device_tree = "{none}", vcio = "{none}" }}
+config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], restart_socket = "{helper}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0, confirm_uptime_s = {UPTIME_S}, device_tree = "{none}", vcio = "{none}" }}
 "#,
         data = data_dir().display(),
         boot = root.join("boot").display(),
-        me = me.display(),
         none = none.display(),
+        helper = restart_helper().display(),
     )
+}
+
+/// The restart helper the daemon asks for its restarts: the helper's real protocol on a socket,
+/// with a service manager that stops at once (there is nothing to restart here). Started once, and
+/// open to the daemon's user.
+fn restart_helper() -> PathBuf {
+    use lemnos_restart::stand_in::{Manager, StandIn};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::OnceLock;
+    static HELPER: OnceLock<Option<StandIn>> = OnceLock::new();
+    let dir = root_dir().join("restart-helper");
+    let helper = HELPER.get_or_init(|| {
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).ok()?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).ok()?;
+        let stand = StandIn::start(&dir, Manager::Stops, std::time::Duration::from_secs(5)).ok()?;
+        fs::set_permissions(&stand.socket, fs::Permissions::from_mode(0o666)).ok()?;
+        Some(stand)
+    });
+    helper
+        .as_ref()
+        .map_or_else(|| dir.join("not-started"), |stand| stand.socket.clone())
 }
 
 /// How the daemon is started.
@@ -857,10 +878,6 @@ fn clear() {
 }
 
 fn main() -> ExitCode {
-    // The board's `systemctl`, run by the daemon for a restart: there is nothing to restart here.
-    if std::env::args().nth(1).as_deref() == Some("reboot") {
-        return ExitCode::SUCCESS;
-    }
     let mut c = Checks(0);
     for (name, run) in [
         ("route A", route_a as fn(&mut Checks) -> Result<(), String>),

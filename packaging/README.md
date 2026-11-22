@@ -280,6 +280,51 @@ check pass (`fsck` passno 0), and says so in its own unit contract. The `lemnos`
 still open the node (`SUBSYSTEM=="watchdog"` in the udev rules, `^watchdog` in the mdev fragment), for a
 keep-alive device named by its `device` setting, which the root phase does not hold. Nothing else should.
 
+## The restart helper
+
+The daemon drops to user `lemnos`, and that user cannot restart the board. Under systemd, a reboot request from a
+user other than root goes to polkit, which a board image does not have, so it fails with "Access denied". Under
+BusyBox init, a user cannot signal process 1. The daemon therefore restarts the board through `lemnos-restart`,
+a small root helper on a Unix socket. It answers one line per connection:
+
+- `check <nonce>`: would a restart be accepted? Nothing is started. The daemon asks this before it writes
+  anything for a trial (the slot record or the trial's attempts), so a trial is never armed on a board that
+  can't restart. The answer is `ok <nonce>` or `refused <nonce> <reason>`.
+- `reboot <nonce>`: restart the board. The answer is `accepted <nonce>`, then on the same connection either
+  `stopping <nonce>` once the system is stopping, or `failed <nonce> <reason>`. A start the service manager
+  refuses is `failed` with its error. So is a start after which the system has not begun stopping within
+  20 s; that answer carries the last state read. A trial whose restart fails is disarmed, so the next restart
+  boots the default. The slots state then reads `restart-failed` with the reason, and no attempt is spent.
+
+The nonce is 1 to 32 lowercase hex digits, and a request line is at most 48 bytes. Anything else is refused
+before the service manager is asked.
+
+**Who can restart the board.** Root, and the one user the helper is started with (`--user lemnos`, the
+daemon's). Group `lemnos` may connect to the socket, because program users are in that group to reach the
+daemon. The helper answers by the peer's uid, though, so another member of the group is refused by name
+("uid N may not restart this board"). Adding a user to group `lemnos` gives them the daemon's devices, not
+the restart.
+
+**Under systemd** the helper is `lemnos-restart.socket` (`/run/lemnos-restart.sock`, `root:lemnos`, `0660`) and
+`lemnos-restart.service`, which runs as root with no capabilities and only `AF_UNIX`. It talks to the service
+manager over `/run/systemd/private` as uid 0, with no D-Bus broker:
+- the check loads `reboot.target` and reads its `LoadState`;
+- the restart is `StartUnit("reboot.target", "replace-irreversibly")`;
+- it watches `SystemState` for `stopping`. The helper's own `SIGTERM`, which the service manager sends as it
+  stops the units, also counts as stopping.
+
+`lemnosd.service` has `Wants=` and `After=` on the socket. Enable the socket (`systemctl enable
+lemnos-restart.socket`); the service starts on the first connection.
+
+**Under BusyBox init** the script `S49lemnos-restart` runs `lemnos-restart --user lemnos --init --listen
+/run/lemnos-restart.sock` under a supervisor, before `S50lemnosd`. The helper makes the socket itself, with
+the same owner and mode as above. The check is whether it may signal process 1, and the restart is `SIGTERM`
+to process 1, which BusyBox init takes as a reboot. Init then sends `SIGTERM` to every process, the helper
+included, and the helper reads that as the system stopping.
+
+**The board file** keeps the default: the slots driver and `system-reboot` ask `/run/lemnos-restart.sock`.
+`restart_socket` names another path. The old `systemctl` setting is refused by name.
+
 ## Without systemd (BusyBox init)
 
 A small board (64 to 128 MB) runs BusyBox init instead, with the same daemon, the same privilege path,

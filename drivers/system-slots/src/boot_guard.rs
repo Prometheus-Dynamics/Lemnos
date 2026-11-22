@@ -193,10 +193,7 @@ mod loader_tests {
         let mut record = UbootEnv {
             disk: Err("no disk in this test".into()),
             place: Place::device(dir.join("missing-env").to_str().unwrap(), 1024, 0, 4096).unwrap(),
-            restarter: crate::boot::Restarter {
-                check: None,
-                systemctl: "/bin/true".into(),
-            },
+            restarter: crate::boot::test_restart::stops(&dir),
             boot_node: Err("no boot partition in this test".into()),
             partitions: None,
         };

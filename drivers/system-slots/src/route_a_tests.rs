@@ -86,7 +86,10 @@ fn started(dir: &TempDir, layout: &Layout) -> (SystemSlots, PathBuf, TestRoots) 
     let entries = [
         ("data", ConfigValue::Str(&data)),
         ("boot", ConfigValue::Str(&boot)),
-        ("systemctl", ConfigValue::Str("/bin/false")),
+        (
+            "restart_socket",
+            ConfigValue::Str("/nonexistent/lemnos-restart.sock"),
+        ),
         ("partuuid", ConfigValue::Str("abcd-02")),
         ("boot_args", ConfigValue::Str("board")),
         ("reserve_mb", ConfigValue::Int(0)),

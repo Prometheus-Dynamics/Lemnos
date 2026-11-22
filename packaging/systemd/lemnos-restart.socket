@@ -1,0 +1,18 @@
+# The restart helper's socket (RESTART-UNIT). Installed as /usr/lib/systemd/system/lemnos-restart.socket.
+# See packaging/README.md, "The restart helper".
+#
+# The daemon runs as user lemnos, which the service manager does not let reboot the board. It asks the helper on
+# this socket instead. Only root and group lemnos can connect; the helper answers only root and the daemon's user.
+
+[Unit]
+Description=Lemnos: the restart helper's socket
+
+[Socket]
+ListenStream=/run/lemnos-restart.sock
+SocketUser=root
+SocketGroup=lemnos
+SocketMode=0660
+Accept=no
+
+[Install]
+WantedBy=sockets.target

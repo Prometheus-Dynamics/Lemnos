@@ -15,6 +15,8 @@ lemnos-contract-system-slots = { path = "../../contracts/system-slots" }
 lemnos-contract-system-reboot = { path = "../../contracts/system-reboot" }
 lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+# The restart helper's client: how the daemon asks the root helper to restart the board.
+lemnos-restart = { path = "../../service/restart-helper" }
 # The slot files, shared with lemnos-slot-init.
 lemnos-slot-store = { path = "../slot-store", features = ["linux"] }
 # The firmware mailbox that clears the boot count; the only unsafe code it reaches is there.
@@ -26,6 +28,7 @@ libc.workspace = true
 
 [dev-dependencies]
 lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
+lemnos-restart = { path = "../../service/restart-helper", features = ["stand-in"] }
 # The command a builder runs: a test installs the file it writes (a dev-dependency cycle: ctl runs the driver).
 lemnos-ctl = { path = "../../service/ctl" }
 lemnos-slot-store = { path = "../slot-store", features = ["linux", "fake", "testing"] }

@@ -66,6 +66,7 @@ lemnos-ctl 699048 to 692992, lemnos-orion 789552 to 775912).
 | `lemnos-orion` (`lemnos-orion`) | `lemnos-orion`    | none (Orion is pinned by its git `rev`)                       | the same three                                                  |
 | `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | the same three (the initramfs's `/init`, static)                |
 | `lemnos-good-boot` (`service/good-boot`) | `lemnos-good-boot` | none (the good-boot deadline's waiter, plain `std`) | the same three |
+| `lemnos-restart` (`service/restart-helper`) | `lemnos-restart` | none (the root restart helper, plain `std`; packaging/README.md, "The restart helper") | the same three |
 
 Stripped sizes, from the vendored builds of this table (bytes):
 

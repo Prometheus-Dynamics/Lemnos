@@ -15,10 +15,7 @@ use lemnos_slot_store::bootimage::Mem;
 use super::*;
 
 fn restarter() -> Restarter {
-    Restarter {
-        systemctl: "/nonexistent/systemctl".into(),
-        check: None,
-    }
+    Restarter::helper("/nonexistent/lemnos-restart.sock")
 }
 
 /// An installed slot's data-partition side: manifest, image, meta. The boot files are the driver's.

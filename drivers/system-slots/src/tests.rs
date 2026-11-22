@@ -1,10 +1,12 @@
 //! The driver over temporary directories: a data partition and a boot partition that are only
 //! folders, and a boot record that writes down what it was told.
 
+use lemnos_restart::stand_in::{Manager, StandIn};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signer, SigningKey};
 use lemnos_contract_system_slots::Slots;
@@ -1427,7 +1429,6 @@ fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
     use lemnos_core::{Encode, MethodId, Writer};
     use lemnos_host::board::parse;
     use lemnos_host::{Host, JobEvent, JobUpdate, Options, entry};
-    use std::os::unix::fs::PermissionsExt;
 
     let dir = TempDir::new("host");
     let layout = layout(&dir.0);
@@ -1442,15 +1443,9 @@ fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
         format!("{} the build key\n", hex(key().verifying_key().as_bytes())),
     )
     .unwrap();
-    // Stands in for systemctl: writes down how it was run.
-    let calls = dir.0.join("calls");
-    let systemctl = dir.0.join("systemctl");
-    fs::write(
-        &systemctl,
-        format!("#!/bin/sh\necho \"$@\" >> '{}'\n", calls.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    // The restart helper, through its real protocol: its service manager writes down what it was asked.
+    let (_, stand) =
+        crate::boot::test_restart::helper(&dir.0, lemnos_restart::stand_in::Manager::Stops);
     let text = format!(
         r#"
 format = "lemnos.board"
@@ -1470,18 +1465,18 @@ keys = "{keys}"
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], systemctl = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0 }}
+config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], restart_socket = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0 }}
 
 [[devices]]
 id = "reboot"
 driver = "system-reboot"
-config = {{ systemctl = "{ctl}" }}
+config = {{ restart_socket = "{ctl}" }}
 "#,
         data = layout.data.display(),
         boot = layout.boot.display(),
         keys = keys.display(),
         record = dir.0.join("security.rec").display(),
-        ctl = systemctl.display(),
+        ctl = stand.socket.display(),
     );
     let sim = lemnos_sim::SimBoard::new();
     let clock = sim.clock();
@@ -1629,7 +1624,9 @@ config = {{ systemctl = "{ctl}" }}
     );
     let reboot = host.device("reboot").unwrap().index;
     host.call(reboot, method(1), &[], &mut []).unwrap();
-    assert_eq!(fs::read_to_string(&calls).unwrap(), "reboot\nreboot\n");
+    // The trial asks the helper whether a restart would be taken before it writes anything (one
+    // check); each restart is then the helper's own check and start.
+    assert_eq!(stand.asked(), ["check", "check", "start", "check", "start"]);
 }
 
 /// A board whose record is the U-Boot environment, as the image builder leaves it: os-1 in bay 0 on the
@@ -2279,10 +2276,7 @@ fn on_nand_the_uboot_record_is_a_volume_replaced_whole() {
     let fake = Arc::new(Fake::new(nand(&dir.0), 1 << 20));
     let mut record = crate::uboot::Uboot {
         boot: dir.0.join("boot"),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/nonexistent/systemctl".into(),
-        },
+        restarter: crate::boot::test_restart::absent(),
         volume: Some((fake.ubi.clone(), fake.clone() as Arc<dyn UbiWrite>)),
     };
     record.set_default("os-1").unwrap();
@@ -3707,10 +3701,21 @@ fn check_config_names_the_bad_setting() {
     );
     assert_eq!(bad.unwrap_err().key, "health");
     let reboot = <SystemReboot as Lifecycle>::check_config(&Config::new(&[(
-        "systemctl",
-        ConfigValue::Str("/bin/systemctl"),
+        "restart_socket",
+        ConfigValue::Str("/run/lemnos-restart.sock"),
     )]));
     assert!(reboot.is_ok());
+    // The program that used to restart the board is no longer a setting: it is refused by name.
+    assert_eq!(
+        <SystemReboot as Lifecycle>::check_config(&Config::new(&[(
+            "systemctl",
+            ConfigValue::Str("/bin/systemctl"),
+        )]))
+        .unwrap_err()
+        .key,
+        "systemctl"
+    );
+
     assert_eq!(
         <SystemReboot as Lifecycle>::check_config(&Config::new(&[("keys", ConfigValue::Str("x"))]))
             .unwrap_err()
@@ -4253,10 +4258,7 @@ fn use_tryboot(board: &mut Board) -> PathBuf {
     board.slots.record = Box::new(crate::boot::Tryboot {
         boot: board.layout().boot.clone(),
         node: Ok(node.clone()),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/bin/true".into(),
-        },
+        restarter: crate::boot::test_restart::stops(&board.dir.0),
     });
     node
 }
@@ -4297,10 +4299,7 @@ fn use_uboot(board: &mut Board) -> PathBuf {
         disk: Err("the device is named, the disk is not needed".into()),
         place: lemnos_slot_store::uboot_env::Place::device(node.to_str().unwrap(), 1024, 0, 4096)
             .unwrap(),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/bin/true".into(),
-        },
+        restarter: crate::boot::test_restart::stops(&board.dir.0),
         boot_node: Ok(boot_node.clone()),
         partitions: Some(env_partitions(&board.dir.0)),
     });
@@ -4311,11 +4310,81 @@ fn use_uboot(board: &mut Board) -> PathBuf {
 fn use_file_record(board: &mut Board) {
     board.slots.record = Box::new(crate::boot::FileRecord {
         boot: board.layout().boot.clone(),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/bin/true".into(),
-        },
+        restarter: crate::boot::test_restart::stops(&board.dir.0),
     });
+}
+
+/// The file form over a helper whose service manager answers as `manager`, with a reboot that never
+/// stops failed after `bound`. The record and the slots share one restarter, as `start` builds them.
+fn use_helper(board: &mut Board, manager: Manager, bound: Duration) -> StandIn {
+    let place = board.dir.0.join("helper");
+    fs::create_dir_all(&place).unwrap();
+    let stand = StandIn::start(&place, manager, bound).unwrap();
+    let restarter = crate::boot::Restarter::helper(&stand.socket);
+    board.slots.record = Box::new(crate::boot::FileRecord {
+        boot: board.layout().boot.clone(),
+        restarter: restarter.clone(),
+    });
+    board.slots.restarter = Some(restarter);
+    stand
+}
+
+/// What a trial whose restart failed leaves: the loader has no trial (the next restart, whoever
+/// makes it, boots the default), the marker is gone, and the state says so with the reason.
+fn assert_disarmed(board: &Board, why: &str) {
+    assert_eq!(board.slots.record.pending().unwrap(), None);
+    assert!(!board.layout().marker("trial-keeps-default").exists());
+    let state = board.state();
+    assert_eq!(state.state, crate::RESTART_FAILED);
+    assert_eq!(state.trial, "");
+    assert_eq!(state.default, "os-1");
+    assert!(
+        state.error.contains(why),
+        "the error names the reason: {}",
+        state.error
+    );
+}
+
+/// A trial whose restart the helper refuses to start is disarmed at once, and the call fails.
+#[test]
+fn a_trial_whose_restart_fails_to_start_is_disarmed() {
+    let mut board = Board::new("os-1");
+    let stand = use_helper(
+        &mut board,
+        Manager::StartFails("the reboot target is masked".into()),
+        Duration::from_secs(5),
+    );
+    board.install_ok("os-2");
+    assert_eq!(
+        board.slots.trial("os-2", true, false, false),
+        Err(Status::IO)
+    );
+    assert_disarmed(&board, "the reboot target is masked");
+    // The check came first, then the one start; nothing was asked again.
+    assert_eq!(stand.asked(), ["check", "check", "start"]);
+}
+
+/// A restart the helper accepted but that never stops the system: the call returns (the restart
+/// is under way as far as anyone can know), and the tick reads the helper's failure later and
+/// disarms the trial then.
+#[test]
+fn a_trial_whose_accepted_restart_never_stops_is_disarmed_by_the_tick() {
+    let mut board = Board::new("os-1");
+    let _stand = use_helper(&mut board, Manager::NeverStops, Duration::from_millis(800));
+    board.install_ok("os-2");
+    board.slots.trial("os-2", false, false, false).unwrap();
+    assert_eq!(board.state().state, "rebooting");
+    assert_eq!(
+        board.slots.record.pending().unwrap().map(|p| p.0),
+        Some("os-2".into())
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while board.state().state == "rebooting" {
+        assert!(Instant::now() < until, "the tick never read the failure");
+        board.slots.tick(0);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_disarmed(&board, "the restart failed");
 }
 
 /// What the refusal says for os-2 and the extra entry.
@@ -4614,10 +4683,7 @@ fn real_record(board: &mut Board, family: lemnos_slot_store::bootimage::Family) 
         board.slots.record = Box::new(crate::boot::Tryboot {
             boot: boot.clone(),
             node: Ok(node.clone()),
-            restarter: crate::boot::Restarter {
-                check: None,
-                systemctl: "/bin/true".into(),
-            },
+            restarter: crate::boot::test_restart::stops(&board.dir.0),
         });
     } else {
         fs::write(&node, crate::bay_fixture::uboot_image("os-1")).unwrap();
@@ -4644,10 +4710,7 @@ fn real_record(board: &mut Board, family: lemnos_slot_store::bootimage::Family) 
                 4096,
             )
             .unwrap(),
-            restarter: crate::boot::Restarter {
-                check: None,
-                systemctl: "/bin/true".into(),
-            },
+            restarter: crate::boot::test_restart::stops(&board.dir.0),
             boot_node: Ok(node.clone()),
             partitions: Some(env_partitions(&board.dir.0)),
         });
@@ -5882,10 +5945,7 @@ fn uboot_gpt_board() -> (Board, PathBuf, PathBuf) {
     board.slots.record = Box::new(crate::uboot::UbootEnv {
         disk: Ok(disk.clone()),
         place: lemnos_slot_store::uboot_env::Place::gpt(1024).unwrap(),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/bin/true".into(),
-        },
+        restarter: crate::boot::test_restart::stops(&board.dir.0),
         boot_node: Ok(boot_node.clone()),
         partitions: None,
     });
@@ -6024,10 +6084,7 @@ fn a_gpt_environment_whose_disk_is_not_known_refuses_a_trial() {
     board.slots.record = Box::new(crate::uboot::UbootEnv {
         disk: Err("no boot disk in this test".into()),
         place: lemnos_slot_store::uboot_env::Place::gpt(1024).unwrap(),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/bin/true".into(),
-        },
+        restarter: crate::boot::test_restart::stops(&board.dir.0),
         boot_node: Ok(board.dir.0.join("boot.img")),
         partitions: None,
     });
@@ -6236,10 +6293,7 @@ fn a_config_txt_without_the_select_lines_leaves_the_driver_running_degraded_and_
     let record = Box::new(crate::boot::Tryboot {
         boot: board.layout().boot.clone(),
         node: Ok(node.clone()),
-        restarter: crate::boot::Restarter {
-            check: None,
-            systemctl: "/bin/true".into(),
-        },
+        restarter: crate::boot::test_restart::stops(&board.dir.0),
     });
     let mut slots = SystemSlots::with_volumes(board.layout().clone(), record, Vec::new(), None);
     let lemnos_core::Health::Degraded(why) = slots.health() else {

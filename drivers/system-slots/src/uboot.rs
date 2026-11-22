@@ -260,7 +260,7 @@ impl BootRecord for Uboot {
 
     fn restart(&mut self) -> io::Result<()> {
         // The script starts a trial that has attempts left on any restart.
-        self.restarter.run(None)
+        self.restarter.run()
     }
 
     fn prepare(&self, dir: &Path, id: &str, cmdline: &str) -> io::Result<()> {
@@ -914,7 +914,7 @@ impl BootRecord for UbootEnv {
 
     fn restart(&mut self) -> io::Result<()> {
         // The script starts a trial that has attempts left on any restart.
-        self.restarter.run(None)
+        self.restarter.run()
     }
 
     /// Nothing is written to the slot's directory: the extlinux is in the bay (see [`Self::install`]).

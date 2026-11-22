@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-restart-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Guest-check tool: asks the restart helper's socket to check or reboot, or sends one raw request line, and prints the answers"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-restart = { path = "../../../service/restart-helper" }

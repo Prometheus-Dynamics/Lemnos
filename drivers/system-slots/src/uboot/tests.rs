@@ -469,10 +469,7 @@ fn the_file_form_is_refused_by_name_and_the_environment_record_round_trips() {
     let dir = TempDir::new("uboot-env");
     let layout = Layout::new(dir.0.join("data"), dir.0.join("boot"));
     fs::create_dir_all(layout.boot_dir("os-1")).unwrap();
-    let restarter = || Restarter {
-        check: None,
-        systemctl: "/nonexistent/systemctl".into(),
-    };
+    let restarter = || crate::boot::test_restart::absent();
     // The file form (the record file on the boot partition) writes nothing at run time.
     let mut file = Uboot {
         boot: layout.boot.clone(),
@@ -661,10 +658,7 @@ fn the_nand_script_mirrors_the_same_decision_over_the_record_volume() {
 #[test]
 fn the_environment_record_refuses_by_name_when_the_disk_or_the_environment_is_not_there() {
     let dir = TempDir::new("uboot-env-refuse");
-    let restarter = || Restarter {
-        check: None,
-        systemctl: "/nonexistent/systemctl".into(),
-    };
+    let restarter = || crate::boot::test_restart::absent();
     let gpt_disk = |name: &str, parts: &[([u8; 16], u64, u64)]| {
         let node = dir.0.join(name);
         fs::write(&node, lemnos_slot_store::gpt::image(parts, 256)).unwrap();

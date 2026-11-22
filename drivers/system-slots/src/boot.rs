@@ -17,8 +17,10 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use lemnos_restart::client::{Client, Pending, Progress};
 
 use sha2::{Digest, Sha256};
 
@@ -217,8 +219,6 @@ pub fn clear_reason(node: &Result<PathBuf, String>) {
     let _ = write_reason(node, "");
 }
 
-/// Runs the system's restart: `<systemctl> reboot`, with `--reboot-argument=0 tryboot` for a
-/// trial when the firmware takes one.
 /// The check lemnosd makes before its own restarts, and on a slow period (see
 /// [`crate::boot_guard`]). Called with `true` before a restart: an `Err` refuses the restart. With
 /// `false` on a slow period, its `Ok` carries a note of what it did.
@@ -231,32 +231,141 @@ impl fmt::Debug for Check {
     }
 }
 
+/// How long a restart's call waits for the helper to say the system is stopping before it
+/// returns, leaving the rest to the tick (see [`Watch`]).
+const SETTLE: Duration = Duration::from_millis(300);
+
+/// A restart the helper accepted whose outcome had not come when its call returned. The driver's
+/// tick reads it: a restart that failed after all disarms the trial and says why.
+#[derive(Clone, Default)]
+pub struct Watch(Arc<Mutex<Option<Pending>>>);
+
+impl fmt::Debug for Watch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Watch")
+    }
+}
+
+impl Watch {
+    /// Whether an outcome is still to come.
+    pub fn waiting(&self) -> bool {
+        self.0.lock().map(|p| p.is_some()).unwrap_or(false)
+    }
+
+    /// What came of the restart, read without waiting: `None` while nothing is pending or nothing
+    /// has been said yet; `Some(Err)` with the reason when it failed after all.
+    pub fn outcome(&self) -> Option<Result<(), String>> {
+        let mut slot = self.0.lock().ok()?;
+        let progress = slot.as_mut()?.poll();
+        match progress {
+            Progress::Waiting => None,
+            Progress::Stopping => {
+                *slot = None;
+                Some(Ok(()))
+            }
+            Progress::Failed(why) => {
+                *slot = None;
+                Some(Err(why))
+            }
+        }
+    }
+
+    fn keep(&self, pending: Pending) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(pending);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Restarter {
-    pub systemctl: PathBuf,
+    /// The restart helper's socket (`restart_socket`): a root service beside the daemon that
+    /// restarts the board through the service manager, or through BusyBox's init (see
+    /// `packaging/README.md`, "The restart helper").
+    pub socket: PathBuf,
     /// Checked before the restart runs: a refused check means no restart.
     pub check: Option<Check>,
+    /// The outcome of an accepted restart, when it came after the call.
+    pub watch: Watch,
 }
 
 impl Restarter {
-    pub fn run(&self, argument: Option<&str>) -> io::Result<()> {
+    /// Restarts through the helper at `socket`, with no check of the boot files.
+    pub fn helper(socket: impl Into<PathBuf>) -> Self {
+        Self {
+            socket: socket.into(),
+            check: None,
+            watch: Watch::default(),
+        }
+    }
+
+    /// Whether a restart would be accepted, before anything is written: the helper answers a
+    /// check through the same socket and the same service manager (or init) as the restart. `Err`
+    /// says why not.
+    pub fn ready(&self) -> Result<(), String> {
+        self.client().check()
+    }
+
+    fn client(&self) -> Client {
+        Client {
+            socket: self.socket.clone(),
+        }
+    }
+
+    /// Runs the restart, after the boot-file check. `Ok` once the restart is under way or was
+    /// accepted and is still to say more (read through [`Restarter::watch`]); `Err` with the reason
+    /// when it was refused or failed.
+    pub fn run(&self) -> io::Result<()> {
         if let Some(check) = &self.check {
             (check.0)(true).map_err(io::Error::other)?;
         }
-        let mut command = Command::new(&self.systemctl);
-        command.arg("reboot");
-        if let Some(argument) = argument {
-            command.arg(format!("--reboot-argument={argument}"));
+        let mut pending = self.client().reboot().map_err(io::Error::other)?;
+        let until = Instant::now() + SETTLE;
+        loop {
+            match pending.poll() {
+                Progress::Stopping => return Ok(()),
+                Progress::Failed(why) => return Err(io::Error::other(why)),
+                Progress::Waiting if Instant::now() >= until => {
+                    self.watch.keep(pending);
+                    return Ok(());
+                }
+                Progress::Waiting => std::thread::sleep(Duration::from_millis(10)),
+            }
         }
-        let status = command.status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "{} reboot: {status}",
-                self.systemctl.display()
-            )))
-        }
+    }
+}
+
+/// Restarters for tests, through the helper's real protocol on a real socket.
+#[cfg(test)]
+pub(crate) mod test_restart {
+    use super::{Restarter, Watch};
+    use lemnos_restart::stand_in::{Manager, StandIn};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    /// A helper in its own directory under `dir` whose service manager answers as `manager`.
+    pub(crate) fn helper(dir: &Path, manager: Manager) -> (Restarter, StandIn) {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let place = dir.join(format!("helper-{}", N.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&place).unwrap();
+        let stand = StandIn::start(&place, manager, Duration::from_millis(200)).unwrap();
+        let restarter = Restarter {
+            socket: stand.socket.clone(),
+            check: None,
+            watch: Watch::default(),
+        };
+        (restarter, stand)
+    }
+
+    /// A restarter whose restart is under way at once.
+    pub(crate) fn stops(dir: &Path) -> Restarter {
+        helper(dir, Manager::Stops).0
+    }
+
+    /// A restarter with no helper behind it: the socket is not there.
+    pub(crate) fn absent() -> Restarter {
+        Restarter::helper("/nonexistent/lemnos-restart.sock")
     }
 }
 
@@ -392,7 +501,7 @@ impl BootRecord for Tryboot {
     }
 
     fn restart(&mut self) -> io::Result<()> {
-        self.restarter.run(None)
+        self.restarter.run()
     }
 
     fn declared(&self) -> io::Result<(Vec<String>, Option<String>)> {
@@ -500,7 +609,7 @@ impl BootRecord for FileRecord {
     }
 
     fn restart(&mut self) -> io::Result<()> {
-        self.restarter.run(None)
+        self.restarter.run()
     }
 
     /// The file form keeps no boot files of its own: its loader reads one fixed kernel, and Lemnos
@@ -717,10 +826,7 @@ mod tests {
         Tryboot {
             boot: dir.0.clone(),
             node,
-            restarter: Restarter {
-                check: None,
-                systemctl: "/nonexistent/systemctl".into(),
-            },
+            restarter: crate::boot::test_restart::absent(),
         }
     }
 
@@ -856,10 +962,7 @@ mod tests {
         let dir = TempDir::new("record");
         let mut record = FileRecord {
             boot: dir.0.clone(),
-            restarter: Restarter {
-                check: None,
-                systemctl: "/nonexistent/systemctl".into(),
-            },
+            restarter: crate::boot::test_restart::absent(),
         };
         record.set_trial("b", 2).unwrap();
         record.set_default("a").unwrap();

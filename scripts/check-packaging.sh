@@ -72,10 +72,12 @@ if [[ "$systemd_major" -ge 254 ]]; then
   for unit in packaging/systemd/*.service; do
     sed -e 's|^ExecStart=/usr/bin/[^ ]*|ExecStart=/bin/true|' "$unit" >"$work/$(basename "$unit")"
   done
+  # The socket units the services name (the restart helper's): verified with them, as installed.
+  cp packaging/systemd/*.socket "$work/"
   # The generated security unit (`lemnos-ctl tree --security-unit`), as the reference board's golden.
   sed -e 's|^ExecStart=/usr/bin/[^ ]*.*|ExecStart=/bin/true|' service/ctl/tests/golden/reference-security.service \
     >"$work/lemnos-board-security.service"
-  verified="$(cd "$work" && systemd-analyze verify --man=no ./*.service 2>&1)" || {
+  verified="$(cd "$work" && systemd-analyze verify --man=no ./*.service ./*.socket 2>&1)" || {
     if grep -q "not found" <<<"$verified"; then
       echo "    units: skipped, a unit the files refer to is not on this systemd: $(grep -m1 'not found' <<<"$verified")"
       echo "    packaging: ok"
@@ -240,7 +242,7 @@ fi
 
 # The BusyBox init scripts: parsed, never run. sh is always here; busybox and shellcheck are optional.
 echo "==> init scripts"
-for script in packaging/init/S5*; do
+for script in packaging/init/S[0-9]*; do
   sh -n "$script"
   if command -v busybox >/dev/null; then
     busybox sh -n "$script"

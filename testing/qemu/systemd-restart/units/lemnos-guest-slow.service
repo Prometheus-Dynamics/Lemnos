@@ -1,0 +1,15 @@
+# The slow-stopping unit of the systemd restart guest (run-systemd-restart.sh). It is active from boot, and its
+# stop takes about 5 s: a reboot that goes through the normal stop shows it in the console, and a reboot that does
+# not wait for units shows no SLOW-STOP-END before the guest exits.
+[Unit]
+Description=Restart guest: a unit that takes about 5 s to stop
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/lib/lemnos-guest/slow-stop.sh
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

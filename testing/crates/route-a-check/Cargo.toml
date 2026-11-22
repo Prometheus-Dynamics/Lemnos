@@ -14,4 +14,6 @@ lemnos-core = { path = "../../../engine/core", features = ["std"] }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-driver-system-slots = { path = "../../../drivers/system-slots" }
+# The restart helper on a socket: the daemon's restarts go through its real protocol.
+lemnos-restart = { path = "../../../service/restart-helper", features = ["stand-in"] }
 lemnos-slot-store = { path = "../../../drivers/slot-store", features = ["testing"] }

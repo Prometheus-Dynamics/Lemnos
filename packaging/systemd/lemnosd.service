@@ -29,6 +29,10 @@ DefaultDependencies=no
 After=systemd-sysusers.service
 Conflicts=shutdown.target
 Before=shutdown.target
+# The daemon's restarts go through the root restart helper on this socket (packaging/README.md, "The restart helper").
+# Wants only, no After: the socket's own default ordering (sockets.target, after sysinit) must not widen the gap
+# above. The helper is needed only when a restart is asked for, long after the socket is listening.
+Wants=lemnos-restart.socket
 
 [Service]
 # Type=notify: lemnosd sends READY=1 once every driver is started and the socket listens. The

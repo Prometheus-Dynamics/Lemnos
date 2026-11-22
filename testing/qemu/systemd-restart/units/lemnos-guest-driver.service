@@ -1,0 +1,16 @@
+# The checks of the systemd restart guest (run-systemd-restart.sh). Runs once, after the helper's socket, the slow
+# unit and the bus. DefaultDependencies=no: a shutdown does not stop it before the probe has seen the reboot's
+# "stopping" answer. Its output goes to the console, where the host reads the PASS and FAIL lines.
+[Unit]
+Description=Restart guest: the checks
+DefaultDependencies=no
+Wants=lemnos-restart.socket lemnos-guest-slow.service
+After=lemnos-restart.socket lemnos-guest-slow.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/lemnos-guest/checks.sh
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

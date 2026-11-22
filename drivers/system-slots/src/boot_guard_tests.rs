@@ -2,7 +2,7 @@
 //! slots' boot files under the boot directory, the state, and the boot record (`default.txt`).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,7 +10,7 @@ use lemnos_slot_store::bootcheck::sha256_hex;
 use lemnos_slot_store::manifest::{BLOCK, tree_bytes};
 use lemnos_slot_store::store::{Layout, Meta, State};
 
-use crate::boot::{BootRecord, Check, Restarter, Tryboot};
+use crate::boot::{BootRecord, Check, Tryboot};
 use crate::boot_guard;
 
 struct Dir(PathBuf);
@@ -99,10 +99,7 @@ impl Board {
         let mut record = Tryboot {
             boot: layout.boot.clone(),
             node: Ok(node.clone()),
-            restarter: Restarter {
-                systemctl: "/nonexistent/systemctl".into(),
-                check: None,
-            },
+            restarter: crate::boot::test_restart::absent(),
         };
         let p = crate::bay_fixture::payloads("os-2");
         record
@@ -230,7 +227,7 @@ fn a_slow_period_that_finds_both_bad_only_reports() {
 }
 
 #[test]
-fn a_refused_check_stops_the_restart_before_systemctl_runs() {
+fn a_refused_check_stops_the_restart_before_the_helper_is_asked() {
     let ran = Arc::new(AtomicBool::new(false));
     let seen = ran.clone();
     let check = Check(Arc::new(move |restart| {
@@ -238,11 +235,16 @@ fn a_refused_check_stops_the_restart_before_systemctl_runs() {
         seen.store(true, Ordering::SeqCst);
         Err("the default doesn't match".to_string())
     }));
-    let restarter = Restarter {
-        systemctl: Path::new("/nonexistent/systemctl").into(),
-        check: Some(check),
-    };
-    let err = restarter.run(None).unwrap_err();
+    let dir = crate::tests::TempDir::new("refused-check");
+    let (mut restarter, stand) =
+        crate::boot::test_restart::helper(&dir.0, lemnos_restart::stand_in::Manager::Stops);
+    restarter.check = Some(check);
+    let err = restarter.run().unwrap_err();
+    assert!(
+        stand.asked().is_empty(),
+        "the helper was asked: {:?}",
+        stand.asked()
+    );
     assert!(err.to_string().contains("doesn't match"), "{err}");
     assert!(ran.load(Ordering::SeqCst));
 }

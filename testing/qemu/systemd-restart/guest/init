@@ -1,0 +1,24 @@
+#!/bin/bash
+# The initramfs's /init (testing/qemu/run-systemd-restart.sh). systemd's early /dev mount fails on the initramfs's
+# own rootfs, so the guest moves into a tmpfs root (/newroot) and runs systemd there, as PID 1, by chroot.
+exec </dev/console >/dev/console 2>&1
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+# The initramfs has no /dev of its own: devtmpfs gives /dev/null and /dev/console to the daemons (the kernel's
+# automount does not run for an initramfs).
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /newroot
+mount -t tmpfs -o mode=0755,size=900m tmpfs /newroot || { echo "init: no tmpfs root"; exec /bin/sh; }
+for entry in /* ; do
+	case "$entry" in
+	/newroot|/proc|/sys|/dev|/init) continue ;;
+	esac
+	cp -a "$entry" /newroot/
+done
+mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/run /newroot/tmp
+# The daemon needs /dev/null: the initramfs's devices are bound into the new root for it (systemd mounts its own /dev).
+mount --bind /dev /newroot/dev
+# The system bus is a socket unit with a service (dbus.socket, dbus.service): PID 1 connects to the bus only
+# when both are running (systemd 259.10 src/core/manager.c manager_dbus_is_running).
+echo "init: the guest's root is /newroot; starting systemd"
+exec chroot /newroot /usr/lib/systemd/systemd

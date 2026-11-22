@@ -7,11 +7,13 @@
 use lemnos_contract_system_slots::Slots as _;
 use lemnos_driver_system_slots::boot::{Restarter, Tryboot};
 use lemnos_driver_system_slots::{SystemSlots, parse_keys};
+use lemnos_restart::stand_in::{Manager, StandIn};
 use lemnos_slot_store::store::{Layout, Meta, State};
 use lemnos_slot_store::tar::{Kind, Sink, Tar, write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 #[path = "support/pi.rs"]
 mod pi;
@@ -416,10 +418,11 @@ fn driver(dir: &Path, data: &Path, image: &str) -> (SystemSlots, Layout) {
     let tryboot = Tryboot {
         boot: read.join("boot-mount"),
         node: Ok(node),
-        restarter: Restarter {
-            systemctl: PathBuf::from("/bin/true"),
-            check: None,
-        },
+        restarter: Restarter::helper(
+            StandIn::start(&read, Manager::Stops, Duration::from_secs(1))
+                .unwrap()
+                .socket,
+        ),
     };
     let keys = parse_keys(&format!("{PUBKEY7} pubkey")).unwrap();
     (

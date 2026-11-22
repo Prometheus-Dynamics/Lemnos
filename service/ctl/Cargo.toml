@@ -47,6 +47,8 @@ lemnosd = { path = "../lemnosd" }
 
 [dev-dependencies]
 lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
+# The restart helper on a socket, for the driver the data-partition tests build.
+lemnos-restart = { path = "../restart-helper", features = ["stand-in"] }
 syn.workspace = true
 lemnos-driver-named-files = { path = "../../drivers/named-files" }
 lemnos-contract-accelerometer = { path = "../../contracts/accelerometer" }

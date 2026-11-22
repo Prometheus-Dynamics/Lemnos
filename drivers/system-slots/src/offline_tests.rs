@@ -4,7 +4,6 @@
 //! byte and mode for mode, and load in the driver as installed, confirmed and default.
 
 use super::*;
-use crate::boot::Restarter;
 use crate::offline::{FirstSlot, OfflineBoard, write_first_slot};
 use crate::tests::{BOARD, TempDir, bundle_and_payloads, bundle_with_bad_signature, key};
 use core::result::Result;
@@ -67,10 +66,7 @@ fn live(dir: &Path, bundle: &[u8], image: &[u8], time: &str) -> (Status, String)
     let tryboot = Tryboot {
         boot: dir.join("boot-mount"),
         node: Ok(node),
-        restarter: Restarter {
-            systemctl: PathBuf::from("/bin/true"),
-            check: None,
-        },
+        restarter: crate::boot::test_restart::stops(dir),
     };
     let mut slots = SystemSlots::new(layout.clone(), Box::new(tryboot), trusted());
     slots.partuuid = "1234abcd-02".into();
@@ -192,10 +188,7 @@ fn the_offline_tree_equals_a_live_install_trial_and_confirm_and_reads_as_default
     let tryboot = Tryboot {
         boot: read_dir.join("boot-mount"),
         node: Ok(node),
-        restarter: Restarter {
-            systemctl: PathBuf::from("/bin/true"),
-            check: None,
-        },
+        restarter: crate::boot::test_restart::stops(&read_dir),
     };
     let slots = SystemSlots::new(layout.clone(), Box::new(tryboot), trusted());
     let state = State::load(&layout);

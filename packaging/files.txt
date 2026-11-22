@@ -39,6 +39,8 @@ packaging/systemd/grants.toml                    -                              
 packaging/systemd/lemnosd.service                /usr/lib/systemd/system/lemnosd.service        0644  systemd
 packaging/systemd/lemnos-orion.service           /usr/lib/systemd/system/lemnos-orion.service   0644  systemd,orion
 packaging/systemd/lemnos-good-boot.service        /usr/lib/systemd/system/lemnos-good-boot.service 0644 systemd
+packaging/systemd/lemnos-restart.socket          /usr/lib/systemd/system/lemnos-restart.socket  0644  systemd
+packaging/systemd/lemnos-restart.service         /usr/lib/systemd/system/lemnos-restart.service 0644  systemd
 packaging/systemd/lemnos.conf                    /usr/lib/sysusers.d/lemnos.conf                0644  systemd
 packaging/systemd/lemnosd.env.example            /etc/lemnos/lemnosd.env                        0644  always
 packaging/systemd/lemnos-orion.env.example       /etc/lemnos/lemnos-orion.env                   0644  orion
@@ -48,6 +50,7 @@ packaging/systemd/lemnosd.service.d/health-tcp.conf  /etc/systemd/system/lemnosd
 packaging/systemd/lemnosd.service.d/slots.conf   /etc/systemd/system/lemnosd.service.d/slots.conf 0644 systemd,slots
 packaging/systemd/lemnosd.service.d/security.conf  /etc/systemd/system/lemnosd.service.d/security.conf 0644 systemd,security
 packaging/udev/70-lemnos.rules                   /usr/lib/udev/rules.d/70-lemnos.rules          0644  udev
+packaging/init/S49lemnos-restart                 /etc/init.d/S49lemnos-restart                  0755  busybox
 packaging/init/S50lemnosd                        /etc/init.d/S50lemnosd                         0755  busybox
 packaging/init/S51lemnos-orion                   /etc/init.d/S51lemnos-orion                    0755  busybox,orion
 packaging/init/mdev.conf.fragment                /etc/mdev.conf                                 append busybox

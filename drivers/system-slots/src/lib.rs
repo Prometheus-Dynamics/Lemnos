@@ -25,8 +25,10 @@
 //!   `slot-<id>` ([`lemnos_slot_store::ubi`]). `data` and `boot` are then where its UBIFS
 //!   volumes `data` and `boot` are mounted, and a slot's command line names the data volume as
 //!   `<boot_args>.data=UBI=ubi0:data`. Unset, the images are files on the data partition.
-//! - `systemctl`: the program that restarts the board, `"systemctl"` by default; it is run as
-//!   `systemctl reboot`, with `--reboot-argument=0 tryboot` for a trial.
+//! - `restart_socket`: the restart helper's socket, `/run/lemnos-restart.sock` by default. The
+//!   helper is a root service beside the daemon that restarts the board: through the service
+//!   manager's `reboot.target`, or through BusyBox's init (see `packaging/README.md`, "The restart
+//!   helper"). Before anything is written for a trial, the helper is asked whether it would restart.
 //! - `keys`: given by the host from the board file's `[security] keys` (the board's one trust root,
 //!   the same keys that authorize turning the switch off); a device that names it itself is refused.
 //!   The file holds the keys the board trusts, one per line: 64 hex digits, a space, and the
@@ -97,6 +99,8 @@ pub const OWNER_UNKNOWN: &str = "foreign-unknown: the boot records can't be read
 /// driver's health; `info` and `list` name the file and the error as `write_failed`).
 pub const WRITE_FAILED: &str = "write-failed: a write of the slots state failed, so what the board shows may be behind what it did";
 
+/// The state's word after a trial's restart failed: the trial was disarmed (see the state's error).
+pub const RESTART_FAILED: &str = "restart-failed";
 pub const STATE_UNWRITABLE: &str = "state-unwritable: the slots state or image dir can't be written by the daemon, so no slot can be installed, switched or confirmed";
 
 /// Whether the daemon can write its state dir and its image dir: a file is made in each and removed.
@@ -280,6 +284,9 @@ pub struct SystemSlots {
     /// [`boot_guard`]), and when the next slow-period check is due.
     check: Option<Check>,
     next_check_ns: u64,
+    /// How the board is restarted: asked before a trial is armed, and watched after a restart the
+    /// helper accepted, so one that fails after all disarms the trial (see [`boot::Watch`]).
+    restarter: Option<Restarter>,
     /// The firmware's boot count and mailbox, for the `tryboot` form (see [`count`]).
     firmware: Option<count::Firmware>,
     /// While the boot records can't be read to say whose they are: whether this boot's count has been
@@ -401,8 +408,12 @@ fn firmware_of(cfg: &Config<'_>) -> Option<count::Firmware> {
 
 fn restarter(cfg: &Config<'_>, check: Option<Check>) -> Restarter {
     Restarter {
-        systemctl: PathBuf::from(cfg.str("systemctl").unwrap_or("systemctl")),
+        socket: PathBuf::from(
+            cfg.str("restart_socket")
+                .unwrap_or(lemnos_restart::client::DEFAULT_SOCKET),
+        ),
         check,
+        watch: boot::Watch::default(),
     }
 }
 
@@ -433,7 +444,16 @@ fn record_for(
     ubi_write: &Option<Arc<dyn UbiWrite>>,
     check: Option<Check>,
 ) -> Result<Box<dyn BootRecord>> {
-    let restarter = restarter(cfg, check);
+    record_with(cfg, layout, ubi_write, restarter(cfg, check))
+}
+
+/// The boot record the `record` setting names, restarting through `restarter`.
+fn record_with(
+    cfg: &Config<'_>,
+    layout: &Layout,
+    ubi_write: &Option<Arc<dyn UbiWrite>>,
+    restarter: Restarter,
+) -> Result<Box<dyn BootRecord>> {
     Ok(match cfg.str("record").unwrap_or("tryboot") {
         "tryboot" => Box::new(Tryboot {
             boot: layout.boot.clone(),
@@ -629,6 +649,7 @@ impl SystemSlots {
             unjudged_note: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
+            restarter: None,
             offline_free: None,
             uncleared: None,
             grow: None,
@@ -1662,7 +1683,7 @@ const KEYS: &[Key] = &[
     Key::optional("boot", Kind::Str),
     Key::optional("ubi", Kind::Str),
     Key::optional("record", Kind::Str),
-    Key::optional("systemctl", Kind::Str),
+    Key::optional("restart_socket", Kind::Str),
     Key::optional("keys", Kind::Str),
     Key::optional("partuuid", Kind::Str),
     Key::optional("running", Kind::Str),
@@ -1713,7 +1734,7 @@ const KEYS: &[Key] = &[
 /// raw from the boot disk, so it takes the same boot facts as the slot driver, and clears the Pi
 /// firmware's boot count through the same mailbox.
 const REBOOT_KEYS: &[Key] = &[
-    Key::optional("systemctl", Kind::Str),
+    Key::optional("restart_socket", Kind::Str),
     Key::optional("data", Kind::Str),
     Key::optional("boot", Kind::Str),
     Key::optional("ubi", Kind::Str),
@@ -1962,7 +1983,8 @@ impl Lifecycle for SystemSlots {
         let count = self.count_tick(now_ns);
         let grow = self.grow_tick(now_ns);
         let trial = self.trial_watch(now_ns);
-        [install, settle, slow, count, grow, trial]
+        let restart = self.restart_watch(now_ns);
+        [install, settle, slow, count, grow, trial, restart]
             .into_iter()
             .flatten()
             .min()
@@ -2063,7 +2085,8 @@ impl Lifecycle for SystemSlots {
         let firmware = firmware_of(cfg);
         let base = record_for(cfg, &layout, &ubi_write, None)?;
         let check = guard_check(layout.clone(), node.clone(), base, firmware.clone());
-        let record = record_for(cfg, &layout, &ubi_write, Some(check.clone()))?;
+        let restarter = restarter(cfg, Some(check.clone()));
+        let record = record_with(cfg, &layout, &ubi_write, restarter.clone())?;
         // A key file that can't be read leaves the board trusting no bundle, which every
         // install then says; it is read again when the driver is bound again.
         let keys = cfg
@@ -2075,6 +2098,7 @@ impl Lifecycle for SystemSlots {
         let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
         slots.trial_updates = trial_updates;
         slots.check = Some(check);
+        slots.restarter = Some(restarter);
         slots.boot_node = node;
         slots.firmware = firmware;
         slots.demote_after =
@@ -2402,7 +2426,10 @@ impl Slots for SystemSlots {
             ..Log::default()
         }
         .save(&self.layout);
-        self.record.restart().map_err(|_| Status::IO)
+        self.record.restart().map_err(|error| {
+            self.restart_failed(error.to_string());
+            Status::IO
+        })
     }
 
     fn confirm(&mut self) -> Result<()> {
@@ -2444,9 +2471,9 @@ impl Slots for SystemSlots {
     }
 }
 
-/// Restarts the board: `systemctl reboot`.
+/// Restarts the board, through the restart helper.
 ///
-/// Settings: `systemctl`, the program to run, `"systemctl"` by default.
+/// Settings: `restart_socket`, as the slot driver reads it.
 #[driver("system-reboot", provides = [Reboot])]
 pub struct SystemReboot {
     restarter: Restarter,
@@ -2485,7 +2512,7 @@ impl Reboot for SystemReboot {
         // The boot history names who asked; the restart goes on either way.
         let state_dir = self.data.join("board/slots");
         boot::note_request(&state_dir, self.calling.0);
-        self.restarter.run(None).map_err(|_| Status::IO)
+        self.restarter.run().map_err(|_| Status::IO)
     }
 }
 
@@ -2672,12 +2699,49 @@ impl SystemSlots {
     /// Refuses a restart whose boot files don't match (see [`boot_guard`]); the reason is the
     /// state's error.
     fn restart_check(&self) -> Result<()> {
-        let Some(check) = &self.check else {
-            return Ok(());
-        };
-        (check.0)(true).map(drop).map_err(|why| {
-            self.note(why);
-            Status::IO
-        })
+        if let Some(check) = &self.check {
+            (check.0)(true).map(drop).map_err(|why| {
+                self.note(why);
+                Status::IO
+            })?;
+        }
+        if let Some(restarter) = &self.restarter {
+            restarter.ready().map_err(|why| {
+                self.note(why);
+                Status::IO
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A trial's restart that failed: the trial is disarmed, so the next restart, whoever makes
+    /// it, boots the default, and the state says the restart failed and why.
+    fn restart_failed(&mut self, why: String) {
+        let _ = self.record.clear_trial();
+        let _ = fs::remove_file(self.layout.marker("trial-keeps-default"));
+        let mut state = self.state();
+        state.trial.clear();
+        state.state = RESTART_FAILED.into();
+        state.error = format!("the restart failed: {why}");
+        let _ = self.save(&state);
+    }
+
+    /// Reads what came of a restart the helper accepted after its call returned: one that failed
+    /// after all is handled as [`Self::restart_failed`]. Looked at every 100 ms while it waits.
+    fn restart_watch(&mut self, now_ns: u64) -> Option<u64> {
+        const EVERY_NS: u64 = 100_000_000;
+        let restarter = self.restarter.as_ref()?;
+        if let Some(Err(why)) = restarter.watch.outcome() {
+            if self.state().state == "rebooting" {
+                self.restart_failed(why);
+            } else {
+                self.note(format!("the restart failed: {why}"));
+            }
+        }
+        let restarter = self.restarter.as_ref()?;
+        restarter
+            .watch
+            .waiting()
+            .then(|| now_ns.saturating_add(EVERY_NS))
     }
 }
