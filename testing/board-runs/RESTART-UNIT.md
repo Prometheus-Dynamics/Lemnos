@@ -25,7 +25,7 @@ The control is the same helper built without the Ping handshake (the handshake's
 copy). The new helper is the one with the Ping.
 
 Daemon cases, the earlier run (`testing/qemu/run-lemnosd-restart.sh`, run 7, base `52ed5c2d`, lower load): every case
-passed. This is the evidence for that base only; the current base does not reach cases a, b and c (next section).
+passed. This is the evidence for that base only. On the current tree see the next section.
 
 - d: a peer in group lemnos that is uid 901 is refused by its uid; a request that is not `<verb> <nonce>` is refused.
 - c: `StartUnit` fails on the helper's connection (`TransactionOrderIsCyclic`); the helper answers `accepted`, then
@@ -37,20 +37,24 @@ passed. This is the evidence for that base only; the current base does not reach
 Fail-before on origin/next `52ed5c2d` (the daemon with `systemctl reboot` as the restart, no helper): c's state never becomes
 `restart-failed`; a's trial is refused with IO, and no reboot starts.
 
-## The current tree (rebased on origin/next `6e13aa1a`, 2026-11-21, host load 46 to 80)
+## The current tree (rebased on origin/next `876b81b0`, SLOT-INSTALL-INT and DL-STOP-RACE in)
 
-- Old path, as lemnos, in the lemnosd guest (packaged units, PID 1 on the system bus: `dbus.socket` and `dbus.service`
-  active, `busctl` lists `org.freedesktop.systemd1`): `systemctl reboot` is refused by PID 1 with `Access denied`,
-  rc 4, after systemctl's first attempt at login1 (`was not provided`, which this guest does not run). lemnosd stays up.
-  PASS. Console: `OLD-PATH systemctl reboot as lemnos rc=4` ... `Failed to start reboot.target: Access denied`.
+- Install: PASS (6 checks). The check now waits, bounded, for the slots device to be running before it starts the job; before
+  this, run 10's job was refused with NO_DEVICE (status -19) because the device was not yet bound.
+- Old path, as lemnos, in the lemnosd guest (PID 1 on the system bus; `busctl` lists `org.freedesktop.systemd1`):
+  refused by PID 1 with `Access denied` (rc 4) after systemctl's first attempt at login1 (not run in this guest). lemnosd
+  stays up. PASS.
 - d: PASS (uid 901 refused by uid; the raw forms refused).
-- Install, the first step of a, b and c: FAILS at this load, in two ways. (1) Runs 8 and 9: the last 64 KiB write of the
-  3,128,832-byte bundle returned TIMED_OUT (-110) at 3,080,192 bytes, the payload commit past the call deadline (the open
-  item in SLOT-INSTALL-INT, not on origin/next). The same bundle passed earlier. (2) Run 10: the daemon refused the job
-  before any byte was written (`the job could not be started`, status -19, from `start_job`); the cause is not confirmed,
-  the cases start the install as soon as the socket is up. With no install, the trial is refused and a, b and c are not
-  evaluated. Their earlier results above stand for the earlier base only.
-- BusyBox (below): PASS.
+- c: PASS. `StartUnit` fails on the helper's connection (`TransactionOrderIsCyclic`); the trial is disarmed, the state is
+  `restart-failed` with the reason, and the caller gets the error.
+- a: PASS. Trial accepted, then SIGTERM under the reboot; the slow unit stops; the reboot goes through (QEMU 0); the boot
+  partition verifies; the next boot's state still has install-1 on trial (a2 PASS). Run with CASES=ca.
+- b: NOT REACHABLE on systemd 259 as designed. The reboot job queued behind the blocker still starts the shutdown at once
+  (`Stopped target multi-user.target`), so the helper's bound never expires and the daemon's trial call is cut off
+  (`answered Disconnected`) before the state can read `restart-failed`. The bound is covered only by the helper's unit tests
+  with a stand-in manager. Run with CASES=b (run 13).
+- Fail-before for b on `52ed5c2d` is NOT established: that base's install timed out at the last write (3,080,192 of
+  3,128,832 bytes), the SLOT-INSTALL-INT open item, so no trial was armed and the guest ran past its bound.
 
 ## BusyBox init (QEMU, not on the board)
 

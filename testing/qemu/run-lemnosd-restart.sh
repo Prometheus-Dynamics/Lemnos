@@ -274,7 +274,7 @@ rmdir "$root"
 QSTATUS_LAST=0
 boot() {
 	local stage="$1" stamped="$WORK/out/console-$1-stamped.log" console="$WORK/out/console-$1.log"
-	local cmdline="console=ttyS0 loglevel=4 panic=5 systemd.log_target=console systemd.log_level=info rst.stage=$stage"
+	local cmdline="console=ttyS0 loglevel=4 panic=5 systemd.log_target=console systemd.log_level=info rst.stage=$stage rst.cases=$CASES"
 	local stamp
 	stamp() {
 		local line
@@ -295,6 +295,8 @@ boot() {
 	echo "QEMU status $QSTATUS_LAST; console in $console"
 }
 
+# CASES: the stage-1 cases to run, letters of c, b, a (default "ca": a's reboot is the end of the stage, b's is a separate run).
+CASES="${CASES:-ca}"
 verdict=0
 bad() {
 	echo "FAIL: $*"
@@ -309,12 +311,12 @@ fi
 c1="$WORK/out/console-1.log"
 echo "== boot 1: the guest's cases"
 grep -a '^LEMNOSD-RESTART-GUEST ' "$c1" | grep -a -E 'PASS|FAIL|INSTALL|CASES' || true
-for n in d c a; do
+for n in d $(printf '%s' "$CASES" | sed 's/./& /g'); do
 	if grep -a -q "^LEMNOSD-RESTART-GUEST PASS $n " "$c1"; then :; else bad "case $n has no PASS line from the guest"; fi
 done
 if grep -a -q '^LEMNOSD-RESTART-GUEST FAIL' "$c1"; then bad "the guest reports a FAIL (above)"; fi
 grep -a -q '^LEMNOSD-RESTART-GUEST CASES stage 1 socket up helper up' "$c1" || bad "the daemon's socket or the helper's was not up for the cases"
-grep -a -q 'SLOW-STOP-END' "$c1" || bad "a: the slow unit's stop did not end on the guest's console (the reboot did not go through the stop)"
+case "$CASES" in *a*) grep -a -q 'SLOW-STOP-END' "$c1" || bad "a: the slow unit's stop did not end on the guest's console (the reboot did not go through the stop)" ;; esac
 if [ "$q1" -ne 0 ]; then bad "boot 1: QEMU did not exit 0 through the reboot (status $q1)"; fi
 if grep -a -q 'Kernel panic' "$c1"; then bad "boot 1: the guest panicked"; fi
 
@@ -323,6 +325,7 @@ dd if="$WORK/disk.img" of="$WORK/boot-after.img" bs=512 skip=$p1 count=$boot_sec
 "$ctl" boot-partition --socs "$socs" --verify "$WORK/boot-after.img" --layout-of "$WORK/board.toml" > "$WORK/out/boot-verify-after.txt" 2>&1 \
 	&& echo "boot partition after boot 1 verifies" || bad "the boot partition after boot 1 does not verify"
 
+if [ "${CASES#*a}" != "$CASES" ]; then
 boot 2
 q2=$QSTATUS_LAST
 c2="$WORK/out/console-2.log"
@@ -330,6 +333,7 @@ echo "== boot 2: the state read back"
 grep -a '^LEMNOSD-RESTART-GUEST ' "$c2" | grep -a -E 'PASS|FAIL|STAGE2|CASES' || true
 grep -a -q '^LEMNOSD-RESTART-GUEST PASS a2 ' "$c2" || bad "a2: the next boot's state does not have the trial armed"
 if [ "$q2" -ne 0 ]; then bad "boot 2: QEMU did not exit 0 (status $q2)"; fi
+fi
 
 if [ "$verdict" -eq 0 ]; then
 	echo "PASS: every case passed, and the boot partition verifies (logs: $WORK/out)"

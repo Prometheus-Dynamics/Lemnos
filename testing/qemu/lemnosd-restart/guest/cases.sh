@@ -14,6 +14,11 @@ CHECK=/usr/bin/lemnos-restart-lemnosd-check
 PROBE=/usr/bin/lemnos-restart-probe
 SLOT=install-1
 stage=$(sed -n 's/.*rst\.stage=\([0-9]*\).*/\1/p' /proc/cmdline)
+# rst.cases: the letters of the stage-1 cases to run (c, b, a; default "ca"). Case a's reboot ends the stage, and case b's
+# reboot ends it too, so the two run in separate boots (run-lemnosd-restart.sh, CASES).
+cases=$(sed -n 's/.*rst\.cases=\([a-z]*\).*/\1/p' /proc/cmdline)
+cases=${cases:-ca}
+case_on() { case "$cases" in *"$1"*) return 0 ;; esac; return 1; }
 
 say() { echo "LEMNOSD-RESTART-GUEST $*"; }
 # as UID GID COMMAND...: the command with that user and group, and group lemnos as a supplementary group.
@@ -101,6 +106,7 @@ else
 	say "FAIL old-path: systemctl reboot as lemnos was not refused (rc=$rc denied=$denied): $out"
 fi
 
+if case_on c; then
 # (c) StartUnit fails on the same connection: reboot.target is ordered after a unit that orders it before itself, so the
 # service manager refuses the transaction ("Transaction order is cyclic"). The helper says accepted, then failed; the
 # daemon's trial is disarmed, its state is restart-failed with the reason, and the caller gets the error.
@@ -135,6 +141,8 @@ rm -f /run/systemd/system/reboot.target.d/cycle.conf /run/systemd/system/lemnos-
 rmdir /run/systemd/system/reboot.target.d 2>/dev/null
 systemctl daemon-reload
 
+fi
+if case_on b; then
 # (b) accepted, then no stop request within the bound. lemnos-guest-blocker.service is a start still running since boot
 # (600 s); a drop-in orders reboot.target after it, so the reboot job queues behind that start and the system does not start
 # stopping. The helper's bound expires, the daemon disarms the trial and says why. The queued job is cancelled after
@@ -156,6 +164,8 @@ rm -f /run/systemd/system/reboot.target.d/blocker.conf
 rmdir /run/systemd/system/reboot.target.d 2>/dev/null
 systemctl daemon-reload
 
+fi
+if case_on a; then
 # (a) accepted, then SIGTERM: the reboot is happening, so the trial stays armed. The slow unit stops for 5 s on the way
 # (lemnos-guest-slow.service). The trial call returns once the helper accepted; the stop comes after.
 out=$("$CHECK" trial "$SOCK" "$SLOT" force 2>&1)
@@ -180,5 +190,6 @@ case "$out" in
 	echo o > /proc/sysrq-trigger
 	;;
 esac
+fi
 # The reboot ends this unit (it has no stop of its own). Waiting here keeps the stage from going on past the reboot.
 sleep 120

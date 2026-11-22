@@ -19,7 +19,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use lemnos_client::{Client, Handle};
+use lemnos_client::{Client, DeviceState, Handle};
 use lemnos_core::{Driver, Encode, Status, Writer};
 use lemnos_driver_system_slots::SystemSlots;
 use lemnos_firmware_check::sample;
@@ -36,6 +36,43 @@ const KERNEL_BYTES: usize = 1_000_000;
 const CHUNK: usize = 64 << 10;
 /// How long the install's end may take before the check gives up (the daemon's own bound is the job).
 const JOB_WAIT: Duration = Duration::from_secs(900);
+/// How long the check waits for the slots device to be bound and running before it starts a job. The daemon refuses a
+/// job on a device that is not bound (Status::NO_DEVICE), and a socket that is up does not mean the device is.
+const BIND_WAIT: Duration = Duration::from_secs(120);
+/// The interval the readiness condition is polled at (the wait ends on the condition or on BIND_WAIT, not on this).
+const BIND_POLL: Duration = Duration::from_millis(200);
+
+/// Waits until the device named `slots` is running in the daemon's device list. When the bound is reached, the error names
+/// every device the daemon listed, with its state, health and reason.
+fn wait_bound(client: &Client) -> Result<(), String> {
+    let deadline = Instant::now() + BIND_WAIT;
+    loop {
+        let entries = client.list().map_err(|e| format!("list: {e:?}"))?;
+        if entries
+            .iter()
+            .any(|e| e.name == "slots" && e.state == DeviceState::Running)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let seen: Vec<String> = entries
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} driver={} state={:?} health={:?} reason={:?}",
+                        e.name, e.driver, e.state, e.health, e.reason
+                    )
+                })
+                .collect();
+            return Err(format!(
+                "the slots device is not running within {} s; the daemon lists: [{}]",
+                BIND_WAIT.as_secs(),
+                seen.join("; ")
+            ));
+        }
+        std::thread::sleep(BIND_POLL);
+    }
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -223,6 +260,7 @@ impl Slots {
 fn install(socket: &str, bundle: &Path, slot: &str, boot_node: &Path) -> Result<(), String> {
     let bytes = fs::read(bundle).map_err(|e| format!("{}: {e}", bundle.display()))?;
     let client = Client::connect(socket, "slot-install").map_err(|e| format!("connect: {e:?}"))?;
+    wait_bound(&client)?;
     let slots = Slots { client };
     let mut c = Checks::new();
 
@@ -327,6 +365,7 @@ fn install(socket: &str, bundle: &Path, slot: &str, boot_node: &Path) -> Result<
 /// restart, through the restart helper). Prints what the daemon answered; the restart's own outcome is read by `state`.
 fn trial(socket: &str, slot: &str, force: bool) -> Result<(), String> {
     let client = Client::connect(socket, "slot-restart").map_err(|e| format!("connect: {e:?}"))?;
+    wait_bound(&client)?;
     let slots = Slots { client };
     let (mut handle, id) = slots.handle("trial")?;
     let args = Args::new()
