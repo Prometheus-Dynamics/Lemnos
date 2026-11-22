@@ -82,6 +82,17 @@ driver = "system-identity"
 config = { serial = "nvmem", serial_path = "/hang.fifo", serial_length = 8 }
 "#;
 
+/// The device after the watchdog in `daemon-loop-bind`: its bind hangs on the same FIFO as `IDENTITY_HANGS`. The
+/// host binds in board order, so the watchdog's bind ends, the host waits in this device's bind (cut at the call
+/// deadline, 2 s), and its first tick cannot come before then. The stand-in stops lemnosd at the watchdog's bind end,
+/// so the stop always lands before any feed of that start.
+const HANG_AFTER_WATCHDOG: &str = r#"
+[[devices]]
+id = "identity-hang"
+driver = "system-identity"
+config = { serial = "nvmem", serial_path = "/hang.fifo", serial_length = 8 }
+"#;
+
 const WATCHDOG: &str = r#"
 [[devices]]
 id = "watchdog"
@@ -261,7 +272,15 @@ pub fn run(mode: &str, last: f64) -> ! {
     } else {
         IDENTITY
     };
-    if let Err(e) = fs::write(BOARD_PATH, format!("{BOARD_HEAD}{identity}{WATCHDOG}")) {
+    let after = if mode == "daemon-loop-bind" {
+        HANG_AFTER_WATCHDOG
+    } else {
+        ""
+    };
+    if let Err(e) = fs::write(
+        BOARD_PATH,
+        format!("{BOARD_HEAD}{identity}{WATCHDOG}{after}"),
+    ) {
         say(&format!(
             "user: daemon: the board file can't be written: {e}"
         ));

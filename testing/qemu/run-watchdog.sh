@@ -142,7 +142,7 @@ run_mode() {
       cp "$work/watchdog-init" "$root/init"; cp "$work/watchdog-user" "$root/sbin/watchdog-user"
       cp "$work/lemnosd" "$root/sbin/lemnosd"; cp "$work/lemnos-unit-check" "$root/sbin/lemnos-unit-check"
       mkdir -p "$root"/{run,tmp}
-      if [[ "$mode" == daemon-hang ]]; then mkfifo -m 0666 "$root/hang.fifo"; fi
+      if [[ "$mode" == daemon-hang || "$mode" == daemon-loop-bind ]]; then mkfifo -m 0666 "$root/hang.fifo"; fi
       extra="lemnos.watchdog=$mode lemnos.serial=QEMUWDT0001"; level=2 ;;
     *) echo "qemu-watchdog: no mode $mode" >&2; exit 2 ;;
   esac
