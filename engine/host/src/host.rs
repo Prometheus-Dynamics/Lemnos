@@ -2647,6 +2647,9 @@ impl Inner {
                 .with_lists(&borrowed)
                 .on_board(&self.board)
                 .on_host_version(self.daemon_version)
+                .with_call_deadline_ms(
+                    u64::try_from(self.options.call_deadline.as_millis()).unwrap_or(u64::MAX),
+                )
                 .with_refusals(RefusalSink::new(&sink));
             let config = if guest {
                 config.for_host_owned()

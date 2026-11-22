@@ -35,6 +35,10 @@
 #   MEM            guest memory in MiB (default 1024)
 #   COMPETE_S      seconds the competitors run (default 150)
 #   ACCEL          kvm or tcg (default: kvm when /dev/kvm is writable, else tcg)
+#   THROTTLE_BPS   bytes per second the guest's disk is held to (QEMU's throttling.bps-write; default: none):
+#                  a slow store, as a slow card is
+#   MAX_TICK_US    the longest tick the install may take, in microseconds (default: none); TICK-BOUND runs it at
+#                  1000000, half the default 2000 ms call deadline, with THROTTLE_BPS=4000000
 #
 # Exits 0 when the guest's install passed every check and the boot partition verifies. Exits 1 otherwise.
 set -euo pipefail
@@ -55,6 +59,8 @@ KERNEL_LOCK="${KERNEL_LOCK:-/mnt/nvme-wd/lemnos-targets/qk/modules-36008ba4fda2e
 BOUND="${BOUND:-900}"
 MEM="${MEM:-1024}"
 COMPETE_S="${COMPETE_S:-600}"
+THROTTLE_BPS="${THROTTLE_BPS:-}"
+MAX_TICK_US="${MAX_TICK_US:-}"
 SLOT_RUN="${SLOT_RUN:-}"
 if [ -z "${ACCEL:-}" ]; then
 	if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; else ACCEL=tcg; fi
@@ -197,7 +203,7 @@ rm -rf datatree
 cat "$WORK/out/data-partition.txt"
 [ -d datatree/slots/bootfiles ] || die "the first-flash tree has no boot-file store (slots/bootfiles)"
 truncate -s $((data_sectors * 512)) data.img
-mke2fs -q -F -t ext4 -b 4096 -I 256 -m 0 -O meta_bg,^resize_inode -E root_owner=0:0 -L lemnos-data \
+mke2fs -q -F -t ext4 -b 4096 -I 256 -m 0 -O meta_bg,^resize_inode -E root_owner=0:0,lazy_itable_init=0,lazy_journal_init=0 -L lemnos-data \
 	-d datatree data.img > "$WORK/out/mke2fs.txt" 2>&1 || { cat "$WORK/out/mke2fs.txt"; die "mke2fs refused the data partition"; }
 dd if=data.img of=disk.img bs=512 seek=$p2 conv=notrunc status=none
 
@@ -297,7 +303,7 @@ printf '/soc/mmc@7e202000\0' > "$seam/chosen/lemnos,boot-source"
 (cd "$root" && find . -print0 | cpio --null -o -H newc --quiet) > "$WORK/initramfs.cpio"
 rm -rf "$root"
 
-echo "== boot $KERNEL under systemd ($ACCEL), bound ${BOUND}s, the lander's kernel read under a shared lock"
+echo "== boot $KERNEL under systemd ($ACCEL), bound ${BOUND}s, the lander's kernel read under a shared lock${THROTTLE_BPS:+, the disk held to $THROTTLE_BPS bytes/s}"
 cmdline="console=ttyS0 loglevel=4 panic=5 systemd.log_target=console systemd.log_level=info"
 stamp() {
 	local line
@@ -312,7 +318,7 @@ set +e
 pooled 2 flock -s "$KERNEL_LOCK" timeout --kill-after=30 "$BOUND" qemu-system-x86_64 -accel "$ACCEL" -cpu "$CPU" \
 	-smp 2 -m "$MEM" -nodefaults -display none -monitor none -serial stdio -no-reboot \
 	-kernel "$KERNEL" -initrd "$WORK/initramfs.cpio" -append "$cmdline" \
-	-drive "file=$WORK/disk.img,format=raw,if=virtio,cache=writeback" </dev/null 2>&1 | stamp > "$stamped"
+	-drive "file=$WORK/disk.img,format=raw,if=virtio,cache=writeback${THROTTLE_BPS:+,throttling.bps-write=$THROTTLE_BPS}" </dev/null 2>&1 | stamp > "$stamped"
 qstatus=${PIPESTATUS[0]}
 set -e
 sed -E 's/^[0-9]+\.[0-9]+ //' "$stamped" > "$console"
@@ -357,6 +363,19 @@ if [ "$ticks_in_job" -gt 0 ]; then
 	grep '^SLOT-INSTALL-GUEST TICK-IN-JOB' "$guest" | awk '
 		{ for (i = 1; i < NF; i++) if ($i == "us" && $(i + 1) + 0 > max) { max = $(i + 1) + 0; line = $0 } }
 		END { printf "longest tick in the job: %d us; the journal line: %s\n", max, line }' | sed 's/SLOT-INSTALL-GUEST TICK-IN-JOB //'
+fi
+
+if [ -n "$MAX_TICK_US" ]; then
+	longest=$(grep '^SLOT-INSTALL-GUEST TICK-IN-JOB' "$guest" | awk '
+		{ for (i = 1; i < NF; i++) if ($i == "us" && $(i + 1) + 0 > max) max = $(i + 1) + 0 }
+		END { print max + 0 }')
+	if [ "$ticks_in_job" -eq 0 ]; then
+		bad "no tick in the job's window to bound"
+	elif [ "$longest" -gt "$MAX_TICK_US" ]; then
+		bad "the longest tick in the job took ${longest} us, past MAX_TICK_US=${MAX_TICK_US}"
+	else
+		echo "the longest tick in the job took ${longest} us, inside MAX_TICK_US=${MAX_TICK_US}"
+	fi
 fi
 
 echo "== the boot partition the guest left"

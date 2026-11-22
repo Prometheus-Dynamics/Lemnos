@@ -875,12 +875,45 @@ then the metadata). The total is the size plus those five, so the figure never g
 is the new slot's id. One install runs at a time.
 
 The finish is not in the call that takes the last byte. That call returns at once with the job
-running, and the driver runs the finish one step a tick, each step short: the boot directory's files
-go in one file a step, so a call from another session answers between any two steps. A step that
-refuses ends the job with the refusal, and the reason is in `info`. A cancel after the payloads are
-in a bay frees that bay, since nothing points at it yet. The commit is one step, so a cancel falls
-before it or not at all; once it has run, the install is in place. `docs/daemon.md` ("When a client gets `BUSY`") has the job's
+running, and the driver runs the finish from its ticks.
+
+**Each tick is bounded by time.** A tick works in pieces of 64 KiB (`drivers/system-slots/src/budget.rs`)
+and looks at the clock after each: it stops at the first piece past a quarter of the host's call
+deadline (the board file's `call_deadline_ms`, 2000 ms by default, so 500 ms), or past 1 MiB, whichever
+comes first. One piece always runs, so the install moves however slow the board is. The bound is time,
+not bytes, so it is the same on every target: a slow card, a slow SHA-256 or an emulated disk only make
+the install take more ticks. Reading a bundle from its file, hashing and copying the boot directory into
+the store, and writing the payloads into a bay (on the tryboot and the U-Boot forms alike) all go by
+pieces. A file's flush (fsync) never runs on the tick: it runs on the flush worker, and the tick only
+asks whether it is done. The offline writer (`lemnos-ctl data-partition`) has no call deadline and runs
+each step through. The host gives the deadline to every driver in its config (`call_deadline_ms()`).
+
+**The slow-period look is off the tick too.** Every 600 s (and at the first tick) the driver reads and
+hashes the default slot's boot files against its manifest (`boot_guard`). That read is a thread of its
+own over a record of its own, and it writes nothing; a tick only takes its answer. Only when the default
+no longer matches and the previous does does a tick run the check that moves the default (it reads both
+again before it writes).
+
+So a call from another session answers between any two ticks. A step that refuses ends the job with
+the refusal, and the reason is in `info`. A cancel after the payloads are in a bay frees that bay,
+since nothing points at it yet. The commit is one step, so a cancel falls before it or not at all;
+once it has run, the install is in place. `docs/daemon.md` ("When a client gets `BUSY`") has the job's
 contract.
+
+Tests: `on_a_slow_store_each_tick_of_a_boot_file_copy_stays_inside_its_share_of_the_deadline` and
+`on_a_slow_store_the_payload_write_into_a_bay_stays_inside_its_share_of_the_deadline` (a clock on which
+each piece takes 100 ms, boot files that differ from every stored one; both fail with the time check taken
+out), `the_slow_boot_file_look_runs_off_the_tick_and_its_answer_is_taken_by_a_later_tick`, and
+`engine/host/tests/call_deadline.rs`. In QEMU, `testing/qemu/run-slot-install.sh` with
+`THROTTLE_BPS=4000000 MAX_TICK_US=1000000`: the guest's disk writes held to 4 MB/s, the install's boot
+files differing from the stored ones, the default deadline. The longest tick in the job was 581 ms and
+621 ms (two runs); the daemon before this change took 1912 ms in one tick, and at 2 MB/s ran a tick past
+the deadline, which ended the job interrupted.
+
+**Not bounded yet: a call that writes.** At 2 MB/s, a stream `write` call can wait in the filesystem
+for over 2 s (ext4 holds the write while a journal commit flushes ordered data), and the call deadline
+then ends the job. No piece size bounds one blocking `write(2)`; it needs the install's file writes off
+the call. Seen in 2 of 3 runs at 2 MB/s, none at 4 MB/s.
 
 ## Over Orion
 

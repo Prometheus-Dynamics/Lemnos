@@ -151,6 +151,10 @@ impl Board {
             .unwrap_or_default()
     }
 
+    fn look(&self) -> boot_guard::Seen {
+        boot_guard::look(&self.layout, &Ok(self.node.clone()), &self.record)
+    }
+
     fn check(&mut self, restart: bool) -> Result<Option<String>, String> {
         // The files are read raw from the image, as lemnosd reads the boot partition's node.
         let node = self.node.clone();
@@ -352,4 +356,37 @@ fn every_boot_file_kind_reads_raw_through_a_fragmented_fat_image() {
 fn no_device_is_refused_by_name() {
     let why = boot_guard::read_raw(&Err("no source".into()), "CMDLINE.TXT").unwrap_err();
     assert!(why.contains("device isn't known"), "{why}");
+}
+
+/// The slow period's look reads what the check reads and writes nothing: the default and its pointer
+/// stay whatever it finds, and only its answer says what the check would do.
+#[test]
+fn the_slow_look_finds_what_the_check_would_and_writes_nothing() {
+    let board = Board::new("look");
+    assert_eq!(board.look(), boot_guard::Seen::Fine);
+    board.edit("os-2");
+    let image = fs::read(&board.node).unwrap();
+    let meta = fs::read(board.layout.meta("os-2")).ok();
+    assert_eq!(board.look(), boot_guard::Seen::Repoint);
+    assert_eq!(
+        fs::read(&board.node).unwrap(),
+        image,
+        "the look wrote the boot partition"
+    );
+    assert_eq!(
+        fs::read(board.layout.meta("os-2")).ok(),
+        meta,
+        "the look wrote the slot's state"
+    );
+    assert_eq!(board.state().default, "os-2");
+    assert_eq!(board.default_txt(), "os-2");
+    assert_eq!(Meta::load(&board.layout, "os-2").get("FAILED"), "");
+    board.edit("os-1");
+    match board.look() {
+        boot_guard::Seen::Neither(why) => {
+            assert!(why.contains("os-2 doesn't match its manifest"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(board.state().default, "os-2");
 }

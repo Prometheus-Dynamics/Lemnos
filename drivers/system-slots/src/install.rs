@@ -754,7 +754,11 @@ impl Install {
 
     /// Runs the next finish step. `Some(id)` once the slot is in place; `None` while steps remain.
     /// A failure ends the finish: the caller then ends the install.
-    pub fn step(&mut self, board: &Finish<'_>) -> Result<Option<String>, Failure> {
+    pub fn step(
+        &mut self,
+        board: &Finish<'_>,
+        budget: &mut crate::budget::Budget<'_>,
+    ) -> Result<Option<String>, Failure> {
         let Some(phase) = self.phase else {
             return Ok(None);
         };
@@ -762,8 +766,8 @@ impl Install {
         let done = match phase {
             Phase::Check => self.check(board, &mut refused),
             Phase::Prepare => self.prepare(board, &mut refused),
-            Phase::Payloads => self.payloads(board, &mut refused),
-            Phase::BootFiles => self.boot_files(board, &mut refused),
+            Phase::Payloads => self.payloads(board, budget, &mut refused),
+            Phase::BootFiles => self.boot_files(board, budget, &mut refused),
             Phase::Commit => self.commit(board, &mut refused),
         };
         self.refused = refused;
@@ -881,14 +885,18 @@ impl Install {
 
     /// The payloads go into a free bay of the boot partition: the five roles, then the firmware
     /// overlays the boot partition declares (the admission made the bundle's set exactly these). The
-    /// files are read a tick's bytes at a time, then the bay's write is stepped a tick at a time, so
-    /// no tick waits on more than [`READ_EVERY_TICK`] bytes or [`lemnos_slot_store::bays::STEP_SECTORS`]
-    /// sectors. Refusals come first (a payload missing or larger than its bay is refused by name
+    /// files are read and the bay's write is stepped a tick's [`crate::budget::Budget`] at a time, so
+    /// no tick spends more than its share of the call deadline or [`READ_EVERY_TICK`] bytes. Refusals come first (a payload missing or larger than its bay is refused by name
     /// before any write); no pointer moves.
-    fn payloads(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
+    fn payloads(
+        &mut self,
+        board: &Finish<'_>,
+        budget: &mut crate::budget::Budget<'_>,
+        refused: &mut bool,
+    ) -> Result<bool, Failure> {
         *refused = true;
         if self.fin.run.is_none() {
-            if !self.load_some()? {
+            if !self.load_some(budget)? {
                 return Ok(false);
             }
             let bytes = self
@@ -908,7 +916,7 @@ impl Install {
             return Ok(false);
         };
         let done = run
-            .step()
+            .step(budget)
             .map_err(|error| bad(format!("slot {}'s boot files: {error}", self.fin.id)))?;
         if done {
             self.fin.run = None;
@@ -917,8 +925,9 @@ impl Install {
         Ok(done)
     }
 
-    /// Reads up to [`READ_EVERY_TICK`] bytes of the payload files. `Ok(true)` once all are read.
-    fn load_some(&mut self) -> Result<bool, Failure> {
+    /// Reads the payload files a piece at a time until the tick's budget is spent. `Ok(true)` once
+    /// all are read.
+    fn load_some(&mut self, budget: &mut crate::budget::Budget<'_>) -> Result<bool, Failure> {
         let io = disk("the slot's boot files");
         let boot_dir = self.fin.boot_dir.clone();
         let load = self.fin.load.get_or_insert_with(|| {
@@ -932,7 +941,6 @@ impl Install {
                 ..Load::default()
             }
         });
-        let mut budget = READ_EVERY_TICK as u64;
         loop {
             let Some(path) = load.paths.get(load.next).cloned() else {
                 return Ok(true);
@@ -944,28 +952,33 @@ impl Install {
                 load.cur = Vec::with_capacity(usize::try_from(load.size).unwrap_or(0));
                 load.file = Some(file);
             }
-            let want = (load.size - load.cur.len() as u64).min(budget) as usize;
+            let want = (load.size - load.cur.len() as u64).min(budget.piece() as u64) as usize;
             if want > 0 {
                 let from = load.cur.len();
                 load.cur.resize(from + want, 0);
                 let file = load.file.as_mut().expect("opened above");
                 std::io::Read::read_exact(file, &mut load.cur[from..]).map_err(&io)?;
-                budget -= want as u64;
+                budget.spend(want);
             }
-            if (load.cur.len() as u64) < load.size {
-                return Ok(false);
+            if (load.cur.len() as u64) == load.size {
+                load.bytes.push(std::mem::take(&mut load.cur));
+                load.file = None;
+                load.next += 1;
             }
-            load.bytes.push(std::mem::take(&mut load.cur));
-            load.file = None;
-            load.next += 1;
-            if budget == 0 {
+            if budget.spent() {
                 return Ok(false);
             }
         }
     }
 
-    /// The slot's boot directory into the boot partition's store on the data side, one file a call.
-    fn boot_files(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
+    /// The slot's boot directory into the boot partition's store on the data side, a tick's budget at
+    /// a time ([`boot::Put`]).
+    fn boot_files(
+        &mut self,
+        board: &Finish<'_>,
+        budget: &mut crate::budget::Budget<'_>,
+        refused: &mut bool,
+    ) -> Result<bool, Failure> {
         let io = disk("the slot's boot files");
         *refused = false;
         if self.fin.put.is_none() {
@@ -976,7 +989,7 @@ impl Install {
         let Some(put) = self.fin.put.as_mut() else {
             return Ok(true);
         };
-        let done = put.step().map_err(&io)?;
+        let done = put.step(budget).map_err(&io)?;
         if done {
             self.fin.put = None;
         }

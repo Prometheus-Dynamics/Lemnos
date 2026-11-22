@@ -88,6 +88,16 @@ fn give(data: &Path, uid: &str, gid: &str) -> Result<(), String> {
 /// `cmdline`, `board-overlay`), as `boot-partition --payload` and `bundle --payload` take them: the kernel and the
 /// initramfs at their sizes, a device tree, the command line with the root hash's hole (`bundle` fills it), and
 /// the board overlay.
+/// The slot's kernel: an arm64 Image of [`KERNEL_BYTES`] with the slot's name written through it, so
+/// two slots' kernels differ and an install copies its kernel into the boot-file store whole.
+fn kernel(slot: &str) -> Vec<u8> {
+    let mut image = sample::arm64_image(KERNEL_BYTES);
+    for at in (0x1000..image.len().saturating_sub(slot.len())).step_by(0x10000) {
+        image[at..at + slot.len()].copy_from_slice(slot.as_bytes());
+    }
+    image
+}
+
 fn payload(dir: &Path, slot: &str) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     // A plain cpio: the firmware-layout check reads it to its trailer, so nothing may follow.
@@ -96,7 +106,7 @@ fn payload(dir: &Path, slot: &str) -> Result<(), String> {
         "os.slot={slot} os.roothash=@roothash@ os.src./soc/mmc@7e202000=/soc/mmc@7e202000 panic=5\n"
     );
     let bytes: [Vec<u8>; 5] = [
-        sample::arm64_image(KERNEL_BYTES),
+        kernel(slot),
         initramfs,
         sample::base_dtb(),
         cmdline.into_bytes(),

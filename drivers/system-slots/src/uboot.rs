@@ -905,6 +905,21 @@ impl BootRecord for UbootEnv {
             .map_err(io::Error::other)
     }
 
+    /// The bay's writes stepped a tick's budget at a time, as the `tryboot` form's are: the checks
+    /// and refusals here, before any write.
+    fn payload_begin(
+        &self,
+        slot: &str,
+        payloads: Vec<Vec<u8>>,
+    ) -> io::Result<Box<dyn crate::boot::PayloadRun>> {
+        let protected = self.protected()?;
+        let run = self
+            .raw()?
+            .into_payloads_with(slot, &payloads, &protected)
+            .map_err(io::Error::other)?;
+        Ok(Box::new(crate::boot::Stepped(run)))
+    }
+
     fn free(&self, slot: &str) -> io::Result<()> {
         let protected = self.protected()?;
         self.raw()?

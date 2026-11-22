@@ -52,24 +52,38 @@ pub(crate) fn loader_reads_record(record: &dyn BootRecord) -> io::Result<()> {
 /// [`BootRecord::payload_begin`]). `step` returns `Ok(true)` once the payloads are committed; until
 /// then the install is still in progress and nothing is a pointer's yet.
 pub trait PayloadRun: Send {
-    fn step(&mut self) -> io::Result<bool>;
+    /// Writes in pieces until the tick's budget is spent (one piece at least). `Ok(true)` once the
+    /// payloads are committed.
+    fn step(&mut self, budget: &mut crate::budget::Budget<'_>) -> io::Result<bool>;
 }
 
 /// A payload write that finished when it began (see [`BootRecord::payload_begin`]).
 struct Written;
 
 impl PayloadRun for Written {
-    fn step(&mut self) -> io::Result<bool> {
+    fn step(&mut self, _budget: &mut crate::budget::Budget<'_>) -> io::Result<bool> {
         Ok(true)
     }
 }
 
-/// The bay writer of the `tryboot` form, stepped (see [`lemnos_slot_store::boot_raw::Payloads`]).
-struct Stepped(lemnos_slot_store::boot_raw::Payloads);
+/// A bay writer, stepped (see [`lemnos_slot_store::boot_raw::Payloads`]): the `tryboot` form's and
+/// the U-Boot environment form's.
+pub(crate) struct Stepped(pub(crate) lemnos_slot_store::boot_raw::Payloads);
 
 impl PayloadRun for Stepped {
-    fn step(&mut self) -> io::Result<bool> {
-        self.0.step().map_err(io::Error::other)
+    fn step(&mut self, budget: &mut crate::budget::Budget<'_>) -> io::Result<bool> {
+        loop {
+            let piece = budget.piece();
+            let sectors = (piece / 512).max(1) as u64;
+            let step = self.0.step_sectors(sectors).map_err(io::Error::other)?;
+            budget.spend(piece);
+            match step {
+                lemnos_slot_store::bays::Step::Done => return Ok(true),
+                lemnos_slot_store::bays::Step::Wait => return Ok(false),
+                lemnos_slot_store::bays::Step::More if budget.spent() => return Ok(false),
+                lemnos_slot_store::bays::Step::More => {}
+            }
+        }
     }
 }
 
@@ -228,6 +242,18 @@ pub struct Check(pub Arc<dyn Fn(bool) -> Result<Option<String>, String> + Send +
 impl fmt::Debug for Check {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Check")
+    }
+}
+
+/// The slow period's look at the boot files ([`crate::boot_guard::look`]), over a record of its own:
+/// it reads every boot file of the default, so the driver runs it on a thread of its own and the tick
+/// only takes its answer.
+#[derive(Clone)]
+pub struct Look(pub Arc<dyn Fn() -> crate::boot_guard::Seen + Send + Sync>);
+
+impl fmt::Debug for Look {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Look")
     }
 }
 
@@ -695,8 +721,13 @@ pub fn kept(layout: &Layout, id: &str) -> Option<Vec<(String, String)>> {
 }
 
 /// A slot's boot directory (as it goes on the boot partition) kept on the data partition: each file
-/// by content, and `<id>.boot` listing them. It goes in one file a step: each file is hashed and
-/// copied unless the store has its content already, and the slot's list is written last.
+/// by content, and `<id>.boot` listing them. It goes in pieces, a tick's [`Budget`] at a time: each
+/// file is hashed, then copied beside the store's entry unless the store has its content already;
+/// the copy is flushed on the flush worker (never on a tick) and renamed into place; the slot's list
+/// is written last. No tick hashes, copies or waits on more than its budget, whatever the file's size
+/// and however slow the board.
+///
+/// [`Budget`]: crate::budget::Budget
 pub struct Put {
     dir: PathBuf,
     store: PathBuf,
@@ -704,6 +735,27 @@ pub struct Put {
     names: Vec<String>,
     at: usize,
     list: String,
+    stage: Option<Stage>,
+    buf: Vec<u8>,
+}
+
+/// Where the current file is.
+enum Stage {
+    /// Being read and hashed.
+    Hash { from: fs::File, hasher: Sha256 },
+    /// Its content is not in the store: being copied beside its entry.
+    Copy {
+        sha: String,
+        from: fs::File,
+        to: fs::File,
+        beside: PathBuf,
+    },
+    /// Copied; its flush runs on the flush worker.
+    Flush {
+        sha: String,
+        beside: PathBuf,
+        barrier: lemnos_slot_store::flush::Barrier,
+    },
 }
 
 impl Put {
@@ -718,28 +770,125 @@ impl Put {
             names: files_under(dir)?,
             at: 0,
             list: String::new(),
+            stage: None,
+            buf: vec![0; crate::budget::PIECE],
         })
     }
 
-    /// The next file's step, or the list's when every file is in. `true` once the directory is in.
-    pub fn step(&mut self) -> io::Result<bool> {
-        let Some(name) = self.names.get(self.at).cloned() else {
-            sync_dir(&self.store)?;
-            replace(&self.list_path, self.list.as_bytes())?;
-            return Ok(true);
-        };
-        let from = self.dir.join(&name);
-        let sha = sha256_file(&from)?;
-        let to = self.store.join(&sha);
-        if !to.exists() {
-            let beside = self.store.join(format!(".{sha}.tmp"));
-            fs::copy(&from, &beside)?;
-            fs::File::open(&beside)?.sync_all()?;
-            fs::rename(&beside, &to)?;
+    /// Runs pieces until the tick's budget is spent (one at least). `true` once the directory is in.
+    pub fn step(&mut self, budget: &mut crate::budget::Budget<'_>) -> io::Result<bool> {
+        loop {
+            if self.piece(budget)? {
+                return Ok(true);
+            }
+            if budget.spent() || matches!(self.stage, Some(Stage::Flush { .. })) {
+                return Ok(false);
+            }
         }
-        self.list.push_str(&format!("{sha}  {name}\n"));
-        self.at += 1;
+    }
+
+    /// One piece of the current file, or the next file's start, or the list once every file is in.
+    fn piece(&mut self, budget: &mut crate::budget::Budget<'_>) -> io::Result<bool> {
+        let Some(stage) = self.stage.take() else {
+            let Some(name) = self.names.get(self.at) else {
+                sync_dir(&self.store)?;
+                replace(&self.list_path, self.list.as_bytes())?;
+                return Ok(true);
+            };
+            self.stage = Some(Stage::Hash {
+                from: fs::File::open(self.dir.join(name))?,
+                hasher: Sha256::new(),
+            });
+            return Ok(false);
+        };
+        let want = budget.piece();
+        match stage {
+            Stage::Hash {
+                mut from,
+                mut hasher,
+            } => {
+                let got = read_some(&mut from, &mut self.buf[..want])?;
+                budget.spend(got);
+                if got > 0 {
+                    hasher.update(&self.buf[..got]);
+                    self.stage = Some(Stage::Hash { from, hasher });
+                    return Ok(false);
+                }
+                let sha = hex(&hasher.finalize());
+                if self.store.join(&sha).exists() {
+                    self.next(&sha);
+                    return Ok(false);
+                }
+                let name = &self.names[self.at];
+                let beside = self.store.join(format!(".{sha}.tmp"));
+                self.stage = Some(Stage::Copy {
+                    from: fs::File::open(self.dir.join(name))?,
+                    to: fs::File::create(&beside)?,
+                    sha,
+                    beside,
+                });
+            }
+            Stage::Copy {
+                sha,
+                mut from,
+                mut to,
+                beside,
+            } => {
+                let got = read_some(&mut from, &mut self.buf[..want])?;
+                budget.spend(got);
+                if got > 0 {
+                    io::Write::write_all(&mut to, &self.buf[..got])?;
+                    self.stage = Some(Stage::Copy {
+                        sha,
+                        from,
+                        to,
+                        beside,
+                    });
+                    return Ok(false);
+                }
+                let barrier =
+                    lemnos_slot_store::flush::Barrier::start(Box::new(move || to.sync_all()))?;
+                self.stage = Some(Stage::Flush {
+                    sha,
+                    beside,
+                    barrier,
+                });
+            }
+            Stage::Flush {
+                sha,
+                beside,
+                mut barrier,
+            } => {
+                if !barrier.poll()? {
+                    self.stage = Some(Stage::Flush {
+                        sha,
+                        beside,
+                        barrier,
+                    });
+                    return Ok(false);
+                }
+                fs::rename(&beside, self.store.join(&sha))?;
+                self.next(&sha);
+            }
+        }
         Ok(false)
+    }
+
+    /// The current file is in the store as `sha`: it goes on the list, and the next file is up.
+    fn next(&mut self, sha: &str) {
+        self.list
+            .push_str(&format!("{sha}  {}\n", self.names[self.at]));
+        self.at += 1;
+    }
+}
+
+/// One read into `buf`, retried when interrupted: the bytes read, 0 at the file's end.
+fn read_some(file: &mut fs::File, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match io::Read::read(file, buf) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            other => return other,
+        }
     }
 }
 

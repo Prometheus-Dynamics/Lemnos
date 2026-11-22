@@ -45,6 +45,7 @@ pub struct Config<'a> {
     host_owned: bool,
     board: &'a str,
     host_version: &'a str,
+    call_deadline_ms: u64,
     refusals: Option<RefusalSink<'a>>,
 }
 
@@ -56,6 +57,7 @@ impl<'a> Config<'a> {
             host_owned: false,
             board: "",
             host_version: "",
+            call_deadline_ms: 0,
             refusals: None,
         }
     }
@@ -125,6 +127,22 @@ impl<'a> Config<'a> {
     /// host was started without one (a test, or a driver package on its own).
     pub const fn host_version(&self) -> &'a str {
         self.host_version
+    }
+
+    /// The same settings, with the host's deadline for one call into this driver (a tick included),
+    /// in milliseconds.
+    #[must_use]
+    pub const fn with_call_deadline_ms(mut self, ms: u64) -> Self {
+        self.call_deadline_ms = ms;
+        self
+    }
+
+    /// How long one call into this driver may run before the host abandons it, in milliseconds
+    /// (the board file's `call_deadline_ms`, or the host's default). A driver whose work comes in
+    /// steps bounds each step by a share of it. 0 where nothing says (a driver package, or a test
+    /// that sets none).
+    pub const fn call_deadline_ms(&self) -> u64 {
+        self.call_deadline_ms
     }
 
     /// The same settings, for a device the board file gives to the host (`owner = "host"`).

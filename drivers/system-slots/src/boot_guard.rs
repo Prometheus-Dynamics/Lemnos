@@ -133,6 +133,45 @@ pub fn check_with(
     })
 }
 
+/// What a look at the boot files found, read only: nothing is written by it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    /// The default matches its manifest, or there is no default to look at, or the records are
+    /// another system's.
+    Fine,
+    /// The default does not match and the previous does: [`check`] moves the default.
+    Repoint,
+    /// Neither matches: what the check would report.
+    Neither(String),
+}
+
+/// The slow period's look: [`check_with`]'s reading, without its writes. It reads and hashes every
+/// boot file of the default (and of the previous when the default does not match), so it runs off
+/// the tick; only a [`Seen::Repoint`] leads to [`check`], on the tick, which reads again before it
+/// writes anything.
+pub fn look_with(layout: &Layout, record: &dyn BootRecord, read: Read<'_>) -> Seen {
+    let state = State::load(layout);
+    if !valid_id(&state.default) {
+        return Seen::Fine;
+    }
+    let why = match verified_with(layout, record, &state.default, read) {
+        Ok(()) => return Seen::Fine,
+        Err(why) => why,
+    };
+    if valid_id(&state.previous) && verified_with(layout, record, &state.previous, read).is_ok() {
+        return Seen::Repoint;
+    }
+    Seen::Neither(format!(
+        "{} doesn't match its manifest ({why}), and its previous {:?} doesn't either",
+        state.default, state.previous
+    ))
+}
+
+/// [`look_with`], reading raw from `node`.
+pub fn look(layout: &Layout, node: &Node, record: &dyn BootRecord) -> Seen {
+    look_with(layout, record, &mut |path| read_raw(node, path))
+}
+
 /// Makes the previous slot the default: the old default is marked failed, then the boot record
 /// points at the previous, then the state swaps the two.
 fn repoint(

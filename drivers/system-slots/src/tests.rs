@@ -6602,3 +6602,209 @@ fn a_cancel_after_the_payloads_are_in_frees_their_bay() {
     );
     board.install_ok("os-2");
 }
+
+/// A slow board: a clock that moves `step_ns` on every read. The driver reads it once when a tick
+/// starts and once after each piece, so each piece costs `step_ns` of the tick's time.
+fn slow_clock(step_ns: u64) -> (crate::budget::Clock, Arc<std::sync::atomic::AtomicU64>) {
+    let now = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let read = now.clone();
+    (
+        Arc::new(move || read.fetch_add(step_ns, Ordering::Relaxed)),
+        now,
+    )
+}
+
+/// Bytes no other test slot has: boot files that differ from every stored one.
+fn unique_bytes(id: &str, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len + 32);
+    let mut block: [u8; 32] = Sha256::digest(id.as_bytes()).into();
+    while out.len() < len {
+        out.extend_from_slice(&block);
+        block = Sha256::digest(block).into();
+    }
+    out.truncate(len);
+    out
+}
+
+/// Streams `bundle` in and runs its finish from ticks on the slow clock, as the host would. Returns
+/// the install's status and the time each finishing tick spent by that clock (the read the tick
+/// starts with not counted).
+fn install_slowly(board: &mut Board, bundle: &[u8], step_ns: u64) -> (Status, Vec<u64>) {
+    let (clock, now) = slow_clock(step_ns);
+    board.slots.set_clock(clock);
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    let mut offset = 0u64;
+    for chunk in bundle.chunks(64 << 10) {
+        board.slots.caller(CallerId(1));
+        board.slots.write(offset, chunk).unwrap();
+        offset += chunk.len() as u64;
+    }
+    let mut ticks = Vec::new();
+    while board.slots.install.as_ref().is_some_and(Install::finishing) {
+        let before = now.load(Ordering::Relaxed);
+        board.slots.tick(0);
+        ticks.push(
+            now.load(Ordering::Relaxed)
+                .saturating_sub(before)
+                .saturating_sub(step_ns),
+        );
+        assert!(ticks.len() < 100_000, "the finish never ended");
+    }
+    let mut out = [0u8; 128];
+    match board.slots.job(job, &mut Reply::new(&mut out)) {
+        JobState::Finished(status) => (status, ticks),
+        JobState::Running { .. } => panic!("the install never ended"),
+    }
+}
+
+/// On a board where a 64 KiB piece takes 100 ms, a tick stops at the first piece past a quarter
+/// of the default 2000 ms call deadline: no tick runs past 500 ms plus the one piece it was in.
+/// The boot files differ from every stored one, so each is hashed and copied in full; the finish
+/// takes many ticks and puts every byte where it belongs. Before the bound, one tick hashed,
+/// copied and flushed a whole boot file however long it took.
+#[test]
+fn on_a_slow_store_each_tick_of_a_boot_file_copy_stays_inside_its_share_of_the_deadline() {
+    const STEP: u64 = 100_000_000;
+    let mut board = Board::new("os-1");
+    assert_eq!(
+        board.slots.tick_limit_ns,
+        crate::budget::limit_ns(crate::budget::DEFAULT_DEADLINE_MS),
+        "no deadline from a host: the host's default"
+    );
+    let limit = board.slots.tick_limit_ns;
+    let mut bundle = Bundle::new("os-2");
+    let kernel = unique_bytes("kernel of os-2", 3 << 20);
+    bundle.boot[0].1 = kernel.clone();
+    let initramfs = unique_bytes("initramfs of os-2", 1 << 20);
+    bundle.boot[2].1 = initramfs.clone();
+    let (status, ticks) = install_slowly(&mut board, &bundle.pack(), STEP);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    let longest = ticks.iter().copied().max().unwrap();
+    assert!(
+        longest <= limit + STEP,
+        "a tick spent {longest} ns, past {limit} ns and one piece"
+    );
+    // Hashing and copying 4 MiB at five pieces a tick: at least that many ticks.
+    let pieces = 2 * (kernel.len() + initramfs.len()) / crate::budget::PIECE;
+    let per_tick = usize::try_from(limit / STEP).unwrap();
+    assert!(
+        ticks.len() >= pieces / per_tick,
+        "{} ticks for {pieces} pieces",
+        ticks.len()
+    );
+    let layout = board.layout().clone();
+    let kept = crate::boot::kept(&layout, "os-2").unwrap();
+    for (name, bytes) in [("kernel8.img", &kernel), ("initramfs.cpio", &initramfs)] {
+        let (sha, _) = kept.iter().find(|(_, n)| n == name).unwrap();
+        assert_eq!(
+            &fs::read(layout.bootfiles().join(sha)).unwrap(),
+            bytes,
+            "{name}"
+        );
+    }
+    assert!(!board.work_left());
+}
+
+/// On the U-Boot form a slot's payloads go into a bay a piece at a time too: a 2 MiB kernel on a
+/// board where a piece takes 100 ms is written over many ticks, none past its share, and the bay
+/// holds it byte for byte.
+#[test]
+fn on_a_slow_store_the_payload_write_into_a_bay_stays_inside_its_share_of_the_deadline() {
+    const STEP: u64 = 100_000_000;
+    const KERNEL: usize = 2 << 20;
+    let mut board = Board::new("os-1");
+    let boot_node = use_uboot(&mut board);
+    fs::write(
+        &boot_node,
+        crate::bay_fixture::uboot_image_with_kernel_bay("os-1", 4 << 20),
+    )
+    .unwrap();
+    let limit = board.slots.tick_limit_ns;
+    let mut bundle = Bundle::new("os-2");
+    let kernel = unique_bytes("kernel of os-2", KERNEL);
+    bundle.boot[0].1 = kernel.clone();
+    let (status, ticks) = install_slowly(&mut board, &bundle.pack(), STEP);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    let longest = ticks.iter().copied().max().unwrap();
+    assert!(
+        longest <= limit + STEP,
+        "a tick spent {longest} ns, past {limit} ns and one piece"
+    );
+    let per_tick = usize::try_from(limit / STEP).unwrap();
+    assert!(ticks.len() >= KERNEL / crate::budget::PIECE / per_tick);
+    let (dir, _) = board.slots.record.slot_bay("os-2").unwrap();
+    let mut file = fs::File::open(&boot_node).unwrap();
+    let got = lemnos_slot_store::bootcheck::fat_read(&mut file, &format!("{dir}/kernel8.img"))
+        .unwrap()
+        .expect("the bay's kernel");
+    assert_eq!(&got[..KERNEL], &kernel[..], "the bay holds the kernel");
+}
+
+/// The slow period's look at the boot files runs on a thread of its own: a tick while it reads
+/// returns at once, and a later tick takes its answer. A default whose files changed is moved by the
+/// check, on the tick that takes the answer; when neither slot matches, the answer is only reported.
+#[test]
+fn the_slow_boot_file_look_runs_off_the_tick_and_its_answer_is_taken_by_a_later_tick() {
+    use std::sync::mpsc;
+    let mut board = Board::new("os-1");
+    let (release, wait) = mpsc::channel::<crate::boot_guard::Seen>();
+    let wait = Mutex::new(wait);
+    board.slots.look = Some(crate::boot::Look(Arc::new(move || {
+        wait.lock().unwrap().recv().unwrap()
+    })));
+    let checked = Arc::new(AtomicU32::new(0));
+    let seen = checked.clone();
+    board.slots.check = Some(crate::boot::Check(Arc::new(move |restart| {
+        assert!(!restart);
+        seen.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(
+            "os-1 doesn't match its manifest: os-0 is the default now".into(),
+        ))
+    })));
+    // The look is held: every tick returns at once, the look still running.
+    let started = Instant::now();
+    for n in 0..5 {
+        board.slots.tick(n * 200_000_000);
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(board.slots.looking.is_some());
+    assert_eq!(checked.load(Ordering::SeqCst), 0);
+    // It answers that the default changed: the next tick runs the check, once.
+    release.send(crate::boot_guard::Seen::Repoint).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while board.slots.looking.is_some() {
+        assert!(Instant::now() < deadline, "the answer was never taken");
+        board.slots.tick(1_000_000_000);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(checked.load(Ordering::SeqCst), 1);
+    assert!(
+        board.state().error.contains("is the default now"),
+        "{}",
+        board.state().error
+    );
+    // At the next period, neither matches: reported, and the check is not run.
+    let period = 600 * 1_000_000_000 + 1_000_000_000;
+    board.slots.tick(period);
+    release
+        .send(crate::boot_guard::Seen::Neither(
+            "os-1 doesn't match, nor os-0".into(),
+        ))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while board.slots.looking.is_some() {
+        assert!(Instant::now() < deadline, "the answer was never taken");
+        board.slots.tick(period + 1);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(checked.load(Ordering::SeqCst), 1);
+    assert_eq!(board.state().error, "os-1 doesn't match, nor os-0");
+}

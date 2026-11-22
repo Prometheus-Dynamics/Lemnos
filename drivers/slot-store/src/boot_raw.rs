@@ -688,10 +688,10 @@ impl<D: Sectors + ReadAt> BayVolume<D> {
 }
 
 /// One install's payloads on the boot partition, written a step a call (see
-/// [`Boot::into_payloads`]). It owns the partition's device, so the cursor and the open file live
-/// here between the driver's ticks.
+/// [`Boot::into_payloads`] and [`BayVolume::into_payloads_with`]). It owns the partition's device,
+/// so the cursor and the open file live here between the driver's ticks.
 pub struct Payloads {
-    boot: Boot<FileSectors>,
+    dev: FileSectors,
     run: Option<bays::SetRun>,
 }
 
@@ -699,19 +699,23 @@ impl Payloads {
     /// One step (at most [`bays::STEP_SECTORS`] sectors). `Ok(true)` once the payloads are
     /// committed; `Ok(false)` while steps remain or a flush is in flight.
     pub fn step(&mut self) -> Result<bool, String> {
+        Ok(self.step_sectors(bays::STEP_SECTORS)? == bays::Step::Done)
+    }
+
+    /// One step of at most `sectors` bulk sectors: [`bays::Step::Done`] once the payloads are
+    /// committed, [`bays::Step::Wait`] while a flush is in flight (the next call polls it), else
+    /// [`bays::Step::More`]. The driver calls it in pieces until its tick's budget is spent.
+    pub fn step_sectors(&mut self, sectors: u64) -> Result<bays::Step, String> {
         let Some(run) = self.run.as_mut() else {
-            return Ok(true);
+            return Ok(bays::Step::Done);
         };
-        match run
-            .step(&mut self.boot.dev, bays::STEP_SECTORS)
-            .map_err(|e| e.to_string())?
-        {
-            bays::Step::Done => {
-                self.run = None;
-                Ok(true)
-            }
-            bays::Step::More | bays::Step::Wait => Ok(false),
+        let step = run
+            .step(&mut self.dev, sectors)
+            .map_err(|e| e.to_string())?;
+        if step == bays::Step::Done {
+            self.run = None;
         }
+        Ok(step)
     }
 }
 
@@ -731,7 +735,30 @@ impl Boot<FileSectors> {
             bays::Begun::Finished(_) => None,
             bays::Begun::Writing(run) => Some(*run),
         };
-        Ok(Payloads { boot, run })
+        Ok(Payloads { dev: boot.dev, run })
+    }
+}
+
+impl BayVolume<FileSectors> {
+    /// [`BayVolume::install_slot_with`], with the writes left to step through [`Payloads`]: the
+    /// checks and the refusals come here, before any write.
+    pub fn into_payloads_with(
+        self,
+        slot: &str,
+        payloads: &[Vec<u8>],
+        protected: &bays::Protected,
+    ) -> Result<Payloads, String> {
+        let mut vol = self;
+        let set = bays::choose_set(&mut vol.dev, slot, protected).map_err(|e| e.to_string())?;
+        let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+        let run =
+            match bays::begin_stage_with(&mut vol.dev, &vol.layout, set, slot, &refs, protected)
+                .map_err(|e| e.to_string())?
+            {
+                bays::Begun::Finished(_) => None,
+                bays::Begun::Writing(run) => Some(*run),
+            };
+        Ok(Payloads { dev: vol.dev, run })
     }
 }
 

@@ -138,6 +138,7 @@ mod boot_guard;
 mod boot_guard_tests;
 #[cfg(test)]
 mod boot_writes_audit;
+pub mod budget;
 mod count;
 #[cfg(test)]
 mod count_tests;
@@ -248,6 +249,10 @@ pub struct SystemSlots {
     shown: Option<(&'static str, u16)>,
     /// The buffer an install from a file reads through, kept between ticks.
     read_buf: Vec<u8>,
+    /// The clock a tick's install work is timed by ([`budget`]): the monotonic clock, or a test's.
+    clock: budget::Clock,
+    /// How long one tick's install work may run: a quarter of the host's call deadline.
+    tick_limit_ns: u64,
     /// On raw NAND, what changes the UBI device's volumes (`layout.ubi` names the device).
     ubi_write: Option<Arc<dyn UbiWrite>>,
     /// The trial settings, and the health sources the board file names.
@@ -288,6 +293,9 @@ pub struct SystemSlots {
     /// [`boot_guard`]), and when the next slow-period check is due.
     check: Option<Check>,
     next_check_ns: u64,
+    /// The slow period's look ([`boot::Look`]) and the answer of the one running on its thread.
+    look: Option<boot::Look>,
+    looking: Option<std::sync::mpsc::Receiver<boot_guard::Seen>>,
     /// How the board is restarted: asked before a trial is armed, and watched after a restart the
     /// helper accepted, so one that fails after all disarms the trial (see [`boot::Watch`]).
     restarter: Option<Restarter>,
@@ -611,6 +619,25 @@ fn guard_check(
     }))
 }
 
+/// The slow period's look over a record of its own: [`boot_guard::look`], which writes nothing. Run on
+/// the look's thread, so it never holds the check's record while a restart waits for it.
+fn guard_look(
+    layout: Layout,
+    node: core::result::Result<PathBuf, String>,
+    record: Box<dyn BootRecord>,
+) -> boot::Look {
+    let record = Mutex::new(record);
+    boot::Look(Arc::new(move || {
+        let record = record
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if record.ownership() != Ownership::Ours {
+            return boot_guard::Seen::Fine;
+        }
+        boot_guard::look(&layout, &node, record.as_ref())
+    }))
+}
+
 impl SystemSlots {
     /// The driver over a layout and a boot record of the caller's choosing.
     pub fn new(layout: Layout, record: Box<dyn BootRecord>, keys: Vec<TrustedKey>) -> Self {
@@ -647,6 +674,8 @@ impl SystemSlots {
             indicator: None,
             shown: None,
             read_buf: Vec::new(),
+            clock: budget::monotonic(),
+            tick_limit_ns: budget::limit_ns(0),
             ubi_write: ubi_write.filter(|_| layout_has_ubi),
             policy: Policy::default(),
             sources: Vec::new(),
@@ -672,6 +701,8 @@ impl SystemSlots {
             unjudged_note: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
+            look: None,
+            looking: None,
             restarter: None,
             offline_free: None,
             uncleared: None,
@@ -872,7 +903,7 @@ impl SystemSlots {
 
     /// Runs the next step of an install's finish: what a tick does while one is due. A step is short,
     /// so the device answers other calls between steps. A step that fails ends the install.
-    fn finish_step(&mut self) {
+    fn finish_step(&mut self, budget: &mut budget::Budget<'_>) {
         if !self.install.as_ref().is_some_and(Install::finishing) {
             return;
         }
@@ -889,7 +920,7 @@ impl SystemSlots {
             },
             record: &*self.record,
         };
-        let done = install.step(&finish);
+        let done = install.step(&finish, budget);
         match done {
             Ok(None) => {}
             Ok(Some(id)) => {
@@ -931,8 +962,11 @@ impl SystemSlots {
     /// Runs every finish step now, as the ticks would, one after another. For the offline writer, which
     /// has no host to tick it.
     pub(crate) fn finish_all(&mut self) {
+        // No call deadline here: each step runs as far as it goes (a flush still yields its step).
+        let clock = self.clock.clone();
         while self.install.as_ref().is_some_and(Install::finishing) {
-            self.finish_step();
+            let mut budget = budget::Budget::new(&*clock, u64::MAX, u64::MAX);
+            self.finish_step(&mut budget);
         }
     }
 
@@ -1185,25 +1219,47 @@ impl SystemSlots {
     }
 
     /// The next piece of an install from a file: what a tick does.
-    fn pull(&mut self) {
+    /// Reads a bundle from its file and takes it, a piece at a time until the tick's budget is spent.
+    fn pull(&mut self, budget: &mut budget::Budget<'_>) {
         let Some(mut install) = self.install.take() else {
             return;
         };
         if install.end.is_none() && install.source.is_some() {
             let mut buf = core::mem::take(&mut self.read_buf);
-            buf.resize(install::READ_EVERY_TICK, 0);
-            match install.pull(&mut buf) {
-                Ok(read) => {
-                    let at = install.got;
-                    let _ = self.feed(&mut install, at, &buf[..read]);
+            buf.resize(budget::PIECE, 0);
+            loop {
+                let want = budget.piece();
+                match install.pull(&mut buf[..want]) {
+                    Ok(read) => {
+                        budget.spend(read);
+                        let at = install.got;
+                        let _ = self.feed(&mut install, at, &buf[..read]);
+                        if read == 0 {
+                            break;
+                        }
+                    }
+                    Err(failure) => {
+                        self.fail_install(&mut install, failure);
+                        break;
+                    }
                 }
-                Err(failure) => {
-                    self.fail_install(&mut install, failure);
+                if install.end.is_some()
+                    || install.source.is_none()
+                    || install.complete()
+                    || budget.spent()
+                {
+                    break;
                 }
             }
             self.read_buf = buf;
         }
         self.install = Some(install);
+    }
+
+    /// The clock a tick's install work is timed by: a test stands in a slow board with its own.
+    #[doc(hidden)]
+    pub fn set_clock(&mut self, clock: budget::Clock) {
+        self.clock = clock;
     }
 
     /// Removes a slot's boot directory, image, manifest and state. The pointers first: the
@@ -1993,8 +2049,11 @@ impl Lifecycle for SystemSlots {
             self.state_unwritable = state_dirs_writable(&self.layout).err();
             self.state_check_ns = now_ns.saturating_add(OWNER_RETRY_NS);
         }
-        self.pull();
-        self.finish_step();
+        let clock = self.clock.clone();
+        let mut budget =
+            budget::Budget::new(&*clock, self.tick_limit_ns, install::READ_EVERY_TICK as u64);
+        self.pull(&mut budget);
+        self.finish_step(&mut budget);
         self.indicate();
         let install = self
             .install
@@ -2110,6 +2169,11 @@ impl Lifecycle for SystemSlots {
         let firmware = firmware_of(cfg);
         let base = record_for(cfg, &layout, &ubi_write, None)?;
         let check = guard_check(layout.clone(), node.clone(), base, firmware.clone());
+        let look = guard_look(
+            layout.clone(),
+            node.clone(),
+            record_for(cfg, &layout, &ubi_write, None)?,
+        );
         let restarter = restarter(cfg, Some(check.clone()));
         let record = record_with(cfg, &layout, &ubi_write, restarter.clone())?;
         // A key file that can't be read leaves the board trusting no bundle, which every
@@ -2123,6 +2187,7 @@ impl Lifecycle for SystemSlots {
         let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
         slots.trial_updates = trial_updates;
         slots.check = Some(check);
+        slots.look = Some(look);
         slots.restarter = Some(restarter);
         slots.boot_node = node;
         slots.firmware = firmware;
@@ -2180,6 +2245,7 @@ impl Lifecycle for SystemSlots {
             slots.boots_keep = usize::try_from(keep).map_err(|_| Status::INVALID_ARGUMENT)?;
         }
         slots.reset_reason = cfg.str("reset_reason").map(PathBuf::from);
+        slots.tick_limit_ns = budget::limit_ns(cfg.call_deadline_ms());
         if let Some(dir) = cfg.str("crash_log") {
             slots.crash = Some(Box::new(crash::FsPstore::new(dir)));
         }
@@ -2709,13 +2775,54 @@ impl SystemSlots {
     /// when the default's files no longer match, and otherwise only reports.
     fn slow_check(&mut self, now_ns: u64) -> Option<u64> {
         const PERIOD_NS: u64 = 600 * 1_000_000_000;
+        /// How soon a tick looks again for the answer of a look that is running.
+        const ANSWER_NS: u64 = 100_000_000;
         let check = self.check.clone()?;
+        let look = self.look.clone()?;
+        if let Some(answer) = &self.looking {
+            let seen = match answer.try_recv() {
+                Ok(seen) => seen,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    return Some(now_ns.saturating_add(ANSWER_NS));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => boot_guard::Seen::Neither(
+                    "the boot-file look ended without an answer; it runs again at its next period"
+                        .into(),
+                ),
+            };
+            self.looking = None;
+            match seen {
+                boot_guard::Seen::Fine => {}
+                boot_guard::Seen::Neither(text) => self.note(text),
+                // The default's files changed under the board: the check reads both slots again
+                // and moves the default, here on the tick, since it writes the records.
+                boot_guard::Seen::Repoint => match (check.0)(false) {
+                    Ok(Some(note)) => self.note(note),
+                    Ok(None) => {}
+                    Err(why) => self.note(why),
+                },
+            }
+        }
         if now_ns >= self.next_check_ns {
-            self.next_check_ns = now_ns.saturating_add(PERIOD_NS);
-            match (check.0)(false) {
-                Ok(Some(note)) => self.note(note),
-                Ok(None) => {}
-                Err(why) => self.note(why),
+            let (tell, answer) = std::sync::mpsc::channel();
+            let started = std::thread::Builder::new()
+                .name("slots-look".into())
+                .spawn(move || {
+                    let _ = tell.send((look.0)());
+                });
+            match started {
+                Ok(_) => {
+                    self.looking = Some(answer);
+                    self.next_check_ns = now_ns.saturating_add(PERIOD_NS);
+                    return Some(now_ns.saturating_add(ANSWER_NS));
+                }
+                // No thread now: tried again at the failure rule's cap.
+                Err(e) => {
+                    self.note(format!(
+                        "the boot-file look couldn't start its thread ({e}); it is tried again"
+                    ));
+                    self.next_check_ns = now_ns.saturating_add(OWNER_RETRY_NS);
+                }
             }
         }
         Some(self.next_check_ns)

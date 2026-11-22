@@ -93,6 +93,16 @@ pub fn uboot_image_with_env(first: &str) -> Vec<u8> {
     bootimage::build(&parts, size, first, &refs(&payloads(first))).unwrap()
 }
 
+/// The U-Boot form's image as [`uboot_image`], with each slot's kernel bay `kernel_bay` bytes.
+pub fn uboot_image_with_kernel_bay(first: &str, kernel_bay: u64) -> Vec<u8> {
+    let mut parts = uboot_parts();
+    parts.layout = bays::Layout::new([kernel_bay, 4096, 4096, 4096, 4096])
+        .unwrap()
+        .with_form(bays::Form::Uboot);
+    let size = bootimage::min_size(&parts).unwrap();
+    bootimage::build(&parts, size, first, &refs(&payloads(first))).unwrap()
+}
+
 /// The U-Boot form's image with slot `first` in bay 0 and its composed extlinux file.
 pub fn uboot_image(first: &str) -> Vec<u8> {
     let parts = uboot_parts();
