@@ -445,14 +445,11 @@ pub fn gpio_level(debug: &Path, label: &str, line: u32) -> Result<Option<String>
     })?;
     let mut base = None;
     for raw in text.lines() {
-        if raw.contains(": GPIOs ") {
-            let header = raw.trim_end().trim_end_matches(':');
+        if let Some(header) = chip_header(raw) {
+            let header = header.trim_end_matches(':');
             let chip = header.rsplit(", ").find(|part| *part != "can sleep");
-            base = match (chip, header.split("GPIOs ").nth(1)) {
-                (Some(chip), Some(range)) if chip == label => range
-                    .split(|c: char| !c.is_ascii_digit())
-                    .next()
-                    .and_then(|first| first.parse::<u32>().ok()),
+            base = match chip {
+                Some(chip) if chip == label => chip_base(header),
                 _ => None,
             };
             continue;
@@ -477,6 +474,34 @@ pub fn gpio_level(debug: &Path, label: &str, line: u32) -> Result<Option<String>
             .map(str::to_string));
     }
     Ok(None)
+}
+
+/// A chip's header line in the kernel's GPIO listing, without its end. Two forms: the older one
+/// gives the chip's global range (`gpiochip0: GPIOs 512-565, parent: …, pinctrl-rp1:`), and the
+/// one kernels give since the global numbers went (`gpiochip0: 54 GPIOs, parent: …, pinctrl-rp1:`)
+/// gives a count, with its lines numbered from 0.
+fn chip_header(raw: &str) -> Option<&str> {
+    let header = raw.trim_end();
+    let (name, rest) = header.split_once(": ")?;
+    let numbered = name.strip_prefix("gpiochip")?;
+    let is_header = numbered.bytes().all(|b| b.is_ascii_digit())
+        && (rest.starts_with("GPIOs ")
+            || rest
+                .split_once(" GPIOs")
+                .is_some_and(|(count, _)| count.bytes().all(|b| b.is_ascii_digit())));
+    is_header.then_some(header)
+}
+
+/// The number of a chip's first line as its lines are listed: the start of the range in the older
+/// header, and 0 in the counted one, whose lines are numbered within the chip.
+fn chip_base(header: &str) -> Option<u32> {
+    match header.split_once(": GPIOs ") {
+        Some((_, range)) => range
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|first| first.parse::<u32>().ok()),
+        None => Some(0),
+    }
 }
 
 /// The `status` a node has. A node with no `status` is enabled.

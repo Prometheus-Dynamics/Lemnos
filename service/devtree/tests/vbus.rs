@@ -556,3 +556,36 @@ fn gpio_listing_is_read_by_its_chip_base_and_line() {
     assert_eq!(gpio_level(&file, "gpio4", 12).unwrap(), None);
     assert_eq!(gpio_level(&file, "gpio9", 11).unwrap(), None);
 }
+
+#[test]
+fn gpio_listing_with_counted_chips_is_read_by_the_line_within_its_chip() {
+    // The listing as a bcm2712 board's 7.3 kernel gives it: each header counts its lines and gives
+    // no global range, and lines are numbered within the chip. A hog's consumer is its line name,
+    // cut at 20 characters. Two chips list a gpio-45; only the named chip's counts.
+    let dir = fixture("listing-counted");
+    let file = dir.join("gpio");
+    fs::write(
+        &file,
+        "gpiochip10: 32 GPIOs, parent: platform/107d508500.gpio, gpio-brcmstb@107d508500:\n \
+         gpio-13  (-                   )\n \
+         gpio-45  (-                   ) out lo \n\
+         gpiochip0: 54 GPIOs, parent: platform/1f000d0000.gpio, pinctrl-rp1:\n \
+         gpio-13  (GPIO13              )\n \
+         gpio-44  (RP1_STAT_LED        |PWR                 ) out hi ACTIVE LOW\n \
+         gpio-45  (FAN_PWM             |the fan header's lin) out hi \n \
+         gpio-46  (-                   |micclk1_hog         ) out hi \n",
+    )
+    .unwrap();
+    assert_eq!(
+        gpio_level(&file, "pinctrl-rp1", 45).unwrap().as_deref(),
+        Some("hi")
+    );
+    assert_eq!(
+        gpio_level(&file, "gpio-brcmstb@107d508500", 45)
+            .unwrap()
+            .as_deref(),
+        Some("lo")
+    );
+    assert_eq!(gpio_level(&file, "pinctrl-rp1", 13).unwrap(), None);
+    assert_eq!(gpio_level(&file, "pinctrl-rp1", 47).unwrap(), None);
+}
