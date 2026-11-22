@@ -976,6 +976,20 @@ pub struct SecuritySpec {
 }
 
 impl BoardFile {
+    /// The facts the host gives devices from the board file: the `[security]` facts
+    /// ([`BoardFile::security_config`]) and the way back (`[boot] loop_return`), each to the devices the host's
+    /// rules name.
+    pub(crate) fn given_facts(&self) -> Vec<(String, OwnedValue)> {
+        let mut facts = self.security_config();
+        if let Some(way) = &self.boot.loop_return {
+            facts.push((
+                crate::host::LOOP_RETURN.to_string(),
+                OwnedValue::Str(way.clone()),
+            ));
+        }
+        facts
+    }
+
     /// The `[security]` facts as the device config they are given as.
     pub(crate) fn security_config(&self) -> Vec<(String, OwnedValue)> {
         let Some(security) = &self.security else {

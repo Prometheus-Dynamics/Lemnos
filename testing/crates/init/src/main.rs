@@ -1122,8 +1122,17 @@ fn unit(c: &mut Checks) {
 
 /// Route A: the slots driver on another system's slots state and boot partition, in real time
 /// past its uptime and its first slow check, and every call that would write: nothing is written.
+/// With the firmware mailbox's stand-in (`/dev/vcio`, root's 0600) loaded for the restart into the way back.
 fn route_a(c: &mut Checks) {
+    let vcio = load("/lemnos_test_vcio.ko", "") == 0;
+    c.check(vcio, "firmware mailbox stand-in loaded");
     c.check(run(&["/lemnos-route-a-check"]) == 0, "lemnos_route_a_check");
+    if vcio {
+        c.check(
+            unload("lemnos_test_vcio") == 0,
+            "firmware mailbox stand-in unloaded",
+        );
+    }
 }
 
 /// The USB gadget end to end: the daemon's root phase (under the unit's bounding set with the

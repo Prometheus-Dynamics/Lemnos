@@ -955,6 +955,7 @@ copy that is never written back. `--verify DIR --layout-of BOARD` reads the tree
 | `set_keep(n)` | How many slots housekeeping keeps; 0 keeps every slot |
 | `boots` | The boot history: one line per boot kept, oldest first (see [Boot history](#boot-history)) |
 | `reboot` (`system.reboot/1`) | Restarts the board |
+| `reboot_to(target)` (`system.reboot/1`, added) | Restarts the board into its way back, when the board declares one (see [The way back on request](#the-way-back-on-request)) |
 
 Housekeeping runs on `confirm` and keeps `keep` slots. It never removes the running, default,
 trial or staged slot, and those count toward `keep`. After them it keeps the previous slot, then
@@ -2954,6 +2955,30 @@ tree the script prepared. A label with an `fdt` line is refused by name at the e
   existing `/chosen` surviving to the kernel, a label with no `fdt` line booting the prepared tree.
   The board check is written in `testing/board-runs/I5i5.md`.
 - The Pi firmware's boot-mode codes other than 1 are from documentation only.
+
+## The way back on request
+
+A caller can ask for the board's way back without a run of failed boots: `reboot_to(target)` on
+`system.reboot/1` (method 2, added: the base hash does not move). It is offered only where the board file
+declares the way back, `[boot] loop_return`, the same key slot-init reads; there is one way back per board.
+The host gives `loop_return` to every device that serves `system.reboot/` and to no other, and a restart
+device that names it in its own config is refused at load. A contract's methods are the same on every
+device, so every restart device lists `reboot_to` in its description (the bridge announces it from there),
+and the call says where it is not offered. In order, each refusal asking and restarting nothing:
+
+| Answer | When |
+| --- | --- |
+| `NOT_SUPPORTED` | The board declares no way back, or the record has no firmware to ask (only `tryboot` has one) |
+| `INVALID_ARGUMENT` | `target` is not the board's way back (`"rpiboot"` is the only one there is) |
+| `NOT_PERMITTED` | The security switch is on |
+| `IO` | The restart helper would not take a restart (asked first; its check writes nothing), or the firmware refused the one-shot |
+
+Then the firmware's one-shot is set through the mailbox (`vcio`; `TAG_SET_REBOOT_ORDER`, 3: RPIBOOT), the
+caller's request goes to the boot history, and the board restarts through the restart helper, as `reboot`
+does. The mailbox is root's on a board (`root:root 0600`), so the restart device's root phase holds it
+across the drop, as the slots device's does for the boot count. The one-shot is for the next boot only:
+if the restart then fails (`IO`), it stays set, and the next restart, whoever asks for it, goes to the way
+back.
 
 ## Settings
 

@@ -702,6 +702,11 @@ fn takes_trust_root(provides: &[&str]) -> bool {
         .any(|prefix| provides.iter().any(|tag| tag.starts_with(prefix)))
 }
 
+/// The board file's way back (`[boot] loop_return`), as the device config it is given as: to every device that serves
+/// `system.reboot/`, which offers the restart into it (`reboot_to`), and to no other. A device that names it itself is
+/// refused, so the board has one way back, the one slot-init also reads.
+pub(crate) const LOOP_RETURN: &str = "loop_return";
+
 /// One trust root per board. The `[security]` facts go to the device that serves `system.security/1`,
 /// and to no other. The trust root's key file (`[security] keys`) also goes to the devices that serve
 /// `system.slots/` and `system.flash/`: the keys that verify a slot bundle or a flash image are the keys
@@ -717,11 +722,20 @@ fn add_security_facts(
         .iter()
         .any(|tag| tag.starts_with("system.security/"));
     let takes_keys = takes_trust_root(provides);
+    let restarts = provides.iter().any(|tag| tag.starts_with("system.reboot/"));
     if takes_keys && config.iter().any(|(own, _)| own == "keys") {
         return Err(BoardError::Config(id.to_string(), "keys".to_string()));
     }
+    if restarts && config.iter().any(|(own, _)| own == LOOP_RETURN) {
+        return Err(BoardError::Config(id.to_string(), LOOP_RETURN.to_string()));
+    }
     for (key, value) in security {
-        if !(serves_security || (takes_keys && key == "keys")) {
+        let given = if key == LOOP_RETURN {
+            restarts
+        } else {
+            serves_security || (takes_keys && key == "keys")
+        };
+        if !given {
             continue;
         }
         if config.iter().any(|(own, _)| own == key) {
@@ -3423,7 +3437,7 @@ impl Host {
                 )
             })
             .collect();
-        let security = board.security_config();
+        let security = board.given_facts();
         let mut slots = Vec::with_capacity(devices.len());
         for (index, spec) in devices.iter().enumerate() {
             let entry = table.get(spec.driver.as_str()).copied();
@@ -4346,6 +4360,35 @@ mod security_facts_tests {
         let mut other = Vec::new();
         add_security_facts("o", &mut other, &["power.sensor/1"], &facts()).unwrap();
         assert!(other.is_empty(), "no other device gets a security fact");
+    }
+
+    #[test]
+    fn the_way_back_goes_to_the_restart_devices_only_and_one_of_their_own_is_refused() {
+        let mut given = facts();
+        given.push((LOOP_RETURN.into(), OwnedValue::Str("rpiboot".into())));
+        let mut reboot = Vec::new();
+        add_security_facts("r", &mut reboot, &["system.reboot/1"], &given).unwrap();
+        assert_eq!(names(&reboot), [LOOP_RETURN]);
+        assert_eq!(reboot[0].1, OwnedValue::Str("rpiboot".into()));
+        for tag in [
+            "system.security/1",
+            "system.slots/1",
+            "system.flash/1",
+            "power.sensor/1",
+        ] {
+            let mut config = Vec::new();
+            add_security_facts("d", &mut config, &[tag], &given).unwrap();
+            assert!(
+                !names(&config).contains(&LOOP_RETURN),
+                "{tag}: {:?}",
+                names(&config)
+            );
+        }
+        let mut own = vec![(LOOP_RETURN.to_string(), OwnedValue::Str("rpiboot".into()))];
+        assert_eq!(
+            add_security_facts("r", &mut own, &["system.reboot/1"], &facts()),
+            Err(BoardError::Config("r".into(), LOOP_RETURN.into()))
+        );
     }
 
     #[test]

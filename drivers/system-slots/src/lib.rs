@@ -143,6 +143,8 @@ pub mod grow;
 mod install;
 mod medium;
 pub mod offline;
+#[cfg(test)]
+mod reboot_to_tests;
 mod resolve;
 pub use lemnos_slot_store::tar;
 pub use lemnos_slot_store::{json, manifest, store};
@@ -381,6 +383,23 @@ pub fn root_phase(cfg: &Config<'_>) -> String {
         other => format!(
             "the {other} record's node is not handed over: its writes need root, and fail by name under the daemon's user"
         ),
+    }
+}
+
+/// The daemon's root phase for a restart device: the firmware mailbox, root-only on a board, is held across the
+/// drop for the `tryboot` record, so the guard's boot count and the way back (`reboot_to`) take copies of the held
+/// descriptor. The other records have no firmware and hold nothing. Returns one line for the daemon's log.
+#[must_use]
+pub fn reboot_root_phase(cfg: &Config<'_>) -> String {
+    match firmware_of(cfg) {
+        Some(firmware) => match lemnos_driver_rpi_firmware_sys::hold(&firmware.vcio) {
+            Ok(()) => format!("{}: held for the restart", firmware.vcio.display()),
+            Err(why) => format!(
+                "{}: not held ({why}): the boot count and the way back can't be asked",
+                firmware.vcio.display()
+            ),
+        },
+        None => "no firmware mailbox for this record: nothing held".into(),
     }
 }
 
@@ -1737,6 +1756,8 @@ const KEYS: &[Key] = &[
 /// firmware's boot count through the same mailbox.
 const REBOOT_KEYS: &[Key] = &[
     Key::optional("restart_socket", Kind::Str),
+    // The board file's way back (`[boot] loop_return`), given by the host, never named in the device's own config.
+    Key::optional("loop_return", Kind::Str),
     Key::optional("data", Kind::Str),
     Key::optional("boot", Kind::Str),
     Key::optional("ubi", Kind::Str),
@@ -2473,15 +2494,31 @@ impl Slots for SystemSlots {
     }
 }
 
-/// Restarts the board, through the restart helper.
+/// Restarts the board, through the restart helper; and into the board's way back (`reboot_to`).
 ///
-/// Settings: `restart_socket`, as the slot driver reads it.
+/// Settings: `restart_socket`, as the slot driver reads it; `loop_return`, the board file's
+/// `[boot] loop_return`, which the host gives (`"rpiboot"`, asked through `vcio`).
 #[driver("system-reboot", provides = [Reboot])]
 pub struct SystemReboot {
     restarter: Restarter,
     /// The state directory's parent: the data partition, where the boot history reads the request.
     data: PathBuf,
     calling: CallerId,
+    /// The board's way back (`loop_return`), when the board file declares one.
+    way_back: Option<String>,
+    /// Asks the firmware for the way back at the next boot: the mailbox the root phase holds
+    /// (`lemnos_driver_rpi_firmware_sys::hold`), or `None` when the board's record has no firmware.
+    arm: Option<Arm>,
+}
+
+/// Asks the firmware for the next boot's way back. The real one is the mailbox; the tests record.
+pub(crate) type Arm = Box<dyn Fn() -> std::io::Result<()> + Send>;
+
+/// The mailbox's request for the firmware's flashing mode at the next boot (`request_rpiboot`).
+fn rpiboot_arm(firmware: count::Firmware) -> Arm {
+    Box::new(move || {
+        lemnos_driver_rpi_firmware_sys::Mailbox::open(&firmware.vcio)?.request_rpiboot()
+    })
 }
 
 impl Lifecycle for SystemReboot {
@@ -2501,6 +2538,8 @@ impl Lifecycle for SystemReboot {
             restarter: restarter(cfg, Some(check)),
             data: PathBuf::from(cfg.str("data").unwrap_or("/data")),
             calling: CallerId::LOCAL,
+            way_back: cfg.str("loop_return").map(str::to_string),
+            arm: firmware_of(cfg).map(rpiboot_arm),
         })
     }
 
@@ -2512,6 +2551,32 @@ impl Lifecycle for SystemReboot {
 impl Reboot for SystemReboot {
     fn reboot(&mut self) -> Result<()> {
         // The boot history names who asked; the restart goes on either way.
+        let state_dir = self.data.join("board/slots");
+        boot::note_request(&state_dir, self.calling.0);
+        self.restarter.run().map_err(|_| Status::IO)
+    }
+
+    fn reboot_to(&mut self, target: &str) -> Result<()> {
+        // What the board offers, then the switch, then the firmware: each refusal asks and restarts nothing.
+        let Some(way_back) = self.way_back.as_deref() else {
+            return Err(Status::NOT_SUPPORTED);
+        };
+        if target != way_back {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        let arm = match (way_back, &self.arm) {
+            ("rpiboot", Some(arm)) => arm,
+            _ => return Err(Status::NOT_SUPPORTED),
+        };
+        if security::enforced() {
+            return Err(Status::NOT_PERMITTED);
+        }
+        // The helper is asked whether a restart would be taken before the firmware is: its check writes
+        // nothing, and a helper that refuses leaves the firmware's order unset.
+        self.restarter.ready().map_err(|_| Status::IO)?;
+        arm().map_err(|_| Status::IO)?;
+        // The firmware's order is for the next boot only, so a restart that fails after it leaves it set:
+        // the next restart, whoever asks for it, goes to the way back.
         let state_dir = self.data.join("board/slots");
         boot::note_request(&state_dir, self.calling.0);
         self.restarter.run().map_err(|_| Status::IO)

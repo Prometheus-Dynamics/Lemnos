@@ -729,7 +729,7 @@ contract's base moved after L1 until then.
 | `self-test/1` | (not there) | `0xf5a21f9763c8595b` | new after L1a |
 | `system.flash/1` | `0x2198953afeadaf6c` | `0x2198953afeadaf6c` | same |
 | `system.identity/1` | `0xfca8957d8d3e73b3` | `0xfca8957d8d3e73b3` | same base hash; method 5 `machine_id` appended with `#[added]` (the machine id, `docs/slots.md`, "The machine id"); the base hash does not move |
-| `system.reboot/1` | `0xface08cdca5b68c0` | `0xface08cdca5b68c0` | same |
+| `system.reboot/1` | `0xface08cdca5b68c0` | `0xface08cdca5b68c0` | same base hash; method 2 `reboot_to` appended with `#[added]` (the way back on request, `docs/slots.md`); the base hash does not move |
 | `system.security-precondition/1` | (not there) | `0x97a0a781dd7267f4` | new after L1a |
 | `system.security/1` | (not there) | `0xabc23d89ae95cd6e` | new after L1a |
 | `system.slots/1` | `0xfded591dd9d79823` | `0x46f18ccbb6ee837d` | **changed**: methods 13 `list_page` (M8b) and 14 `info` (I5g) were appended with no `#[added]` |

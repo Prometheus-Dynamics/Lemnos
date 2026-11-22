@@ -21,6 +21,11 @@
 //!   is ok; `confirm` and `trial` are taken, the daemon is restarted on the trial slot as the board
 //!   would boot it, and `confirm` and `set_default` are taken there. After each, the boot records are
 //!   read back raw from the partition: the trial record, then `default.txt`.
+//!   Then the restart into the board's way back (`[boot] loop_return = "rpiboot"`, a `system-reboot` device on
+//!   the firmware mailbox's stand-in, `/dev/vcio`, root's 0600 as on a board, held by the reboot device's root
+//!   phase across the drop): `reboot_to("rpiboot")` sets the reboot order once (3, the flashing mode) and the
+//!   helper is asked the check and the restart; another target is refused with nothing asked; a mailbox that
+//!   refuses answers `IO` and nothing restarts (the helper is asked its check only).
 //! - **image-side**: the partition is ours, but the slots dirs are root's and the unit has no slots
 //!   drop-in. The daemon must say so by name (`state-unwritable`) and refuse the switch.
 //!
@@ -42,7 +47,7 @@ use std::time::{Duration, Instant};
 use lemnos_client::{Client, DeviceHealth, Error, Handle};
 use lemnos_core::{Driver, Encode, Status, Writer};
 use lemnos_daemon_ready::Ready;
-use lemnos_driver_system_slots::SystemSlots;
+use lemnos_driver_system_slots::{SystemReboot, SystemSlots};
 use lemnos_slot_store::bays::{Layout as Bays, as_layout_5};
 use lemnos_slot_store::boot_raw::{Boot, Pointer, Pointers, Records};
 use lemnos_slot_store::bootimage::{self, Family, Parts};
@@ -307,10 +312,10 @@ fn first_difference(before: &Tree, after: &Tree) -> String {
         .map_or_else(String::new, |gone| format!("{} went", gone.0.display()))
 }
 
-fn board_text() -> String {
+fn board_text(way_back: bool) -> String {
     let root = root_dir();
     let none = root.join("none");
-    format!(
+    let mut text = format!(
         r#"format = "lemnos.board"
 schema_version = 1
 
@@ -326,7 +331,142 @@ config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000
         boot = root.join("boot").display(),
         none = none.display(),
         helper = helper_socket().display(),
-    )
+    );
+    if way_back {
+        text.push_str(&format!(
+            r#"
+[[devices]]
+id = "reboot"
+driver = "system-reboot"
+config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], restart_socket = "{helper}", device_tree = "{none}", vcio = "{VCIO}" }}
+
+[boot]
+loop_return = "rpiboot"
+"#,
+            data = data_dir().display(),
+            boot = root.join("boot").display(),
+            none = none.display(),
+            helper = helper_socket().display(),
+        ));
+    }
+    text
+}
+
+/// The firmware mailbox's stand-in (testing/qemu/test_block/lemnos_test_vcio.rs), which the init stanza loads.
+const VCIO: &str = "/dev/vcio";
+
+/// One of the stand-in's counts (`orders`, `order`, `asked`), or `None` when it can't be read.
+fn vcio_param(name: &str) -> Option<u32> {
+    fs::read_to_string(format!("/sys/module/lemnos_test_vcio/parameters/{name}"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Calls the reboot device's `reboot_to` with `target`, over the daemon's socket.
+fn reboot_to(client: &Client, target: &str) -> Result<(), Error> {
+    let refused = |text: String| Error::Refused {
+        status: Status::NOT_FOUND,
+        text,
+    };
+    let (tag, id) = SystemReboot::MANIFEST
+        .provides
+        .iter()
+        .find_map(|info| {
+            info.methods
+                .iter()
+                .find(|m| m.name == "reboot_to")
+                .map(|m| (info.tag.as_str(), m.id))
+        })
+        .ok_or_else(|| refused("no method reboot_to".into()))?;
+    let mut handle = client
+        .open_tag("reboot", tag)
+        .map_err(|e| refused(format!("open {tag}: {e:?}")))?;
+    client
+        .call(&mut handle, id, Args::new().put(&target).bytes(), &mut [])
+        .map(drop)
+}
+
+/// The restart into the way back, on the daemon `ours` started with it: see the module comment.
+fn way_back(c: &mut Checks, slots: &Slots) -> Result<(), String> {
+    let log = log_text();
+    c.check(
+        log.contains(&format!("root phase: reboot: {VCIO}: held for the restart")),
+        &format!(
+            "the reboot device's root phase held the mailbox: {}",
+            log.trim()
+        ),
+    );
+    let mode = fs::metadata(VCIO).map(|m| (m.uid(), m.mode() & 0o777));
+    c.check(
+        matches!(mode, Ok((0, 0o600))),
+        &format!("the mailbox is root's, 0600, as on a board: {mode:?}"),
+    );
+    let client = &slots.client;
+    // The way back is announced where the bridge reads it: the device's description lists `reboot_to`.
+    let listed = client
+        .list()
+        .map_err(|e| format!("list: {e:?}"))?
+        .into_iter()
+        .find(|d| d.name == "reboot")
+        .ok_or("no reboot device")?;
+    let described = client
+        .describe(listed.index)
+        .map_err(|e| format!("describe reboot: {e:?}"))?;
+    c.check(
+        described.contracts.iter().any(|contract| {
+            contract.tag == "system.reboot/1"
+                && contract
+                    .methods
+                    .iter()
+                    .any(|m| m.name == "reboot_to" && m.id == 2)
+        }),
+        "the reboot device's description lists reboot_to (2) under system.reboot/1",
+    );
+    let (orders, asked) = (vcio_param("orders"), helper_asked().len());
+    let got = reboot_to(client, "uboot");
+    c.check(
+        status_of(&got) == Some(Status::INVALID_ARGUMENT)
+            && vcio_param("orders") == orders
+            && helper_asked().len() == asked,
+        &format!("another target is refused and nothing is asked: {got:?}"),
+    );
+    let got = reboot_to(client, "rpiboot");
+    c.check(got.is_ok(), &format!("reboot_to rpiboot is taken: {got:?}"));
+    c.check(
+        vcio_param("orders") == orders.map(|n| n + 1) && vcio_param("order") == Some(3),
+        &format!(
+            "the firmware was given one reboot order, the flashing mode (3), by the daemon's user through the held node: orders {:?} -> {:?}, order {:?}",
+            orders,
+            vcio_param("orders"),
+            vcio_param("order")
+        ),
+    );
+    c.check(
+        helper_asked()[asked..] == ["check", "check", "start"],
+        &format!(
+            "the helper was asked the way back's check, then the reboot's check and start: {:?}",
+            &helper_asked()[asked..]
+        ),
+    );
+    fs::write("/sys/module/lemnos_test_vcio/parameters/refuse", "1\n")
+        .map_err(|e| format!("the stand-in's refuse: {e}"))?;
+    let (orders, asked) = (vcio_param("orders"), helper_asked().len());
+    let got = reboot_to(client, "rpiboot");
+    let _ = fs::write("/sys/module/lemnos_test_vcio/parameters/refuse", "0\n");
+    c.check(
+        status_of(&got) == Some(Status::IO),
+        &format!("a mailbox that refuses answers IO: {got:?}"),
+    );
+    c.check(
+        vcio_param("orders") == orders && helper_asked()[asked..] == ["check"],
+        &format!(
+            "no order taken and nothing restarted, the helper asked its check only: {:?}",
+            &helper_asked()[asked..]
+        ),
+    );
+    Ok(())
 }
 
 /// The restart helper's directory and its socket, as the board file names the socket. The helper is started by
@@ -386,6 +526,8 @@ fn helper_asked() -> Vec<&'static str> {
 struct Start {
     /// The unit's slots drop-in is given to the launcher.
     drop_in: bool,
+    /// The board declares the way back and has a restart device on the mailbox's stand-in (guest only).
+    way_back: bool,
 }
 
 /// One lemnosd, killed by its PID when dropped.
@@ -403,7 +545,7 @@ impl Daemon {
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
         let _ = fs::remove_file(socket());
         let board = root_dir().join("board.toml");
-        fs::write(&board, board_text()).map_err(|e| format!("the board file: {e}"))?;
+        fs::write(&board, board_text(how.way_back)).map_err(|e| format!("the board file: {e}"))?;
         let lemnosd = me.with_file_name("lemnosd-route-a");
         let mut command = if pc() {
             Command::new(&lemnosd)
@@ -650,7 +792,13 @@ fn foreign_run(c: &mut Checks, image: &[u8], why: &str, state: bool) -> Result<(
     }
     let (node, roots) = boot_chain(image).map_err(|e| format!("the boot chain: {e}"))?;
     let before = tree(&data).map_err(|e| e.to_string())?;
-    let mut daemon = Daemon::start(&roots, Start { drop_in: true })?;
+    let mut daemon = Daemon::start(
+        &roots,
+        Start {
+            drop_in: true,
+            way_back: false,
+        },
+    )?;
     let slots = Slots::connect()?;
     let after_start = tree(&data).map_err(|e| e.to_string())?;
     c.check(
@@ -768,7 +916,13 @@ fn ours(c: &mut Checks) -> Result<(), String> {
     our_state(&data, OURS).map_err(|e| format!("the state: {e}"))?;
     give_slots_dirs(&data)?;
     let (node, roots) = our_partition()?;
-    let mut daemon = Daemon::start(&roots, Start { drop_in: true })?;
+    let mut daemon = Daemon::start(
+        &roots,
+        Start {
+            drop_in: true,
+            way_back: !pc(),
+        },
+    )?;
     let slots = Slots::connect()?;
     if !pc() {
         let log = log_text();
@@ -845,7 +999,13 @@ fn ours(c: &mut Checks) -> Result<(), String> {
     daemon.stop();
     // The trial boot, as slot-init records it: the slot the board came up on.
     fs::write(data.join("board/slots/booted"), format!("{NEXT}\n")).map_err(|e| e.to_string())?;
-    daemon = Daemon::start(&roots, Start { drop_in: true })?;
+    daemon = Daemon::start(
+        &roots,
+        Start {
+            drop_in: true,
+            way_back: !pc(),
+        },
+    )?;
     let slots = Slots::connect()?;
     let got = slots.call("confirm", &Args::new());
     c.check(
@@ -875,6 +1035,9 @@ fn ours(c: &mut Checks) -> Result<(), String> {
             .is_ok_and(|d| d.as_deref() == Some(ours_bay.as_str())),
         &format!("default.txt names {OURS} ({ours_bay}), read back raw: {default:?}"),
     );
+    if !pc() {
+        way_back(c, &slots)?;
+    }
     drop(slots);
     drop(daemon);
     Ok(())
@@ -889,7 +1052,13 @@ fn image_side(c: &mut Checks) -> Result<(), String> {
     our_state(&data, OURS).map_err(|e| format!("the state: {e}"))?;
     let (node, roots) = our_partition()?;
     let before = fs::read(&node).map_err(|e| e.to_string())?;
-    let daemon = Daemon::start(&roots, Start { drop_in: false })?;
+    let daemon = Daemon::start(
+        &roots,
+        Start {
+            drop_in: false,
+            way_back: false,
+        },
+    )?;
     let slots = Slots::connect()?;
     let word = lemnos_driver_system_slots::STATE_UNWRITABLE;
     // A device in a call reads Ok until the call returns (the host does not know yet): the first
