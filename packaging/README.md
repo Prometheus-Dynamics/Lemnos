@@ -99,8 +99,11 @@ The drop-in under systemd has not run on a board (`testing/board-runs/HEALTH-TCP
 A board with slots has its own optional drop-in, `packaging/systemd/lemnosd.service.d/slots.conf`. Install
 it as `/etc/systemd/system/lemnosd.service.d/slots.conf` on a board whose board file has a `system-slots`
 device, and only then (its `when` in `files.txt` is `slots`). Its one setting,
-`ReadWritePaths=/data/board/slots /data/slots`, makes the slot driver's state and image dirs (under its
-`data`, default `/data`) the writable pieces of the read-only filesystem. Who owns them is slot-init's to
+`ReadWritePaths=-/data/board/slots -/data/slots`, makes the slot driver's state and image dirs (under its
+`data`, default `/data`) the writable pieces of the read-only filesystem. Both are optional (`-`): where
+slot-init made neither dir (another system's boot records, or another layout version's), systemd leaves
+them out and lemnosd still starts; a required missing dir would fail the unit's namespace setup and reset
+the board in a loop. Who owns them is slot-init's to
 set, not the daemon's: before it starts lemnosd, slot-init (root, in the initramfs) gives both dirs to the
 daemon's user and group, read from the new root's `passwd` and `group`, and only when the boot records are
 this system's. It changes the dirs alone, never what they hold, never through a link, and nothing when they

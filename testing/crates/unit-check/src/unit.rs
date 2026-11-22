@@ -340,8 +340,8 @@ mod tests {
             names,
             [
                 ("/sys/kernel/config/usb_gadget", true),
-                ("/data/board/slots", false),
-                ("/data/slots", false),
+                ("/data/board/slots", true),
+                ("/data/slots", true),
                 ("/var/lib/lemnos", true),
                 ("/run/board", false),
             ]

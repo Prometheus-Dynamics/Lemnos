@@ -1347,6 +1347,61 @@ pub fn write_empty_records<D: Sectors + ReadAt>(dev: &mut D) -> Result<(), Strin
     Ok(())
 }
 
+/// Test seam (feature `testing`, and this crate's own tests): `img` with every set's record
+/// rewritten in the form of layout version 5: `bay0` committed to `slot` (its name's length, the
+/// name, each role's length and SHA-256), the others empty (`[0]`). The result is a partition another
+/// layout version made, which [`records_version`] refuses by name.
+#[cfg(any(test, feature = "testing"))]
+pub fn as_layout_5(img: &[u8], slot: &str) -> Vec<u8> {
+    let mut dev = Mem(img.to_vec());
+    let sets = place_sets(&mut dev).unwrap();
+    for (set, lba) in sets.into_iter().enumerate() {
+        let payload = if set == 0 {
+            let mut out = vec![slot.len() as u8];
+            out.extend_from_slice(slot.as_bytes());
+            for i in 0..5u64 {
+                out.extend_from_slice(&(4096 * (i + 1)).to_le_bytes());
+                out.extend_from_slice(&[i as u8; 32]);
+            }
+            out
+        } else {
+            vec![0]
+        };
+        Pair::at(lba)
+            .write(&mut dev, Kind::BAY_INFO, &payload)
+            .unwrap();
+    }
+    dev.0
+}
+
+/// An in-memory partition for [`as_layout_5`].
+#[cfg(any(test, feature = "testing"))]
+struct Mem(Vec<u8>);
+
+#[cfg(any(test, feature = "testing"))]
+impl ReadAt for Mem {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let at = offset as usize;
+        buf.copy_from_slice(&self.0[at..at + buf.len()]);
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Sectors for Mem {
+    fn read(&mut self, lba: u64, buf: &mut crate::twocopy::Sector) -> std::io::Result<()> {
+        let at = lba as usize * SECTOR;
+        buf.copy_from_slice(&self.0[at..at + SECTOR]);
+        Ok(())
+    }
+
+    fn write(&mut self, lba: u64, buf: &crate::twocopy::Sector) -> std::io::Result<()> {
+        let at = lba as usize * SECTOR;
+        self.0[at..at + SECTOR].copy_from_slice(buf);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path = "bays_tests.rs"]
 pub(crate) mod tests;

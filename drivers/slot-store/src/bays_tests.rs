@@ -859,30 +859,6 @@ fn a_bay_nothing_names_is_rewritten_in_place_with_a_new_build() {
     );
 }
 
-/// `img` with every set's record rewritten in the form of layout version 5: `bay0` committed to
-/// `slot` (its name's length, the name, each role's length and SHA-256), the others empty (`[0]`).
-pub(crate) fn as_layout_5(img: &[u8], slot: &str) -> Vec<u8> {
-    let mut dev = Dev::new(img.to_vec());
-    let sets = place_sets(&mut dev).unwrap();
-    for (set, lba) in sets.into_iter().enumerate() {
-        let payload = if set == 0 {
-            let mut out = vec![slot.len() as u8];
-            out.extend_from_slice(slot.as_bytes());
-            for i in 0..5u64 {
-                out.extend_from_slice(&(4096 * (i + 1)).to_le_bytes());
-                out.extend_from_slice(&[i as u8; 32]);
-            }
-            out
-        } else {
-            vec![0]
-        };
-        Pair::at(lba)
-            .write(&mut dev, Kind::BAY_INFO, &payload)
-            .unwrap();
-    }
-    dev.img
-}
-
 #[test]
 fn a_disk_of_layout_5_is_refused_by_name_by_every_write_and_nothing_is_written() {
     use crate::boot_raw::{BayVolume, Ownership, ownership};

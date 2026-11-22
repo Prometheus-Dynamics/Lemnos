@@ -1521,6 +1521,13 @@ system reads it on its next boot. So on such a boot:
   `write-failed`, and `info` and `list` name the file and the error as `write_failed`
   (`packaging/README.md`). The QEMU stanza `route-a` runs the real daemon through the unit launcher on
   both kinds of partition and reads the records back raw.
+- Another system's records with no slots state at all (what slot-init leaves: it makes neither dir), and
+  a partition of another layout version (layout 5 records), start the same way. The slots drop-in's paths
+  are optional (`ReadWritePaths=-/data/board/slots -/data/slots`), so the unit's namespace setup leaves
+  them out and lemnosd starts and reaches ready. Health says `foreign` with the reason, `list` and `info`
+  carry it, every write is refused, and nothing is created under `/data`. Before the change a missing dir
+  failed the namespace setup (226/NAMESPACE) and the restart loop reset the board. The stanza
+  `route-a` checks the no-dirs and layout-5 starts as well as the state-present one.
 
 ```text
 lemnos-ctl boot-partition --add-to DUMP --layout-of BOARD [--socs DIR] --slot ID --payload DIR

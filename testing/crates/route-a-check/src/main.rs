@@ -43,7 +43,7 @@ use lemnos_client::{Client, DeviceHealth, Error, Handle};
 use lemnos_core::{Driver, Encode, Status, Writer};
 use lemnos_daemon_ready::Ready;
 use lemnos_driver_system_slots::SystemSlots;
-use lemnos_slot_store::bays::Layout as Bays;
+use lemnos_slot_store::bays::{Layout as Bays, as_layout_5};
 use lemnos_slot_store::boot_raw::{Boot, Pointer, Pointers, Records};
 use lemnos_slot_store::bootimage::{self, Family, Parts};
 use lemnos_slot_store::owner;
@@ -270,6 +270,9 @@ type Tree = Vec<(PathBuf, bool, u32, u32, Vec<u8>)>;
 
 fn tree(root: &Path) -> std::io::Result<Tree> {
     let mut out = Vec::new();
+    if !root.exists() {
+        return Ok(out);
+    }
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
         let meta = fs::symlink_metadata(&path)?;
@@ -338,6 +341,13 @@ struct Start {
 struct Daemon(Option<Child>);
 
 impl Daemon {
+    /// Whether the daemon this check started is still running (it has not exited).
+    fn alive(&mut self) -> bool {
+        self.0
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+
     fn start(roots: &str, how: Start) -> Result<Self, String> {
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
         let _ = fs::remove_file(socket());
@@ -375,7 +385,12 @@ impl Daemon {
             .append(true)
             .open(daemon_log())
             .map_err(|e| format!("the daemon's log: {e}"))?;
-        command.stderr(Stdio::from(log)).stdout(Stdio::null());
+        // The unit launcher says why it refuses to start on stdout (`say!`), lemnosd on stderr: both
+        // go to the daemon's log, so a start that fails says why.
+        let stdout = log
+            .try_clone()
+            .map_err(|e| format!("the daemon's log: {e}"))?;
+        command.stderr(Stdio::from(log)).stdout(Stdio::from(stdout));
         let ready = Ready::new()?;
         ready.give(&mut command);
         let mut child = command.spawn().map_err(|e| format!("start lemnosd: {e}"))?;
@@ -558,12 +573,33 @@ fn give_slots_dirs(data: &Path) -> Result<(), String> {
 }
 
 fn route_a(c: &mut Checks) -> Result<(), String> {
+    foreign_run(c, &partition(true)?, "default.txt", true)
+}
+
+/// Another system's records with no slots state at all: what slot-init leaves when the records are
+/// not ours (it makes no state dirs, `service/slot-init/src/boot.rs`). The unit's slots drop-in must
+/// still let lemnosd start, and the device must say why.
+fn route_a_no_dirs(c: &mut Checks) -> Result<(), String> {
+    foreign_run(c, &partition(true)?, "default.txt", false)
+}
+
+/// A partition another layout version made (layout 5 records, `bays::as_layout_5`), with no slots
+/// state: the same start as [`route_a_no_dirs`], refused by the record's own form.
+fn route_a_layout_5(c: &mut Checks) -> Result<(), String> {
+    let image = as_layout_5(&partition(false)?, OURS);
+    foreign_run(c, &image, "before layout version 6", false)
+}
+
+/// One foreign start: lemnosd is started as its unit starts it on `image`, with the slots state
+/// as `state` says (the other system's, or none at all). `why` is the reason the records give.
+fn foreign_run(c: &mut Checks, image: &[u8], why: &str, state: bool) -> Result<(), String> {
     let data = data_dir();
-    foreign_state(&data).map_err(|e| format!("the state: {e}"))?;
-    let image = partition(true)?;
-    let (node, roots) = boot_chain(&image).map_err(|e| format!("the boot chain: {e}"))?;
+    if state {
+        foreign_state(&data).map_err(|e| format!("the state: {e}"))?;
+    }
+    let (node, roots) = boot_chain(image).map_err(|e| format!("the boot chain: {e}"))?;
     let before = tree(&data).map_err(|e| e.to_string())?;
-    let daemon = Daemon::start(&roots, Start { drop_in: true })?;
+    let mut daemon = Daemon::start(&roots, Start { drop_in: true })?;
     let slots = Slots::connect()?;
     let after_start = tree(&data).map_err(|e| e.to_string())?;
     c.check(
@@ -584,6 +620,10 @@ fn route_a(c: &mut Checks) -> Result<(), String> {
         );
     }
     thread::sleep(RUN);
+    c.check(
+        daemon.alive(),
+        "lemnosd is still running after the ticks: it did not exit and was not restarted",
+    );
     let after_ticks = tree(&data).map_err(|e| e.to_string())?;
     c.check(
         after_ticks == before,
@@ -638,13 +678,13 @@ fn route_a(c: &mut Checks) -> Result<(), String> {
     }
     let list = slots.text("list")?;
     c.check(
-        list.contains(&format!("\"foreign\":\"{foreign}: default.txt")),
-        &format!("list says foreign: {list}"),
+        list.contains(&format!("\"foreign\":\"{foreign}: ")) && list.contains(why),
+        &format!("list says foreign, with the reason: {list}"),
     );
     let info = slots.text("info")?;
     c.check(
-        info.contains(&format!("\"foreign\":\"{foreign}: default.txt")),
-        "info says foreign",
+        info.contains(&format!("\"foreign\":\"{foreign}: ")) && info.contains(why),
+        &format!("info says foreign, with the reason: {info}"),
     );
     thread::sleep(Duration::from_secs(2));
     drop(slots);
@@ -824,6 +864,8 @@ fn main() -> ExitCode {
     let mut c = Checks(0);
     for (name, run) in [
         ("route A", route_a as fn(&mut Checks) -> Result<(), String>),
+        ("route A without the state dirs", route_a_no_dirs),
+        ("route A on layout 5", route_a_layout_5),
         ("ours", ours),
         ("image-side", image_side),
     ] {

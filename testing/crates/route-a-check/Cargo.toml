@@ -14,4 +14,4 @@ lemnos-core = { path = "../../../engine/core", features = ["std"] }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-driver-system-slots = { path = "../../../drivers/system-slots" }
-lemnos-slot-store = { path = "../../../drivers/slot-store" }
+lemnos-slot-store = { path = "../../../drivers/slot-store", features = ["testing"] }

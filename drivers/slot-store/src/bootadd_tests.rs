@@ -961,7 +961,7 @@ fn a_dump_whose_bays_are_layout_5_is_refused_by_name_and_nothing_is_written() {
         &request("ours-4", 0, false, &refs(&first)),
     )
     .unwrap();
-    let v5 = crate::bays::tests::as_layout_5(&one.image, "ours-4");
+    let v5 = crate::bays::as_layout_5(&one.image, "ours-4");
     let Err(e) = add_to(&parts, &v5, &request("ours-5", 1, true, &refs(&second))) else {
         panic!("a dump of layout 5 must be refused");
     };
