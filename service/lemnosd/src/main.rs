@@ -48,8 +48,9 @@ fn soc_map(board: &lemnos_host::board::BoardFile) -> Option<lemnos_devtree::SocM
     }
 }
 
-/// Prints each way the live device tree differs from the board file, from its SoC map. Run after the
-/// root phase, so a node the root phase gave to the module is checked as it now is.
+/// Prints each way the live device tree differs from the board file, from its SoC map. Run in the root
+/// phase after its claim and before the drop, so a node the root phase gave to the module is checked
+/// as it now is, and the GPIO listing in debugfs (root only) can be read.
 fn report_live_tree(board: &lemnos_host::board::BoardFile, map: Option<&lemnos_devtree::SocMap>) {
     let Some(map) = map else {
         return;
@@ -67,11 +68,14 @@ fn report_live_tree(board: &lemnos_host::board::BoardFile, map: Option<&lemnos_d
         regulators: std::path::Path::new("/sys/class/regulator"),
     };
     let findings = lemnos_devtree::check(board, map, &live);
+    // One write per line (see the root phase's claim lines): stderr is unbuffered.
     for problem in &findings.problems {
-        let _ = writeln!(std::io::stderr(), "lemnosd: live tree: {problem}");
+        let line = format!("lemnosd: live tree: {problem}\n");
+        let _ = std::io::stderr().write_all(line.as_bytes());
     }
     for note in &findings.notes {
-        let _ = writeln!(std::io::stderr(), "lemnosd: live tree note: {note}");
+        let line = format!("lemnosd: live tree note: {note}\n");
+        let _ = std::io::stderr().write_all(line.as_bytes());
     }
 }
 
@@ -271,14 +275,17 @@ fn main() -> ExitCode {
     #[cfg(feature = "testing-boot-roots")]
     test_boot_roots();
     let mut root = privilege::Started::default();
+    let mut dropped = false;
     match (drop, lemnos_linux_sys::privilege::observe()) {
         (Some(request), Ok(now)) if now.euid == 0 => {
+            dropped = true;
             match privilege::start(
                 &request,
                 &board_file,
                 map.as_ref(),
                 Path::new(&socket),
                 !sim,
+                &|| report_live_tree(&board_file, map.as_ref()),
             ) {
                 Ok(started) => root = started,
                 Err(error) => return complain(&error),
@@ -298,9 +305,12 @@ fn main() -> ExitCode {
     if tracing {
         lemnosd::start_trace_line("root phase done (the drop included, when asked)");
     }
-    // The live device tree against what the board file needs, when the board names a SoC map, after
-    // the root phase's claim. A mismatch is reported and the daemon starts anyway.
-    report_live_tree(&board_file, map.as_ref());
+    // The live device tree against what the board file needs, when the board names a SoC map: in the
+    // root phase when there is one (above), else here. A mismatch is reported and the daemon starts
+    // anyway.
+    if !dropped {
+        report_live_tree(&board_file, map.as_ref());
+    }
     // A device the root phase could not set up is refused, and the daemon starts without it.
     for line in &root.warnings {
         let _ = writeln!(std::io::stderr(), "lemnosd: {board}: {line}");

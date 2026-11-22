@@ -281,10 +281,10 @@ pub fn claim_module_nodes(
             },
         };
         let label = hardware.name.as_deref().unwrap_or(&hardware.controller);
-        let _ = writeln!(
-            io::stderr(),
-            "lemnosd: root phase: module node {label}: {line}"
-        );
+        // One write per line: stderr is unbuffered, and a line formatted in pieces can be split in
+        // the journal by another thread's write between them.
+        let text = format!("lemnosd: root phase: module node {label}: {line}\n");
+        let _ = io::stderr().write_all(text.as_bytes());
     }
 }
 
@@ -452,6 +452,7 @@ pub fn start(
     map: Option<&lemnos_devtree::SocMap>,
     socket: &Path,
     helper: bool,
+    before_drop: &dyn Fn(),
 ) -> Result<Started, String> {
     use std::io::Write;
     let (uid, gid) = resolve(request)?;
@@ -477,6 +478,8 @@ pub fn start(
     if helper {
         claim_module_nodes(board, map, Path::new("/sys/bus/platform"));
     }
+    // What still needs root to read (the live-tree check reads debugfs), after the claim.
+    before_drop();
     let fed = hold_keepalive_nodes(board, &lemnos_linux::LinuxBoard::new(), &mut stored);
     for file in stored.drain(..) {
         let _ = writeln!(
