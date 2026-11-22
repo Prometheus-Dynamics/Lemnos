@@ -17,6 +17,8 @@ use lemnos_flash_stage::sim::{Device, Transport, TransportError};
 use lemnos_flash_wire::frame::{Request, ResetKind, SECTOR, STATUS_CRC, STATUS_OK, payload_crc};
 use lemnos_rockchip_maskrom_stage::entry472::{BUILD_ID, REGIONS};
 
+pub mod face;
+
 /// The 471 stub's watchdog period: TOP 15 at 24 MHz, 2^31 / 24e6 us (plan section 1).
 pub const WDT_471_US: u64 = 89_478_485;
 /// The 472 session's watchdog period: TOP 12 at 24 MHz, 2^28 / 24e6 us (plan section 3.1).
