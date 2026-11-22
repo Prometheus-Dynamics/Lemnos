@@ -133,6 +133,11 @@ build = "2026-05-12"
 max_restarts = "not set"
 reboot_on_fatal_error = true
 
+# The board's one trust root, which the host gives the slots driver: the test key both bundles are signed with.
+[security]
+record = "/var/lib/lemnos/security.rec"
+keys = "/etc/lemnos/slot-keys"
+
 [[devices]]
 id = "slots"
 driver = "system-slots"
@@ -143,18 +148,27 @@ echo "== the payloads, the rootfs stand-in and the bundle (lemnos-ctl bundle, th
 "$check" payload "$WORK/payload-base" base-1
 "$check" payload "$WORK/payload-install" install-1
 "$check" rootfs "$WORK/rootfs.erofs" "$WORK/verity.txt" 512
+# Both bundles are signed with the documented test key (the seed 0x07 repeated), which the board trusts, as a
+# signed board's are: `data-partition` refuses an unsigned first slot on a board that requires signatures.
+printf '%s' "$(printf '07%.0s' $(seq 32))" > "$WORK/test-key.seed"
+chmod 0600 "$WORK/test-key.seed"
+echo "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c test-key-07" > "$WORK/slot-keys"
+"$ctl" bundle --socs "$socs" --layout-of "$WORK/board.toml" --slot base-1 --payload "$WORK/payload-base" --firmware "$WORK/firmware" \
+	--rootfs "$WORK/rootfs.erofs" --verity-table "$WORK/verity.txt" --product slot-install-os --version 0.9 \
+	--key-file "$WORK/test-key.seed" --payload-out "$WORK/payload-base-out" --out "$WORK/base.tar" > "$WORK/out/base-bundle.txt" 2>&1 \
+	|| { cat "$WORK/out/base-bundle.txt"; die "lemnos-ctl bundle refused the base bundle"; }
 "$ctl" bundle --socs "$socs" --layout-of "$WORK/board.toml" --slot install-1 --payload "$WORK/payload-install" --firmware "$WORK/firmware" \
 	--rootfs "$WORK/rootfs.erofs" --verity-table "$WORK/verity.txt" --product slot-install-os --version 1.0 \
-	--out "$WORK/bundle.tar" > "$WORK/out/bundle.txt" 2>&1 || { cat "$WORK/out/bundle.txt"; die "lemnos-ctl bundle refused the bundle"; }
+	--key-file "$WORK/test-key.seed" --out "$WORK/bundle.tar" > "$WORK/out/bundle.txt" 2>&1 || { cat "$WORK/out/bundle.txt"; die "lemnos-ctl bundle refused the bundle"; }
 "$ctl" bundle --verify "$WORK/bundle.tar" --socs "$socs" --layout-of "$WORK/board.toml" > "$WORK/out/bundle-verify.txt" 2>&1 \
 	|| { cat "$WORK/out/bundle-verify.txt"; die "the bundle does not verify"; }
 echo "bundle: $(stat -c %s "$WORK/bundle.tar") bytes, verifies"
 
-echo "== the boot partition: the image builder with the base slot in bay set 0 (the install goes to a free bay)"
-min_text="$("$ctl" boot-partition --socs "$socs" --layout-of "$WORK/board.toml" --payload "$WORK/payload-base" --firmware "$WORK/firmware" --min-size)" || die "boot-partition --min-size refused"
+echo "== the boot partition: the image builder with the base slot in bay set 0, its payload as the base bundle finalized it (the install goes to a free bay)"
+min_text="$("$ctl" boot-partition --socs "$socs" --layout-of "$WORK/board.toml" --payload "$WORK/payload-base-out" --firmware "$WORK/firmware" --min-size)" || die "boot-partition --min-size refused"
 min="${min_text%%$'\n'*}"
 bootbytes=$(( (min + 511) / 512 * 512 ))
-"$ctl" boot-partition --socs "$socs" --layout-of "$WORK/board.toml" --slot base-1 --payload "$WORK/payload-base" --firmware "$WORK/firmware" \
+"$ctl" boot-partition --socs "$socs" --layout-of "$WORK/board.toml" --slot base-1 --payload "$WORK/payload-base-out" --firmware "$WORK/firmware" \
 	--size "$bootbytes" --out "$WORK/boot.img" > "$WORK/out/boot-partition.txt" 2>&1 \
 	|| { cat "$WORK/out/boot-partition.txt"; die "lemnos-ctl boot-partition refused the image"; }
 "$ctl" boot-partition --socs "$socs" --verify "$WORK/boot.img" --layout-of "$WORK/board.toml" > "$WORK/out/boot-verify-before.txt" 2>&1 \
@@ -175,8 +189,13 @@ start=$p2, size=$data_sectors, type=83
 EOF
 dd if=boot.img of=disk.img bs=512 seek=$p1 conv=notrunc status=none
 
-echo "== the data partition's tree (the daemon's state dirs; the guest's init gives them to its user)"
-mkdir -p datatree/board/slots datatree/slots/.incoming
+echo "== the data partition's tree: lemnos-ctl data-partition, the first-flash writer, with base-1 (the guest's init gives the daemon's dirs to its user by slot-init's rule)"
+rm -rf datatree
+"$ctl" data-partition --socs "$socs" --layout-of "$WORK/board.toml" --install "$WORK/base.tar" --boot-image "$WORK/boot.img" \
+	--keys "$WORK/slot-keys" --time 2026-11-22T12:00:00Z --data-size $((data_sectors * 512)) --out datatree > "$WORK/out/data-partition.txt" 2>&1 \
+	|| { cat "$WORK/out/data-partition.txt"; die "lemnos-ctl data-partition refused the tree"; }
+cat "$WORK/out/data-partition.txt"
+[ -d datatree/slots/bootfiles ] || die "the first-flash tree has no boot-file store (slots/bootfiles)"
 truncate -s $((data_sectors * 512)) data.img
 mke2fs -q -F -t ext4 -b 4096 -I 256 -m 0 -O meta_bg,^resize_inode -E root_owner=0:0 -L lemnos-data \
 	-d datatree data.img > "$WORK/out/mke2fs.txt" 2>&1 || { cat "$WORK/out/mke2fs.txt"; die "mke2fs refused the data partition"; }
@@ -185,7 +204,7 @@ dd if=data.img of=disk.img bs=512 seek=$p2 conv=notrunc status=none
 echo "== the guest root (initramfs): systemd, the packaged daemon unit and its drop-ins, the checker, the stand-ins"
 root="$WORK/root"
 rm -rf "$root"
-mkdir -p "$root"/{usr/bin,usr/sbin,usr/lib64,usr/lib/systemd/system,usr/lib/lemnos-guest/boot-roots,etc/systemd/system/lemnosd.service.d,etc/lemnos,etc/dbus-1,dev,proc,sys,run,tmp,root,var/lib/slot-install,data,boot/firmware}
+mkdir -p "$root"/{usr/bin,usr/sbin,usr/lib64,usr/lib/systemd/system,usr/lib/lemnos-guest/boot-roots,etc/systemd/system/lemnosd.service.d,etc/lemnos,var/lib/lemnos,etc/dbus-1,dev,proc,sys,run,tmp,root,var/lib/slot-install,data,boot/firmware}
 for link in bin:usr/bin sbin:usr/sbin lib:usr/lib lib64:usr/lib64; do
 	ln -s "${link#*:}" "$root/${link%%:*}"
 done
@@ -233,7 +252,7 @@ inst /usr/lib64/libnss_systemd.so.2 2>/dev/null || true
 [ -e "$root/usr/bin/sh" ] || die "bash did not come into the guest"
 
 # The packaged units, as shipped, enabled as the packaging enables them, and the test's own unit and drop-ins.
-cp /mnt/nvme-wd/lemnos-wSLOT-INSTALL-INT/packaging/systemd/lemnosd.service "$root/usr/lib/systemd/system/"
+cp "$repo/packaging/systemd/lemnosd.service" "$root/usr/lib/systemd/system/"
 cp "$src/dropins/20-packaged-slots.conf" "$root/etc/systemd/system/lemnosd.service.d/"
 cp "$src/dropins/10-slot-install.conf" "$root/etc/systemd/system/lemnosd.service.d/"
 cp "$src/units/lemnos-slot-install.service" "$root/usr/lib/systemd/system/"
@@ -258,6 +277,7 @@ chmod 0755 "$root/init"
 cp "$src/etc/passwd" "$src/etc/group" "$src/etc/nsswitch.conf" "$src/etc/machine-id" "$src/etc/os-release" "$root/etc/"
 cp "$src/etc/dbus-system.conf" "$root/etc/dbus-1/system.conf"
 cp board.toml "$root/etc/lemnos/board.toml"
+cp "$WORK/slot-keys" "$root/etc/lemnos/slot-keys"
 cp "$WORK/bundle.tar" "$root/var/lib/slot-install/bundle.tar"
 
 # The boot chain stood in: an x86 guest has no device tree, so the controller of the boot disk is a sysfs and a

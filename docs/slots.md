@@ -1532,8 +1532,11 @@ system reads it on its next boot. So on such a boot:
 - under the daemon's unit the decision needs no write access: the daemon's root phase opens the
   partition read-only, probes it with the same test, and opens it read-write only when the records are
   ours (`lemnos_slot_store::boot_raw::prepare`); otherwise the driver holds a read-only descriptor at
-  most. slot-init gives `board/slots` and `slots` to the daemon's user only on an owned boot
-  (`lemnos_slot_store::owner`), and never through a link. With the records ours but the dirs not
+  most. slot-init gives the daemon's dirs, `board/slots`, `slots` and the boot-file store
+  `slots/bootfiles` (`Layout::daemon_dirs`, the one list), to the daemon's user at every owned boot
+  (`lemnos_slot_store::owner::give_daemon_dirs`), the dirs alone and never through a link; the
+  first-flash tree (`lemnos-ctl data-partition`) makes all three as root, and a board flashed before
+  the store was in the list gets it at its next boot. With the records ours but any of the three not
   writable (still root's, or no `slots.conf` drop-in), health says `state-unwritable` and every call
   that would write is refused with `FAILED_PRECONDITION` before a boot record is touched (the dirs are
   looked at again at each such call and every 8 s, so a grant given since is taken); with the

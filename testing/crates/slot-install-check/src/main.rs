@@ -6,6 +6,8 @@
 //!
 //!   lemnos-slot-install-check payload DIR SLOT          the five build roles, a realistic boot set
 //!   lemnos-slot-install-check rootfs IMAGE TABLE BLOCKS the erofs stand-in with its verity tree, and the table
+//!   lemnos-slot-install-check give DATA UID GID        as the guest's slot-init: the daemon's dirs on the data
+//!       partition given to its user by slot-init's own rule (`lemnos_slot_store::owner::give_daemon_dirs`)
 //!   lemnos-slot-install-check install SOCKET BUNDLE SLOT BOOT_NODE
 //!       as the guest's client: `install` then `write` in chunks over the socket, the job's end, then `info`
 //!       and `list` (the install's record) and the boot partition read raw (the bay the slot is in).
@@ -44,8 +46,9 @@ fn main() -> ExitCode {
             Path::new(&args[2]),
             args[3].parse().map_err(|_| "BLOCKS is a number".to_string()),
         ),
+        Some("give") if args.len() == 4 => give(Path::new(&args[1]), &args[2], &args[3]),
         Some("install") if args.len() == 5 => install(&args[1], Path::new(&args[2]), &args[3], Path::new(&args[4])),
-        _ => Err("usage: payload DIR SLOT | rootfs IMAGE TABLE BLOCKS | install SOCKET BUNDLE SLOT BOOT_NODE".into()),
+        _ => Err("usage: payload DIR SLOT | rootfs IMAGE TABLE BLOCKS | give DATA UID GID | install SOCKET BUNDLE SLOT BOOT_NODE".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -53,6 +56,31 @@ fn main() -> ExitCode {
             eprintln!("slot-install-check: {why}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// slot-init's step, stood in by the same code: each of the daemon's dirs under `data` given to
+/// `uid:gid` (the dirs alone), one line each. Any refusal fails the step.
+fn give(data: &Path, uid: &str, gid: &str) -> Result<(), String> {
+    let uid: u32 = uid.parse().map_err(|_| "UID is a number".to_string())?;
+    let gid: u32 = gid.parse().map_err(|_| "GID is a number".to_string())?;
+    let layout = lemnos_slot_store::store::Layout::new(data, "/boot");
+    let mut failed = Vec::new();
+    for (dir, given) in lemnos_slot_store::owner::give_daemon_dirs(
+        &layout,
+        uid,
+        gid,
+        lemnos_slot_store::owner::lchown,
+    ) {
+        match given {
+            Ok(how) => println!("slot-install-check: give {}: {how:?}", dir.display()),
+            Err(why) => failed.push(format!("{}: {why}", dir.display())),
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
     }
 }
 

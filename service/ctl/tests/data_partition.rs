@@ -1116,3 +1116,38 @@ fn verify_refuses_both_copies_damaged_and_names_each() {
     assert!(report.contains(SECOND_DAMAGED), "{report}");
     assert!(report.contains("refused: 2"), "{report}");
 }
+
+/// Every directory the first-flash tree makes is either one the daemon writes in, which slot-init
+/// gives to the daemon's user at every boot (`Layout::daemon_dirs`), or one the daemon only reads
+/// through (the partition's root and `board/`). A directory this command adds that the daemon
+/// writes and the list leaves out would be root's on every first-flashed board (BOOTFILES-OWNER:
+/// `slots/bootfiles` was, and a live install whose boot files differed failed at its finish).
+#[test]
+fn every_directory_the_first_flash_tree_makes_is_given_to_the_daemon_or_only_read_through() {
+    let slot = slot_in("dirs");
+    let out = slot.dir.join("data");
+    let (r, text) = write_partition(&slot, &out, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+    let layout = Layout::new(&out, slot.dir.join("boot"));
+    let given: Vec<String> = layout
+        .daemon_dirs()
+        .iter()
+        .map(|d| d.strip_prefix(&out).unwrap().display().to_string())
+        .collect();
+    let read_through = ["", "board"];
+    let made: Vec<String> = tree(&out)
+        .into_iter()
+        .filter(|(_, (bytes, _))| bytes.is_none())
+        .map(|(path, _)| path)
+        .collect();
+    for dir in &made {
+        assert!(
+            given.contains(dir) || read_through.contains(&dir.as_str()),
+            "the first-flash tree makes {dir:?}, which slot-init does not give to the daemon: {made:?}"
+        );
+    }
+    assert!(
+        made.contains(&"slots/bootfiles".to_string()),
+        "the tree holds the boot-file store: {made:?}"
+    );
+}

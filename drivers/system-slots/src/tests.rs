@@ -6373,6 +6373,33 @@ fn an_unwritable_state_dir_refuses_a_switch_before_any_boot_record_is_written() 
     );
 }
 
+/// A boot-file store the daemon can't write (`slots/bootfiles` left root's by the first-flash tree)
+/// makes the state unwritable by name, and an install is refused before it takes a byte, instead of
+/// failing at its finish after all of them (BOOTFILES-OWNER). A store given since is taken at the
+/// next call.
+#[test]
+fn an_unwritable_boot_file_store_refuses_an_install_before_any_byte() {
+    let mut board = Board::new("os-1");
+    let probe = board
+        .layout()
+        .bootfiles()
+        .join(format!(".lemnosd-write-check-{}", std::process::id()));
+    fs::create_dir_all(&probe).unwrap();
+    board.slots.state_unwritable = Some("the boot-file store".into());
+    assert_eq!(
+        board.slots.install(1 << 20, false, false),
+        Err(Status::FAILED_PRECONDITION)
+    );
+    assert_eq!(
+        board.slots.health(),
+        Health::Degraded(crate::STATE_UNWRITABLE)
+    );
+    let why = board.slots.info_json();
+    assert!(why.contains("bootfiles"), "{why}");
+    fs::remove_dir(&probe).unwrap();
+    assert!(board.slots.install(1 << 20, false, false).is_ok());
+}
+
 /// `list` says each slot's build mode and medium as its manifest writes them, `not recorded` when it
 /// writes neither, and an unknown build mode as it is written.
 #[test]

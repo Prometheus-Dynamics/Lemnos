@@ -3285,8 +3285,9 @@ fn a_route_a_boot_that_fails_keeps_its_log_off_the_other_systems_state_dir() {
     assert!(!data.join("board/slots").join(DATA_LOG).exists(), "{logs}");
 }
 
-/// A boot of our own slot gives the slots state dir and the image dir to lemnosd's user, by the ids
-/// in the slot's root: the dirs alone, so the daemon writes them after its drop.
+/// A boot of our own slot gives the slots state dir, the image dir and the boot-file store to
+/// lemnosd's user, by the ids in the slot's root: the dirs alone, so the daemon writes them after its
+/// drop.
 #[test]
 fn an_owned_boot_gives_the_slots_dirs_to_the_daemons_user() {
     let board = Board::new();
@@ -3302,9 +3303,15 @@ fn an_owned_boot_gives_the_slots_dirs_to_the_daemons_user() {
         calls.contains(&"chown 990:990 data/slots".to_string()),
         "{calls:?}"
     );
+    // The boot-file store: `lemnos-ctl data-partition` makes it root's, and a live install whose
+    // boot files differ from the stored ones writes into it (BOOTFILES-OWNER).
+    assert!(
+        calls.contains(&"chown 990:990 data/slots/bootfiles".to_string()),
+        "{calls:?}"
+    );
     assert_eq!(
         calls.iter().filter(|c| c.starts_with("chown")).count(),
-        2,
+        3,
         "{calls:?}"
     );
 }

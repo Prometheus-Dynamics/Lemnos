@@ -101,7 +101,7 @@ pub const WRITE_FAILED: &str = "write-failed: a write of the slots state failed,
 
 /// The state's word after a trial's restart failed: the trial was disarmed (see the state's error).
 pub const RESTART_FAILED: &str = "restart-failed";
-pub const STATE_UNWRITABLE: &str = "state-unwritable: the slots state or image dir can't be written by the daemon, so no slot can be installed, switched or confirmed";
+pub const STATE_UNWRITABLE: &str = "state-unwritable: the slots state, image or boot-file dir can't be written by the daemon, so no slot can be installed, switched or confirmed";
 
 /// Whether the daemon can write its state dir and its image dir: a file is made in each and removed.
 /// Only on a board whose records are ours (another system's dirs are never touched).
@@ -110,7 +110,9 @@ pub const STATE_UNWRITABLE: &str = "state-unwritable: the slots state or image d
 ///
 /// The first dir that can't be written, and why.
 fn state_dirs_writable(layout: &Layout) -> core::result::Result<(), String> {
-    for dir in [layout.state_dir(), layout.images()] {
+    // Every dir the daemon writes in (`Layout::daemon_dirs`), the boot-file store included: a store
+    // the daemon can't write fails an install only at its finish, after every byte (BOOTFILES-OWNER).
+    for dir in layout.daemon_dirs() {
         // A dir that isn't there yet is made, as the writer makes it; one the daemon can't make is
         // the first error.
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;

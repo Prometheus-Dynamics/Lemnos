@@ -19,7 +19,10 @@ done
 mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/run /newroot/tmp /newroot/data
 mount --bind /dev /newroot/dev
 if mount -t ext4 /dev/vda2 /newroot/data; then
-	chown 990:990 /newroot/data/board /newroot/data/board/slots /newroot/data/slots /newroot/data/slots/.incoming 2>/dev/null
+	# The first-flash tree is root's on a board (the image is made as root); `mke2fs -d` kept the PC builder's
+	# ids, so they are put back to root first. Then slot-init's own rule gives the daemon's dirs, and only those.
+	chown -R 0:0 /newroot/data
+	/usr/bin/lemnos-slot-install-check give /newroot/data 990 990 || echo "init: FAIL giving the daemon's dirs"
 	echo "init: the data partition is mounted at /data"
 else
 	echo "init: the data partition did not mount"

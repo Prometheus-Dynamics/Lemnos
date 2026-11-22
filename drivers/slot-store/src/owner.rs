@@ -1,4 +1,4 @@
-//! Who owns the slots state: the one rule for giving the state and image dirs to the daemon's user,
+//! Who owns the slots state: the one rule for giving the daemon's dirs (state, images, boot files) to its user,
 //! run as root before lemnosd starts (slot-init on a board; the QEMU route-A check stands it in).
 //!
 //! A dir is given only as itself, never what it holds (the daemon replaces a file by renaming over
@@ -46,6 +46,25 @@ pub fn give_dir(
     chown(dir, uid, gid).map(|()| Given::Given)
 }
 
+/// Gives each of the layout's [`daemon_dirs`](crate::store::Layout::daemon_dirs) to `uid:gid`, in
+/// order, by [`give_dir`]: each dir's result, so the caller logs every one. A parent is given before
+/// the dir under it, and one dir's failure does not stop the others.
+pub fn give_daemon_dirs(
+    layout: &crate::store::Layout,
+    uid: u32,
+    gid: u32,
+    chown: impl Fn(&Path, u32, u32) -> Result<(), String>,
+) -> Vec<(std::path::PathBuf, Result<Given, String>)> {
+    layout
+        .daemon_dirs()
+        .into_iter()
+        .map(|dir| {
+            let given = give_dir(&dir, uid, gid, &chown);
+            (dir, given)
+        })
+        .collect()
+}
+
 /// The board's own chown: `lchown(2)`, which never follows a link.
 ///
 /// # Errors
@@ -59,6 +78,52 @@ pub fn lchown(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// Each dir the daemon is given sits under a writable `/data` grant of the packaged unit
+    /// (`packaging/systemd/grants.toml`, `access = "rw"`): owning a dir the unit's sandbox keeps
+    /// read-only would not let the daemon write it either, and the two lists are kept together here.
+    #[test]
+    fn every_given_dir_is_under_a_writable_data_grant_of_the_unit() {
+        let table = include_str!("../../../packaging/systemd/grants.toml");
+        let writable: Vec<&str> = table
+            .lines()
+            .filter(|l| l.contains("access = \"rw\""))
+            .filter_map(|l| l.split("path = \"").nth(1)?.split('"').next())
+            .filter(|p| p.starts_with("/data/"))
+            .collect();
+        assert!(!writable.is_empty(), "the table has no writable /data rows");
+        let layout = crate::store::Layout::new("/data", "/boot");
+        for dir in layout.daemon_dirs() {
+            let dir = dir.display().to_string();
+            assert!(
+                writable
+                    .iter()
+                    .any(|grant| dir == *grant || dir.starts_with(&format!("{grant}/"))),
+                "{dir} is given to the daemon but no writable /data grant covers it: {writable:?}"
+            );
+        }
+    }
+
+    /// The boot-file store is given with the state and image dirs, after the images dir it sits in.
+    #[test]
+    fn the_daemon_dirs_are_given_in_order_with_the_boot_file_store_last() {
+        let root = std::env::temp_dir().join(format!("owner-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let layout = crate::store::Layout::new(root.join("data"), root.join("boot"));
+        let seen = RefCell::new(Vec::new());
+        let given = give_daemon_dirs(&layout, 990, 990, |d, _, _| {
+            seen.borrow_mut().push(
+                d.strip_prefix(root.join("data"))
+                    .unwrap()
+                    .display()
+                    .to_string(),
+            );
+            Ok(())
+        });
+        assert!(given.iter().all(|(_, g)| g.is_ok()), "{given:?}");
+        assert_eq!(*seen.borrow(), ["board/slots", "slots", "slots/bootfiles"]);
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("slot-owner-{name}-{}", std::process::id()));

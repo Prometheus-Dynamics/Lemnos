@@ -76,6 +76,15 @@ impl Layout {
         self.data.join("board/slots")
     }
 
+    /// Every directory on the data partition the daemon writes in: the state dir, the images dir and
+    /// the boot-file store. The one list slot-init gives to the daemon's user at every boot
+    /// ([`crate::owner::give_daemon_dirs`]); a directory added here is given with the others. The
+    /// first-flash tree (`lemnos-ctl data-partition`) makes these as root, so a directory the daemon
+    /// writes and this list leaves out is root's on every first-flashed board.
+    pub fn daemon_dirs(&self) -> [PathBuf; 3] {
+        [self.state_dir(), self.images(), self.bootfiles()]
+    }
+
     pub fn image(&self, id: &str) -> PathBuf {
         self.images().join(format!("{id}.erofs"))
     }

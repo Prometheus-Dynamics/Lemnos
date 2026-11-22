@@ -364,8 +364,9 @@ impl Boot<'_> {
         self.data_writable.get() && !self.foreign.get()
     }
 
-    /// Gives the slots state dir and the image dir to the user lemnosd drops to (its ids from the slot's
-    /// own root), so the daemon writes them after its drop without any grant of its own. Only when the
+    /// Gives the daemon's dirs on the data partition (the state dir, the image dir and the boot-file store,
+    /// `Layout::daemon_dirs`) to the user lemnosd drops to (its ids from the slot's own root), so the daemon
+    /// writes them after its drop without any grant of its own. Only when the
     /// state is ours to write ([`Boot::state_writable`]): another system's dirs are never touched. The
     /// dirs themselves only, never what they hold (the daemon replaces a file by renaming over it, which
     /// needs the dir alone), and never through a link: a path that is not a plain directory is refused
@@ -382,10 +383,11 @@ impl Boot<'_> {
             ));
             return;
         };
-        for dir in [self.layout.state_dir(), self.layout.images()] {
-            let given = lemnos_slot_store::owner::give_dir(&dir, uid, gid, |d, u, g| {
+        let given =
+            lemnos_slot_store::owner::give_daemon_dirs(&self.layout, uid, gid, |d, u, g| {
                 self.ops.chown_dir(d, u, g)
             });
+        for (dir, given) in given {
             match given {
                 Ok(lemnos_slot_store::owner::Given::Already) => {}
                 Ok(lemnos_slot_store::owner::Given::Given) => self.log(&format!(
