@@ -218,6 +218,16 @@ pub trait Sectors {
     fn read(&mut self, lba: u64, buf: &mut Sector) -> io::Result<()>;
     /// Writes sector `lba`, durably, before it returns.
     fn write(&mut self, lba: u64, buf: &Sector) -> io::Result<()>;
+    /// Writes sector `lba` without waiting for the medium. Nothing depends on it until the caller
+    /// has called [`flush`](Self::flush); a cut before that leaves the sector as it was or as
+    /// written, and the caller's records say which of those it is.
+    fn write_unsynced(&mut self, lba: u64, buf: &Sector) -> io::Result<()> {
+        self.write(lba, buf)
+    }
+    /// Waits until every sector written by [`write_unsynced`](Self::write_unsynced) is on the medium.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The current value of a record.
@@ -375,6 +385,14 @@ impl Sectors for FileSectors {
     fn write(&mut self, lba: u64, buf: &Sector) -> io::Result<()> {
         self.file
             .write_all_at(buf, self.base + lba * SECTOR as u64)?;
+        self.file.sync_data()
+    }
+
+    fn write_unsynced(&mut self, lba: u64, buf: &Sector) -> io::Result<()> {
+        self.file.write_all_at(buf, self.base + lba * SECTOR as u64)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
         self.file.sync_data()
     }
 }

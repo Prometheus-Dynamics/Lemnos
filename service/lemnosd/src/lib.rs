@@ -419,6 +419,12 @@ impl Drop for Service {
 /// Whether the start trace is on (`LEMNOSD_START_TRACE`).
 static TRACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// A host warning as a journal line at warning priority: systemd reads a leading `<4>` as the
+/// level when the unit's stderr is the journal (`SyslogLevelPrefix`, on by default).
+pub fn warning_line(text: &str) {
+    let _ = io::Write::write_fmt(&mut io::stderr(), format_args!("<4>lemnosd: {text}\n"));
+}
+
 /// One line of the start trace, when it is on: seconds on CLOCK_MONOTONIC (the clock the boot path's own stamps
 /// use), then the event. When the start was given a stop point (see [`StopAfter`]) and this line ends the stage
 /// it names, the process stops itself right after the line: nothing after the stop point runs until something

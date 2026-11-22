@@ -302,3 +302,40 @@ fn out_buffers_and_replies_reach_the_caller() {
     assert_eq!(host.call(good, method(6), &capacity, &mut into), Ok(4));
     assert_eq!(into[..4], args);
 }
+
+static WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn record_warning(text: &str) {
+    WARNINGS.lock().unwrap().push(text.to_string());
+}
+
+fn warned(part: &str) -> bool {
+    WARNINGS.lock().unwrap().iter().any(|w| w.contains(part))
+}
+
+#[test]
+fn a_deadline_a_refused_rebind_and_the_release_each_leave_a_warning() {
+    lemnos_host::set_warning_sink(record_warning);
+    let (host, clock) = host_with(COUNTERS, quick());
+    let bad = index(&host, "bad");
+    let args = 400u32.to_le_bytes();
+    assert_eq!(
+        host.call(bad, method(4), &args, &mut [0; 8]),
+        Err(Status::TIMED_OUT)
+    );
+    assert!(warned(
+        "device bad (driver fake-counter): a call ran past its"
+    ));
+    // The stuck call still holds the old instance: the rebind is refused, and says so.
+    clock.advance(Duration::from_secs(1));
+    host.tick();
+    assert!(warned("device bad (driver fake-counter): rebind refused"));
+    assert_ne!(host.device("bad").unwrap().state, DeviceState::Running);
+    // Once the call returns, the next rebind releases the old instance and says so.
+    std::thread::sleep(Duration::from_millis(450));
+    clock.advance(Duration::from_secs(8));
+    host.tick();
+    assert!(warned("the abandoned call returned"));
+    assert_eq!(host.device("bad").unwrap().state, DeviceState::Running);
+    assert_eq!(get_counter(&host, bad), Ok(1));
+}

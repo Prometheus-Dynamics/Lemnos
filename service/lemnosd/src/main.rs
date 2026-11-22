@@ -181,6 +181,8 @@ fn main() -> ExitCode {
             "lemnosd: LEMNOSD_STOP_AFTER is honoured only with LEMNOSD_START_TRACE: not stopping"
         );
     }
+    // The host's warnings are journal lines at warning priority, with or without the start trace.
+    lemnos_host::set_warning_sink(lemnosd::warning_line);
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     let mut board = var("LEMNOSD_BOARD", DEFAULT_BOARD);
     let mut socket = var("LEMNOSD_SOCKET", DEFAULT_SOCKET);

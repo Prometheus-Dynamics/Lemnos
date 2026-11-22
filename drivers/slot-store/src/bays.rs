@@ -961,8 +961,20 @@ pub fn commit_set<D: Sectors + ReadAt>(
     // b-e.
     let dirs = layout.subdirs();
     let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
-    bayfat::write_set(dev, &set_dir(set), INFO_NAME, region, &dirs, &members)
-        .map_err(Error::Device)?;
+    // The set's sectors go down unsynced (one write each, no wait for the medium), then one flush
+    // makes them all durable before the commit record below names them. A cut before the flush
+    // leaves the set empty (step a) and uncommitted; a cut after it leaves the sectors whole.
+    bayfat::write_set_with(
+        dev,
+        &set_dir(set),
+        INFO_NAME,
+        region,
+        &dirs,
+        &members,
+        bayfat::Durability::Unsynced,
+    )
+    .map_err(Error::Device)?;
+    dev.flush().map_err(|e| Error::Device(e.to_string()))?;
     // f. The commit.
     let record = Info::committed(region, slot, &written);
     Pair::at(info_lba)

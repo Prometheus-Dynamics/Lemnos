@@ -1383,6 +1383,34 @@ fn counts_as_gone(status: Status) -> bool {
 /// Where the start trace goes: set once by the daemon when asked for (see [`set_start_trace`]).
 static START_TRACE: OnceLock<fn(&str)> = OnceLock::new();
 
+/// Where the host's warnings go: a call past its deadline, a job that ends interrupted, a rebind
+/// refused because the old instance is still in a call, and that instance released. Off unless set.
+static WARNING_SINK: OnceLock<fn(&str)> = OnceLock::new();
+
+/// Sends the host's warnings to `sink`. The daemon sets it, so each is a journal line at warning
+/// priority. Set once; a second setting is ignored.
+pub fn set_warning_sink(sink: fn(&str)) {
+    let _ = WARNING_SINK.set(sink);
+}
+
+/// One warning, made only when a sink is set.
+fn warn(event: impl FnOnce() -> String) {
+    if let Some(sink) = WARNING_SINK.get() {
+        sink(&event());
+    }
+}
+
+/// The job ids as the warnings name them: `0x…` each, or `none`.
+fn jobs_text(jobs: &[u64]) -> String {
+    if jobs.is_empty() {
+        return "none".into();
+    }
+    jobs.iter()
+        .map(|id| format!("{id:#x}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Sends the host's start events to `sink`: each device's bind as it begins and ends, and its first
 /// tick after each bind. The daemon stamps them; a board run and the QEMU watchdog check read the
 /// gaps between them (how long after the start the watchdog is first fed). Off unless set. A
@@ -1874,6 +1902,17 @@ impl Inner {
     fn fault(&self, slot: &Slot, reason: &str) {
         slot.stop_wait();
         // Whatever the driver was doing for its callers went with it, and the job's end says why.
+        let jobs = self.open_job_ids(slot);
+        if !jobs.is_empty() {
+            warn(|| {
+                format!(
+                    "device {} (driver {}): job(s) {} ended interrupted: {reason}",
+                    slot.spec.id,
+                    slot.spec.driver,
+                    jobs_text(&jobs),
+                )
+            });
+        }
         self.end_jobs_because(slot, Status::INTERRUPTED, reason.as_bytes());
         let mut state = lock(&slot.state);
         let attempts = match &*state {
@@ -2147,7 +2186,7 @@ impl Inner {
             slot: Arc::clone(&slot),
         });
         if let Err(LaneError::Deadline) = lane.run(&[], &mut [], self.options.call_deadline, work) {
-            self.on_deadline(&slot);
+            self.on_deadline(&slot, "tick");
         }
     }
 
@@ -2305,10 +2344,30 @@ impl Inner {
 
     /// Whichever call was running, the lane is gone. Every device on it
     /// keeps working through a new lane; only `slot` is marked.
-    fn on_deadline(&self, slot: &Slot) {
+    fn on_deadline(&self, slot: &Slot, call: &'static str) {
         self.abandon_lane(slot);
         slot.hung.store(true, Ordering::Release);
+        let jobs = self.open_job_ids(slot);
+        warn(|| {
+            format!(
+                "device {} (driver {}): a {call} ran past its {} ms deadline; its driver is abandoned until the call returns; job(s) {} end interrupted",
+                slot.spec.id,
+                slot.spec.driver,
+                self.options.call_deadline.as_millis(),
+                jobs_text(&jobs),
+            )
+        });
         self.fault(slot, "a call did not finish in time");
+    }
+
+    /// The ids of the open jobs of `slot`'s device.
+    fn open_job_ids(&self, slot: &Slot) -> Vec<u64> {
+        self.jobs()
+            .open
+            .iter()
+            .filter(|open| open.device == slot.index)
+            .map(|open| open.id)
+            .collect()
     }
 
     /// Runs `work` on a device's driver, on its lane and inside the panic boundary, then ticks
@@ -2351,7 +2410,7 @@ impl Inner {
             Ok(0)
         }));
         if let Err(LaneError::Deadline) = lane.run(&[], &mut [], self.options.call_deadline, work) {
-            self.on_deadline(&slot);
+            self.on_deadline(&slot, "call");
         }
     }
 
@@ -2416,7 +2475,7 @@ impl Inner {
         match lane.run(&[], &mut [], self.options.call_deadline, lane_work) {
             Ok(_) => lock(&answer).take().unwrap_or(Err(Status::NO_DEVICE)),
             Err(LaneError::Deadline) => {
-                self.on_deadline(&slot);
+                self.on_deadline(&slot, "call");
                 Err(Status::TIMED_OUT)
             }
             Err(LaneError::Busy) => Err(Status::TIMED_OUT),
@@ -2456,7 +2515,7 @@ impl Inner {
             Ok(result) => result,
             Err(LaneError::Deadline) => {
                 // The work may already be running on the lane: it reports its own end when it ends.
-                self.on_deadline(&slot);
+                self.on_deadline(&slot, "call");
                 Err(Status::TIMED_OUT)
             }
             Err(LaneError::Busy) => {
@@ -2508,9 +2567,23 @@ impl Inner {
 
         // A call stuck in the old instance holds its lock until it returns.
         let Ok(mut old) = slot.instance.try_lock() else {
+            warn(|| {
+                format!(
+                    "device {} (driver {}): rebind refused: a call into the old instance is still running; retried with backoff, capped at 8 s",
+                    slot.spec.id, slot.spec.driver
+                )
+            });
             self.record_failed_bind(&slot, "a call into the old driver is still stuck");
             return;
         };
+        if slot.hung.load(Ordering::Acquire) {
+            warn(|| {
+                format!(
+                    "device {} (driver {}): the abandoned call returned; the old instance is released and the device rebinds",
+                    slot.spec.id, slot.spec.driver
+                )
+            });
+        }
         let dead = old.take();
         drop(old);
         slot.end_close();

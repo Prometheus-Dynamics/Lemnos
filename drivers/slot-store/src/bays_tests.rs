@@ -918,3 +918,161 @@ fn a_disk_of_layout_5_is_refused_by_name_by_every_write_and_nothing_is_written()
         assert!(dev.img == v5, "the image changed");
     }
 }
+
+/// A device with a write cache: `write` is durable at once (counted as a sync), `write_unsynced`
+/// sits in the cache until `flush`. Reads see the cache, as reads through the page cache do. With
+/// `cut_at_flush`, the flush applies only the cached sectors `keep` picks (any subset, in any order:
+/// what reached the medium before the power went) and fails; every later write fails.
+struct Cached {
+    dev: Dev,
+    cache: Vec<(u64, Sector)>,
+    synced: usize,
+    unsynced: usize,
+    flushes: usize,
+    cut_at_flush: Option<fn(usize) -> bool>,
+}
+
+impl Cached {
+    fn new(img: Vec<u8>) -> Self {
+        Self {
+            dev: Dev::new(img),
+            cache: Vec::new(),
+            synced: 0,
+            unsynced: 0,
+            flushes: 0,
+            cut_at_flush: None,
+        }
+    }
+}
+
+impl ReadAt for Cached {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.dev.read_at(offset, buf)?;
+        for (lba, sector) in &self.cache {
+            let (s0, s1) = (*lba * SECTOR as u64, (*lba + 1) * SECTOR as u64);
+            let (b0, b1) = (offset, offset + buf.len() as u64);
+            let (lo, hi) = (s0.max(b0), s1.min(b1));
+            if lo < hi {
+                buf[(lo - b0) as usize..(hi - b0) as usize]
+                    .copy_from_slice(&sector[(lo - s0) as usize..(hi - s0) as usize]);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Sectors for Cached {
+    fn read(&mut self, lba: u64, buf: &mut Sector) -> std::io::Result<()> {
+        self.read_at(lba * SECTOR as u64, buf)
+    }
+
+    fn write(&mut self, lba: u64, buf: &Sector) -> std::io::Result<()> {
+        self.synced += 1;
+        self.dev.write(lba, buf)
+    }
+
+    fn write_unsynced(&mut self, lba: u64, buf: &Sector) -> std::io::Result<()> {
+        if self.dev.dead {
+            return Err(std::io::Error::other("power is off"));
+        }
+        self.unsynced += 1;
+        self.cache.push((lba, *buf));
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flushes += 1;
+        let cache = std::mem::take(&mut self.cache);
+        match self.cut_at_flush {
+            None => {
+                for (lba, sector) in &cache {
+                    self.dev.write(*lba, sector)?;
+                }
+                Ok(())
+            }
+            Some(keep) => {
+                for (i, (lba, sector)) in cache.iter().enumerate() {
+                    if keep(i) {
+                        let at = *lba as usize * SECTOR;
+                        self.dev.img[at..at + SECTOR].copy_from_slice(sector);
+                    }
+                }
+                self.dev.dead = true;
+                Err(std::io::Error::other("power cut before the flush finished"))
+            }
+        }
+    }
+}
+
+#[test]
+fn an_install_writes_its_set_unsynced_and_waits_for_the_medium_once_before_its_commit() {
+    // The install path used to wait for the medium after every 512-byte sector: one wait per
+    // sector of every payload (13,502 for a 7.7 MB boot set, 153.8 s at load ~110 on the bench
+    // NVMe). The set's sectors now go down unsynced, with one flush before the commit record.
+    let layout = board_layout();
+    let pre = volume_image(&layout);
+    let mut dev = Cached::new(pre);
+    assert_eq!(
+        install(&mut dev, &layout, 2, "c", &refs(&payloads_c())).unwrap(),
+        Done::Installed
+    );
+    assert_eq!(dev.flushes, 1, "one wait for the medium per install");
+    let data_sectors: usize = layout
+        .written(&refs(&payloads_c()))
+        .unwrap()
+        .iter()
+        .map(|(_, b)| b.len().div_ceil(SECTOR))
+        .sum();
+    assert!(
+        dev.unsynced >= data_sectors,
+        "every data sector goes down unsynced: {} unsynced, {data_sectors} data sectors",
+        dev.unsynced
+    );
+    // The synced writes are the records only: the set's record emptied and committed (two copies
+    // each) and the two pointers (two copies each).
+    assert!(
+        dev.synced <= 8,
+        "only the records wait for the medium; {} synced writes",
+        dev.synced
+    );
+    for (path, bytes) in layout.written(&refs(&payloads_c())).unwrap() {
+        assert_eq!(file(&dev.dev.img, 2, &path), bytes, "{path}");
+    }
+}
+
+#[test]
+fn a_cut_before_the_flush_leaves_the_set_uncommitted_whatever_reached_the_medium() {
+    // Unsynced sectors reach the medium in any order and any subset. Whichever ones made it before
+    // the power went, the set's record is still empty (step a was synced), so the default boots
+    // what it booted and the next install repairs the set.
+    let layout = test_layout();
+    let pre = volume_image(&layout);
+    let keeps: [fn(usize) -> bool; 4] = [|_| false, |_| true, |i| i % 2 == 0, |i| i % 3 == 1];
+    // Fill set 2 first, so step a has a committed record to empty.
+    let mut first = Dev::new(pre);
+    install(&mut first, &layout, 2, "c", &refs(&payloads_c())).unwrap();
+    let pre = first.img;
+    let allowed = write_set(&pre, 1);
+    for (k, keep) in keeps.into_iter().enumerate() {
+        let mut dev = Cached::new(pre.clone());
+        dev.cut_at_flush = Some(keep);
+        let got = install(&mut dev, &layout, 1, "b", &refs(&payloads_b()));
+        assert!(got.is_err(), "keep #{k}: the install must fail at the cut");
+        let img = dev.dev.img.clone();
+        only_inside(&pre, &dev.dev, &allowed).unwrap_or_else(|e| panic!("keep #{k}: {e}"));
+        check_cut_set(&img, &layout, 1).unwrap_or_else(|e| panic!("keep #{k}: {e}"));
+        let mut after = Dev::new(img.clone());
+        let lba = place_sets(&mut after).unwrap()[1];
+        let info = read_info(&mut after, lba).unwrap().expect("a record");
+        assert!(
+            info.slot.is_none(),
+            "keep #{k}: the cut set must read uncommitted"
+        );
+        check_bootable(&img, &layout, (2, "c")).unwrap_or_else(|e| panic!("keep #{k}: {e}"));
+        // The next install repairs it.
+        let mut again = Dev::new(img);
+        install(&mut again, &layout, 1, "b", &refs(&payloads_b()))
+            .unwrap_or_else(|e| panic!("keep #{k}: reinstall: {e}"));
+        check_cut_set(&again.img, &layout, 1).unwrap();
+    }
+}

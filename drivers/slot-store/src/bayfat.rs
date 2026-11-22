@@ -275,6 +275,7 @@ fn compose(
 /// change from `old`; the sector holding entry `last` (when given) is written after every other.
 fn write_dir<D: Sectors>(
     dev: &mut D,
+    durability: Durability,
     v: &Volume,
     chain: &[u64],
     old: &[u8],
@@ -297,7 +298,7 @@ fn write_dir<D: Sectors>(
         }
         let mut buf = [0u8; SECTOR];
         buf.copy_from_slice(new);
-        dev.write(sectors[s], &buf).map_err(io)?;
+        put_sector(dev, durability, sectors[s], &buf).map_err(io)?;
     }
     Ok(())
 }
@@ -312,6 +313,49 @@ pub(crate) fn write_set<D: Sectors + ReadAt>(
     region: Region,
     subdirs_of_set: &[&str],
     members: &[Member<'_>],
+) -> Result<(), String> {
+    write_set_with(
+        dev,
+        set_dir,
+        record,
+        region,
+        subdirs_of_set,
+        members,
+        Durability::Synced,
+    )
+}
+
+/// How a set's sectors are written: each one durable as it is written, or left for the caller to
+/// [`Sectors::flush`] before anything that names them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Durability {
+    Synced,
+    Unsynced,
+}
+
+/// Writes one sector as `durability` says.
+fn put_sector<D: Sectors>(
+    dev: &mut D,
+    durability: Durability,
+    lba: u64,
+    buf: &[u8; SECTOR],
+) -> std::io::Result<()> {
+    match durability {
+        Durability::Synced => dev.write(lba, buf),
+        Durability::Unsynced => dev.write_unsynced(lba, buf),
+    }
+}
+
+/// [`write_set`], with the sectors' durability chosen by the caller. The install path writes its
+/// bulk unsynced and flushes once before its commit record; every other caller keeps `Synced`.
+pub(crate) fn write_set_with<D: Sectors + ReadAt>(
+    dev: &mut D,
+    set_dir: &str,
+    record: &str,
+    region: Region,
+    subdirs_of_set: &[&str],
+    members: &[Member<'_>],
+    durability: Durability,
 ) -> Result<(), String> {
     let v = bootfat::volume(dev).map_err(|e| e.to_string())?;
     region.check(&v)?;
@@ -360,7 +404,7 @@ pub(crate) fn write_set<D: Sectors + ReadAt>(
                 let to = (from + SECTOR).min(m.bytes.len());
                 buf[..to - from].copy_from_slice(&m.bytes[from..to]);
             }
-            dev.write(v.cluster_lba(first) + s, &buf).map_err(io)?;
+            put_sector(dev, durability, v.cluster_lba(first) + s, &buf).map_err(io)?;
         }
     }
     // c. The FAT sectors of the region, the last copy first.
@@ -370,13 +414,18 @@ pub(crate) fn write_set<D: Sectors + ReadAt>(
         for (k, chunk) in fat.chunks(SECTOR).enumerate() {
             let mut buf = [0u8; SECTOR];
             buf.copy_from_slice(chunk);
-            dev.write(v.fat_lba(copy) + first_sector + k as u64, &buf)
-                .map_err(io)?;
+            put_sector(
+                dev,
+                durability,
+                v.fat_lba(copy) + first_sector + k as u64,
+                &buf,
+            )
+            .map_err(io)?;
         }
     }
     // d. The directories: the subdirectories, then the set's own (reserve's sector last).
     for (chain, old, bytes, at) in &dirs {
-        write_dir(dev, &v, chain, old, bytes, *at)?;
+        write_dir(dev, durability, &v, chain, old, bytes, *at)?;
     }
     // e. Read back through the FAT, parsed again.
     for m in members {
