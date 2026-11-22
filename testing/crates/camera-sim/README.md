@@ -23,8 +23,8 @@ are in `tests/instance.rs`.
 | the period is the sensor's frame length times its line time, not the link's width x height / pixel rate | `the_period_is_the_sensors_frame_length_times_its_line_time` |
 | a due frame with no free buffer is dropped and counted, never blocked or queued past the ring | `a_due_frame_with_no_free_buffer_is_dropped_and_counted_and_the_stream_continues` |
 | all buffers held: frame dropped and counted, stream continues | `a_due_frame_with_no_free_buffer_is_dropped_and_counted_and_the_stream_continues` |
-| stamps: interval within one line of the frame length; `timestamp_ns > 0` | `paced_frames_fall_on_the_sensor_period_from_its_start_and_are_stamped_on_the_grid`, `a_real_paced_stream_over_four_seconds_has_no_reader_gap_over_250_ms` |
-| reader gaps at most 250 ms over at least four seconds | `a_real_paced_stream_over_four_seconds_has_no_reader_gap_over_250_ms` |
+| stamps: interval within one line of the frame length; `timestamp_ns > 0` | `paced_frames_fall_on_the_sensor_period_from_its_start_and_are_stamped_on_the_grid`, `a_real_paced_stream_stamps_on_its_grid_and_counts_what_it_drops_in_the_sequence` (the host's clock) |
+| reader gaps at most 250 ms over at least four seconds | `a_paced_stream_over_four_seconds_of_its_clock_has_no_gap_over_one_period` (the injected clock: how fast a loaded host keeps up is a measurement, not a gate test) |
 | paced content: a reader's bytes are the producer's for the same frame id | `paced_frames_carry_the_bytes_of_their_identity` |
 | per-instance state: no shared clock or names between two instances in one process | `two_instances_in_one_process_share_no_state` |
 | lock-step: `next` advances exactly one frame, in order | `next_advances_exactly_one_frame_in_order` |

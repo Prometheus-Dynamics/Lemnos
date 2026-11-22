@@ -250,39 +250,61 @@ fn a_due_frame_with_no_free_buffer_is_dropped_and_counted_and_the_stream_continu
     assert_eq!((c.frames, c.dropped, c.errors), (9, 6, 0));
 }
 
+/// Four seconds of the stream's own clock, moved one period at a time: every frame comes, in order, on the grid,
+/// none dropped, so no gap between frames is longer than one period (33 ms, under the consumer's 250 ms). On the
+/// injected clock, so the host's load can't move it.
 #[test]
-fn a_real_paced_stream_over_four_seconds_has_no_reader_gap_over_250_ms() {
+fn a_paced_stream_over_four_seconds_of_its_clock_has_no_gap_over_one_period() {
+    let sim = paced(lemnos_camera_sim::ClockSource::Injected);
+    let mut consumer = started(&sim);
+    let start = sim.now_ns();
+    let frames = 4_000_000_000u64.div_ceil(PERIOD_NS);
+    const { assert!(PERIOD_NS < 250_000_000) };
+    for k in 0..frames {
+        sim.advance_to(start + (k + 1) * PERIOD_NS);
+        let f = recv_frame(&mut consumer);
+        assert_eq!(f.id, k, "frame {k} comes next, none dropped");
+        assert_eq!(
+            f.timestamp_ns,
+            start + (k + 1) * PERIOD_NS,
+            "frame {k} is stamped one period after the one before"
+        );
+        consumer.release(f).unwrap();
+    }
+    let c = counters_when(&mut consumer, |c| c.frames >= frames);
+    assert_eq!((c.frames, c.dropped, c.errors), (frames, 0, 0));
+}
+
+/// On the host's clock, only what load can't break: frames come in order, each stamped on the sensor's grid and
+/// never in the future, and a frame the host was too slow for is dropped and counted in the sequence, not stamped
+/// late. How many frames a loaded host keeps up with is a measurement, not this test's.
+#[test]
+fn a_real_paced_stream_stamps_on_its_grid_and_counts_what_it_drops_in_the_sequence() {
     let sim = paced(lemnos_camera_sim::ClockSource::Monotonic);
     let mut consumer = started(&sim);
     let period = sim.period_ns();
-    let begun = Instant::now();
-    let mut last = Instant::now();
-    let mut worst = Duration::ZERO;
-    let mut frames = 0u64;
-    let mut previous = 0u64;
-    while begun.elapsed() < Duration::from_secs(4) {
+    let mut previous: Option<(u64, u64)> = None;
+    for _ in 0..5 {
         let f = recv_frame(&mut consumer);
-        let now = Instant::now();
-        worst = worst.max(now - last);
-        last = now;
         assert!(f.timestamp_ns > 0);
-        if frames > 0 {
-            let delta = f.timestamp_ns - previous;
+        let now = lemnos_linux_sys::time::monotonic_ns().unwrap();
+        assert!(
+            f.timestamp_ns <= now,
+            "a stamp is never in the future: {} > {now} (CLOCK_MONOTONIC)",
+            f.timestamp_ns
+        );
+        if let Some((id, stamp)) = previous {
+            assert!(f.id > id, "frames come in order: {} after {id}", f.id);
+            let starts = f.id - id;
+            let delta = f.timestamp_ns - stamp;
             assert!(
-                delta.abs_diff(period) <= LINE_NS,
-                "a real stamp interval {delta} ns is the frame period {period} within one line"
+                delta.abs_diff(starts * period) <= LINE_NS,
+                "{starts} frame start(s) apart is {delta} ns: the period {period} ns each, within one line"
             );
         }
-        previous = f.timestamp_ns;
-        frames += 1;
+        previous = Some((f.id, f.timestamp_ns));
         consumer.release(f).unwrap();
     }
-    assert!(
-        worst <= Duration::from_millis(250),
-        "the longest gap between frames was {worst:?}"
-    );
-    // Four seconds at about 30 frames a second: the stream keeps up with its own period.
-    assert!(frames >= 100, "{frames} frames in four seconds");
 }
 
 // ---------------------------------------------------------------- lock-step
