@@ -405,16 +405,42 @@ pub fn slot_words(board: &BoardFile) -> Result<(String, Vec<String>), String> {
     Ok((prefix.to_string(), sources))
 }
 
+/// The command-line word slot-init reads the board's way back from (`<prefix>.loop_return=`).
+pub const LOOP_RETURN_WORD: &str = "loop_return";
+
+/// The board's `[boot] loop_return`, checked: `Some("rpiboot")` on the Raspberry Pi 5 family (the SoC
+/// name starts with `bcm2712`), `None` when unset. Any other value, or `"rpiboot"` elsewhere, is
+/// refused by name.
+pub fn loop_return(board: &BoardFile) -> Result<Option<&'static str>, String> {
+    let Some(way) = board.boot.loop_return.as_deref() else {
+        return Ok(None);
+    };
+    if way != "rpiboot" {
+        return Err(format!(
+            "[boot] loop_return = {way:?}: the one way back slot-init knows is \"rpiboot\" (the Raspberry Pi 5 family's flashing mode)"
+        ));
+    }
+    let soc = board.board.soc.as_deref().unwrap_or_default();
+    if !soc.starts_with("bcm2712") {
+        return Err(format!(
+            "[boot] loop_return = \"rpiboot\": the firmware's flashing mode is asked through the Raspberry Pi 5 family's mailbox, and this board's soc is {soc:?}: remove loop_return"
+        ));
+    }
+    Ok(Some("rpiboot"))
+}
+
 /// The slot's kernel command-line words for `--cmdline-slot`, one line: `<prefix>.slot=<ID>
 /// <prefix>.roothash=@roothash@ <prefix>.src.<source>=<path> ... panic=5`. `<prefix>` is the
 /// system-slots `boot_args` of the board file: the words the slot-init program reads from the line.
 /// `@roothash@` is the one hole, which `lemnos-ctl bundle` fills with the root hash it computes. There is one
 /// `.src.` word per `boot_sources` entry, in the table's order, the entry itself after `.src.`: the
 /// slot's initramfs finds its boot disk from them, and the install refuses a bundle without each.
-/// There is no `.disk=` word. `panic=5` is a fixed word: the fallback depends on a panic restarting
+/// A board with `[boot] loop_return` gets `<prefix>.loop_return=rpiboot` after the serial words
+/// ([`loop_return`]). There is no `.disk=` word. `panic=5` is a fixed word: the fallback depends on a panic restarting
 /// the board, so it is never left out or changed.
 pub fn cmdline_slot(board: &BoardFile, slot: &str) -> Result<String, String> {
     let (prefix, sources) = slot_words(board)?;
+    let loop_return = loop_return(board)?;
     if !lemnos_slot_store::store::valid_id(slot) {
         return Err(format!("{slot:?} is not a slot id"));
     }
@@ -430,6 +456,9 @@ pub fn cmdline_slot(board: &BoardFile, slot: &str) -> Result<String, String> {
     for word in serial {
         words.push(' ');
         words.push_str(&word);
+    }
+    if let Some(way) = loop_return {
+        words.push_str(&format!(" {prefix}.{LOOP_RETURN_WORD}={way}"));
     }
     words.push_str(" panic=5\n");
     Ok(words)

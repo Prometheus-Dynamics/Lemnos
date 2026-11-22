@@ -1788,6 +1788,28 @@ rotation above still reads the raw count.
   checked by `scripts/check-kernel-config.py --check-config <.config> --firmware rpi-tryboot`, which
   names a symbol that is `=m` or unset. A test ties slot-init's use of the mailbox to that group.
   Still to confirm on a board: `testing/board-runs/I5i6.md`. A failed request restarts the old way.
+- **Boots that die after slot-init reach the flashing mode too, where the board says so.** A boot can pass
+  slot-init and die after it: a reset after the switch to the slot's root, or a daemon that never feeds the
+  watchdog. slot-init makes no refusal then, so the rescue above never sees it. On a freshly flashed disk,
+  `previous.txt` names the default's own bay, so the firmware's count fallback starts the same slot again, and
+  the board loops on its disk. The count still shows the run, because only a good boot moves the baseline. A
+  board file with `[boot] loop_return = "rpiboot"` (the Raspberry Pi 5 family only; any other value or SoC is
+  refused at build by name) gets `<prefix>.loop_return=rpiboot` on each slot's command line. With it,
+  slot-init checks the restarts since the last good boot as soon as the data partition is found, before any
+  slot starts. At `FLASH_AFTER` (8) or more, wherever those boots ended, it says so at the kernel log's error
+  level with the count and the baseline, asks the firmware for RPIBOOT as the rescue does, and restarts into
+  it. A request the firmware does not take is said, and the boot goes on.
+
+  A healthy board never reaches the limit. Each good boot keeps the count it started from as the baseline,
+  so plain restarts and trials, each boot good, count at most the restarts since the last good one. A failed
+  trial and the default's good boot after it add two. Without the key, only a refusal asks for the flashing
+  mode, as before. Tests: `boots_that_die_after_this_program_reach_the_flashing_mode_at_the_limit_before_any_slot_starts`,
+  `a_healthy_board_across_plain_restarts_and_trials_never_reaches_the_flashing_mode`,
+  `below_the_limit_or_without_the_way_back_the_boot_starts_its_slot` and
+  `a_way_back_the_firmware_refuses_lets_the_boot_go_on`. On a real kernel (an arm64 QEMU guest, a boot
+  partition from `lemnos-ctl boot-partition`, the count in `chosen/bootloader`), the request comes before
+  any slot starts. The guest has no mailbox, so the restart into RPIBOOT itself is a board check
+  (`testing/board-runs/I5i6.md`).
 - Limits, stated: only the last reset's cause is visible; a broken previous alternates with the
   default for ever and nothing reports it (the fixed boot stage is the answer to that case); a
   power cut clears the count, so a cut in the middle of an arrival counts once at most; a plain

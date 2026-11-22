@@ -939,3 +939,50 @@ fn tree_boot_dir_is_refused_and_names_boot_partition() {
     assert!(error.contains("boot-partition") && error.contains("--manifest-boot"));
     assert!(!std::path::Path::new("/nonexistent/dir").exists());
 }
+
+mod loop_return {
+    use super::super::boot_dir::cmdline_slot;
+    use lemnos_host::board;
+
+    fn reference_with(soc: &str, line: &str) -> lemnos_host::board::BoardFile {
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testing/boards/reference.toml"),
+        )
+        .unwrap();
+        let text = text.replace("soc = \"bcm2712-rp1\"", &format!("soc = \"{soc}\""));
+        let text = text.replacen("[boot]\n", &format!("[boot]\n{line}\n"), 1);
+        board::parse(&text).unwrap()
+    }
+
+    #[test]
+    fn a_pi5_board_with_the_way_back_names_it_on_the_slot_s_line() {
+        let line = cmdline_slot(
+            &reference_with("bcm2712-rp1", "loop_return = \"rpiboot\""),
+            "os-1",
+        )
+        .unwrap();
+        assert!(
+            line.ends_with(" os.loop_return=rpiboot panic=5\n"),
+            "{line}"
+        );
+        let line = cmdline_slot(&super::reference(), "os-1").unwrap();
+        assert!(!line.contains("loop_return"), "{line}");
+    }
+
+    #[test]
+    fn another_way_or_another_soc_is_refused_by_name() {
+        let why = cmdline_slot(
+            &reference_with("bcm2712-rp1", "loop_return = \"usb\""),
+            "os-1",
+        )
+        .unwrap_err();
+        assert!(why.contains("loop_return = \"usb\""), "{why}");
+        let why = cmdline_slot(
+            &reference_with("rk3566", "loop_return = \"rpiboot\""),
+            "os-1",
+        )
+        .unwrap_err();
+        assert!(why.contains("this board's soc is \"rk3566\""), "{why}");
+    }
+}

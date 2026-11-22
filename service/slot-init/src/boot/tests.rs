@@ -3410,6 +3410,7 @@ mod grow_state {
             roothash: String::new(),
             sources: Vec::new(),
             grow_off,
+            loop_return: false,
         }
     }
 
@@ -3529,4 +3530,133 @@ mod grow_state {
             "still refused on the next boot"
         );
     }
+}
+/// Adds the board's way back (`os.loop_return=rpiboot`, from `[boot] loop_return`) to the command line.
+fn with_way_back(board: &Board) {
+    let line = board.read("proc/cmdline");
+    board.write(
+        "proc/cmdline",
+        format!("{} os.loop_return=rpiboot\n", line.trim_end()).as_bytes(),
+    );
+}
+
+/// A run of boots that pass this program and die after it (the reset after the switch to the slot's
+/// root): no refusal is made, so only the count shows them. At the limit, on a board whose way back
+/// is the flashing mode, the boot asks for it before any slot starts, says so with the count, and
+/// restarts into it; nothing is mounted from the data partition and no record changes.
+#[test]
+fn boots_that_die_after_this_program_reach_the_flashing_mode_at_the_limit_before_any_slot_starts() {
+    let board = Board::new();
+    with_way_back(&board);
+    set_baseline(&board, 50);
+    boot_count(&board, 50 + FLASH_AFTER);
+    let before = boot_files(&board);
+    let (fake, why) = board.boot(&[]);
+    let calls = fake.calls();
+    assert!(why.contains("8 restarts without a good boot"), "{why}");
+    let flash = calls.iter().position(|c| c == "flash mode").expect("asked");
+    assert_eq!(calls[flash + 1..], ["restart".to_string()], "{calls:?}");
+    assert!(!fake.called("mount ext4"), "no slot starts: {calls:?}");
+    assert!(!fake.called("sleep 30"), "{calls:?}");
+    assert_eq!(boot_files(&board), before);
+    assert_eq!(baseline_of(&board), Some(50));
+    assert!(!board.meta("os-2").failed());
+    let logs = fake.logs.borrow().join("\n");
+    assert!(
+        logs.contains("8 restarts without a good boot (the firmware's count less the baseline 50), wherever they ended"),
+        "{logs}"
+    );
+    assert!(logs.contains("RPIBOOT"), "{logs}");
+}
+
+/// One below the limit, the boot goes on; without the way back on the command line, the limit is
+/// only the rescue's (a boot that would start, starts).
+#[test]
+fn below_the_limit_or_without_the_way_back_the_boot_starts_its_slot() {
+    for (way_back, restarts) in [
+        (true, FLASH_AFTER - 1),
+        (false, FLASH_AFTER),
+        (false, FLASH_AFTER + 5),
+    ] {
+        let board = Board::new();
+        if way_back {
+            with_way_back(&board);
+        }
+        set_baseline(&board, 0);
+        boot_count(&board, restarts);
+        let (fake, why) = board.boot(&[]);
+        assert_eq!(why, "", "{way_back} {restarts}: {:?}", fake.logs.borrow());
+        assert!(
+            !fake.called("flash mode"),
+            "{way_back} {restarts}: {:?}",
+            fake.calls()
+        );
+        assert!(fake.called("mount ext4 noatime,errors=remount-ro dev/mmcblk0p2 data"));
+    }
+}
+
+/// A healthy board never reaches the limit: a good boot keeps the count it started from as the
+/// baseline (the daemon's write, before its clear), so a long run of plain restarts and trials, each
+/// boot good, counts at most the restarts since the last good one. The firmware's count is modelled
+/// as never cleared (the strictest case): it climbs by one on every restart.
+#[test]
+fn a_healthy_board_across_plain_restarts_and_trials_never_reaches_the_flashing_mode() {
+    let board = Board::new();
+    with_way_back(&board);
+    let mut count = 0u32;
+    for boot in 0..(3 * FLASH_AFTER) {
+        // Every third boot is a trial (the update's tryboot restart), the rest plain restarts.
+        let trial = boot % 3 == 2;
+        let flag: &[u8] = if trial { &[0, 0, 0, 1] } else { &[0, 0, 0, 0] };
+        board.write(lemnos_slot_store::records::tryboot::TRIAL_FLAG, flag);
+        boot_count(&board, count);
+        let (fake, why) = board.boot(&[]);
+        assert_eq!(why, "", "boot {boot}: {:?}", fake.logs.borrow());
+        assert!(
+            !fake.called("flash mode"),
+            "boot {boot}: {:?}",
+            fake.calls()
+        );
+        // The boot is good: the daemon keeps the count it started from.
+        set_baseline(&board, count);
+        count += 1;
+    }
+    // A failed trial goes back to the default, which is good: two restarts, far below the limit.
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    boot_count(&board, count);
+    let (fake, _) = board.boot(&["verity "]);
+    assert!(!fake.called("flash mode"), "{:?}", fake.calls());
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 0],
+    );
+    boot_count(&board, count + 1);
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(!fake.called("flash mode"), "{:?}", fake.calls());
+}
+
+/// A request the firmware does not take is said at the error level, and the boot goes on: a board
+/// must come up.
+#[test]
+fn a_way_back_the_firmware_refuses_lets_the_boot_go_on() {
+    let board = Board::new();
+    with_way_back(&board);
+    set_baseline(&board, 0);
+    boot_count(&board, FLASH_AFTER + 2);
+    let (fake, why) = board.boot(&["flash mode"]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(fake.called("mount ext4 noatime,errors=remount-ro dev/mmcblk0p2 data"));
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("the firmware's flashing mode was not taken")
+                && l.contains("the boot goes on")),
+        "{:?}",
+        fake.logs.borrow()
+    );
 }

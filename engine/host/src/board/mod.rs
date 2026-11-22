@@ -853,6 +853,14 @@ pub struct BootSpec {
     /// by name; `false` on a Pi 5 writes config.txt without the filter. Only the `tryboot` record has one.
     #[serde(default)]
     pub count_fallback: Option<bool>,
+    /// The board's own way back from a run of boots that never become good, wherever they end
+    /// (in the initramfs or after it). `"rpiboot"`: the Raspberry Pi 5 family's flashing mode, which
+    /// slot-init asks the firmware for once the restarts since the last good boot reach its limit, before
+    /// it starts a slot. Written to the slot's command line as `<prefix>.loop_return=rpiboot`. Default
+    /// none: without it only a refusal in the initramfs asks for the flashing mode. Any other value, and
+    /// `"rpiboot"` on a board that is not the Pi 5 family, are refused at build by name.
+    #[serde(default)]
+    pub loop_return: Option<String>,
     /// Firmware overlay names (without `.dtbo`) the boot partition carries in each bay's `overlays/`:
     /// each is copied from `--firmware DIR`. Default none.
     #[serde(default)]

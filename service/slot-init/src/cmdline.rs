@@ -45,6 +45,9 @@ pub struct Args {
     /// Whether the board file opted the data partition's grow out: `<prefix>.grow=0` (the image
     /// builder writes it from `grow_data = false`). Anything else, or none, is on.
     pub grow_off: bool,
+    /// `<prefix>.loop_return=rpiboot`: the board has the firmware's flashing mode as its way back
+    /// from a run of boots that never become good ([`crate::boot`]). Any other value is `false`.
+    pub loop_return: bool,
 }
 
 impl Args {
@@ -68,6 +71,7 @@ impl Args {
                 .to_string(),
             sources: sources(cmdline, prefix),
             grow_off: arg(cmdline, &format!("{prefix}.grow")) == Some("0"),
+            loop_return: arg(cmdline, &format!("{prefix}.loop_return")) == Some("rpiboot"),
         })
     }
 
@@ -100,6 +104,26 @@ mod tests {
                 .unwrap();
         assert_eq!(args.sources, ["mmc0=/soc/mmc@1", "nvme0=/axi/pcie@2"]);
         assert!(Args::parse("os.slot=a").unwrap().sources.is_empty());
+    }
+
+    #[test]
+    fn the_way_back_is_read_under_the_prefix_and_only_rpiboot_counts() {
+        assert!(
+            Args::parse("os.slot=a os.loop_return=rpiboot")
+                .unwrap()
+                .loop_return
+        );
+        assert!(!Args::parse("os.slot=a").unwrap().loop_return);
+        assert!(
+            !Args::parse("os.slot=a os.loop_return=other")
+                .unwrap()
+                .loop_return
+        );
+        assert!(
+            !Args::parse("os.slot=a x.loop_return=rpiboot")
+                .unwrap()
+                .loop_return
+        );
     }
 
     #[test]

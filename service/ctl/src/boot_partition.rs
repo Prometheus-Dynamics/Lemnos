@@ -257,6 +257,7 @@ pub(crate) fn check_board_boot(board: &BoardFile) -> Result<Family, String> {
             "[boot] count_fallback = true: the firmware's boot_count exists on the Raspberry Pi 5 family only, and this board's soc is {soc:?}: remove count_fallback, or set it to false"
         ));
     }
+    crate::boot_dir::loop_return(board)?;
     if family == Family::UbootBlock && boot.count_fallback.is_some() {
         return Err(
             "[boot] count_fallback is a Raspberry Pi firmware setting: this board's record is \"uboot\""

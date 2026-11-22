@@ -648,6 +648,39 @@ impl Boot<'_> {
         }
     }
 
+    /// The board's way back from boots that never become good (`<prefix>.loop_return=rpiboot`). A boot
+    /// can pass this program and die after it (a reset after the switch to the slot's root, a daemon
+    /// that never feeds the watchdog): no refusal is made, so the rescue never sees it, and on a fresh
+    /// disk the firmware's count fallback starts the same bay. The count still climbs, because only a
+    /// good boot moves the baseline. So once [`FLASH_AFTER`] restarts have gone by without a good boot,
+    /// wherever they ended, this asks the firmware for its flashing mode before any slot is started,
+    /// says so at the kernel log's error level with the count, and restarts into it. Called on a
+    /// Lemnos disk only (the data partition is found). A request the firmware does not take is said,
+    /// and the boot goes on. `Some`: the restart was issued.
+    fn loop_return(&self, since: Since) -> Option<String> {
+        if since.restarts() < FLASH_AFTER {
+            return None;
+        }
+        let why = format!(
+            "{} restarts without a good boot (the firmware's count less the baseline {}), wherever they ended: this board's way back is the firmware's flashing mode (RPIBOOT); asking for it before any slot starts: this board waits until it is flashed or power-cycled",
+            since.restarts(),
+            since.baseline()
+        );
+        self.alert(&why);
+        match self.ops.request_flash_mode() {
+            Ok(()) => {
+                self.restart(None);
+                Some(why)
+            }
+            Err(error) => {
+                self.alert(&format!(
+                    "the firmware's flashing mode was not taken: {error}; the boot goes on"
+                ));
+                None
+            }
+        }
+    }
+
     /// Whether this is a Lemnos disk: the data partition is found, or the boot disk has exactly one
     /// partition labelled [`DATA_LABEL`]. One read, with no wait. A disk that can't be read, has no
     /// such label or has two is not a Lemnos disk, and no firmware request is made for it (M36c).
@@ -1541,8 +1574,16 @@ impl Boot<'_> {
             let data = match self.find_data() {
                 Ok(part) => {
                     // The baseline is set here, on the first boot of a Lemnos disk, before anything can fail.
-                    if let Err(error) = self.since_good() {
-                        self.log(&format!("the restart baseline can't be kept: {error}"));
+                    match self.since_good() {
+                        Err(error) => {
+                            self.log(&format!("the restart baseline can't be kept: {error}"));
+                        }
+                        Ok(Some(since)) if args.loop_return => {
+                            if let Some(why) = self.loop_return(since) {
+                                return why;
+                            }
+                        }
+                        Ok(_) => {}
                     }
                     part
                 }
