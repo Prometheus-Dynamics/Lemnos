@@ -246,17 +246,30 @@ fn hex_to(text: &str) -> [u8; 32] {
 }
 
 /// The job's status and its reply: its result's fields (see [`written`] and [`checked`]).
+/// The job's end, ticking the driver while the write's thread finishes it.
 fn job_result(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>) {
-    let mut out = [0u8; 64];
-    let (status, n) = {
-        let mut reply = Reply::new(&mut out);
-        let status = match driver.job(job, &mut reply) {
-            JobState::Finished(status) => status,
-            other => panic!("the job is not finished: {other:?}"),
-        };
-        (status, reply.len())
-    };
-    (status, out[..n].to_vec())
+    let (status, reply, _) = run_to_end(driver, job);
+    (status, reply)
+}
+
+/// A stream whose image fails in the writer: the failure is the writer's, so it is answered at a later
+/// piece (the first after the writer met it) or not until the job ends. Either is `want`; no piece is
+/// answered with anything else.
+fn assert_fails(streamed: std::result::Result<(), Status>, want: Status) {
+    assert!(
+        streamed == Ok(()) || streamed == Err(want),
+        "a piece was answered {streamed:?}, not {want:?} or taken"
+    );
+}
+
+/// A write started once the last write's thread has ended (a cancelled one ends after its last piece).
+fn write_when_free(driver: &mut SystemFlash, size: u64, format: u8) -> JobId {
+    loop {
+        match driver.write(size, format) {
+            Err(Status::BUSY) => std::thread::sleep(std::time::Duration::from_millis(1)),
+            other => return other.expect("the write starts"),
+        }
+    }
 }
 
 /// Runs a job to its end, ticking it while it runs; the job's status and its reply. The job is
@@ -274,6 +287,7 @@ fn run_to_end(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>, u64) {
             JobState::Running { .. } => {
                 ticks += 1;
                 lemnos_core::Lifecycle::tick(driver, 0);
+                std::thread::sleep(std::time::Duration::from_micros(200));
             }
             JobState::Finished(status) => return (status, out[..n].to_vec(), ticks),
         }
@@ -296,14 +310,25 @@ fn info(driver: &mut SystemFlash) -> String {
     String::from_utf8(out[..n].to_vec()).unwrap()
 }
 
-/// Streams `bytes` into the write job in pieces of `piece`, from offset 0, as the starter.
+/// Streams `bytes` into the write job in pieces of `piece`, from offset 0, as the starter. A piece answered
+/// `BUSY` (the writer behind) is offered again, as the bridge does.
 fn stream(driver: &mut SystemFlash, bytes: &[u8], piece: usize) -> std::result::Result<(), Status> {
     let mut at = 0;
     for chunk in bytes.chunks(piece) {
-        driver.data(at, chunk)?;
+        offer(driver, at, chunk)?;
         at += chunk.len() as u64;
     }
     Ok(())
+}
+
+/// One piece, offered again while the writer is behind (`BUSY`).
+fn offer(driver: &mut SystemFlash, at: u64, chunk: &[u8]) -> std::result::Result<(), Status> {
+    loop {
+        match driver.data(at, chunk) {
+            Err(Status::BUSY) => std::thread::sleep(std::time::Duration::from_millis(1)),
+            other => return other,
+        }
+    }
 }
 
 /// A started driver whose manifest is accepted (unsigned) for `image`.
@@ -359,8 +384,10 @@ fn a_wrong_hash_fails_the_job_and_says_so() {
     let rig = Rig::new("hash", SMALL);
     let mut driver = ready(&rig, &"0".repeat(64), SMALL);
     let job = driver.write(SMALL, FORMAT_RAW).unwrap();
-    let last = stream(&mut driver, &fixture("small.img"), 4096);
-    assert_eq!(last, Err(Status::INVALID_ARGUMENT));
+    assert_fails(
+        stream(&mut driver, &fixture("small.img"), 4096),
+        Status::INVALID_ARGUMENT,
+    );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("SHA-256"));
 }
@@ -371,9 +398,9 @@ fn a_truncated_stream_fails_at_its_end() {
     let stream_bytes = fixture("truncated.img.xz");
     let mut driver = ready(&rig, SMALL_SHA, SMALL);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("cut short"));
@@ -400,7 +427,7 @@ fn a_cancel_mid_way_leaves_the_target_partial_and_a_rerun_writes_it_again() {
     );
 
     // Nothing is kept: the next write starts again from byte 0.
-    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    let job = write_when_free(&mut driver, stream_bytes.len() as u64, FORMAT_XZ);
     stream(&mut driver, &stream_bytes, 4096).unwrap();
     assert_eq!(job_result(&mut driver, job).0, Status::OK);
     assert_eq!(
@@ -450,9 +477,9 @@ fn an_xz_dictionary_over_the_limit_is_refused_when_the_block_starts() {
     let stream_bytes = fixture("dict16.img.xz");
     let mut driver = ready(&rig, SMALL_SHA, SMALL);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes[..100], 100),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("dictionary is 16 MiB"));
@@ -483,9 +510,9 @@ fn a_board_limit_below_the_stream_refuses_the_stream_at_its_block() {
     let stream_bytes = fixture("dict16.img.xz");
     let mut driver = ready(&rig, SMALL_SHA, SMALL);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("over the board's limit of 1 MiB"));
@@ -777,9 +804,9 @@ fn a_trailing_record_that_differs_from_the_argument_fails_the_job() {
         .unwrap();
     let stream_bytes = fixture(SIGNED);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("the image's trailing signature is not the one given"));
@@ -800,9 +827,9 @@ fn a_record_given_for_a_file_with_none_fails_the_job() {
         .unwrap();
     let stream_bytes = fixture("crc64.img.xz");
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("the image's trailing signature is not the one given"));
@@ -814,9 +841,9 @@ fn a_file_with_a_record_given_no_record_fails_the_job() {
     let mut driver = ready(&rig, SMALL_SHA, SMALL);
     let stream_bytes = fixture(SIGNED);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
 }
@@ -827,9 +854,9 @@ fn a_junk_second_stream_is_refused_by_name() {
     let stream_bytes = fixture("junk-second.img.xz");
     let mut driver = ready(&rig, SMALL_SHA, SMALL);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("not a first-flash image"));
@@ -841,9 +868,9 @@ fn a_third_stream_is_refused_by_name() {
     let stream_bytes = fixture("third.img.xz");
     let mut driver = ready(&rig, SMALL_SHA, SMALL);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("not a first-flash image"));
@@ -1131,10 +1158,7 @@ fn a_ubi_image_built_for_another_page_size_fails_at_its_first_block_and_the_targ
         )
         .unwrap();
     let job = driver.write(image.len() as u64, FORMAT_RAW).unwrap();
-    assert_eq!(
-        stream(&mut driver, &image, 1000),
-        Err(Status::INVALID_ARGUMENT)
-    );
+    assert_fails(stream(&mut driver, &image, 1000), Status::INVALID_ARGUMENT);
     assert_eq!(run_to_end(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("another page or sub-page size"));
     assert!(
@@ -1309,9 +1333,9 @@ fn a_stream_of_8193_blocks_is_refused_by_name() {
     let stream_bytes = fixture("blocks-8193.img.xz");
     let mut driver = ready(&rig, &sha_hex(&vec![0u8; size as usize]), size);
     let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
-    assert_eq!(
+    assert_fails(
         stream(&mut driver, &stream_bytes, 4096),
-        Err(Status::INVALID_ARGUMENT)
+        Status::INVALID_ARGUMENT,
     );
     assert_eq!(job_result(&mut driver, job).0, Status::INVALID_ARGUMENT);
     assert!(info(&mut driver).contains("more blocks than the board takes"));
@@ -1363,4 +1387,65 @@ fn a_four_block_signed_image_verifies_and_is_written_with_its_record() {
         (Status::OK, written(MULTI_LEN, 0))
     );
     assert_eq!(sha_hex(&rig.file_bytes()[..MULTI_LEN as usize]), MULTI_SHA);
+}
+
+/// FLASH-DATA-OFF-CALL: the writer fails part-way (the last block of a four-block image is damaged, so its
+/// check fails after the first blocks are on the target). The job ends failed with a sentence naming the
+/// image byte the write failed at and that the target holds a partial image; nothing reports success: the
+/// job's status is not OK, `info` reads `failed`, and there is no finished image to verify. The bytes before
+/// the failure are on the target, and none after it.
+#[test]
+fn a_writer_that_fails_part_way_ends_the_job_naming_the_byte_and_nothing_reports_success() {
+    let rig = Rig::new("writer-fails", MULTI_LEN + 4096);
+    let mut stream_bytes = fixture("multi-block.img.xz");
+    let damaged = stream_bytes.len() * 3 / 4;
+    stream_bytes[damaged] ^= 0x55;
+    let mut driver = ready(&rig, MULTI_SHA, MULTI_LEN);
+    let job = driver.write(stream_bytes.len() as u64, FORMAT_XZ).unwrap();
+    let streamed = stream(&mut driver, &stream_bytes, 4096);
+    let (status, reply, _) = run_to_end(&mut driver, job);
+    assert_ne!(status, Status::OK, "a damaged image reported success");
+    assert!(
+        !String::from_utf8_lossy(&reply).contains("raw_bytes="),
+        "a failed write gave a write's result: {reply:?}"
+    );
+    assert!(
+        streamed.is_ok() || streamed == Err(status),
+        "a piece was answered {streamed:?}, not the job's {status:?}"
+    );
+    let text = info(&mut driver);
+    assert!(text.contains("\"state\":\"failed\""), "{text}");
+    let at: u64 = text
+        .split("the write failed at byte ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("the failure names no byte: {text}"));
+    assert!(
+        at > 0 && at < MULTI_LEN,
+        "failed at byte {at} of {MULTI_LEN}"
+    );
+    assert!(text.contains("partial image"), "{text}");
+    assert_eq!(
+        driver.verify(),
+        Err(Status::NOT_FOUND),
+        "a failed write is no finished image"
+    );
+    let target = rig.file_bytes();
+    let image = {
+        let whole = Rig::new("writer-fails-whole", MULTI_LEN + 4096);
+        let mut good = ready(&whole, MULTI_SHA, MULTI_LEN);
+        let job = good
+            .write(fixture("multi-block.img.xz").len() as u64, FORMAT_XZ)
+            .unwrap();
+        stream(&mut good, &fixture("multi-block.img.xz"), 4096).unwrap();
+        assert_eq!(job_result(&mut good, job).0, Status::OK);
+        whole.file_bytes()
+    };
+    let at = at as usize;
+    assert_eq!(&target[..at], &image[..at], "the bytes before the failure");
+    assert!(
+        target[at..MULTI_LEN as usize].iter().all(|&b| b == 0),
+        "bytes after the failure were written"
+    );
 }

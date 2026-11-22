@@ -885,7 +885,11 @@ fn a_signed_file_whose_manifest_gives_no_record_fails_the_job() {
     );
     let sent = s.push("image.img.xz", &fixture("signed.img.xz"));
     assert_eq!(sent.state, FileState::Rejected);
-    assert!(sent.detail.contains("refused the data"), "{}", sent.detail);
+    // The writer finds it at the stream's end: the job ends failed, and the bridge gives the device's reason.
+    assert_eq!(
+        sent.detail,
+        "the write ended with status -22: the image's trailing signature is not the one given"
+    );
 }
 
 #[test]
@@ -899,7 +903,34 @@ fn an_image_whose_hash_is_not_the_manifests_is_refused_and_says_why() {
     );
     let sent = s.push("image.img.xz", &fixture("crc64.img.xz"));
     assert_eq!(sent.state, FileState::Rejected);
-    assert!(sent.detail.contains("refused the data"), "{}", sent.detail);
+    assert_eq!(
+        sent.detail,
+        "the write ended with status -22: the image's SHA-256 is not the manifest's"
+    );
+}
+
+#[test]
+fn an_image_damaged_mid_stream_is_rejected_naming_the_byte_the_write_failed_at() {
+    // The decoder meets the damage on the device's writer, off the call: a later piece or the job's end
+    // says so, and the bridge's answer carries the device's sentence with the byte. Nothing commits.
+    let s = setup("damaged", SMALL + 4096);
+    assert_eq!(
+        s.push("image.img.xz.json", &manifest(BOARD, SMALL_SHA, None))
+            .state,
+        FileState::Committed
+    );
+    let mut image = fixture("crc64.img.xz");
+    let at = image.len() * 3 / 4;
+    image[at] ^= 0x55;
+    let sent = s.push("image.img.xz", &image);
+    assert_eq!(sent.state, FileState::Rejected, "{}", sent.detail);
+    assert!(
+        sent.detail.contains("the write failed at byte ")
+            && sent.detail.contains("the target holds a partial image"),
+        "{}",
+        sent.detail
+    );
+    assert!(!sent.detail.contains("raw_bytes"), "{}", sent.detail);
 }
 
 #[test]

@@ -16,7 +16,8 @@
 //!    byte-identical to what they held before, and the kernel still has the blank disk's table (no `mmcblk0p1`).
 //!
 //! Every chunk's answer is timed: the longest is printed, and a refused chunk says how long it and the longest
-//! before it took.
+//! before it took. A chunk's answer is the bridge's, and includes its waits while the driver answers `BUSY`; the
+//! longest single `data` call, measured inside the driver (`info`'s `longest_data_us`), is checked under 100 ms.
 //!
 //! It prints `flasher: passed (<n> checks)` or each failure, then powers the guest off.
 
@@ -28,6 +29,9 @@ use std::thread;
 use std::time::Duration;
 
 use lemnos_contract_system_flash::Flash;
+
+/// The bound on one `data` call inside the driver: a twentieth of the 2 s call deadline.
+const LONGEST_DATA_CALL_US: u64 = 100_000;
 use lemnos_core::Contract;
 use lemnos_orion::stream::{Streamer, committed_detail};
 use orion::files::FileState;
@@ -312,6 +316,30 @@ fn flash(
     c.check(
         info.contains("the image is written, but the kernel did not re-read its partition table"),
         &format!("the write's info names the re-read the daemon's user can't do: {info}"),
+    );
+
+    // A `data` call queues its piece for the driver's writer or answers `BUSY`, so its time does not depend on
+    // the store: the longest one, measured inside the driver, stays far under the 2 s call deadline however long
+    // the chunk answers above took (they include the bridge's waits after `BUSY`).
+    let field = |name: &str| -> Option<u64> {
+        let rest = info.split(&format!("\"{name}\":")).nth(1)?;
+        rest.split(|ch: char| !ch.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let (longest_call, behind) = (field("longest_data_us"), field("behind"));
+    println!(
+        "flasher: the longest data call took {} us inside the driver; {} answered BUSY",
+        longest_call.map_or("?".into(), |v| v.to_string()),
+        behind.map_or("?".into(), |v| v.to_string())
+    );
+    c.check(
+        longest_call.is_some_and(|us| us < LONGEST_DATA_CALL_US),
+        &format!(
+            "the longest data call is under {} ms, whatever the store does: {longest_call:?} us",
+            LONGEST_DATA_CALL_US / 1000
+        ),
     );
 
     // The verify: a second job, which reads the target back for the manifest's size.

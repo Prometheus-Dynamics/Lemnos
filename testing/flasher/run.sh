@@ -8,6 +8,8 @@
 #
 #   KERNEL  an arm64 Image built by build-kernel.sh (required)
 #   CARGO   the cargo that builds the guest for aarch64-unknown-linux-musl (default: cargo)
+#   WRITE_BPS  when set, the eMMC's writes are throttled to this many bytes a second (QEMU's
+#              throttling.bps-write): a slow store, under which a data call must still return at once
 #   The guest is two vCPUs under TCG that mostly wait for the kernel: one slot of the pool (lt/slot-run.sh 1).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +20,12 @@ target=aarch64-unknown-linux-musl
 targetdir="${CARGO_TARGET_DIR:-$repo/target}"
 
 work="$(mktemp -d)"
+throttle=""
+if [[ -n "${WRITE_BPS:-}" ]]; then
+  [[ "$WRITE_BPS" =~ ^[0-9]+$ ]] || { echo "WRITE_BPS must be a byte count" >&2; exit 2; }
+  throttle=",throttling.bps-write=$WRITE_BPS"
+  echo "emmc: writes throttled to $WRITE_BPS bytes a second" >&2
+fi
 trap 'rm -rf -- "$work"' EXIT
 
 (cd "$repo" && "$CARGO" build -q -p lemnosd -p lemnos-flasher-check --bin lemnosd --bin lemnos-flasher-guest --target "$target")
@@ -62,7 +70,7 @@ cp "$work/image.img.xz" "$work/image.img.xz.json" "$work/image.facts" "$root/"
 status=0
 timeout 600 qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512 -nographic -no-reboot \
   -kernel "$KERNEL" -initrd "$work/initramfs" \
-  -device sdhci-pci -drive "if=none,id=emmc,file=$work/emmc.img,format=raw" \
+  -device sdhci-pci -drive "if=none,id=emmc,file=$work/emmc.img,format=raw$throttle" \
   -device emmc,drive=emmc,boot-partition-size=$boot \
   -append "console=ttyAMA0 panic=-1 loglevel=4" </dev/null | tee "$work/console.log" || status=$?
 echo "qemu: exited with status $status" >&2

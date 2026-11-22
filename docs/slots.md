@@ -3223,7 +3223,9 @@ stream, so the record check does not apply to it.
    1 for xz and 0 for raw. Its progress is the stream bytes taken; its result is text in fields,
    `raw_bytes=<the raw image's byte count> outcome=<code>`.
 3. `data(offset, bytes)`: the stream in order from offset 0. The last piece ends the stream, and the
-   job then checks the image, its record, and ends.
+   job then checks the image, its record, and ends. A piece is decoded and written off the call (see
+   "The writer off the call" below): `data` takes the piece and returns, or answers `BUSY` when the
+   writer is behind, and the same piece is sent again.
 4. `verify()`: optional, a second long job. It reads the target back from its start for the
    manifest's size and checks the hash. Its result is text in fields, `raw_bytes=<the byte count
    checked>`.
@@ -3247,8 +3249,31 @@ fails or is cancelled leaves the target partial, and the state says so: `info` s
 restart.
 
 `info` (JSON) says whether a write may start (`writable`, and why not in `reason`), the target's size,
-whether it holds anything, the state and the last error, the last manifest's facts and outcome, and
-the effective `max_dict_mb`.
+whether it holds anything, the state and the last error, the last manifest's facts and outcome,
+the effective `max_dict_mb`, and the last write's `behind` and `longest_data_us`.
+
+### The writer off the call
+
+The decode and the write to the target run on the driver's own thread, the writer, never inside a
+call: a target's write may stall for seconds (an eMMC's garbage collection, a journal flush), and a call
+has the host's deadline (`call_deadline_ms`, 2000 ms by default). `write` starts the writer; `data`
+copies its piece into one of four buffers and hands it over, so a call costs one copy. When all four are
+with the writer, `data` answers `BUSY` and takes nothing: the sender waits and sends the same piece again
+(the Orion bridge does, from 2 ms doubling to 200 ms). `info` counts those answers in `behind`, and gives the
+longest single `data` call of the write, measured inside the driver, in `longest_data_us`: it does not depend
+on the store. The buffers grow to the largest piece and are reused; nothing is allocated per piece after
+the first four.
+
+The writer's failure is not the call's. It is answered at the next `data` (the piece is refused with the
+job's status, and the job ends), or, after the last piece, at the job's end; the job's status is the one
+listed above and its text names the image byte the write failed at: `the write failed at byte <n> of the
+image: <reason>; the target holds a partial image`. `info` shows `failed` with that sentence, the job
+gives no `raw_bytes`, and `verify` is refused: nothing reports a write that did not end. The bytes before
+`<n>` are the image's; past it the target is not the image and must not be booted.
+
+A cancel ends the job at once; the writer stops after the piece it is on, and the pieces still queued for it
+are dropped unwritten. `write` is refused with `BUSY` ("the last write's writer is still ending its piece")
+until it has, so a new write never shares the target with an old one. The job's end is read at the host's tick, not inside a call.
 
 ### Safety
 
@@ -3269,13 +3294,19 @@ signature sidecar: the record is in the manifest's `signature` field and in the 
 1. The bridge reads the manifest, decodes its `signature` field, calls `manifest`, starts the `write`
    job on its own lemnosd connection (it is the job's starter, and only the starter may send `data`),
    and acknowledges the push as received.
-2. Each chunk goes to `data` before the bridge acknowledges it, so a slow device slows the sender.
+2. Each chunk goes to `data` before the bridge acknowledges it, so a slow device slows the sender: while the
+   driver answers `BUSY` the bridge offers the chunk again ("The writer off the call"), and the chunk's answer
+   waits with it.
 3. At the commit the bridge checks the stream's SHA-256 against the sender's, then waits for the
    job: the answer is `committed` with the raw byte count and the signature outcome, or `rejected`
    with the job's status or the refusal. A committed answer's detail is fields, not a sentence:
    `raw_bytes=<n> outcome=<code>`, one space between them, the code the job's (`0` verified, `1` not
    checked: unsigned, `2` not checked: unknown key) or `none` when the job reported none. A reader
-   ignores a field it does not know; fields are only ever added after these.
+   ignores a field it does not know; fields are only ever added after these. A failed job carries no
+   result, so a `rejected` answer for one is `the write ended with status <n>: <the device's info error>`,
+   for example `the write ended with status -22: the image's SHA-256 is not the manifest's`, or, for a
+   write that failed part-way, the sentence naming the byte and the partial image. A chunk refused because
+   the write had already failed carries the same sentence after `the device refused the data: ...`.
 
 **The pump never waits for the device.** The bridge's files thread pumps its Orion session (the
 receiver, `Sink`) and nothing else: each stream's begin, chunks and commit go to a worker thread of the

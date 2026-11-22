@@ -75,6 +75,8 @@ struct Active {
     job: u64,
     handle: Handle,
     data: u16,
+    /// The device's `info`: read when the write fails, for the reason the device gives.
+    info: u16,
     /// When the sender last sent a chunk, or the stream began.
     seen: Instant,
 }
@@ -218,7 +220,9 @@ impl Streamer {
         }
         let (_, write) = find_method(&description, "write")?;
         let (_, data) = find_method(&description, "data")?;
-        let (manifest_id, write_id, data_id) = (manifest_method.id, write.id, data.id);
+        let (_, info) = find_method(&description, "info")?;
+        let (manifest_id, write_id, data_id, info_id) =
+            (manifest_method.id, write.id, data.id, info.id);
         let mut handle = client
             .open_tag(&device, TAG)
             .map_err(|e| format!("lemnosd: {e}"))?;
@@ -243,6 +247,7 @@ impl Streamer {
             job,
             handle,
             data: data_id,
+            info: info_id,
             seen: Instant::now(),
         })
     }
@@ -284,12 +289,14 @@ impl Streamer {
         };
         let data = active.data;
         let sent = match self.client.as_ref().filter(|c| c.is_connected()) {
-            Some(client) => client
-                .call(&mut active.handle, data, &args, &mut [0u8; 0])
-                .map_err(|e| format!("the device refused the data: {e}")),
+            Some(client) => offer(client, &mut active.handle, data, &args),
             None => Err("lemnosd went away during the stream".to_string()),
         };
         if let Err(detail) = sent {
+            let detail = match self.client.as_ref() {
+                Some(client) => with_reason(detail, client, &mut active.handle, active.info),
+                None => detail,
+            };
             self.drop_active();
             return rejected(detail);
         }
@@ -335,7 +342,7 @@ impl Streamer {
     }
 
     fn commit_active(&mut self) -> Answer {
-        let Some(active) = self.active.take() else {
+        let Some(mut active) = self.active.take() else {
             return rejected("no stream is being received".into());
         };
         let job = active.job;
@@ -367,7 +374,14 @@ impl Streamer {
                     String::from_utf8_lossy(&result)
                 )),
             },
-            Some((status, _)) => rejected(format!("the write ended with status {}", status.0)),
+            // A failed job carries no result: the device's `info` says why (the byte a failed write
+            // stopped at, and that the target holds a partial image).
+            Some((status, _)) => rejected(with_reason(
+                format!("the write ended with status {}", status.0),
+                client,
+                &mut active.handle,
+                active.info,
+            )),
             None => rejected("the write did not end".into()),
         }
     }
@@ -579,6 +593,45 @@ pub fn committed_detail(raw: u64, outcome: Option<u8>) -> String {
     match outcome {
         Some(code @ 0..=2) => format!("raw_bytes={raw} outcome={code}"),
         _ => format!("raw_bytes={raw} outcome=none"),
+    }
+}
+
+/// The first wait before a chunk the device answered `BUSY` is offered again, and the longest.
+const BEHIND_FIRST: Duration = Duration::from_millis(2);
+const BEHIND_CAP: Duration = Duration::from_millis(200);
+
+/// Gives the device one chunk. `BUSY` is the device's writer behind, with nothing taken: the same chunk is
+/// offered again, after a wait that doubles to [`BEHIND_CAP`], for as long as the device answers so. The
+/// sender is not answered meanwhile, which is what paces it. Any other refusal is the answer.
+/// `detail` with the device's own reason after it: `info`'s `error`, when the device gives one.
+fn with_reason(detail: String, client: &Client, handle: &mut Handle, info: u16) -> String {
+    let mut text = vec![0u8; 8192];
+    let cap = u32::try_from(text.len()).unwrap_or(u32::MAX).to_le_bytes();
+    let error = client
+        .call(handle, info, &cap, &mut text)
+        .ok()
+        .and_then(|n| std::str::from_utf8(&text[..n]).ok().and_then(Json::parse))
+        .and_then(|json| json.get("error").and_then(Json::text).map(str::to_string))
+        .filter(|error| !error.is_empty());
+    match error {
+        Some(error) => format!("{detail}: {error}"),
+        None => detail,
+    }
+}
+
+fn offer(client: &Client, handle: &mut Handle, data: u16, args: &[u8]) -> Result<(), String> {
+    let mut wait = BEHIND_FIRST;
+    loop {
+        match client.call(handle, data, args, &mut [0u8; 0]) {
+            Ok(_) => return Ok(()),
+            Err(lemnos_client::Error::Refused { status, .. })
+                if status == lemnos_core::Status::BUSY =>
+            {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(BEHIND_CAP);
+            }
+            Err(e) => return Err(format!("the device refused the data: {e}")),
+        }
     }
 }
 

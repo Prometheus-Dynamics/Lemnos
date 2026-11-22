@@ -92,15 +92,23 @@ fn info(driver: &mut SystemFlash) -> String {
     String::from_utf8(out[..n].to_vec()).unwrap()
 }
 
+/// The job's end, ticking the driver while its writer finishes.
 fn finished(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>) {
-    let mut out = [0u8; 64];
-    let mut reply = Reply::new(&mut out);
-    let status = match driver.job(job, &mut reply) {
-        JobState::Finished(status) => status,
-        other => panic!("the job is not finished: {other:?}"),
-    };
-    let n = reply.len();
-    (status, out[..n].to_vec())
+    loop {
+        let mut out = [0u8; 64];
+        let (state, n) = {
+            let mut reply = Reply::new(&mut out);
+            let state = driver.job(job, &mut reply);
+            (state, reply.len())
+        };
+        match state {
+            JobState::Finished(status) => return (status, out[..n].to_vec()),
+            JobState::Running { .. } => {
+                lemnos_core::Lifecycle::tick(driver, 0);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 fn write_small(driver: &mut SystemFlash) -> (Status, Vec<u8>) {
@@ -111,7 +119,10 @@ fn write_small(driver: &mut SystemFlash) -> (Status, Vec<u8>) {
     let job = driver.write(bytes.len() as u64, FORMAT_XZ).unwrap();
     let mut at = 0;
     for chunk in bytes.chunks(4096) {
-        driver.data(at, chunk).unwrap();
+        // `BUSY` is the writer behind: the piece is offered again, as the bridge does.
+        while driver.data(at, chunk) == Err(Status::BUSY) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         at += chunk.len() as u64;
     }
     finished(driver, job)

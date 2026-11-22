@@ -65,6 +65,8 @@ pub mod xz;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::FileExt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 use lemnos_contract_indicator::{Indicator as IndicatorContract, NO_PROGRESS};
 use lemnos_contract_security_precondition::SecurityPrecondition;
@@ -99,7 +101,7 @@ struct Accepted {
 
 /// A write, or a verify: the job's work.
 enum Work {
-    Write(Box<Writer>),
+    Write(Box<Pipe>),
     Verify(Checker),
     Nand(Box<nand::Verifier>),
 }
@@ -145,7 +147,118 @@ struct Written {
     expect: [u8; 32],
 }
 
-/// The write job's state: the decoder (for xz), the target and the hash of what is written.
+/// The pieces of a write's stream that may wait for the writer at once. `data` copies each piece into one
+/// of these buffers and returns; with none free it answers `BUSY` and the caller offers the piece again.
+const PIECES: usize = 4;
+
+/// How often a tick looks for the writer's end while it writes.
+const WRITER_LOOK_NS: u64 = 10_000_000;
+
+/// What `data` hands the writer thread.
+enum Piece {
+    Bytes(Vec<u8>),
+    /// The stream is all taken: finish the write (the decoder's end, the checks, the target's sync).
+    Last,
+}
+
+/// How the writer thread ended.
+enum WriterEnd {
+    /// The stream's end: the write's checks and finish, and the manifest it wrote.
+    Finished(std::result::Result<Finished, (Status, String)>, Manifest),
+    /// A piece failed: the sentence names the image byte it failed at.
+    Failed(Status, String),
+}
+
+/// A write running on its own thread ([`Writer`] there): the decoding, the writes to the target and the
+/// final sync never run in a driver call or a tick, so a slow store holds no call past the deadline. The
+/// call side only copies pieces in and collects the end.
+struct Pipe {
+    /// `None` once the write is cancelled: the writer ends after the piece it is on.
+    to_writer: Option<mpsc::SyncSender<Piece>>,
+    /// Buffers the writer is done with, for the next pieces.
+    free: mpsc::Receiver<Vec<u8>>,
+    ended: mpsc::Receiver<WriterEnd>,
+    /// Image bytes written so far.
+    written: Arc<AtomicU64>,
+    /// The first failure, once the writer has one, so the next `data` names it at once.
+    failed: Arc<Mutex<Option<(Status, String)>>>,
+    /// Set by a cancel: the writer drops the pieces still queued for it, unwritten.
+    stop: Arc<AtomicBool>,
+}
+
+/// Starts the writer thread for `writer`; `alive` is cleared when the thread ends, however it ends.
+fn start_writer(writer: Writer, alive: &Arc<AtomicBool>) -> std::io::Result<Pipe> {
+    let (to_writer, pieces) = mpsc::sync_channel::<Piece>(PIECES + 1);
+    let (give_back, free) = mpsc::channel();
+    for _ in 0..PIECES {
+        // Each grows to the first piece it carries and is reused from then on.
+        let _ = give_back.send(Vec::new());
+    }
+    let (tell, ended) = mpsc::channel();
+    let written = Arc::new(AtomicU64::new(0));
+    let failed = Arc::new(Mutex::new(None));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (thread_written, thread_failed, thread_stop) =
+        (Arc::clone(&written), Arc::clone(&failed), Arc::clone(&stop));
+    struct Alive(Arc<AtomicBool>);
+    impl Drop for Alive {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    alive.store(true, Ordering::Release);
+    let guard = Alive(Arc::clone(alive));
+    let started = std::thread::Builder::new()
+        .name("flash-writer".into())
+        .spawn(move || {
+            let _alive = guard;
+            let mut writer = writer;
+            for piece in pieces {
+                if thread_stop.load(Ordering::Acquire) {
+                    return;
+                }
+                match piece {
+                    Piece::Bytes(buf) => {
+                        if let Err((status, sentence)) = SystemFlash::feed(&mut writer, &buf) {
+                            let sentence = format!(
+                                "the write failed at byte {} of the image: {sentence}; the target holds a partial image",
+                                writer.written
+                            );
+                            *thread_failed
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some((status, sentence.clone()));
+                            let _ = tell.send(WriterEnd::Failed(status, sentence));
+                            return;
+                        }
+                        thread_written.store(writer.written, Ordering::Release);
+                        let _ = give_back.send(buf);
+                    }
+                    Piece::Last => {
+                        let end = SystemFlash::finish_write(&mut writer);
+                        thread_written.store(writer.written, Ordering::Release);
+                        let _ = tell.send(WriterEnd::Finished(end, writer.manifest.clone()));
+                        return;
+                    }
+                }
+            }
+        });
+    if let Err(error) = started {
+        alive.store(false, Ordering::Release);
+        return Err(error);
+    }
+    Ok(Pipe {
+        to_writer: Some(to_writer),
+        free,
+        ended,
+        written,
+        failed,
+        stop,
+    })
+}
+
+/// The write job's state: the decoder (for xz), the target and the hash of what is written. It lives on
+/// the writer thread ([`start_writer`]).
 struct Writer {
     decoder: Option<Decoder>,
     out: Out,
@@ -295,6 +408,14 @@ pub struct SystemFlash {
     job: Option<Job>,
     next_job: u64,
     calling: CallerId,
+    /// Set while a write's thread runs: a cancelled write's thread may still be on its last piece, and a
+    /// new write waits for it, so two writers never share the target.
+    writer_alive: Arc<AtomicBool>,
+    /// How many `data` calls of the last write found the writer behind (answered `BUSY`): a slow store.
+    behind: u64,
+    /// The longest single `data` call of the last write, in microseconds, measured inside the driver: the call
+    /// queues its piece or answers `BUSY`, so this does not depend on the store.
+    longest_data_us: u64,
 }
 
 impl SystemFlash {
@@ -569,24 +690,7 @@ impl SystemFlash {
         }
     }
 
-    /// The write's last piece is in: the stream and the image are checked (`finish_write`).
-    fn finish_job_write(
-        &mut self,
-    ) -> (
-        std::result::Result<Finished, (Status, String)>,
-        Option<Manifest>,
-    ) {
-        let Some(job) = self.job.as_mut() else {
-            return (Err((Status::NOT_FOUND, String::new())), None);
-        };
-        let Work::Write(writer) = &mut job.work else {
-            return (Err((Status::NOT_FOUND, String::new())), None);
-        };
-        let manifest = writer.manifest.clone();
-        (Self::finish_write(writer), Some(manifest))
-    }
-
-    /// Ends the write with what `finish_job_write` found.
+    /// Ends the write with how its writer finished.
     fn conclude_write(
         &mut self,
         end: std::result::Result<Finished, (Status, String)>,
@@ -973,6 +1077,9 @@ impl Lifecycle for SystemFlash {
             job: None,
             next_job: 0,
             calling: CallerId(0),
+            writer_alive: Arc::new(AtomicBool::new(false)),
+            behind: 0,
+            longest_data_us: 0,
         })
     }
 
@@ -988,6 +1095,9 @@ impl Lifecycle for SystemFlash {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        if self.collect_writer() {
+            return Some(now_ns + WRITER_LOOK_NS);
+        }
         let more = self.verify_step();
         self.show_verify_progress();
         more.then_some(now_ns)
@@ -1023,6 +1133,12 @@ impl Lifecycle for SystemFlash {
             return;
         };
         let is_write = matches!(running.work, Work::Write(_));
+        if let Work::Write(pipe) = &mut running.work {
+            // The writer ends after the piece it is on and drops the queued ones; a new write waits for it
+            // (`writer_alive`).
+            pipe.stop.store(true, Ordering::Release);
+            pipe.to_writer = None;
+        }
         running.end = Some(Err((Status::CANCELLED, String::new())));
         self.show("failed", NO_PROGRESS);
         if is_write {
@@ -1062,6 +1178,100 @@ impl SystemFlash {
             ",\"image\":\"{image}\",\"erase_size\":{erase},\"bad_blocks\":{bad},\"needed\":{needed},\"available\":{available},\"corrected_bits\":{}",
             self.corrected
         )
+    }
+}
+
+impl SystemFlash {
+    /// `data`'s work: decides what the piece does to the write and hands it to the writer. It never waits:
+    /// the piece is queued, or the call answers `BUSY` at once.
+    fn take_piece(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        let caller = self.calling;
+        let len = bytes.len() as u64;
+        // What the call does to the write, decided under one borrow of the job.
+        enum Step {
+            Refuse(Status, &'static str),
+            /// No buffer is free: the writer is behind. Nothing changed; the caller offers the piece again.
+            Behind,
+            /// A piece handed to the writer; the progress, and whether the image is being written yet.
+            Taken(u16, bool),
+            /// The stream's last piece: the writer finishes the image, and a tick ends the write.
+            Last,
+            Failed(Status, String),
+        }
+        let step = match self.job.as_mut() {
+            Some(job) if matches!(job.work, Work::Write(_)) && job.end.is_none() => {
+                let Work::Write(pipe) = &mut job.work else {
+                    return Err(Status::NOT_FOUND);
+                };
+                let failed = pipe
+                    .failed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if job.starter != caller {
+                    Step::Refuse(
+                        Status::NOT_PERMITTED,
+                        "only the write's starter may send its stream",
+                    )
+                } else if let Some((status, sentence)) = failed {
+                    Step::Failed(status, sentence)
+                } else if offset != job.got {
+                    Step::Refuse(
+                        Status::INVALID_ARGUMENT,
+                        "the stream's offset is not where the last data ended; nothing changed",
+                    )
+                } else if job.got + len > job.size {
+                    Step::Refuse(
+                        Status::INVALID_ARGUMENT,
+                        "the data goes past the stream's size",
+                    )
+                } else {
+                    match (pipe.free.try_recv(), pipe.to_writer.as_ref()) {
+                        (Ok(mut buf), Some(to_writer)) => {
+                            buf.clear();
+                            buf.extend_from_slice(bytes);
+                            // The channel holds every buffer and the last mark, so it is never full.
+                            let _ = to_writer.try_send(Piece::Bytes(buf));
+                            job.got += len;
+                            if job.got < job.size {
+                                Step::Taken(
+                                    permille(job.got, job.size),
+                                    pipe.written.load(Ordering::Acquire) > 0,
+                                )
+                            } else {
+                                let _ = to_writer.try_send(Piece::Last);
+                                Step::Last
+                            }
+                        }
+                        (Err(mpsc::TryRecvError::Empty), Some(_)) => Step::Behind,
+                        _ => Step::Failed(
+                            Status::IO,
+                            "the write's thread ended before the stream did".into(),
+                        ),
+                    }
+                }
+            }
+            _ => Step::Refuse(Status::NOT_FOUND, "no write is running"),
+        };
+        match step {
+            Step::Refuse(status, sentence) => Err(self.refuse(status, sentence)),
+            Step::Behind => {
+                self.behind += 1;
+                Err(Status::BUSY)
+            }
+            Step::Taken(progress, writing) => {
+                self.show(if writing { "writing" } else { "receiving" }, progress);
+                Ok(())
+            }
+            Step::Failed(status, sentence) => {
+                self.end_job(Err((status, sentence)), "failed");
+                Err(status)
+            }
+            Step::Last => {
+                self.show("verifying", NO_PROGRESS);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1115,10 +1325,12 @@ impl Flash for SystemFlash {
         quoted(&self.last_reason, &mut out);
         out.push('}');
         out.push_str(&format!(
-            ",\"allow_first_flash\":{},\"security\":{},\"max_dict_mb\":{}",
+            ",\"allow_first_flash\":{},\"security\":{},\"max_dict_mb\":{},\"behind\":{},\"longest_data_us\":{}",
             self.allow_first_flash,
             lemnos_slot_store::security::enforced(),
-            self.max_dict >> 20
+            self.max_dict >> 20,
+            self.behind,
+            self.longest_data_us
         ));
         if self.kind == Kind::Mtd {
             out.push_str(&self.nand_fields(&found));
@@ -1185,6 +1397,12 @@ impl Flash for SystemFlash {
         if self.job.is_some() {
             return Err(self.refuse(Status::BUSY, "a write or verify is running"));
         }
+        if self.writer_alive.load(Ordering::Acquire) {
+            return Err(self.refuse(
+                Status::BUSY,
+                "the last write's writer is still ending its piece: try again",
+            ));
+        }
         let Some(accepted) = self.manifest.clone() else {
             return Err(self.refuse(
                 Status::NOT_FOUND,
@@ -1233,20 +1451,30 @@ impl Flash for SystemFlash {
         self.next_job += 1;
         let id = JobId(self.next_job);
         let decoder = (format == FORMAT_XZ).then(|| Decoder::new(self.max_dict));
+        let writer = Writer {
+            decoder,
+            out,
+            manifest,
+            written: 0,
+            hasher: Sha256::new(),
+            refused: None,
+            expect: accepted.record,
+            record: Vec::with_capacity(RECORD_LEN),
+            streams: 0,
+        };
+        let pipe = match start_writer(writer, &self.writer_alive) {
+            Ok(pipe) => pipe,
+            Err(error) => {
+                let (status, sentence) = io_failure(&error, "the write's thread can't be started");
+                return Err(self.refuse(status, sentence));
+            }
+        };
+        self.behind = 0;
+        self.longest_data_us = 0;
         self.job = Some(Job {
             id,
             starter: self.calling,
-            work: Work::Write(Box::new(Writer {
-                decoder,
-                out,
-                manifest,
-                written: 0,
-                hasher: Sha256::new(),
-                refused: None,
-                expect: accepted.record,
-                record: Vec::with_capacity(RECORD_LEN),
-                streams: 0,
-            })),
+            work: Work::Write(Box::new(pipe)),
             code: accepted.outcome.code(),
             size,
             got: 0,
@@ -1259,72 +1487,11 @@ impl Flash for SystemFlash {
     }
 
     fn data(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
-        let caller = self.calling;
-        let len = bytes.len() as u64;
-        // What the call does to the write, decided under one borrow of the job.
-        enum Step {
-            Refuse(Status, &'static str),
-            /// A piece taken; the progress, and whether the image is being written yet.
-            Taken(u16, bool),
-            /// The stream's last piece: the image is checked and the write ends.
-            Last,
-            Failed(Status, String),
-        }
-        let step = match self.job.as_mut() {
-            Some(job) if matches!(job.work, Work::Write(_)) && job.end.is_none() => {
-                if job.starter != caller {
-                    Step::Refuse(
-                        Status::NOT_PERMITTED,
-                        "only the write's starter may send its stream",
-                    )
-                } else if offset != job.got {
-                    Step::Refuse(
-                        Status::INVALID_ARGUMENT,
-                        "the stream's offset is not where the last data ended; nothing changed",
-                    )
-                } else if job.got + len > job.size {
-                    Step::Refuse(
-                        Status::INVALID_ARGUMENT,
-                        "the data goes past the stream's size",
-                    )
-                } else {
-                    let Work::Write(writer) = &mut job.work else {
-                        return Err(Status::NOT_FOUND);
-                    };
-                    match Self::feed(writer, bytes) {
-                        Err((status, sentence)) => {
-                            job.got += len;
-                            Step::Failed(status, sentence)
-                        }
-                        Ok(()) => {
-                            job.got += len;
-                            if job.got < job.size {
-                                Step::Taken(permille(job.got, job.size), writer.written > 0)
-                            } else {
-                                Step::Last
-                            }
-                        }
-                    }
-                }
-            }
-            _ => Step::Refuse(Status::NOT_FOUND, "no write is running"),
-        };
-        match step {
-            Step::Refuse(status, sentence) => Err(self.refuse(status, sentence)),
-            Step::Taken(progress, writing) => {
-                self.show(if writing { "writing" } else { "receiving" }, progress);
-                Ok(())
-            }
-            Step::Failed(status, sentence) => {
-                self.end_job(Err((status, sentence)), "failed");
-                Err(status)
-            }
-            Step::Last => {
-                self.show("verifying", NO_PROGRESS);
-                let (end, manifest) = self.finish_job_write();
-                self.conclude_write(end, manifest)
-            }
-        }
+        let started = std::time::Instant::now();
+        let answer = self.take_piece(offset, bytes);
+        let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.longest_data_us = self.longest_data_us.max(took);
+        answer
     }
 
     fn verify(&mut self) -> Result<JobId> {
@@ -1392,6 +1559,33 @@ impl Flash for SystemFlash {
 }
 
 impl SystemFlash {
+    /// Looks for the end of a running write's thread and ends the job with it. True while the writer is
+    /// still at it, so the tick comes back.
+    fn collect_writer(&mut self) -> bool {
+        let Some(job) = self.job.as_mut().filter(|j| j.end.is_none()) else {
+            return false;
+        };
+        let Work::Write(pipe) = &mut job.work else {
+            return false;
+        };
+        let end = match pipe.ended.try_recv() {
+            Ok(end) => end,
+            Err(mpsc::TryRecvError::Empty) => return true,
+            Err(mpsc::TryRecvError::Disconnected) => WriterEnd::Failed(
+                Status::IO,
+                "the write's thread ended without a result; the target holds a partial image"
+                    .into(),
+            ),
+        };
+        match end {
+            WriterEnd::Finished(end, manifest) => {
+                let _ = self.conclude_write(end, Some(manifest));
+            }
+            WriterEnd::Failed(status, sentence) => self.end_job(Err((status, sentence)), "failed"),
+        }
+        false
+    }
+
     /// After a write the kernel is asked to read the disk's partition table again. A kernel that
     /// holds a partition open refuses; that is reported, not failed: the restart the flasher does
     /// next makes the new table the one in use.
