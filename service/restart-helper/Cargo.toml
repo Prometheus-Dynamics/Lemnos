@@ -1,0 +1,25 @@
+[package]
+name = "lemnos-restart"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The restart helper: a root service on a socket that the daemon's user asks to reboot the board through the service manager"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lemnos-restart"
+path = "src/main.rs"
+
+[features]
+# The helper on a socket with a chosen service manager, for other crates' tests.
+stand-in = []
+
+[dependencies]
+# Socket activation, the peer's credentials, the user database and the signal descriptor.
+lemnos-linux-sys = { path = "../../backends/linux-sys" }

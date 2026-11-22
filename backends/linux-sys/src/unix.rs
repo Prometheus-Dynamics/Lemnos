@@ -130,3 +130,46 @@ pub fn set_nonblocking(fd: std::os::fd::BorrowedFd<'_>, on: bool) -> io::Result<
     }
     Ok(())
 }
+
+/// The listening Unix socket the service manager passed as descriptor `fd` (socket activation:
+/// `LISTEN_FDS`, the first at 3), taken over by this process. Refused, and the descriptor left
+/// alone, when `fd` is not an open listening Unix stream socket.
+///
+/// # Errors
+///
+/// `fd` is not open, is not a Unix stream socket, or is not listening.
+pub fn listener_from_activation(fd: i32) -> io::Result<std::os::unix::net::UnixListener> {
+    let int = |opt: libc::c_int| -> io::Result<libc::c_int> {
+        let mut value: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `value` is writable for `len` bytes and `len` is writable, both alive for the
+        // call; a descriptor that is not open makes the call fail with EBADF, nothing else.
+        let rc = unsafe {
+            libc::getsockopt(fd, libc::SOL_SOCKET, opt, (&raw mut value).cast(), &mut len)
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(value)
+    };
+    let refused = |what: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("descriptor {fd} {what}"),
+        )
+    };
+    if int(libc::SO_DOMAIN)? != libc::AF_UNIX {
+        return Err(refused("is not a Unix socket"));
+    }
+    if int(libc::SO_TYPE)? != libc::SOCK_STREAM {
+        return Err(refused("is not a stream socket"));
+    }
+    if int(libc::SO_ACCEPTCONN)? == 0 {
+        return Err(refused("is not listening"));
+    }
+    use std::os::fd::FromRawFd;
+    // SAFETY: `fd` is open (the reads above succeeded on it), is a listening Unix stream socket,
+    // and was handed to this process by the service manager for it to own; nothing else in this
+    // process holds it.
+    Ok(unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) })
+}

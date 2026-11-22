@@ -118,3 +118,30 @@ impl Child {
             .ok_or_else(|| io::Error::other("waitpid returned without a status"))
     }
 }
+
+/// Whether this process may send a signal to process `pid`: `kill(pid, 0)`, which checks the
+/// permission and sends nothing.
+///
+/// # Errors
+///
+/// The kernel refuses (`EPERM`: not this process's to signal) or there is no such process (`ESRCH`).
+pub fn may_signal(pid: i32) -> io::Result<()> {
+    // SAFETY: signal 0 sends nothing; `kill` only checks that `pid` exists and may be signalled.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Sends `SIGTERM` to process `pid`.
+///
+/// # Errors
+///
+/// The kernel refuses (`EPERM`: not this process's to signal) or there is no such process (`ESRCH`).
+pub fn terminate(pid: i32) -> io::Result<()> {
+    // SAFETY: `kill` takes plain integers and touches no memory of this process.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
