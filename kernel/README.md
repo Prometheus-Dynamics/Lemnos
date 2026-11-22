@@ -8,7 +8,7 @@ interrupts as reads. The interface is `lemnos.h`.
 
 The module is Rust. It builds only against a kernel with `CONFIG_RUST=y`; there is no C fallback.
 Its only C is `lemnos_helpers.c`, one-line shims for static inline kernel APIs with no Rust path; the
-QEMU fixtures' only C is `testing/qemu/test_block/lemnos_test_helpers.c`, shims that each make one call
+QEMU fixtures link the same file (`kernel/lemnos_helpers.c`); its shims each make one call
 with nothing else. `scripts/check-kernel-helpers.py` holds both to that form and a cap. The headers here
 are the uAPI and bindgen input.
 

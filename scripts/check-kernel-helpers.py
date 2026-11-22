@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Checks kernel/lemnos_helpers.c, the Lemnos module's only C, and
-testing/qemu/test_block/lemnos_test_helpers.c, the only C of the test fixtures built beside it.
+"""Checks kernel/lemnos_helpers.c, the only C of the Lemnos module and of its QEMU test fixtures.
 
 Each file may hold comments, #include lines, one-line prototypes and one-line shims. A shim is a function
 whose whole body is one line (`{ ... }`), with a comment line directly above it that names the kernel API it
@@ -27,7 +26,6 @@ DEFAULT_MAX_LINES = 120
 # The files checked when none is named, each with its cap and whether the pure-wrapper rule holds.
 FILES = [
     (REPO / "kernel" / "lemnos_helpers.c", DEFAULT_MAX_LINES, False),
-    (REPO / "testing" / "qemu" / "test_block" / "lemnos_test_helpers.c", 40, True),
 ]
 
 # A one-line prototype: a return type, a name, a parameter list, and a semicolon.

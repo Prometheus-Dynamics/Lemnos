@@ -2,13 +2,19 @@
 
 obj-m += lemnos_test_block.o
 # The block fixture: its crate (block_main.rs and its modules) and the helpers' shims.
-lemnos_test_block-y := block_main.o lemnos_test_helpers.o
+lemnos_test_block-y := block_main.o lemnos_helpers.o
 # Rust: each fixture is one crate, its file here; fixture.rs is the module they share.
 obj-m += lemnos_test_bus.o
-# A fixture that needs the helpers (lemnos_test_helpers.c, the fixtures' only C: one-line shims,
-# capped by scripts/check-kernel-helpers.py) is two objects: its crate and the helpers.
+# A fixture that needs the helpers (kernel/lemnos_helpers.c, the one C file of the module and its fixtures:
+# one-line shims, capped by scripts/check-kernel-helpers.py) is two objects: its crate and the helpers.
 obj-m += lemnos_test_regjob.o
-lemnos_test_regjob-y := regjob_main.o lemnos_test_helpers.o
+lemnos_test_regjob-y := regjob_main.o lemnos_helpers.o
+# The helpers are the kernel module's file, compiled here: beside this directory in the repository, and
+# beside the work directory the QEMU harness copies kernel/ and test_block/ into.
+lemnos_helpers_c := $(firstword $(wildcard $(src)/../../../kernel/lemnos_helpers.c $(src)/../kernel/lemnos_helpers.c))
+targets += lemnos_helpers.o
+$(obj)/lemnos_helpers.o: $(lemnos_helpers_c) FORCE
+	$(call if_changed_rule,cc_o_c)
 
 # Bindings for what the kernel crate's own bindings leave out (bindings.h), made the way kernel/Kbuild
 # makes the module's: the kernel's bindgen with this directory's C flags, only the listed items, every
