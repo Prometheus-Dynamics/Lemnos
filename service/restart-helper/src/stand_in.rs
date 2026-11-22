@@ -72,7 +72,18 @@ impl StandIn {
     /// Starts serving: every connection is admitted as root, and a reboot that never stops is
     /// failed after `bound`.
     pub fn start(dir: &Path, manager: Manager, bound: Duration) -> std::io::Result<Self> {
-        Self::serve_in(dir, manager, bound, None)
+        Self::serve_in(dir, manager, bound, None, 0)
+    }
+
+    /// As [`StandIn::start`], and also admits the user `allowed_uid` (root is always admitted), as the
+    /// helper admits the one user its unit names.
+    pub fn start_admitting(
+        dir: &Path,
+        manager: Manager,
+        bound: Duration,
+        allowed_uid: u32,
+    ) -> std::io::Result<Self> {
+        Self::serve_in(dir, manager, bound, None, allowed_uid)
     }
 
     /// Starts serving in `dir`, which the stand-in owns: it is removed when the stand-in is dropped, so
@@ -80,7 +91,7 @@ impl StandIn {
     /// path is at most 107 bytes).
     pub fn start_owned(dir: PathBuf, manager: Manager, bound: Duration) -> std::io::Result<Self> {
         let owned = Some(dir.clone());
-        Self::serve_in(&dir, manager, bound, owned)
+        Self::serve_in(&dir, manager, bound, owned, 0)
     }
 
     fn serve_in(
@@ -88,6 +99,7 @@ impl StandIn {
         manager: Manager,
         bound: Duration,
         owned: Option<PathBuf>,
+        allowed_uid: u32,
     ) -> std::io::Result<Self> {
         let socket = dir.join("restart.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -114,7 +126,7 @@ impl StandIn {
                 let _ = serve(
                     &mut conn,
                     0,
-                    Policy { allowed_uid: 0 },
+                    Policy { allowed_uid },
                     &mut pid1,
                     watch,
                     &mut || false,

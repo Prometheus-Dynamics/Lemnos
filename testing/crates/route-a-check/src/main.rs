@@ -325,30 +325,60 @@ config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000
         data = data_dir().display(),
         boot = root.join("boot").display(),
         none = none.display(),
-        helper = restart_helper().display(),
+        helper = helper_socket().display(),
     )
 }
 
-/// The restart helper the daemon asks for its restarts: the helper's real protocol on a socket,
-/// with a service manager that stops at once (there is nothing to restart here). Started once, and
-/// open to the daemon's user.
-fn restart_helper() -> PathBuf {
+/// The restart helper's directory and its socket, as the board file names the socket. The helper is started by
+/// `start_helper`, after the negative step of the ours run: until then the socket is not there.
+fn helper_dir() -> PathBuf {
+    root_dir().join("restart-helper")
+}
+
+fn helper_socket() -> PathBuf {
+    helper_dir().join("restart.sock")
+}
+
+/// Starts the restart helper the daemon asks for its restarts: the helper's own serve loop on the socket, admitting the
+/// daemon's user, with a service manager that stops at once (the trial's restart is a reboot request, and nothing here may
+/// reboot the guest). This is the stand-in of the helper's protocol, not the `lemnos-restart` binary: the binary's init
+/// backend would send SIGTERM to this guest's PID 1 and wait for a stop that never comes. Started once.
+fn start_helper() -> Result<(), String> {
     use lemnos_restart::stand_in::{Manager, StandIn};
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::OnceLock;
-    static HELPER: OnceLock<Option<StandIn>> = OnceLock::new();
-    let dir = root_dir().join("restart-helper");
-    let helper = HELPER.get_or_init(|| {
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).ok()?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).ok()?;
-        let stand = StandIn::start(&dir, Manager::Stops, std::time::Duration::from_secs(5)).ok()?;
-        fs::set_permissions(&stand.socket, fs::Permissions::from_mode(0o666)).ok()?;
-        Some(stand)
+    let dir = helper_dir();
+    let helper = helper_cell().get_or_init(|| {
+        fs::create_dir_all(&dir).map_err(|e| format!("the helper's directory: {e}"))?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("the helper's directory: {e}"))?;
+        let stand = StandIn::start_admitting(
+            &dir,
+            Manager::Stops,
+            std::time::Duration::from_secs(5),
+            DAEMON,
+        )
+        .map_err(|e| format!("the helper: {e}"))?;
+        fs::set_permissions(&stand.socket, fs::Permissions::from_mode(0o666))
+            .map_err(|e| format!("the helper's socket: {e}"))?;
+        Ok(stand)
     });
-    helper
-        .as_ref()
-        .map_or_else(|| dir.join("not-started"), |stand| stand.socket.clone())
+    helper.as_ref().map(drop).map_err(Clone::clone)
+}
+
+/// The started helper, once (`start_helper`).
+fn helper_cell() -> &'static std::sync::OnceLock<Result<lemnos_restart::stand_in::StandIn, String>>
+{
+    static HELPER: std::sync::OnceLock<Result<lemnos_restart::stand_in::StandIn, String>> =
+        std::sync::OnceLock::new();
+    &HELPER
+}
+
+/// What the helper's service manager was asked, in order (`check` for each check, `start` for the restart).
+fn helper_asked() -> Vec<&'static str> {
+    match helper_cell().get() {
+        Some(Ok(stand)) => stand.asked(),
+        _ => Vec::new(),
+    }
 }
 
 /// How the daemon is started.
@@ -768,6 +798,26 @@ fn ours(c: &mut Checks) -> Result<(), String> {
         fs::metadata(&state).is_ok_and(|m| pc() || m.uid() == DAEMON),
         "the daemon's user wrote the state",
     );
+    // Before the helper starts, the trial is refused by its reason, and nothing is written.
+    let before = fs::read(&node).map_err(|e| format!("the partition: {e}"))?;
+    let refused = slots.call(
+        "trial",
+        &Args::new().put(&NEXT).put(&false).put(&false).put(&false),
+    );
+    c.check(
+        refused.is_err(),
+        &format!("before the restart helper starts, trial {NEXT} is refused: {refused:?}"),
+    );
+    let list = slots.text("list")?;
+    c.check(
+        list.contains("the restart helper at") && list.contains("No such file or directory"),
+        &format!("the refusal names the helper's socket: {list}"),
+    );
+    c.check(
+        fs::read(&node).is_ok_and(|now| now == before) && raw_trial(&node).ok().flatten().is_none(),
+        "nothing written: the boot partition is byte-identical and no trial record",
+    );
+    start_helper()?;
     let got = slots.call(
         "trial",
         &Args::new().put(&NEXT).put(&false).put(&false).put(&false),
@@ -781,6 +831,15 @@ fn ours(c: &mut Checks) -> Result<(), String> {
     c.check(
         trial.as_ref().is_ok_and(|t| t.as_deref() == Some(NEXT)),
         &format!("the partition's trial record names {NEXT}, read back raw: {trial:?}"),
+    );
+    // The trial's check, then its restart: a reboot request, which the helper checks the manager for again before it
+    // starts it (serve.rs), and which this helper's manager answers without rebooting the guest. Nothing else is asked.
+    c.check(
+        helper_asked() == ["check", "check", "start"],
+        &format!(
+            "the helper's manager was asked the trial's check, the reboot's check and its start, and nothing else: {:?}",
+            helper_asked()
+        ),
     );
     drop(slots);
     daemon.stop();
