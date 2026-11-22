@@ -1,0 +1,5 @@
+# BusyBox init's table (testing/qemu/run-busybox-restart.sh): id:runlevels:action:process
+::sysinit:/bin/sh -c 'echo "BUSYBOX-RESTART-GUEST sysinit: PID 1 is $(cat /proc/1/comm)"'
+# The restart helper in --init mode, as the packaged BusyBox init script starts it (service/restart-helper).
+::respawn:/usr/sbin/lemnos-restart --user lemnos --init --listen /run/lemnos-restart.sock
+::once:/bin/sh /etc/cases.sh

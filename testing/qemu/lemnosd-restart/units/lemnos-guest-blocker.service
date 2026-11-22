@@ -1,0 +1,15 @@
+# A start that is still running for 600 s after boot (testing/qemu/lemnosd-restart/guest/cases.sh, case b). A reboot
+# queued while a drop-in orders reboot.target after it waits for this start, so the system does not start stopping and
+# the helper's bound expires. It is not ordered before anything else, so it does not hold boot.
+[Unit]
+Description=Restart guest: a start that is still running, so a reboot queued after it waits
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sleep 600
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

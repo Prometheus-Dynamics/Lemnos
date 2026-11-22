@@ -85,6 +85,22 @@ else
 	say "FAIL d peer refused=$refused rc=$rc; not refused: $bad"
 fi
 
+# Old path: a non-root systemctl reboot, with no helper in it. PID 1 is on the system bus here (the bus is a socket and a
+# service unit of this guest, as in the systemd-restart guest). systemctl first asks login1, which this guest does not
+# run ("was not provided"), then PID 1, which refuses lemnos ("Access denied"). It must be refused, and lemnosd stays up.
+say "BUS systemd1 on the system bus: $(busctl --system list 2>/dev/null | grep -c '^org.freedesktop.systemd1 ') (dbus.socket $(systemctl is-active dbus.socket) dbus.service $(systemctl is-active dbus.service))"
+out=$(as $LEMNOS $LEMNOS timeout 30 systemctl reboot 2>&1); rc=$?
+say "OLD-PATH systemctl reboot as lemnos rc=$rc: $(echo "$out" | tr '\n' ' ')"
+case "$out" in
+*"Access denied"*|*"Interactive authentication required"*) denied=yes ;;
+*) denied=no ;;
+esac
+if [ "$rc" -ne 0 ] && [ "$denied" = yes ] && [ "$(systemctl is-active lemnosd.service)" = active ]; then
+	say "PASS old-path: systemctl reboot as lemnos is refused by PID 1, and lemnosd stays up"
+else
+	say "FAIL old-path: systemctl reboot as lemnos was not refused (rc=$rc denied=$denied): $out"
+fi
+
 # (c) StartUnit fails on the same connection: reboot.target is ordered after a unit that orders it before itself, so the
 # service manager refuses the transaction ("Transaction order is cyclic"). The helper says accepted, then failed; the
 # daemon's trial is disarmed, its state is restart-failed with the reason, and the caller gets the error.
@@ -119,11 +135,26 @@ rm -f /run/systemd/system/reboot.target.d/cycle.conf /run/systemd/system/lemnos-
 rmdir /run/systemd/system/reboot.target.d 2>/dev/null
 systemctl daemon-reload
 
-# (b) accepted, then no stop request within the bound: NOT RUN in this guest. A reboot job puts the system in the
-# stopping state at once (the shutdown's stop jobs are queued with it, whatever reboot.target and systemd-reboot.service
-# wait on: run 4 and run 5 rebooted during it), so the helper's bound cannot expire on systemd. The bound's branch is
-# covered by the helper's unit tests with a stand-in manager, and it is listed as not reproduced in the board-run note.
-say "NOT-RUN b accepted, then no stop within the bound: systemd starts the shutdown at once for a reboot job (see testing/qemu/lemnosd-restart/guest/cases.sh)"
+# (b) accepted, then no stop request within the bound. lemnos-guest-blocker.service is a start still running since boot
+# (600 s); a drop-in orders reboot.target after it, so the reboot job queues behind that start and the system does not start
+# stopping. The helper's bound expires, the daemon disarms the trial and says why. The queued job is cancelled after
+# the answer, so the reboot does not follow the blocker's end.
+mkdir -p /run/systemd/system/reboot.target.d
+printf '[Unit]\nAfter=lemnos-guest-blocker.service\n' > /run/systemd/system/reboot.target.d/blocker.conf
+systemctl daemon-reload
+say "b0 the blocker is $(systemctl is-active lemnos-guest-blocker.service); the helper's check before the trial: $(as $LEMNOS $LEMNOS $PROBE check 2>&1) reboot.target $(systemctl show -P LoadState reboot.target) $(systemctl show -P ActiveState reboot.target)"
+out=$("$CHECK" trial "$SOCK" "$SLOT" force 2>&1)
+say "b1 trial with the reboot queued behind the blocker: $out"
+if wait_for_reason "did not start stopping within" 60; then
+	say "b2 $(list_line | grep -o '"state":"restart-failed","error":"[^"]*"')"
+	say "PASS b accepted, no stop within the bound: trial disarmed, state restart-failed with the reason"
+else
+	say "FAIL b the state did not become restart-failed within 60 s: $(state | tr '\n' ' ')"
+fi
+systemctl cancel
+rm -f /run/systemd/system/reboot.target.d/blocker.conf
+rmdir /run/systemd/system/reboot.target.d 2>/dev/null
+systemctl daemon-reload
 
 # (a) accepted, then SIGTERM: the reboot is happening, so the trial stays armed. The slow unit stops for 5 s on the way
 # (lemnos-guest-slow.service). The trial call returns once the helper accepted; the stop comes after.

@@ -235,6 +235,7 @@ ln -s ../lemnosd.service "$root/usr/lib/systemd/system/multi-user.target.wants/l
 ln -s ../lemnos-restart.service "$root/usr/lib/systemd/system/multi-user.target.wants/lemnos-restart.service"
 ln -s ../lemnos-restart-cases.service "$root/usr/lib/systemd/system/multi-user.target.wants/lemnos-restart-cases.service"
 ln -s ../lemnos-guest-slow.service "$root/usr/lib/systemd/system/multi-user.target.wants/lemnos-guest-slow.service"
+ln -s ../lemnos-guest-blocker.service "$root/usr/lib/systemd/system/multi-user.target.wants/lemnos-guest-blocker.service"
 ln -s ../dbus.service "$root/usr/lib/systemd/system/multi-user.target.wants/dbus.service"
 ln -s ../lemnos-restart.socket "$root/usr/lib/systemd/system/sockets.target.wants/lemnos-restart.socket"
 ln -s ../dbus.socket "$root/usr/lib/systemd/system/sockets.target.wants/dbus.socket"
