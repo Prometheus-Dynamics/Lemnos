@@ -340,16 +340,31 @@ fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
 pub fn root_phase(cfg: &Config<'_>) -> String {
     use lemnos_slot_store::boot_raw::{Prepared, prepare};
     match cfg.str("record").unwrap_or("tryboot") {
-        "tryboot" => match boot_node_of(cfg) {
-            Ok(node) => match prepare(&node) {
-                Prepared::ReadWrite => format!("{}: handed over read-write", node.display()),
-                Prepared::ReadOnly(why) => {
-                    format!("{}: handed over read only ({why})", node.display())
-                }
-                Prepared::Failed(why) => format!("not handed over: {why}"),
-            },
-            Err(why) => format!("the boot partition isn't known: {why}"),
-        },
+        "tryboot" => {
+            let boot = match boot_node_of(cfg) {
+                Ok(node) => match prepare(&node) {
+                    Prepared::ReadWrite => format!("{}: handed over read-write", node.display()),
+                    Prepared::ReadOnly(why) => {
+                        format!("{}: handed over read only ({why})", node.display())
+                    }
+                    Prepared::Failed(why) => format!("not handed over: {why}"),
+                },
+                Err(why) => format!("the boot partition isn't known: {why}"),
+            };
+            // The firmware mailbox the boot count is cleared through: root-only on a board, so it is
+            // held across the drop and every clear takes a copy of the held descriptor.
+            let vcio = firmware_of(cfg).map(|firmware| firmware.vcio);
+            match vcio {
+                Some(vcio) => match lemnos_driver_rpi_firmware_sys::hold(&vcio) {
+                    Ok(()) => format!("{boot}; {}: held for the boot count", vcio.display()),
+                    Err(why) => format!(
+                        "{boot}; {}: not held ({why}): the boot count can't be cleared",
+                        vcio.display()
+                    ),
+                },
+                None => boot,
+            }
+        }
         "uboot" => match uboot_env_place(cfg) {
             Ok(place) => uboot::root_phase(&place, &boot_disk_of(cfg), &boot_node_of(cfg)),
             Err(_) => {

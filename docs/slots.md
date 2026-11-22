@@ -1736,7 +1736,10 @@ rotation above still reads the raw count.
   `rsts` (four big-endian bytes each; `device_tree` names the directory). It is cleared through the
   property mailbox on `/dev/vcio` (`vcio`), tag `0x0003808d` with the value zero
   (`lemnos_driver_rpi_firmware_sys`). Both settings are the `system-slots` device's; the defaults
-  are the paths above.
+  are the paths above. `/dev/vcio` is `root:root 0600` on a board and the daemon runs as its own user, so the
+  slots device's root phase opens it before the drop and holds it for the daemon's life; every
+  clear takes a copy of that descriptor. The root phase's line says `<vcio>: held for the boot
+  count`, or why it is not held (then no clear can work, and the health says each failure).
 - The count is cleared by lemnosd, never by slot-init, in two places: at a boot that is good (a
   confirmed trial, or a default boot that has run its uptime with its boot files matching the
   manifest) and before each restart Lemnos makes. The restart check runs first: a refused check

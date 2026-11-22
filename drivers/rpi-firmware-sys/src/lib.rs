@@ -98,9 +98,41 @@ pub struct Mailbox {
     file: File,
 }
 
+/// The mailbox nodes held across a daemon's drop of root, by path: each opened once by [`hold`].
+static HELD: std::sync::Mutex<Vec<(std::path::PathBuf, File)>> = std::sync::Mutex::new(Vec::new());
+
+/// Opens the mailbox device at `path` now (as root, before a daemon drops to its own user) and keeps
+/// the descriptor for the process's life, so a later [`Mailbox::open`] of the same path takes a copy
+/// of it instead of opening the node by name. The node is `root:root 0600` on a board until a rule
+/// gives it out, and the daemon's user can't open it. Holding it again is a no-op.
+///
+/// # Errors
+/// The open's error.
+pub fn hold(path: &Path) -> io::Result<()> {
+    let mut held = HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.iter().any(|(at, _)| at == path) {
+        return Ok(());
+    }
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    held.push((path.to_path_buf(), file));
+    Ok(())
+}
+
 impl Mailbox {
-    /// Opens the mailbox device at `path`. The device is only opened, nothing is sent.
+    /// Opens the mailbox device at `path`: a copy of the descriptor [`hold`] kept for it, or the node
+    /// opened by name. Nothing is sent.
     pub fn open(path: &Path) -> io::Result<Self> {
+        let held = HELD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, file)) = held.iter().find(|(at, _)| at == path) {
+            return Ok(Self {
+                file: file.try_clone()?,
+            });
+        }
+        drop(held);
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         Ok(Self { file })
     }
@@ -224,6 +256,40 @@ mod tests {
                 Message(words).reply_value(TAG_GET_BOOT_COUNT),
                 None,
                 "word {index} = {bad:#x} must be refused"
+            );
+        }
+    }
+
+    /// A held node is opened from its held descriptor once the node can no longer be opened by
+    /// name, as on a board after the daemon's drop of root (`/dev/vcio` is `root:root 0600`).
+    #[test]
+    fn a_held_mailbox_is_opened_after_its_node_can_no_longer_be() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rpi-fw-sys-held-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let node = dir.join("vcio");
+        std::fs::write(&node, b"").unwrap();
+        let other = dir.join("other");
+        std::fs::write(&other, b"").unwrap();
+        hold(&node).unwrap();
+        hold(&node).unwrap();
+        for path in [&node, &other] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        // Root opens any mode: the check means something only for a user the mode stops.
+        let stopped = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&other)
+            .is_err();
+        let held = Mailbox::open(&node);
+        let unheld = Mailbox::open(&other);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(held.is_ok(), "the held node opens: {held:?}");
+        if stopped {
+            assert!(
+                unheld.is_err(),
+                "a node not held is opened by name, and refused"
             );
         }
     }
