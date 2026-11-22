@@ -12,6 +12,11 @@
 //!
 //! The device's description says what each word must be; nothing here knows a device.
 //!
+//! The actions are the resource's, so a caller addresses them to it: `Target::Resource("lemnos.<device>")`.
+//! Addressed to the node they are not the node's actions, and the node refuses them "not found" before
+//! anything runs. A method is `NAME`, or `TAG:NAME` with the contract's whole tag (`system.slots/1:list`); the
+//! words are split on whitespace, with no quoting, so no argument holds a space.
+//!
 //! A method the description marks as a long job runs as one through `call`. The run is started
 //! on lemnosd, and the job's progress goes back as the run's progress: `percent`, the message
 //! `"<done> of <total>"`, and the data `done` and `total` as two little-endian `u64`s. The run

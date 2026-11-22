@@ -1225,3 +1225,49 @@ fn a_committed_image_pushed_again_is_answered_with_its_outcome_and_not_sent_agai
         "the image was written again"
     );
 }
+
+/// FLASH-INFO-NOTFOUND: a device's `call` is an action of the device's resource, so it is addressed to the
+/// resource (`Target::Resource("lemnos.<device>")`). `lemnos.flash.call info` there answers the device's
+/// `info` as text: the target, the state and the manifest. The same call addressed to the node is not one of
+/// the node's actions: the node refuses it "not found", and nothing runs. That is the refusal a flasher's
+/// client saw when it sent `info` to the node.
+#[test]
+fn a_devices_call_is_answered_on_its_resource_and_refused_not_found_on_the_node() {
+    let s = setup("info-target", SMALL + 4096);
+    let call = |target| {
+        s.dashboard.run(&ActionCall {
+            name: "lemnos.flash.call",
+            target,
+            args: b"info",
+            deadline_ms: 0,
+            detached: false,
+        })
+    };
+    let mut run = call(Target::Resource("lemnos.flash".parse().expect("name"))).expect("run");
+    let finished = run.finish(WAIT).expect("info ends");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    let info = String::from_utf8(finished.output).expect("text");
+    assert!(
+        info.starts_with("{\"kind\":\"file\"") && info.contains("\"allow_first_flash\":true"),
+        "the device's info: {info}"
+    );
+    let node: orion::types::NodeName = s
+        .dashboard
+        .node()
+        .expect("node")
+        .name
+        .parse()
+        .expect("name");
+    // The refusal comes at the run or at its end, as the node sends it: either way it is the node's "not found".
+    let on_node: Result<Outcome, String> = match call(Target::Node(node)) {
+        Ok(mut run) => run
+            .finish(WAIT)
+            .map(|f| f.outcome)
+            .map_err(|e| format!("{e} ({e:?})")),
+        Err(e) => Err(format!("{e} ({e:?})")),
+    };
+    assert!(
+        matches!(&on_node, Err(why) if why.contains("not found")),
+        "the node answered a resource's action addressed to it: {on_node:?}"
+    );
+}

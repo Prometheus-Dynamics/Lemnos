@@ -1331,8 +1331,9 @@ drivers that the reference board does not use.
 ### Over Orion
 
 The board is the device `selftest`, so its resource is `lemnos.selftest`. From an Orion client the calls
-are actions on that resource, named `lemnos.selftest.call`, with the method and its arguments as the
-text of the action (`service/orion/tests/orion_bridge.rs` runs these):
+are actions on that resource, named `lemnos.selftest.call`, addressed to the resource
+(`Target::Resource("lemnos.selftest")`; addressed to the node they are refused "not found"), with the method
+and its arguments as the text of the action (`service/orion/tests/orion_bridge.rs` runs these):
 
 | Args | What it does | Reply |
 |---|---|---|

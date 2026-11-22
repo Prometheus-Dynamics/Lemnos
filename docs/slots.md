@@ -3301,6 +3301,12 @@ is the same transfer. Begun again:
   file, and an open stream and its job are left alone. A stream resumed reads no manifest; the device checks
   the image against the manifest its stream began with.
 
+**Calling the device through the bridge.** The device's actions (`lemnos.<device>.call`, `.set`, `.power`)
+are its resource's: address them to `Target::Resource("lemnos.<device>")`. Addressed to the node, they are
+refused "not found" before anything runs. `lemnos.<device>.call info` on the resource answers the device's
+`info` as text. A method is `NAME`, or `TAG:NAME` with the contract's whole tag; the arguments are words split
+on whitespace, with no quoting (`service/orion/src/calls.rs`).
+
 **What a sender must do.** Wait for each answer as long as the node is heard from, not a fixed time:
 Orion's `Reply::Alive` with a ceiling. A chunk is answered once the device has taken it, so a slow store
 makes an answer late; under Orion's default (`Reply::Timeout`, 5 s, renewed only when `received` moves) a
