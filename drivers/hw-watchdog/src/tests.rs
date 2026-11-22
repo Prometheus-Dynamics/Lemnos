@@ -32,6 +32,8 @@ struct Device {
     applies: Option<u32>,
     /// The next this many timeout requests fail.
     set_failures: u32,
+    /// The error a failing timeout request answers.
+    set_error: ErrorKind,
     /// Every feed fails from this time (ns), if set.
     feed_fails_from: Option<u64>,
     /// The time of the current call, set by the test.
@@ -43,6 +45,9 @@ struct Device {
     read_fails: bool,
     /// What the device reports as time left (`timeleft`), if it has the attribute.
     time_left: Option<u32>,
+    /// The sysfs min_timeout and max_timeout, as the device reports them.
+    min: Option<u32>,
+    max: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -58,11 +63,14 @@ impl Fake {
             clamp: u32::MAX,
             applies: None,
             set_failures: 0,
+            set_error: ErrorKind::Failed,
             feed_fails_from: None,
             now: 0,
             record: true,
             read_fails: false,
             time_left: None,
+            min: None,
+            max: None,
         })))
     }
 
@@ -92,7 +100,11 @@ impl RawWatchdog for Fake {
             }
             if d.set_failures > 0 {
                 d.set_failures -= 1;
-                return Err(ErrorKind::Failed);
+                return Err(d.set_error);
+            }
+            // The watchdog core's own check: below min_timeout is EINVAL.
+            if d.min.is_some_and(|min| seconds < min) {
+                return Err(ErrorKind::InvalidInput);
             }
             d.timeout = d.applies.unwrap_or(seconds.min(d.clamp));
             Ok(d.timeout)
@@ -107,7 +119,7 @@ impl RawWatchdog for Fake {
     }
 
     fn timeout_range(&mut self) -> (Option<u32>, Option<u32>) {
-        (None, None)
+        self.with(|d| (d.min, d.max))
     }
 
     fn has_attribute(&mut self, _name: &str) -> bool {
@@ -191,6 +203,71 @@ fn a_failed_timeout_request_is_retried_on_the_backoff_and_then_succeeds() {
         "each retry waits twice as long as the one before"
     );
     assert_eq!(dog.health(), Health::Ok);
+}
+
+#[test]
+fn a_max_timeout_of_zero_is_no_maximum_and_the_timeout_asked_for_is_set() {
+    // The board's bcm2835 watchdog: min_timeout 1 and max_timeout 0 in sysfs, because the driver
+    // gives only max_hw_heartbeat_ms. The watchdog core refuses a timeout of 0 with EINVAL, as the
+    // fake does below the minimum.
+    let fake = Fake::new(60);
+    fake.with(|d| {
+        d.min = Some(1);
+        d.max = Some(0);
+    });
+    let mut dog = HwWatchdog::over(Held::boxed(Box::new(fake.clone())), 15);
+    tick_at(&fake, &mut dog, 0);
+    assert_eq!(fake.with(|d| d.sets.clone()), vec![(0, 15)]);
+    assert_eq!(dog.applied_s, Some(15));
+    assert_eq!(dog.health(), Health::Ok);
+}
+
+#[test]
+fn a_timeout_the_device_refuses_says_why_in_the_health_until_it_is_set() {
+    let fake = Fake::new(60);
+    fake.with(|d| {
+        d.set_failures = 1;
+        d.set_error = ErrorKind::InvalidInput;
+    });
+    let mut dog = driver(&fake, 15);
+    tick_at(&fake, &mut dog, 0);
+    assert_eq!(
+        dog.health(),
+        Health::Degraded(
+            "timeout not set: the device refused the value (invalid input): retried with backoff"
+        ),
+        "the device's own answer is the reason"
+    );
+    tick_at(&fake, &mut dog, 250 * MS);
+    assert_eq!(dog.health(), Health::Ok);
+}
+
+#[test]
+fn a_timeout_request_the_kernel_refuses_keeps_the_kernels_errno() {
+    // A real descriptor that is not a watchdog: the kernel answers the ioctl with ENOTTY, as it
+    // does for any node without the watchdog ioctls.
+    let dir = std::env::temp_dir().join(format!("hw-watchdog-errno-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("not-a-watchdog");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut node = OpenNode {
+        file,
+        sys_dir: dir.clone(),
+    };
+    let set = node.set_timeout(15);
+    let get = node.timeout();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(set, Err(ErrorKind::Unsupported));
+    assert_eq!(get, Err(ErrorKind::Unsupported));
+    assert_eq!(
+        timeout_not_set(ErrorKind::Unsupported),
+        "timeout not set: the device cannot set its timeout (unsupported): retried with backoff"
+    );
+    assert_eq!(
+        request_error(&std::io::Error::from_raw_os_error(22)),
+        ErrorKind::InvalidInput,
+        "EINVAL, the watchdog core's answer to a timeout outside min/max"
+    );
 }
 
 #[test]

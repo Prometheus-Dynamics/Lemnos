@@ -140,6 +140,34 @@ const ATTRIBUTES: [(&str, Unit); 5] = [
 /// Reason strings for [`Health::Degraded`].
 const FEED_FAILING: &str = "feed failed: retried with backoff";
 const TIMEOUT_NOT_SET: &str = "timeout not set: retried with backoff";
+
+/// The reason a timeout request that failed with `kind` gives: the error the device answered, so a
+/// board's report says why, not only that it failed.
+const fn timeout_not_set(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::InvalidInput => {
+            "timeout not set: the device refused the value (invalid input): retried with backoff"
+        }
+        ErrorKind::Unsupported => {
+            "timeout not set: the device cannot set its timeout (unsupported): retried with backoff"
+        }
+        ErrorKind::PermissionDenied => "timeout not set: permission denied: retried with backoff",
+        ErrorKind::Busy => "timeout not set: the device is busy: retried with backoff",
+        ErrorKind::Unavailable => {
+            "timeout not set: the device is gone (unavailable): retried with backoff"
+        }
+        ErrorKind::NotFound => "timeout not set: no such device: retried with backoff",
+        ErrorKind::Timeout => "timeout not set: the request timed out: retried with backoff",
+        _ => TIMEOUT_NOT_SET,
+    }
+}
+
+/// A watchdog request's error, by the errno the kernel answered.
+fn request_error(error: &std::io::Error) -> ErrorKind {
+    error
+        .raw_os_error()
+        .map_or(ErrorKind::Failed, ErrorKind::from_errno)
+}
 const TIMEOUT_UNKNOWN: &str = "timeout unknown: fed every 1 s";
 
 /// The node the `device` setting names: `dev_root/<device>`, opened for writing, with its sysfs
@@ -200,11 +228,11 @@ impl RawWatchdog for OpenNode {
 
     fn set_timeout(&mut self, seconds: u32) -> std::result::Result<u32, ErrorKind> {
         lemnos_driver_hw_watchdog_sys::set_timeout(self.file.as_fd(), seconds)
-            .map_err(|_| ErrorKind::Failed)
+            .map_err(|e| request_error(&e))
     }
 
     fn timeout(&mut self) -> std::result::Result<u32, ErrorKind> {
-        lemnos_driver_hw_watchdog_sys::get_timeout(self.file.as_fd()).map_err(|_| ErrorKind::Failed)
+        lemnos_driver_hw_watchdog_sys::get_timeout(self.file.as_fd()).map_err(|e| request_error(&e))
     }
 
     fn timeout_range(&mut self) -> (Option<u32>, Option<u32>) {
@@ -242,6 +270,8 @@ pub struct HwWatchdog {
     applied_s: Option<u32>,
     /// Timeout requests that have failed in a row.
     set_attempts: u32,
+    /// The error of the last failed timeout request, said in the health while it fails.
+    set_error: ErrorKind,
     /// When the next timeout request may be made (ns).
     set_retry_ns: Option<u64>,
     /// When the next feed (or retry) is due, on the host's clock. Zero means the first tick.
@@ -371,13 +401,11 @@ impl Lifecycle for HwWatchdog {
                 ));
             }
         };
-        let mut node = match needs.watchdog {
+        let node = match needs.watchdog {
             Some(node) => node,
             None => open_device(cfg)?,
         };
-        let (min, max) = node.timeout_range();
-        let wanted_s = clamp(requested, min.map(u64::from), max.map(u64::from));
-        Ok(Self::new(node, wanted_s, (min, max)))
+        Ok(Self::over(node, requested))
     }
 
     fn describe(&self, out: &mut Description) {
@@ -417,7 +445,7 @@ impl Lifecycle for HwWatchdog {
         if self.feed_attempts > 0 {
             Health::Degraded(FEED_FAILING)
         } else if self.set_attempts > 0 {
-            Health::Degraded(TIMEOUT_NOT_SET)
+            Health::Degraded(timeout_not_set(self.set_error))
         } else if self.applied_s.is_some() {
             // A device that rounds or clamps the request is not degraded: the feed follows the
             // period it read back, and `timeout` reports that period as a fact.
@@ -464,6 +492,17 @@ impl HwWatchdog {
         self.watchdog.as_mut().ok_or(ErrorKind::Failed)
     }
 
+    /// A driver over `node` asking for `requested` seconds, held to the range the device reports.
+    fn over(mut node: Watchdog, requested: u32) -> Self {
+        let (min, max) = node.timeout_range();
+        // A max_timeout of 0 is the kernel's "no maximum": a device that gives only its hardware
+        // heartbeat (max_hw_heartbeat_ms) leaves it unset, and the watchdog core then keeps any
+        // longer timeout itself. Taken as a maximum it would ask for 0 s, which the core refuses.
+        let max = max.filter(|&max| max != 0);
+        let wanted_s = clamp(requested, min.map(u64::from), max.map(u64::from));
+        Self::new(node, wanted_s, (min, max))
+    }
+
     /// A driver over `node`, asking for `wanted_s`.
     fn new(mut node: Watchdog, wanted_s: u32, timeout_range: (Option<u32>, Option<u32>)) -> Self {
         let mut present = [false; ATTRIBUTES.len()];
@@ -478,6 +517,7 @@ impl HwWatchdog {
             unset: true,
             applied_s: None,
             set_attempts: 0,
+            set_error: ErrorKind::Failed,
             set_retry_ns: None,
             due_ns: 0,
             deadline_ns: None,
@@ -504,7 +544,8 @@ impl HwWatchdog {
                 // The feed interval follows the timeout that is now in force.
                 self.due_ns = self.due_ns.min(now_ns);
             }
-            Err(_) => {
+            Err(error) => {
+                self.set_error = error;
                 self.set_attempts = self.set_attempts.saturating_add(1);
                 self.set_retry_ns = Some(now_ns.saturating_add(backoff_ns(self.set_attempts)));
             }

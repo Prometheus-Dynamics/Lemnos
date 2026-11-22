@@ -379,7 +379,7 @@ by omission):
 | `pwm-channel-fan` | `rpm` (with a tachometer) | rpm | known | 0 to `max_rpm` (board) | 1 | `warn_below_rpm` (board, a stall) | board, as for `hwmon-fan` |
 | `pwm-channel-fan` | `duty` | per mille | dimensionless | 0 to 1000 | 1 | none | chip: the per-mille scale (`FULL`) |
 | `thermal-zone` | `temperature` | °C | known | `min_c` to `max_c` (board) | none | `warn_below_c`, `warn_above_c` (board) | board: the zone's trusted range and the limits; the zone's own trip points are not read |
-| `hw-watchdog` | `timeout` | s | known | the device's `min_timeout` to `max_timeout` | 1 | none | bind: read from sysfs when the driver binds |
+| `hw-watchdog` | `timeout` | s | known | the device's `min_timeout` to `max_timeout` (no range when `max_timeout` reads 0, the kernel's "no maximum") | 1 | none | bind: read from sysfs when the driver binds |
 | `hw-watchdog` | `timeleft` | s | known | 0 to the device's `max_timeout` | 1 | none | bind: read from sysfs when the driver binds |
 | `hw-watchdog` | `identity` | (none) | dimensionless | (none) | none | none | bind: read from sysfs when the driver binds (the chip's identity text; no figure) |
 | `hw-watchdog` | `bootstatus` | (none) | dimensionless | (none) | none | none | bind: read from sysfs when the driver binds (the boot status (0 or 1); no figure) |

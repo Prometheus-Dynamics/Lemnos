@@ -118,6 +118,14 @@ fn held(node: &Path) -> Option<std::io::Result<File>> {
         .map(|(_, file)| file.try_clone())
 }
 
+/// A watchdog request's error, by the errno the kernel answered: the reason reaches the driver's
+/// health instead of a bare failure.
+fn request_error(error: &std::io::Error) -> ErrorKind {
+    error
+        .raw_os_error()
+        .map_or(ErrorKind::Failed, ErrorKind::from_errno)
+}
+
 /// An open watchdog node, with its sysfs directory and the claim that keeps one owner on it.
 pub(crate) struct LinuxWatchdog {
     file: File,
@@ -155,11 +163,11 @@ impl RawWatchdog for LinuxWatchdog {
 
     fn set_timeout(&mut self, seconds: u32) -> Result<u32, ErrorKind> {
         lemnos_driver_hw_watchdog_sys::set_timeout(self.file.as_fd(), seconds)
-            .map_err(|_| ErrorKind::Failed)
+            .map_err(|e| request_error(&e))
     }
 
     fn timeout(&mut self) -> Result<u32, ErrorKind> {
-        lemnos_driver_hw_watchdog_sys::get_timeout(self.file.as_fd()).map_err(|_| ErrorKind::Failed)
+        lemnos_driver_hw_watchdog_sys::get_timeout(self.file.as_fd()).map_err(|e| request_error(&e))
     }
 
     fn timeout_range(&mut self) -> (Option<u32>, Option<u32>) {
