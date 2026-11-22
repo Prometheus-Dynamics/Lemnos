@@ -1135,6 +1135,65 @@ fn route_a(c: &mut Checks) {
     }
 }
 
+/// One of the firmware mailbox stand-in's parameters, trimmed; empty when it can't be read.
+fn vcio_param(name: &str) -> String {
+    fs::read_to_string(format!("/sys/module/lemnos_test_vcio/parameters/{name}"))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The way back from an initramfs, with no daemon: `lemnos-way-back rpiboot` sets the reboot order
+/// once, RPIBOOT (3), on the mailbox stand-in (`/dev/vcio`, root's 0600). A firmware that refuses is
+/// exit 1 with nothing taken, and so is a node that is not there.
+fn way_back(c: &mut Checks) {
+    let vcio = load("/lemnos_test_vcio.ko", "") == 0;
+    c.check(vcio, "firmware mailbox stand-in loaded");
+    if !vcio {
+        return;
+    }
+    let before: u32 = vcio_param("orders").parse().unwrap_or(u32::MAX);
+    c.check(
+        before == 0,
+        &format!("no reboot order before the way back (orders {before})"),
+    );
+    c.check(
+        run(&["/lemnos-way-back", "rpiboot"]) == 0,
+        "lemnos-way-back rpiboot exits 0",
+    );
+    let (orders, order) = (vcio_param("orders"), vcio_param("order"));
+    c.check(
+        orders == "1" && order == "3",
+        &format!("the firmware was given one reboot order, RPIBOOT (3): orders {orders:?} order {order:?}"),
+    );
+    c.check(
+        put("/sys/module/lemnos_test_vcio/parameters/refuse", "1\n") == 0,
+        "the stand-in refuses",
+    );
+    c.check(
+        run(&["/lemnos-way-back", "rpiboot"]) == 1,
+        "a refused way back exits 1",
+    );
+    let _ = put("/sys/module/lemnos_test_vcio/parameters/refuse", "0\n");
+    c.check(
+        run(&[
+            "/lemnos-way-back",
+            "rpiboot",
+            "--device",
+            "/dev/lemnos-no-mailbox",
+        ]) == 1,
+        "a missing node exits 1",
+    );
+    let orders = vcio_param("orders");
+    c.check(
+        orders == "1",
+        &format!("nothing more was taken (orders {orders:?})"),
+    );
+    c.check(
+        unload("lemnos_test_vcio") == 0,
+        "firmware mailbox stand-in unloaded",
+    );
+}
+
 /// The USB gadget end to end: the daemon's root phase (under the unit's bounding set with the
 /// gadget drop-in), FunctionFS on dummy_hcd, and a host.
 fn gadget(c: &mut Checks) {
@@ -1358,6 +1417,12 @@ const STANZAS: &[Stanza] = &[
         block: None,
         needs: &[],
         run: route_a,
+    },
+    Stanza {
+        name: "way-back",
+        block: None,
+        needs: &[],
+        run: way_back,
     },
     Stanza {
         name: "gadget",

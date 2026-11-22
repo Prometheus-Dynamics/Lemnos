@@ -67,6 +67,7 @@ lemnos-ctl 699048 to 692992, lemnos-orion 789552 to 775912).
 | `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | the same three (the initramfs's `/init`, static)                |
 | `lemnos-good-boot` (`service/good-boot`) | `lemnos-good-boot` | none (the good-boot deadline's waiter, plain `std`) | the same three |
 | `lemnos-restart` (`service/restart-helper`) | `lemnos-restart` | none (the root restart helper, plain `std`; packaging/README.md, "The restart helper") | the same three |
+| `lemnos-way-back` (`service/way-back`) | `lemnos-way-back` | none (the firmware's way back from an initramfs, plain `std`; docs/slots.md, "The way back with no daemon") | the same three |
 
 Stripped sizes, from the vendored builds of this table (bytes):
 
@@ -77,6 +78,9 @@ Stripped sizes, from the vendored builds of this table (bytes):
 | `lemnos-orion`  | 775368       | 768908           | 772048       |
 | `lemnos-slot-init` | 491768   | 466144           | 483896       |
 | `lemnos-good-boot` | 391800   | 368780           | 386056       |
+| `lemnos-way-back` | 345984   | 323672           | 343648       |
+
+`lemnos-way-back` was measured from a worktree build of its change the same way (`cargo build --locked --profile service --target <triple> -p lemnos-way-back`); stripped and statically linked, `file` reports the right machine for each triple.
 
 `lemnos-good-boot` was measured from a worktree build of this change (`cargo build --locked --profile service --target <triple> -p lemnos-good-boot`), not the vendored tree; it is stripped and statically linked, and `file` reports the right word size and machine for each triple.
 

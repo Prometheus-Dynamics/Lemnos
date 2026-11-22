@@ -131,7 +131,8 @@ cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
 # The route-A check runs the real daemon with its boot chain stood in (lemnosd's `testing-boot-roots`
 # feature). That daemon is built on its own, after the shipped one is copied above, and goes in as
 # /lemnosd-route-a: the feature never reaches /lemnosd.
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-route-a-check --target "$target")
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-route-a-check -p lemnos-way-back --target "$target")
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-way-back" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-route-a-check" "$root/"
 (cd "$repo" && cargo build -q -j"$JOBS" -p lemnosd --features testing-boot-roots --target "$target")
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/lemnosd-route-a"

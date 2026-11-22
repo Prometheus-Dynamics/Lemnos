@@ -8,3 +8,4 @@ lemnos-orion lemnos-orion aarch64-unknown-linux-musl,armv7-unknown-linux-musleab
 lemnos-slot-init lemnos-slot-init aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,riscv64gc-unknown-linux-musl
 lemnos-good-boot lemnos-good-boot aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,riscv64gc-unknown-linux-musl
 lemnos-restart lemnos-restart aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,riscv64gc-unknown-linux-musl
+lemnos-way-back lemnos-way-back aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,riscv64gc-unknown-linux-musl

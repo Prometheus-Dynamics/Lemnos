@@ -17,6 +17,17 @@ const AUDIT_ARCH: u32 = 0xc000_00b7;
 /// `AUDIT_ARCH_ARM`: EM_ARM (40) with the little-endian flag.
 #[cfg(target_arch = "arm")]
 const AUDIT_ARCH: u32 = 0x4000_0028;
+/// `AUDIT_ARCH_RISCV64`: EM_RISCV (243) with the 64-bit and little-endian flags
+/// (`<linux/audit.h>`, `<linux/elf-em.h>`).
+#[cfg(target_arch = "riscv64")]
+const AUDIT_ARCH: u32 = 0xc000_00f3;
+#[cfg(not(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm",
+    target_arch = "riscv64"
+)))]
+compile_error!("seccomp: no AUDIT_ARCH for this architecture; add it from <linux/audit.h>");
 
 const BPF_LD_W_ABS: u16 = 0x20;
 const BPF_JEQ_K: u16 = 0x15;

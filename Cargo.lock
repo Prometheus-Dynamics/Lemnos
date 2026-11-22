@@ -3290,6 +3290,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-way-back"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-driver-rpi-firmware-sys",
+]
+
+[[package]]
 name = "lemnos-wire"
 version = "2.0.1-dev"
 dependencies = [

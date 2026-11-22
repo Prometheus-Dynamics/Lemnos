@@ -2980,6 +2980,23 @@ across the drop, as the slots device's does for the boot count. The one-shot is 
 if the restart then fails (`IO`), it stays set, and the next restart, whoever asks for it, goes to the way
 back.
 
+### The way back with no daemon
+
+`lemnos-way-back rpiboot [--device NODE]` (`service/way-back`, shipped) sends the same one-shot from anywhere,
+an initramfs `/init` before lemnosd exists included: RPIBOOT for the next boot through the mailbox (`/dev/vcio` by
+default, which devtmpfs makes; `root:root 0600` on a board, so the caller is root). It needs no board file and no
+daemon, and it does not restart: the caller restarts, or the hardware watchdog does. It exits 0 when the reply word
+is `0x80000000` and 1 otherwise; each outcome is one line on its own output and one in the kernel log (`<3>` for a
+refusal), which reaches the console and a ramoops record.
+
+The order is for the NEXT BOOT, whatever ends this one: set at the top of a RAM-booted image's `/init`, it also turns
+that image's own good restart (into the slot it has just written) into RPIBOOT. No request takes it back: no value
+that clears it is documented in the sources this was written from, so the tool offers none. Arm it on the paths that
+give up (no daemon binary, a board file that cannot be read, a daemon that will not start), or where landing in
+RPIBOOT is the wanted end, such as a bench boot of an untried image. The QEMU check is the `way-back` stanza of
+`testing/qemu/run.sh` on the mailbox stand-in; the board check is in
+[`testing/board-runs/WAY-BACK-TOOL.md`](../testing/board-runs/WAY-BACK-TOOL.md).
+
 ## Settings
 
 ```toml

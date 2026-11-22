@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-way-back"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Asks the board's firmware for its way back at the next boot (RPIBOOT, through the property mailbox), from an initramfs or anywhere, with no daemon"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lemnos-way-back"
+path = "src/main.rs"
+
+# Lean on purpose: a static program an initramfs /init calls before the daemon exists. Plain std.
+[dependencies]
+lemnos-driver-rpi-firmware-sys = { path = "../../drivers/rpi-firmware-sys" }
