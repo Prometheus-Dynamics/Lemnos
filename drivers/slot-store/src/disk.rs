@@ -47,7 +47,34 @@ pub fn partitions(sys: &Path) -> Vec<Part> {
     found
 }
 
-/// The names of the whole disks (block devices that are not partitions).
+/// Whether `name` is one of an eMMC's hardware areas rather than its user area: the kernel's MMC
+/// block driver names each area of a card `mmcblk<host><area>`, the area being `boot0`, `boot1`,
+/// `gp0` to `gp3` or `rpmb` (drivers/mmc/core/block.c, `mmc_blk_alloc_req`), the same names
+/// udev's persistent-storage rules set apart. Each area is a block device of its own under the
+/// same card, with no partition file, so without this an eMMC with boot areas (most have two) would
+/// show three whole disks under its controller. The areas hold the card's boot-ROM data, never a
+/// Lemnos disk.
+pub fn emmc_hardware_area(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("mmcblk") else {
+        return false;
+    };
+    let host = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if host == 0 {
+        return false;
+    }
+    let area = &rest[host..];
+    if area == "rpmb" {
+        return true;
+    }
+    let numbered = |prefix: &str| {
+        area.strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    numbered("boot") || numbered("gp")
+}
+
+/// The names of the whole disks (block devices that are not partitions), less an eMMC's hardware
+/// areas ([`emmc_hardware_area`]).
 pub fn whole_disks(sys: &Path) -> Vec<String> {
     let mut disks: Vec<String> = fs::read_dir(sys.join("class/block"))
         .into_iter()
@@ -60,6 +87,7 @@ pub fn whole_disks(sys: &Path) -> Vec<String> {
                 .unwrap_or(false)
         })
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !emmc_hardware_area(name))
         .collect();
     disks.sort();
     disks
@@ -328,6 +356,49 @@ mod tests {
             boot_partition(sys.path(), Path::new("/dev"), "mmcblk0"),
             Some(PathBuf::from("/dev/mmcblk0p1"))
         );
+    }
+
+    /// An eMMC's hardware areas (boot0, boot1, the general-purpose areas) are block devices of
+    /// their own under the same card, with no partition file: they are never the boot disk, and
+    /// they don't make the user area one of several (a typical eMMC has boot0 and boot1).
+    #[test]
+    fn an_emmc_s_hardware_boot_areas_are_not_boot_disks() {
+        let sys = Sys::new("emmc-areas");
+        let sd = sys.controller("/soc/mmc@7e202000", "sd-host");
+        sys.disk(&sd, "mmcblk0", &[("mmcblk0p1", 1), ("mmcblk0p2", 2)]);
+        sys.disk(&sd, "mmcblk0boot0", &[]);
+        sys.disk(&sd, "mmcblk0boot1", &[]);
+        sys.disk(&sd, "mmcblk0gp0", &[]);
+        assert_eq!(
+            boot_disk(sys.path(), &table(), "rpi-boot-mode-1").unwrap(),
+            "mmcblk0"
+        );
+        assert_eq!(whole_disks(sys.path()), vec!["mmcblk0".to_string()]);
+    }
+
+    #[test]
+    fn only_the_kernel_s_hardware_area_names_are_set_aside() {
+        for name in [
+            "mmcblk0boot0",
+            "mmcblk1boot1",
+            "mmcblk0gp0",
+            "mmcblk12gp3",
+            "mmcblk0rpmb",
+        ] {
+            assert!(emmc_hardware_area(name), "{name}");
+        }
+        for name in [
+            "mmcblk0",
+            "mmcblk10",
+            "mmcblk0p1",
+            "sda",
+            "nvme0n1",
+            "mmcblkboot0",
+            "mmcblk0boot",
+            "mmcblk0bootx",
+        ] {
+            assert!(!emmc_hardware_area(name), "{name}");
+        }
     }
 
     #[test]

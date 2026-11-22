@@ -2753,6 +2753,16 @@ The boot chain states where it booted from; the board file says which of those s
 where each one's storage controller is in the kernel's device tree. The disk is the one whole disk
 under that controller.
 
+An eMMC's hardware areas are not whole disks here. The kernel's MMC block driver gives each area of
+a card a block device of its own, named `mmcblk<host><area>` (`boot0`, `boot1`, `gp0` to `gp3`,
+`rpmb`), under the same card and so under the same controller, with no partition file. Counted as
+disks, an eMMC with boot areas would show three disks under its controller and be refused at every
+boot, with nothing written (the reference board's eMMC has `boot0` and `boot1`). Those names are set
+apart, as udev's persistent-storage rules do, and the user area `mmcblk<host>` is the disk. Checked in
+QEMU with its `emmc` device and 1 MiB boot areas: the kernel lists `mmcblk0`, `mmcblk0boot0` and
+`mmcblk0boot1`; before this the boot was refused ("3 whole disks sit under ..."), and now the boot
+disk is `mmcblk0`.
+
 The board file's `boot_sources` lists the allowed sources, one `source=kernel path` entry each:
 
 - `rpi-boot-mode-<n>=<path>`: the Raspberry Pi firmware's `/chosen/bootloader/boot-mode`. Code 1
