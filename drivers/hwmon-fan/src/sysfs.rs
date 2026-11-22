@@ -70,6 +70,18 @@ fn parse<T: FromStr>(file: &mut File) -> Result<T> {
     }
 }
 
+/// Whether this process may write the attribute `path`, as a write would be checked: the attribute is
+/// opened for writing, and nothing is written. An attribute that does not exist may not be written
+/// either, and is not an error here (the caller decides whether it is needed). A refusal is the
+/// kernel's `EACCES`, reported as [`Status::ACCESS`].
+pub fn may_write(path: &Path) -> Result<()> {
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_status(&e)),
+    }
+}
+
 /// Writes a number attribute, formatted on the stack.
 pub fn write_number(path: &Path, value: impl fmt::Display) -> Result<()> {
     struct Stack {

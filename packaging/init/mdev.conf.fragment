@@ -42,3 +42,11 @@
 
 # Vendor nodes a board's compiled-in drivers open by name are the image's to add: one line each,
 # "^<name>$ root:lemnos 0660". Look the name up in the driver's source (DEVICE or NODE in drivers/<name>/).
+
+# Late attribute grants (HOTPLUG-GRANT), the counterpart of the hotplug lines in packaging/udev/70-lemnos.rules: the
+# same attributes, on the add event. mdev runs an `@` command after the add with DEVPATH in its environment. A device
+# with no dev file gets no node, so the owner and mode of these lines apply to nothing; the command does the grant.
+# The fan is matched by its device name (hwmonN, on SUBSYSTEM=hwmon); the channel by its name (pwmN) under a
+# pwmchip, an envmatch on DEVPATH.
+SUBSYSTEM=hwmon;^hwmon[0-9]+$  root:root 0660 @/bin/chgrp lemnos /sys$DEVPATH/pwm1 /sys$DEVPATH/pwm1_enable ; /bin/chmod 0660 /sys$DEVPATH/pwm1 /sys$DEVPATH/pwm1_enable
+DEVPATH=.*/pwmchip[0-9]+/pwm[0-9]+;^pwm[0-9]+$  root:root 0660 @/bin/chgrp lemnos /sys$DEVPATH/period /sys$DEVPATH/duty_cycle /sys$DEVPATH/polarity /sys$DEVPATH/enable ; /bin/chmod 0660 /sys$DEVPATH/period /sys$DEVPATH/duty_cycle /sys$DEVPATH/polarity /sys$DEVPATH/enable

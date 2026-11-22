@@ -78,6 +78,13 @@ fn decimal(value: u64, buffer: &mut [u8; 20]) -> &[u8] {
     }
 }
 
+/// Whether this process may write the attribute `path`, as a write would be checked: it is opened for
+/// writing, and nothing is written. Any refusal is the kernel's `EACCES`, which the caller sees as
+/// `PermissionDenied`.
+fn may_write(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path).map(|_| ())
+}
+
 /// Reads a small attribute into `buffer`, without its trailing newline.
 fn read_attribute<'b>(path: &Path, buffer: &'b mut [u8; 32]) -> io::Result<&'b str> {
     let n = File::open(path)?.read(buffer)?;
@@ -111,14 +118,22 @@ impl SysfsPwm {
                 std::thread::sleep(EXPORT_WAIT);
             }
         }
-        Ok(Self {
+        let pwm = Self {
             period: root.join("period"),
             duty: root.join("duty_cycle"),
             polarity: root.join("polarity"),
             enable: root.join("enable"),
             unexport,
             _claim: None,
-        })
+        };
+        // The daemon writes the four attributes after its drop. A channel whose attributes it may not
+        // write yet is refused here, and the host binds it again under the failure rule, so it binds
+        // once the grant has been made (the root phase's, or the hotplug rule's). Dropping this undoes
+        // an export this call made.
+        for attribute in [&pwm.period, &pwm.duty, &pwm.polarity, &pwm.enable] {
+            may_write(attribute)?;
+        }
+        Ok(pwm)
     }
 
     pub(crate) fn holding(mut self, claim: Claim) -> Self {
@@ -366,6 +381,46 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(chip.join("export")).unwrap(), "1");
         std::fs::remove_dir_all(chip).unwrap();
+    }
+
+    #[test]
+    fn a_channel_the_daemon_may_not_write_is_refused_until_the_grant_is_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let chip = fake_chip("ungranted", true);
+        let root = chip.join("pwm1");
+        let names = ["period", "duty_cycle", "polarity", "enable"];
+        // The stand-in fails as the kernel's root-owned 0644 does: a write open of a 0444 attribute is
+        // EACCES for a user. (Root writes past the mode bits, so this test must run as a user.)
+        for name in names {
+            std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o444))
+                .unwrap();
+        }
+        let refused = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("enable"))
+            .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            SysfsPwm::open(&chip, 1).err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        for name in names {
+            std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o660))
+                .unwrap();
+        }
+        let mut pwm = SysfsPwm::open(&chip, 1).unwrap();
+        pwm.configure(&config(2000, 500, true)).unwrap();
+        drop(pwm);
+        std::fs::remove_dir_all(chip).unwrap();
+    }
+
+    #[test]
+    fn a_real_root_owned_file_refuses_a_channel_the_same_way() {
+        // /etc/passwd is root's and 0644: refused by the kernel for a user, and by the same check here.
+        assert_eq!(
+            may_write(Path::new("/etc/passwd")).err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

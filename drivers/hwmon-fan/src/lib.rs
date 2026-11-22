@@ -410,6 +410,14 @@ impl Lifecycle for HwmonFan {
 
     fn start(_needs: HwmonFanNeeds, cfg: &Config<'_>) -> Result<Self> {
         let fan = fan_dir(cfg)?;
+        // The daemon writes the duty and the mode after its drop. A fan whose attributes it may not
+        // write yet is not bound now: the host tries the bind again under the failure rule, and the
+        // fan binds once the grant has been made (the root phase's, or the hotplug rule's). A
+        // host-owned fan is only read, so it needs no grant.
+        if !cfg.host_owned() {
+            sysfs::may_write(&fan.join("pwm1"))?;
+            sysfs::may_write(&fan.join("pwm1_enable"))?;
+        }
         let mut driver = Self::new(&fan);
         driver.reads_only = cfg.host_owned();
         driver.rpm_limits = rpm_limits(cfg)?;

@@ -252,12 +252,13 @@ impl LinuxBoard {
     /// `Ok(None)` for a need that is not a PWM channel.
     ///
     /// # Errors
-    /// The chip or channel that cannot be granted, by name and reason.
+    /// The chip or channel that cannot be granted, by name and reason, with the kind of the error (a
+    /// `NotFound` is a channel or chip that is not there yet, which the root phase does not refuse).
     pub fn grant_pwm_before_drop(
         &self,
         need: &str,
         owner: (u32, u32),
-    ) -> core::result::Result<Option<String>, String> {
+    ) -> core::result::Result<Option<String>, (std::io::ErrorKind, String)> {
         let Some((chip, channel)) = self.pwm_node(need) else {
             return Ok(None);
         };
@@ -270,7 +271,12 @@ impl LinuxBoard {
                     owner.1
                 ))
             })
-            .map_err(|e| format!("{}:{channel}: not granted: {e}", chip.display()))
+            .map_err(|e| {
+                (
+                    e.kind(),
+                    format!("{}:{channel}: not granted: {e}", chip.display()),
+                )
+            })
     }
 
     /// The watchdog node a name means: `watchdog:<node>` by its device-tree node, or the numbered

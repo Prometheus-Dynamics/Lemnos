@@ -273,6 +273,50 @@ fn a_panic_leaves_a_taken_fan_at_full_duty() {
     assert_eq!(read(&root, &format!("{PWM_FAN}/pwm1_enable")), "1");
 }
 
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn a_fan_the_daemon_may_not_write_is_not_bound_until_the_grant_is_made() {
+    let tree = Tree::new("ungranted");
+    let root = tree.root();
+    let pwm = root.join(PWM_FAN).join("pwm1");
+    let enable = root.join(PWM_FAN).join("pwm1_enable");
+    // The stand-in fails as the kernel's root-owned 0644 does: a write open of a 0444 attribute is
+    // EACCES for a user. (Root writes past the mode bits, so this test must run as a user.)
+    for path in [&pwm, &enable] {
+        set_mode(path, 0o444);
+    }
+    let refused = fs::OpenOptions::new().write(true).open(&pwm).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(matches!(
+        bind(root, &[("name", ConfigValue::Str("pwmfan"))]),
+        Err(Status::ACCESS)
+    ));
+    // The grant lands (the hotplug rule's chgrp and chmod, here the mode alone): the next bind takes the fan.
+    for path in [&pwm, &enable] {
+        set_mode(path, 0o660);
+    }
+    let mut fan = pwm_fan(root);
+    fan.set_duty(500).unwrap();
+    assert_eq!(
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        duty_to_pwm(500).to_string()
+    );
+}
+
+#[test]
+fn a_real_root_owned_file_refuses_the_driver_the_same_way() {
+    // /etc/passwd is root's and 0644 on every Linux system: a user's write open is refused by the
+    // kernel, and the driver's check refuses it by the same status. Nothing is written by the check.
+    assert!(matches!(
+        sysfs::may_write(Path::new("/etc/passwd")),
+        Err(Status::ACCESS)
+    ));
+}
+
 #[test]
 fn a_missing_attribute_fails_the_call_and_the_next_call_tries_again() {
     let tree = Tree::new("missing");

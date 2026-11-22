@@ -8,6 +8,11 @@ board's generated fragment grants (`image`, `generated`). Each row names the cra
 
 The checks, all against the source as it is:
 
+0. The late grants. A root-phase grant that a device appearing after the start needs (a hwmon fan's attributes, an
+   exported PWM channel's) names its hotplug lines: the udev rule's (`hotplug_udev`) and the BusyBox fragment's
+   (`hotplug_mdev`). Each named line must be in its packaged file, and each packaged line that grants a group on a
+   hotplug event (`chgrp lemnos` in a udev RUN or an mdev command) must be named by a row.
+
 1. The source. Every absolute path literal in the production source of the crates lemnosd links
    (its closure of path dependencies; tests, examples and `#[cfg(test)]` blocks are left out) is
    either covered by a row that names that crate, or the gate fails and names the file and line.
@@ -67,6 +72,12 @@ TUNABLES = (
 WRITABLE_BASE = ("/dev", "/run", "/proc", "/sys")
 # The unit's own file that the root phase's grants are wired in (the call names in its `wired` fields).
 PRIVILEGE = "service/lemnosd/src/privilege.rs"
+# The root-phase grants a device that appears later needs a hotplug line for (HOTPLUG-GRANT): each names both lines.
+HOTPLUG_WIRED = ("grant_pwm_before_drop", "lemnos_driver_hwmon_fan::grant_before_drop")
+# The text of a hotplug line that changes a group when the device is added: a udev RUN or an mdev command that chgrps
+# to the daemon's group. The lines of the packaged files that hold it are the late grants the table must name.
+HOTPLUG_GROUP = "chgrp lemnos"
+
 # Directives whose values are grants (the unit and drop-ins). A value's tokens are checked one by one.
 GRANT_DIRECTIVES = ("ReadWritePaths", "RuntimeDirectory", "CapabilityBoundingSet", "SystemCallFilter",
                     "RestrictAddressFamilies")
@@ -349,6 +360,39 @@ def check_schema(rows):
             fail(f"{where}: `none` is for what the base unit allows: read-only, or write under /dev or /run")
 
 
+def hotplug_lines():
+    """(udev, mdev) the packaged late-grant lines: the non-comment lines that change a group on a hotplug event."""
+    udev = {" ".join(raw.split()) for raw in read(UDEV).split("\n")
+            if raw.strip() and not raw.lstrip().startswith("#") and HOTPLUG_GROUP in raw and "RUN" in raw}
+    mdev = {line for line in mdev_lines() if HOTPLUG_GROUP in line}
+    return udev, mdev
+
+
+def check_hotplug(rows):
+    """Each named hotplug line is in its packaged file; each packaged hotplug line is named by a row; and a
+    root-phase row that wires a hotplug grant names both of its lines."""
+    packaged_udev, packaged_mdev = hotplug_lines()
+    named_udev, named_mdev = set(), set()
+    for row in rows:
+        udev = [" ".join(line.split()) for line in row.get("hotplug_udev", [])]
+        mdev = [" ".join(line.split()) for line in row.get("hotplug_mdev", [])]
+        where = f"{TABLE}: row {row.get('path', '?')}"
+        if row.get("how") == "root-phase" and row.get("wired") in HOTPLUG_WIRED and not (udev and mdev):
+            fail(f"{where}: a late grant (`{row.get('wired')}`) names its hotplug lines: `hotplug_udev` and `hotplug_mdev`")
+        for line in udev:
+            if line not in packaged_udev:
+                fail(f"{where}: its hotplug line {line!r} is not in {UDEV}: the late grant is not packaged")
+        for line in mdev:
+            if line not in packaged_mdev:
+                fail(f"{where}: its hotplug line {line!r} is not in {MDEV}: the late grant is not packaged")
+        named_udev |= set(udev)
+        named_mdev |= set(mdev)
+    for line in sorted(packaged_udev - named_udev):
+        fail(f"{UDEV}: `{line}` is a late grant and no row declares it (its row's `hotplug_udev`)")
+    for line in sorted(packaged_mdev - named_mdev):
+        fail(f"{MDEV}: `{line}` is a late grant and no row declares it (its row's `hotplug_mdev`)")
+
+
 def check_grants(rows, when):
     """Each packaged grant has its row; each row names a grant the files make."""
     tokens = unit_grant_tokens()
@@ -490,6 +534,7 @@ def main(argv):
     check_schema(rows)
     when = files_when()
     check_grants(rows, when)
+    check_hotplug(rows)
     crates = closure()
     if not crates:
         fail("the closure of service/lemnosd is empty")

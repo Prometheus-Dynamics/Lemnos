@@ -78,7 +78,9 @@ pub const STEPS: &[Step] = &[
 /// The PWM channels the board names, granted before the drop (`pwm::grant`): each channel is
 /// exported if the kernel has not, and its four attributes go to root:`lemnos` mode 0660, so the
 /// daemon's user can write them. Only the channels a non-refused device uses. A channel that cannot
-/// be granted refuses that device by name; the daemon keeps running and the others start.
+/// be granted refuses that device by name; the daemon keeps running and the others start. A channel
+/// that is not there yet (`NotFound`) does not refuse: the device's driver binds it under the failure
+/// rule, and the hotplug rule grants its attributes when they appear (packaging/udev/70-lemnos.rules).
 fn pwm_channels(cx: &Context<'_>) -> io::Result<Refusals> {
     use std::io::Write;
     let linux = lemnos_linux::LinuxBoard::new();
@@ -94,7 +96,14 @@ fn pwm_channels(cx: &Context<'_>) -> io::Result<Refusals> {
                     );
                 }
                 Ok(None) => {}
-                Err(why) => {
+                Err((io::ErrorKind::NotFound, why)) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "lemnosd: root phase: {}: {need}: not there yet, bound when it is: {why}",
+                        device.id
+                    );
+                }
+                Err((_, why)) => {
                     let _ = writeln!(
                         io::stderr(),
                         "lemnosd: root phase: {}: {need}: {why}",
@@ -110,8 +119,10 @@ fn pwm_channels(cx: &Context<'_>) -> io::Result<Refusals> {
 
 /// The hwmon fans the board names, granted before the drop (`lemnos_driver_hwmon_fan::grant_before_drop`):
 /// each fan's `pwm1` and `pwm1_enable` go to root:`lemnos` mode 0660, so the daemon's user can write the
-/// duty and the mode. A fan that cannot be granted (no `pwm1` in its directory yet, or an attribute that
-/// can't be changed) refuses its device by name; the daemon keeps running and the others start.
+/// duty and the mode. A fan that cannot be granted because it is not there yet (no `pwm1` in its
+/// directory) does not refuse its device: the driver binds it under the failure rule, and the hotplug
+/// rule grants its attributes when they appear. Any other failure refuses its device by name; the
+/// daemon keeps running and the others start.
 fn hwmon_fans(cx: &Context<'_>) -> io::Result<Refusals> {
     use std::io::Write;
     let mut refused = Vec::new();
@@ -132,6 +143,13 @@ fn hwmon_fans(cx: &Context<'_>) -> io::Result<Refusals> {
                     device.id,
                     dir.display(),
                     cx.gid
+                );
+            }
+            Ok(Err(why)) if why.kind() == io::ErrorKind::NotFound => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "lemnosd: root phase: {}: fan: not there yet, bound when it is: {why}",
+                    device.id
                 );
             }
             Ok(Err(why)) => {

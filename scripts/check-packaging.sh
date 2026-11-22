@@ -258,11 +258,13 @@ for env in packaging/systemd/*.env.example; do
   sh -n "$env"
 done
 
-# The mdev fragment: every rule is an anchored pattern, owner:group and a four-digit mode.
+# The mdev fragment: every rule is an anchored pattern, owner:group and a four-digit mode. A rule may
+# carry an envmatch prefix (`VAR=regex;`, for DEVPATH or SUBSYSTEM) and, after the mode, a command
+# (`@`, `$` or `*`, as mdev.txt defines them): the late grants (HOTPLUG-GRANT) are those.
 echo "==> mdev fragment"
 awk '
   /^[[:space:]]*(#|$)/ { next }
-  NF != 3 || $1 !~ /^\^.*\$$/ || $2 !~ /^[a-z0-9]+:[a-z0-9]+$/ || $3 !~ /^[0-7]{4}$/ {
+  NF < 3 || $1 !~ /^([A-Za-z_][A-Za-z0-9_]*=[^;]*;)*\^.*\$$/ || $2 !~ /^[a-z0-9]+:[a-z0-9]+$/ || $3 !~ /^[0-7]{4}$/ || (NF > 3 && $4 !~ /^[@$*]/) {
     printf "packaging/init/mdev.conf.fragment:%d: not a rule: %s\n", NR, $0; bad = 1
   }
   END { exit bad }
