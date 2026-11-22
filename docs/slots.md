@@ -2753,15 +2753,29 @@ The boot chain states where it booted from; the board file says which of those s
 where each one's storage controller is in the kernel's device tree. The disk is the one whole disk
 under that controller.
 
-An eMMC's hardware areas are not whole disks here. The kernel's MMC block driver gives each area of
-a card a block device of its own, named `mmcblk<host><area>` (`boot0`, `boot1`, `gp0` to `gp3`,
-`rpmb`), under the same card and so under the same controller, with no partition file. Counted as
-disks, an eMMC with boot areas would show three disks under its controller and be refused at every
-boot, with nothing written (the reference board's eMMC has `boot0` and `boot1`). Those names are set
-apart, as udev's persistent-storage rules do, and the user area `mmcblk<host>` is the disk. Checked in
-QEMU with its `emmc` device and 1 MiB boot areas: the kernel lists `mmcblk0`, `mmcblk0boot0` and
-`mmcblk0boot1`; before this the boot was refused ("3 whole disks sit under ..."), and now the boot
-disk is `mmcblk0`.
+Not every block device without a partition file is a disk the boot can be on. Each of these is
+set aside by a fact the kernel gives, and the refusals below name each one set aside and why
+(`disk::set_aside`):
+
+- **An eMMC's hardware areas.** The kernel's MMC block driver gives the card's boot areas, its
+  general-purpose areas and RPMB block devices of their own, `mmcblk<host><area>` (`boot0`,
+  `boot1`, `gp0` to `gp3`, `rpmb`), registered as children of the user area `mmcblk<host>`: in sysfs
+  each sits inside the user area's directory, as a partition does, but with no partition file. Same
+  card, same controller. One is set aside when it has an area's name *and* its sysfs parent is that
+  user area's block device. A real disk can't be set aside this way: a disk's parent is a controller
+  or a card, never another disk, and no other driver uses the `mmcblk` name. Counted as disks, the
+  reference board's eMMC (`boot0` and `boot1`, 4 MiB each) showed three disks under its controller and
+  every boot was refused, with nothing written.
+- **Hidden** (`hidden` is 1): a path the kernel keeps behind another disk (an NVMe multipath
+  controller's own view of a namespace).
+- **No medium** (`size` is 0): a card-reader slot with no card, or a removable drive with no medium.
+  A medium that arrives later is seen then, within the wait.
+
+Loop, RAM and device-mapper devices sit under `devices/virtual` with no controller, so they never
+match one. Two real disks under one controller (two USB disks behind one host controller, two NVMe
+namespaces) are refused: the boot doesn't guess between them. An SD card and an eMMC are on separate
+hosts, so separate controllers. The test fixture is the reference board's own `/sys/class/block`
+shape; QEMU's `emmc` device with boot areas shows the same refusal before and the boot disk after.
 
 The board file's `boot_sources` lists the allowed sources, one `source=kernel path` entry each:
 

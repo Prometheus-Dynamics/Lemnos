@@ -47,50 +47,103 @@ pub fn partitions(sys: &Path) -> Vec<Part> {
     found
 }
 
-/// Whether `name` is one of an eMMC's hardware areas rather than its user area: the kernel's MMC
-/// block driver names each area of a card `mmcblk<host><area>`, the area being `boot0`, `boot1`,
-/// `gp0` to `gp3` or `rpmb` (drivers/mmc/core/block.c, `mmc_blk_alloc_req`), the same names
-/// udev's persistent-storage rules set apart. Each area is a block device of its own under the
-/// same card, with no partition file, so without this an eMMC with boot areas (most have two) would
-/// show three whole disks under its controller. The areas hold the card's boot-ROM data, never a
-/// Lemnos disk.
-pub fn emmc_hardware_area(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix("mmcblk") else {
-        return false;
-    };
+/// Whether `name` has the form the kernel's MMC block driver gives an eMMC's hardware areas:
+/// `mmcblk<host><area>`, the area being `boot0`, `boot1`, `gp0` to `gp3` or `rpmb`
+/// (drivers/mmc/core/block.c, `mmc_blk_alloc_req`; udev's persistent-storage rules use the same
+/// names). The user area is `mmcblk<host>`. Returns the user area's name.
+pub fn emmc_area_of(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("mmcblk")?;
     let host = rest.bytes().take_while(u8::is_ascii_digit).count();
     if host == 0 {
-        return false;
+        return None;
     }
     let area = &rest[host..];
-    if area == "rpmb" {
-        return true;
-    }
     let numbered = |prefix: &str| {
         area.strip_prefix(prefix)
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     };
-    numbered("boot") || numbered("gp")
+    (area == "rpmb" || numbered("boot") || numbered("gp"))
+        .then(|| format!("mmcblk{}", &rest[..host]))
 }
 
-/// The names of the whole disks (block devices that are not partitions), less an eMMC's hardware
-/// areas ([`emmc_hardware_area`]).
-pub fn whole_disks(sys: &Path) -> Vec<String> {
-    let mut disks: Vec<String> = fs::read_dir(sys.join("class/block"))
+/// Why a block device that is not a partition is still not a disk the boot can be on, or `None`
+/// when it is one. `real` is its sysfs directory. Each rule is a fact the kernel gives:
+///
+/// - **An eMMC hardware area.** The MMC driver makes the card's boot areas, its general-purpose
+///   areas and RPMB block devices of their own, registered as children of the user area's disk
+///   (`mmc_blk_alloc_part` passes the user area's device as their parent): in sysfs their
+///   directories sit inside the user area's, as a partition's does, but with no partition file.
+///   One is set aside when its name is an area's ([`emmc_area_of`]) *and* its sysfs parent is that
+///   user area's block device (named `mmcblk<host>`, with a `dev` file). A real disk is never set
+///   aside by this: a disk's parent is a controller or a card, never another disk, and no other
+///   driver names its disks `mmcblk`.
+/// - **Hidden** (`hidden` reads 1): a path the kernel keeps behind another disk (an NVMe
+///   multipath controller's own view of a namespace); the disk to use is the shared one.
+/// - **No medium** (`size` reads 0): a card-reader slot with no card, or a removable drive with no
+///   medium in it; nothing can be booted from it. A disk whose medium arrives later is seen then.
+///
+/// Virtual devices (loop, RAM, zram, device-mapper) sit under `devices/virtual` with no controller,
+/// so they never match a controller; two real disks under one controller (two USB disks behind one
+/// host controller, two NVMe namespaces) are not set aside: the boot refuses to guess between them.
+pub fn set_aside(name: &str, real: &Path) -> Option<String> {
+    if real.components().any(|c| c.as_os_str() == "virtual") {
+        return None;
+    }
+    if let Some(user) = emmc_area_of(name)
+        && real.parent().is_some_and(|parent| {
+            parent.file_name().is_some_and(|n| n == user.as_str()) && parent.join("dev").is_file()
+        })
+    {
+        let area = &name[user.len()..];
+        return Some(format!(
+            "{name}: the hardware {area} area of the eMMC {user}"
+        ));
+    }
+    let read = |attribute: &str| fs::read_to_string(real.join(attribute)).ok();
+    if read("hidden").is_some_and(|text| text.trim() == "1") {
+        return Some(format!(
+            "{name}: hidden by the kernel (a path behind another disk)"
+        ));
+    }
+    if read("size").is_some_and(|text| text.trim() == "0") {
+        return Some(format!("{name}: no medium (size 0)"));
+    }
+    None
+}
+
+/// The block devices that are not partitions, split into the disks the boot can be on and those
+/// set aside, each with its reason ([`set_aside`]). Both sorted by name.
+pub fn block_disks(sys: &Path) -> (Vec<String>, Vec<String>) {
+    let mut disks = Vec::new();
+    let mut aside = Vec::new();
+    for entry in fs::read_dir(sys.join("class/block"))
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|entry| !entry.path().join("partition").exists())
-        .filter(|entry| {
-            fs::canonicalize(entry.path())
-                .map(|real| !real.join("partition").exists())
-                .unwrap_or(false)
-        })
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !emmc_hardware_area(name))
-        .collect();
+    {
+        if entry.path().join("partition").exists() {
+            continue;
+        }
+        let Ok(real) = fs::canonicalize(entry.path()) else {
+            continue;
+        };
+        if real.join("partition").exists() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match set_aside(&name, &real) {
+            Some(why) => aside.push(why),
+            None => disks.push(name),
+        }
+    }
     disks.sort();
-    disks
+    aside.sort();
+    (disks, aside)
+}
+
+/// The names of the disks the boot can be on: [`block_disks`] less those it sets aside.
+pub fn whole_disks(sys: &Path) -> Vec<String> {
+    block_disks(sys).0
 }
 
 /// The device-tree path of the node a sysfs device directory is bound to (its `of_node` link), if
@@ -224,7 +277,12 @@ pub fn find_boot_disk(sys: &Path, table: &Table, source: &str) -> BootDisk {
         Ok(controller) => controller,
         Err(why) => return BootDisk::Refused(why),
     };
-    let disks = whole_disks(sys);
+    let (disks, aside) = block_disks(sys);
+    let aside = if aside.is_empty() {
+        String::new()
+    } else {
+        format!("; set aside: {}", aside.join("; "))
+    };
     let hits: Vec<&String> = disks
         .iter()
         .filter(|disk| controllers_of(sys, disk).iter().any(|c| c == controller))
@@ -245,7 +303,7 @@ pub fn find_boot_disk(sys: &Path, table: &Table, source: &str) -> BootDisk {
                 })
                 .collect();
             BootDisk::NoneYet(format!(
-                "no whole disk sits under {controller} (boot source {source}); disks seen: {}",
+                "no whole disk sits under {controller} (boot source {source}); disks seen: {}{aside}",
                 if seen.is_empty() {
                     "none".into()
                 } else {
@@ -256,7 +314,7 @@ pub fn find_boot_disk(sys: &Path, table: &Table, source: &str) -> BootDisk {
         n => {
             let names: Vec<&str> = hits.iter().map(|d| d.as_str()).collect();
             BootDisk::Refused(format!(
-                "{n} whole disks sit under {controller} ({}): refusing to guess",
+                "{n} whole disks sit under {controller} ({}): refusing to guess{aside}",
                 names.join(", ")
             ))
         }
@@ -358,34 +416,190 @@ mod tests {
         );
     }
 
-    /// An eMMC's hardware areas (boot0, boot1, the general-purpose areas) are block devices of
-    /// their own under the same card, with no partition file: they are never the boot disk, and
-    /// they don't make the user area one of several (a typical eMMC has boot0 and boot1).
+    /// The reference board's block devices exactly as its sysfs lists them (a RAM-boot listing of
+    /// `/sys/class/block` with each device's real path and attributes): the controller's `of_node`
+    /// is on `mmc_host`; the card's user area `mmcblk0` is in the card's `block` directory; its boot
+    /// areas sit inside `mmcblk0`'s directory, as its partitions do, with no partition file
+    /// (`force_ro` and `ro` 1, 8192 sectors each); loops and device-mapper under `virtual`.
+    fn emmc_board(sys: &Sys) {
+        let host = sys.controller(
+            "/soc@107c000000/mmc@fff000",
+            "platform/soc@107c000000/1000fff000.mmc/mmc_host",
+        );
+        let card = host.join("mmc0/mmc0:0001/block");
+        sys.disk(&card, "mmcblk0", &[("mmcblk0p1", 1), ("mmcblk0p2", 2)]);
+        let user = card.join("mmcblk0");
+        sys.disk(&user, "mmcblk0boot0", &[]);
+        sys.disk(&user, "mmcblk0boot1", &[]);
+        let attrs = |dir: &Path, list: &[(&str, &str)]| {
+            for (attribute, value) in list {
+                fs::write(dir.join(attribute), format!("{value}\n")).unwrap();
+            }
+        };
+        attrs(
+            &user,
+            &[
+                ("size", "30535680"),
+                ("hidden", "0"),
+                ("removable", "0"),
+                ("ro", "0"),
+                ("force_ro", "0"),
+                ("ext_range", "256"),
+                ("dev", "179:0"),
+            ],
+        );
+        for (area, dev) in [("mmcblk0boot0", "179:32"), ("mmcblk0boot1", "179:64")] {
+            attrs(
+                &user.join(area),
+                &[
+                    ("size", "8192"),
+                    ("hidden", "0"),
+                    ("removable", "0"),
+                    ("ro", "1"),
+                    ("force_ro", "1"),
+                    ("ro_lock_until_next_power_on", "0"),
+                    ("ext_range", "256"),
+                    ("dev", dev),
+                ],
+            );
+        }
+        attrs(
+            &user.join("mmcblk0p1"),
+            &[("size", "161792"), ("ro", "0"), ("dev", "179:1")],
+        );
+        attrs(
+            &user.join("mmcblk0p2"),
+            &[("size", "30371840"), ("ro", "0"), ("dev", "179:2")],
+        );
+        let virt = sys.path().join("devices/virtual/block");
+        fs::create_dir_all(&virt).unwrap();
+        sys.disk(&virt, "dm-0", &[]);
+        attrs(
+            &virt.join("dm-0"),
+            &[
+                ("size", "81992"),
+                ("hidden", "0"),
+                ("ro", "1"),
+                ("ext_range", "1"),
+                ("dev", "254:0"),
+            ],
+        );
+        for n in 0..8 {
+            let name = format!("loop{n}");
+            sys.disk(&virt, &name, &[]);
+            let (size, ro) = if n == 0 { ("82656", "1") } else { ("0", "0") };
+            let dev = format!("7:{n}");
+            attrs(
+                &virt.join(&name),
+                &[
+                    ("size", size),
+                    ("hidden", "0"),
+                    ("ro", ro),
+                    ("ext_range", "256"),
+                    ("dev", &dev),
+                ],
+            );
+        }
+    }
+
+    fn emmc_table() -> Table {
+        Table::parse(&["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"]).unwrap()
+    }
+
+    /// The board's own shape: the eMMC's boot areas sit beside its user area, under the same card,
+    /// with no partition file. Counted as disks they made three under the controller, and the boot
+    /// was refused at every boot ("3 whole disks ... refusing to guess").
     #[test]
-    fn an_emmc_s_hardware_boot_areas_are_not_boot_disks() {
-        let sys = Sys::new("emmc-areas");
-        let sd = sys.controller("/soc/mmc@7e202000", "sd-host");
-        sys.disk(&sd, "mmcblk0", &[("mmcblk0p1", 1), ("mmcblk0p2", 2)]);
-        sys.disk(&sd, "mmcblk0boot0", &[]);
-        sys.disk(&sd, "mmcblk0boot1", &[]);
-        sys.disk(&sd, "mmcblk0gp0", &[]);
+    fn on_the_board_s_emmc_the_user_area_is_the_boot_disk() {
+        let sys = Sys::new("emmc-board");
+        emmc_board(&sys);
         assert_eq!(
-            boot_disk(sys.path(), &table(), "rpi-boot-mode-1").unwrap(),
+            boot_disk(sys.path(), &emmc_table(), "rpi-boot-mode-1").unwrap(),
             "mmcblk0"
         );
-        assert_eq!(whole_disks(sys.path()), vec!["mmcblk0".to_string()]);
+        let (disks, aside) = block_disks(sys.path());
+        assert!(
+            disks.contains(&"mmcblk0".to_string())
+                && disks
+                    .iter()
+                    .all(|d| d == "mmcblk0" || d.starts_with("loop") || d == "dm-0"),
+            "{disks:?}"
+        );
+        assert_eq!(
+            aside,
+            [
+                "mmcblk0boot0: the hardware boot0 area of the eMMC mmcblk0",
+                "mmcblk0boot1: the hardware boot1 area of the eMMC mmcblk0"
+            ]
+        );
+    }
+
+    /// A genuine two-disk case is still refused, and the refusal names what was set aside and why.
+    #[test]
+    fn two_real_disks_are_still_refused_and_the_refusal_names_what_was_set_aside() {
+        let sys = Sys::new("emmc-two");
+        emmc_board(&sys);
+        let card = sys
+            .path()
+            .join("devices/platform/soc@107c000000/1000fff000.mmc/mmc_host/mmc0/mmc0:0001/block");
+        sys.disk(&card, "mmcblk9", &[]);
+        let why = boot_disk(sys.path(), &emmc_table(), "rpi-boot-mode-1").unwrap_err();
+        assert_eq!(
+            why,
+            "2 whole disks sit under /soc@107c000000/mmc@fff000 (mmcblk0, mmcblk9): refusing to guess; \
+             set aside: mmcblk0boot0: the hardware boot0 area of the eMMC mmcblk0; \
+             mmcblk0boot1: the hardware boot1 area of the eMMC mmcblk0"
+        );
+    }
+
+    /// An area name with no user area beside it is not set aside: the name alone decides nothing.
+    #[test]
+    fn an_area_name_without_its_user_area_beside_it_is_counted() {
+        let sys = Sys::new("emmc-orphan");
+        let host = sys.controller("/soc/mmc@7e202000", "sd-host");
+        sys.disk(&host, "mmcblk1boot0", &[]);
+        assert_eq!(whole_disks(sys.path()), ["mmcblk1boot0"]);
+        assert_eq!(
+            boot_disk(sys.path(), &table(), "rpi-boot-mode-1").unwrap(),
+            "mmcblk1boot0"
+        );
+    }
+
+    /// Behind one USB controller: the stick that holds the system, and a card reader's empty slot
+    /// (no medium, size 0). The empty slot is set aside; a hidden multipath view too.
+    #[test]
+    fn an_empty_reader_slot_and_a_hidden_path_are_set_aside_by_their_sysfs_facts() {
+        let sys = Sys::new("usb-reader");
+        let usb = sys.controller("/soc/mmc@7e202000", "usb-host");
+        sys.disk(&usb, "sda", &[("sda1", 1), ("sda2", 2)]);
+        sys.disk(&usb, "sdb", &[]);
+        sys.disk(&usb, "nvme0c0n1", &[]);
+        fs::write(usb.join("sda/size"), "30000000\n").unwrap();
+        fs::write(usb.join("sdb/size"), "0\n").unwrap();
+        fs::write(usb.join("nvme0c0n1/hidden"), "1\n").unwrap();
+        assert_eq!(
+            boot_disk(sys.path(), &table(), "rpi-boot-mode-1").unwrap(),
+            "sda"
+        );
+        assert_eq!(
+            block_disks(sys.path()).1,
+            [
+                "nvme0c0n1: hidden by the kernel (a path behind another disk)",
+                "sdb: no medium (size 0)"
+            ]
+        );
     }
 
     #[test]
-    fn only_the_kernel_s_hardware_area_names_are_set_aside() {
-        for name in [
-            "mmcblk0boot0",
-            "mmcblk1boot1",
-            "mmcblk0gp0",
-            "mmcblk12gp3",
-            "mmcblk0rpmb",
+    fn only_the_kernel_s_area_names_have_a_user_area() {
+        for (name, user) in [
+            ("mmcblk0boot0", "mmcblk0"),
+            ("mmcblk1boot1", "mmcblk1"),
+            ("mmcblk0gp0", "mmcblk0"),
+            ("mmcblk12gp3", "mmcblk12"),
+            ("mmcblk0rpmb", "mmcblk0"),
         ] {
-            assert!(emmc_hardware_area(name), "{name}");
+            assert_eq!(emmc_area_of(name).as_deref(), Some(user), "{name}");
         }
         for name in [
             "mmcblk0",
@@ -397,7 +611,7 @@ mod tests {
             "mmcblk0boot",
             "mmcblk0bootx",
         ] {
-            assert!(!emmc_hardware_area(name), "{name}");
+            assert_eq!(emmc_area_of(name), None, "{name}");
         }
     }
 
