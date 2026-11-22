@@ -247,9 +247,20 @@ sends this connection, and no other:
   says (bytes, steps), `total` 0 while not known. Only the newest matters, and a host may drop one
   a client hasn't read yet, as it drops values (rule 5).
 - JobDone, once, when the job is over. `status` 0 is success and `bytes` is then the result the
-  contract defines; otherwise `bytes` is empty. A cancelled job ends with `ECANCELED` (-125), and
+  contract defines, whole, in the form the contract declares for it (below); otherwise `bytes` is
+  empty. A cancelled job ends with `ECANCELED` (-125), and
   a job whose driver was lost (a panic, a rebind, the device switched off) with `EINTR` (-4).
   JobDone is never dropped.
+
+**A job's result form.** A job method declares its result's form in the contract:
+`#[method(N, job, stall = SECS, result = text)]` for UTF-8 text, `result = bytes` for bytes. A job
+method without one does not build. The description carries it as the method's result shape: `str`
+for text and `bytes` for bytes, read whole like an out buffer, with no length before it. The JobId the
+start answers with is implied by the job flag. Since the shape is in the method hash, the form is part
+of what a client and a device agree on. A reader shows a text result as it is and a bytes result as
+hex, whatever its bytes are; nothing is guessed from the bytes. A device from before this change
+describes its job's result shape as `u64` (the JobId's); the Orion bridge refuses to start such a
+job, by name, rather than guess its result.
 
 A job that goes longer than its method's stall bound without a progress report ends with JobDone and
 `ETIMEDOUT` (-110); its driver is told to stop it. The bound is declared in the contract (`docs/daemon.md`, "The stall bound
@@ -685,6 +696,18 @@ Calls after the open are not checked again.
 No per-contract additions level is written: the per-method check gives the same guarantee and names
 the method that is missing. A device that doesn't list the contract's tag is not refused by the
 check (the open itself already found the tag).
+
+### The base hashes after JOB-RESULT
+
+The job result form (above, "Long jobs") is in the method hash, so three contracts' base hashes moved
+when it was declared. `service/ctl/tests/contract_hashes.rs` pins the new ones. A typed client built
+before it for one of these is refused at bind (`ContractMismatch`); every other contract is unchanged.
+
+| Contract | Job methods and their form | Base hash before | Base hash after |
+|---|---|---|---|
+| `self-test/1` | `run`: bytes (its `Record`) | `0xf5a21f9763c8595b` | `0x6aff59ade5c0bef1` |
+| `system.flash/1` | `write`, `verify`: text (fields) | `0x2198953afeadaf6c` | `0xde1c693ee11cc0bf` |
+| `system.slots/1` | `install`, `install_file`: text (the slot id) | `0x46f18ccbb6ee837d` | `0xbc090a29d4cfc4a8` |
 
 A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 i32, 9 i64, 10 f32,
 11 f64, 12 str, 13 bytes, 14 option (followed by its shape), 15 array (a u32 length, then its shape),

@@ -15,7 +15,8 @@
 //! A method the description marks as a long job runs as one through `call`. The run is started
 //! on lemnosd, and the job's progress goes back as the run's progress: `percent`, the message
 //! `"<done> of <total>"`, and the data `done` and `total` as two little-endian `u64`s. The run
-//! ends as the job does: its result as the output (text when it is UTF-8, hex otherwise),
+//! ends as the job does: its result as the output, in the form its contract declares (text as it
+//! is, bytes as hex; see [`JobResult`]),
 //! `Cancelled` when it was cancelled, `Failed` otherwise. Cancelling the run cancels the job.
 //!
 //! Each Orion caller has a lemnosd connection of its own. lemnosd keeps the callers of a driver
@@ -162,6 +163,8 @@ impl Progress {
 /// A long job a run started, until it ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Running {
+    /// The form of the job's result, as its contract declares it.
+    result: JobResult,
     session: u64,
     /// The Orion session token the run came from ([`Job::token`]).
     token: u64,
@@ -707,8 +710,12 @@ fn run_one(
         }
     }
     let (ending, output, detail) = match served {
-        Ok(Served::Started(started)) => {
+        Ok(Served::Started {
+            job: started,
+            result,
+        }) => {
             running.push(Running {
+                result,
                 token: job.token,
                 detached: job.detached,
                 session: job.session,
@@ -806,7 +813,10 @@ fn follow(
 /// How a run that was a long job ended.
 fn job_done(run: &Running, status: Status, result: &[u8]) -> Done {
     let (ending, output, detail) = if status.is_ok() {
-        (Ending::SUCCEEDED, result_text(result), String::new())
+        match result_text(run.result, result) {
+            Ok(text) => (Ending::SUCCEEDED, text, String::new()),
+            Err(why) => (Ending::FAILED, String::new(), why),
+        }
     } else if run.own_deadline && status == Status::CANCELLED {
         // The bridge cancelled the job at its deadline, and lemnosd confirms it stopped: it ran out of time.
         (
@@ -842,11 +852,19 @@ fn job_done(run: &Running, status: Status, result: &[u8]) -> Done {
     }
 }
 
-/// A job's result as text: itself when it is UTF-8, hex otherwise.
-pub fn result_text(result: &[u8]) -> String {
-    match core::str::from_utf8(result) {
-        Ok(text) => text.to_owned(),
-        Err(_) => result.iter().map(|b| format!("{b:02x}")).collect(),
+/// A job's result as the run's output, in the form its contract declares: text as it is, bytes as
+/// hex. Nothing is guessed from the bytes. A text result that is not UTF-8 is the device breaking
+/// its contract, and says so.
+///
+/// # Errors
+///
+/// A text result that is not UTF-8.
+pub fn result_text(form: JobResult, result: &[u8]) -> Result<String, String> {
+    match form {
+        JobResult::Text => core::str::from_utf8(result)
+            .map(str::to_owned)
+            .map_err(|_| "the job's result is not the UTF-8 text its contract declares".to_owned()),
+        JobResult::Bytes => Ok(result.iter().map(|b| format!("{b:02x}")).collect()),
     }
 }
 
@@ -987,13 +1005,35 @@ fn lost_all(running: &mut Vec<Running>, shared: &Shared) {
     }
 }
 
+/// The form a job's result is in, as its contract declares it (`#[method(N, job, result = ...)]`,
+/// carried as the method's `returns`: `Str` for text, `Bytes` for bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobResult {
+    /// UTF-8 text, given as it is.
+    Text,
+    /// Bytes, given as hex, whatever they are.
+    Bytes,
+}
+
+impl JobResult {
+    /// The form a job method's description declares. `None` for a shape no job declares.
+    #[must_use]
+    pub fn of(returns: &OwnedShape) -> Option<Self> {
+        match returns {
+            OwnedShape::Str => Some(Self::Text),
+            OwnedShape::Bytes => Some(Self::Bytes),
+            _ => None,
+        }
+    }
+}
+
 /// What a run did when it didn't fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Served {
     /// It is over: the reply as text, or empty.
     Output(String),
-    /// It started this long job.
-    Started(u64),
+    /// It started this long job, whose result its contract declares as text or bytes.
+    Started { job: u64, result: JobResult },
 }
 
 /// Why a run did not succeed.
@@ -1106,10 +1146,22 @@ pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Fail
     let tag = &description.contracts[contract].tag;
     let mut handle = client.open_tag(&device.name, tag).map_err(failed)?;
     if method.job {
+        // A device from before job results had a form says `u64` (the JobId) here: its result
+        // cannot be read without a guess, so the run is refused before the job starts.
+        let result = JobResult::of(&method.returns).ok_or_else(|| {
+            Failure::Refused(format!(
+                "{wanted} is a job whose result has no declared form (its description says {:?}); \
+                 the device's lemnosd is older than the bridge",
+                method.returns
+            ))
+        })?;
         let started = client
             .start_job(&mut handle, method.id, &call.args)
             .map_err(effect)?;
-        return Ok(Served::Started(started));
+        return Ok(Served::Started {
+            job: started,
+            result,
+        });
     }
     let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
     let len = client
@@ -1166,10 +1218,28 @@ mod tests {
     }
 
     #[test]
-    fn a_result_is_text_or_hex() {
-        assert_eq!(result_text(b"os-2"), "os-2");
-        assert_eq!(result_text(&[0xff, 0x01]), "ff01");
-        assert_eq!(result_text(b""), "");
+    fn a_result_is_read_in_its_declared_form_never_guessed() {
+        assert_eq!(result_text(JobResult::Text, b"os-2"), Ok("os-2".to_owned()));
+        assert_eq!(result_text(JobResult::Text, b""), Ok(String::new()));
+        assert!(result_text(JobResult::Text, &[0xff, 0x01]).is_err());
+        // Bytes that happen to be UTF-8 are still bytes: hex, the same as any other bytes.
+        assert_eq!(
+            result_text(JobResult::Bytes, b"AAAAAAAA"),
+            Ok("4141414141414141".to_owned())
+        );
+        assert_eq!(
+            result_text(JobResult::Bytes, &[0xff, 0x01]),
+            Ok("ff01".to_owned())
+        );
+        assert_eq!(result_text(JobResult::Bytes, b""), Ok(String::new()));
+    }
+
+    #[test]
+    fn only_text_and_bytes_are_job_result_forms() {
+        assert_eq!(JobResult::of(&OwnedShape::Str), Some(JobResult::Text));
+        assert_eq!(JobResult::of(&OwnedShape::Bytes), Some(JobResult::Bytes));
+        // What a job said before it declared a form: its JobId's shape.
+        assert_eq!(JobResult::of(&OwnedShape::U64), None);
     }
 }
 
@@ -1193,6 +1263,7 @@ mod departure_tests {
 
     fn run(caller: &str, call: u64, detached: bool) -> Running {
         Running {
+            result: JobResult::Text,
             session: 1,
             token: 2,
             detached,
@@ -1239,6 +1310,7 @@ mod deadline_tests {
 
     fn run(call: u64, due: Option<Instant>) -> Running {
         Running {
+            result: JobResult::Text,
             session: 1,
             token: 2,
             detached: false,
@@ -1306,6 +1378,7 @@ mod ending_tests {
 
     fn run() -> Running {
         Running {
+            result: JobResult::Text,
             session: 1,
             token: 2,
             call: 3,
@@ -1455,6 +1528,7 @@ mod cancel_tests {
 
     fn run(call: u64) -> Running {
         Running {
+            result: JobResult::Text,
             session: 1,
             token: 2,
             detached: false,
@@ -1558,6 +1632,7 @@ mod confirm_bound_tests {
     #[test]
     fn a_confirmed_cancel_of_an_own_deadline_is_timed_out() {
         let mut r = Running {
+            result: JobResult::Text,
             session: 1,
             token: 2,
             detached: false,

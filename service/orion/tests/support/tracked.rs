@@ -21,16 +21,16 @@ pub trait Tracked {
     fn held(&mut self) -> Result<u32>;
     #[method(3)]
     fn who(&mut self) -> Result<u32>;
-    #[method(4, job, stall = 60)]
+    #[method(4, job, stall = 60, result = bytes)]
     fn hold_until_cancelled(&mut self) -> Result<JobId>;
-    #[method(5, job, stall = 60)]
+    #[method(5, job, stall = 60, result = bytes)]
     fn count_until_cancelled(&mut self) -> Result<JobId>;
-    #[method(6, job, stall = 60)]
+    #[method(6, job, stall = 60, result = bytes)]
     fn finish_when_cancelled(&mut self) -> Result<JobId>;
-    #[method(7, job, stall = 60)]
+    #[method(7, job, stall = 60, result = bytes)]
     fn ignore_cancel(&mut self) -> Result<JobId>;
     /// A job that finishes on its own, as done, after about six seconds of ticks (not cancelled).
-    #[method(8, job, stall = 60)]
+    #[method(8, job, stall = 60, result = bytes)]
     fn finish_after_ticks(&mut self) -> Result<JobId>;
 }
 

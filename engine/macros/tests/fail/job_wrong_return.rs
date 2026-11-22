@@ -1,4 +1,4 @@
 use lemnos_core::{contract, Result};
 #[contract("x", version = 1)]
-pub trait T { #[method(1, job, stall = 60)] fn a(&mut self) -> Result<u32>; }
+pub trait T { #[method(1, job, stall = 60, result = bytes)] fn a(&mut self) -> Result<u32>; }
 fn main() {}

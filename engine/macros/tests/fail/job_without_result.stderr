@@ -1,0 +1,5 @@
+error: a job method declares the form of its result: #[method(N, job, stall = SECS, result = text|bytes)]
+ --> tests/fail/job_without_result.rs:2:24
+  |
+2 | pub trait T { #[method(1, job, stall = 60)] fn a(&mut self) -> lemnos_core::Result<lemnos_core::JobId>; }
+  |                        ^

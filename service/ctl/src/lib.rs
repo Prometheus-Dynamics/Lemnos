@@ -1407,7 +1407,7 @@ impl Tool<'_> {
     }
 
     /// Runs a job method as a long job: prints its number, its progress as it comes, and its
-    /// result in hex, and fails if it ends with anything but success.
+    /// result in the form its contract declares (text as it is, bytes in hex), and fails if it ends with anything but success.
     fn job(
         &mut self,
         device: &str,
@@ -1459,15 +1459,23 @@ impl Tool<'_> {
                     status.0
                 ));
             }
-            let hex = result
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            return if hex.is_empty() {
+            // The result in the form the contract declares: text as it is, bytes as hex.
+            let shown = match method.returns {
+                OwnedShape::Str => std::str::from_utf8(&result)
+                    .map(str::to_owned)
+                    .map_err(|_| {
+                        format!("job {job:#x} done, but its result is not the UTF-8 text its contract declares")
+                    })?,
+                _ => result
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            };
+            return if shown.is_empty() {
                 line(self.out, format_args!("job {job:#x} done"))
             } else {
-                line(self.out, format_args!("job {job:#x} done: {hex}"))
+                line(self.out, format_args!("job {job:#x} done: {shown}"))
             };
         }
     }

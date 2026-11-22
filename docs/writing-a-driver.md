@@ -374,8 +374,11 @@ A note reports what was done. Health says what is wrong now; a note says what ha
 
 ### Long jobs
 
-A method that runs longer than a call is marked `#[method(N, job, stall = SECS)]` in its contract and returns
-`Result<JobId>`. `stall` is the longest the job may go without a progress report: a job silent past it is ended by
+A method that runs longer than a call is marked `#[method(N, job, stall = SECS, result = text|bytes)]` in its
+contract and returns `Result<JobId>`. `result` is the form of what the job finishes with: `text` (UTF-8, the whole
+result) or `bytes`. Readers show it in that form and never guess (`docs/wire.md`, "A job's result form"); a job
+method without it does not build. Choose `text` for anything a person or a script reads, in `name=value` fields
+when there is more than one value, and `bytes` only for a layout the contract defines and its crate reads. `stall` is the longest the job may go without a progress report: a job silent past it is ended by
 the host as timed out, and each progress report restarts the count. A job method without a `stall` does not build.
 The contract's job methods and their bounds are listed in `docs/daemon.md`, "The stall bound of each job method". The driver starts the work, returns a number of its choosing, and goes on with the
 work in `tick` (set `TICKS`). It sets `JOBS` and answers two more methods. `job(id, result)` says

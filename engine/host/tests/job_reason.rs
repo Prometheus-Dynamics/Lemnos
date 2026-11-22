@@ -28,7 +28,7 @@ fn turn() -> MutexGuard<'static, ()> {
 #[contract("example.reasons", version = 1)]
 pub trait Reasons {
     /// A job that never finishes on its own.
-    #[method(1, job, stall = 300)]
+    #[method(1, job, stall = 300, result = bytes)]
     fn begin(&mut self) -> Result<JobId>;
 }
 

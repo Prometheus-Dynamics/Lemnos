@@ -32,7 +32,9 @@ fn the_tag_and_numbers_are_stable() {
     assert!(page.has_out_buffer);
     assert_eq!(page.params[0].shape, Shape::Str);
     assert!(method("info").has_out_buffer);
-    assert_eq!(info.methods[1].returns, Shape::U64);
+    // install is a job whose result is text (the new slot's id).
+    assert!(info.methods[1].job);
+    assert_eq!(info.methods[1].returns, Shape::Str);
     assert_eq!(info.methods[2].params[1].shape, Shape::Bytes);
     assert_eq!(info.methods[3].params[0].shape, Shape::Str);
 }

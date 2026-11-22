@@ -69,6 +69,8 @@ struct Method {
     job: bool,
     /// A job's stall bound, in seconds: required for a job, zero for a method that is not one.
     stall_secs: u32,
+    /// A job's result form: `true` for text (UTF-8, whole), `false` for bytes. Required for a job.
+    result_text: bool,
     reading: Option<Ident>,
     /// An addition after the base shape: `#[added]`, unless `#[breaking]`.
     added: bool,
@@ -82,13 +84,14 @@ struct Method {
 /// The largest stall bound a job can declare, in seconds: the package ABI carries it in 24 bits.
 const MAX_STALL_SECS: u32 = 0x00FF_FFFF;
 
-/// `#[method(N)]`, `#[method(N, job, stall = SECS)]` for a method that starts a long job and the
-/// longest it may go without progress, and `#[method(N, reading = switch)]` for the reading its
+/// `#[method(N)]`, `#[method(N, job, stall = SECS, result = text|bytes)]` for a method that starts a
+/// long job, the longest it may go without progress and the form of its result, and `#[method(N, reading = switch)]` for the reading its
 /// value shows as.
 struct MethodArgs {
     id: LitInt,
     job: bool,
     stall_secs: Option<LitInt>,
+    result: Option<Ident>,
     reading: Option<Ident>,
 }
 
@@ -97,6 +100,7 @@ impl Parse for MethodArgs {
         let id: LitInt = input.parse()?;
         let mut job = false;
         let mut stall_secs = None;
+        let mut result = None;
         let mut reading = None;
         while input.parse::<Option<Token![,]>>()?.is_some() {
             let word: Ident = input.parse()?;
@@ -105,13 +109,23 @@ impl Parse for MethodArgs {
             } else if word == "stall" {
                 input.parse::<Token![=]>()?;
                 stall_secs = Some(input.parse::<LitInt>()?);
+            } else if word == "result" {
+                input.parse::<Token![=]>()?;
+                let form: Ident = input.parse()?;
+                if form != "text" && form != "bytes" {
+                    return Err(Error::new(
+                        form.span(),
+                        "a job's result is `text` (UTF-8, read whole) or `bytes`",
+                    ));
+                }
+                result = Some(form);
             } else if word == "reading" {
                 input.parse::<Token![=]>()?;
                 reading = Some(input.parse::<Ident>()?);
             } else {
                 return Err(Error::new(
                     word.span(),
-                    "expected #[method(N)], #[method(N, job, stall = SECS)] or #[method(N, reading = ...)]",
+                    "expected #[method(N)], #[method(N, job, stall = SECS, result = text|bytes)] or #[method(N, reading = ...)]",
                 ));
             }
         }
@@ -119,6 +133,18 @@ impl Parse for MethodArgs {
             return Err(Error::new(
                 id.span(),
                 "a job method declares how long it may go without progress: #[method(N, job, stall = SECS)]",
+            ));
+        }
+        if job && result.is_none() {
+            return Err(Error::new(
+                id.span(),
+                "a job method declares the form of its result: #[method(N, job, stall = SECS, result = text|bytes)]",
+            ));
+        }
+        if !job && result.is_some() {
+            return Err(Error::new(
+                id.span(),
+                "only a job method has a result form: add `job` to #[method(N, ...)]",
             ));
         }
         if !job && stall_secs.is_some() {
@@ -131,12 +157,16 @@ impl Parse for MethodArgs {
             id,
             job,
             stall_secs,
+            result,
             reading,
         })
     }
 }
 
-fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool, u32, Option<Ident>)> {
+/// A method's number, whether it is a job, its stall bound, whether its result is text, and its reading.
+type MethodHead = (u16, bool, u32, bool, Option<Ident>);
+
+fn remove_method_id(method: &mut TraitItemFn) -> Result<MethodHead> {
     let position = method
         .attrs
         .iter()
@@ -162,7 +192,14 @@ fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool, u32, Option<
             value
         }
     };
-    Ok((args.id.base10_parse()?, args.job, stall_secs, args.reading))
+    let result_text = args.result.is_some_and(|form| form == "text");
+    Ok((
+        args.id.base10_parse()?,
+        args.job,
+        stall_secs,
+        result_text,
+        args.reading,
+    ))
 }
 
 /// Removes `#[name]` from `attrs` and says whether it was there.
@@ -224,7 +261,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
             "a contract method can't be generic",
         ));
     }
-    let (id, job, stall_secs, reading) = remove_method_id(method)?;
+    let (id, job, stall_secs, result_text, reading) = remove_method_id(method)?;
     let marked_added = take_flag(&mut method.attrs, "added");
     let breaking = take_flag(&mut method.attrs, "breaking");
     let added = marked_added && !breaking;
@@ -307,6 +344,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
         id,
         job,
         stall_secs,
+        result_text,
         reading,
         added,
 
@@ -396,8 +434,15 @@ fn method_info(method: &Method) -> TokenStream {
     };
     let added = method.added;
 
-    // The reply to an #[out] method is the bytes themselves.
-    let returns = if has_out {
+    // The reply to an #[out] method is the bytes themselves. A job's is its result, read whole as
+    // an out buffer is: text (`Str`) or bytes; the JobId its start returns is implied by `job`.
+    let returns = if job {
+        if method.result_text {
+            quote! { ::lemnos_core::Shape::Str }
+        } else {
+            quote! { ::lemnos_core::Shape::Bytes }
+        }
+    } else if has_out {
         quote! { ::lemnos_core::Shape::Bytes }
     } else {
         quote! { <#returned as ::lemnos_core::Encode>::SHAPE }

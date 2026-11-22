@@ -1058,7 +1058,7 @@ run in flight is never dropped for silence (see "Only silence expires a lease").
 | flash stream | the stream's write is cancelled after 600 s with no chunk; the commit waits up to 900 s for the device's job | the bridge | the sender is answered `Rejected` with words `ran out of time` |
 
 **The stall bound of each job method.** A job method declares how long it may go without progress, in the
-contract: `#[method(N, job, stall = SECS)]`. A job method with no bound does not build, and a packaged driver
+contract: `#[method(N, job, stall = SECS, result = text|bytes)]`. A job method with no bound does not build, and a packaged driver
 carries its bound in the method's flags (`METHOD_STALL_SHIFT`). The host ends a job silent past its bound as
 `TIMED_OUT`, with no result, and tells its driver to stop it. Each progress report restarts the bound. The host
 looks at a job when its bound passes, even when its driver does not tick and nothing calls it, so a silent job
@@ -1066,13 +1066,13 @@ ends on time. A progress report the host has not yet seen counts from the look t
 ended sooner than its declared bound, and may be ended up to one look after it. The bound is host policy and is
 not in the contract's hash.
 
-| contract | job method | stall bound |
-|---|---|---|
-| `system.flash` (1) | `write` (the flash image, streamed) | 900 s |
-| `system.flash` (1) | `verify` | 600 s |
-| `self-test` (1) | `run` | 600 s |
-| `system.slots` (1) | `install` (streamed or a file in `.incoming`) | 600 s |
-| `system.slots` (1) | `install_file` | 600 s |
+| contract | job method | stall bound | result |
+|---|---|---|---|
+| `system.flash` (1) | `write` (the flash image, streamed) | 900 s | text: `raw_bytes=<n> outcome=<code>` |
+| `system.flash` (1) | `verify` | 600 s | text: `raw_bytes=<n>` |
+| `self-test` (1) | `run` | 600 s | bytes: the test's `Record` |
+| `system.slots` (1) | `install` (streamed or a file in `.incoming`) | 600 s | text: the new slot's id |
+| `system.slots` (1) | `install_file` | 600 s | text: the new slot's id |
 
 The stream and file bounds above (600 s with no chunk) end a transfer before the write's own bound of 900 s, so
 a silent sender is answered first. A test-only contract in the repository declares 60 s and does not ship.
@@ -1104,8 +1104,10 @@ that job:
   - `percent`;
   - the message `"<done> of <total>"`;
   - the data `done` and `total`, as two little-endian `u64`s.
-- **End.** The job's end is the run's end. Its result is the output: text when it is UTF-8,
-  hex otherwise.
+- **End.** The job's end is the run's end. Its result is the output, in the form its contract
+  declares: text as it is, bytes as lowercase hex (`docs/wire.md`, "A job's result form"). A text
+  result that is not UTF-8 ends the run `Failed` and says so. A job whose device declares no form
+  (a lemnosd from before it) is refused before it starts.
 - **Cancel.** Cancelling the run cancels the job, and the run then ends `Cancelled`.
 - **Lost lemnosd.** If lemnosd goes away, the run ends `Failed`.
 

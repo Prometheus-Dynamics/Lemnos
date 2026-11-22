@@ -36,10 +36,10 @@ pub trait Stalls {
     #[method(1)]
     fn value(&mut self) -> Result<u32>;
     /// A job of a minute's silence.
-    #[method(2, job, stall = 60)]
+    #[method(2, job, stall = 60, result = bytes)]
     fn short(&mut self) -> Result<JobId>;
     /// A job of five minutes' silence.
-    #[method(3, job, stall = 300)]
+    #[method(3, job, stall = 300, result = bytes)]
     fn long(&mut self) -> Result<JobId>;
 }
 

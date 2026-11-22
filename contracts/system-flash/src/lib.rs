@@ -50,7 +50,7 @@ pub trait Flash {
     /// `raw_bytes=<the raw image's byte count> outcome=<code>` (`0` verified, `1` not checked:
     /// unsigned, `2` not checked: unknown key).
     /// Needs a manifest, `allow_first_flash` and a target that is not the running system.
-    #[method(3, job, stall = 900)]
+    #[method(3, job, stall = 900, result = text)]
     fn write(&mut self, size: u64, format: u8) -> Result<JobId>;
     /// The stream's bytes from `offset`, which must be where the last ended. The last of them ends
     /// the stream: the job then checks the image and ends. Only the write's starter may call it.
@@ -59,7 +59,7 @@ pub trait Flash {
     /// Reads the target back, from its start, for the manifest's image size, and checks it against
     /// the manifest's SHA-256. Only after a write that finished. The job's result is the text
     /// [`write_result`] makes with no outcome: `raw_bytes=<the byte count checked>`.
-    #[method(5, job, stall = 600)]
+    #[method(5, job, stall = 600, result = text)]
     fn verify(&mut self) -> Result<JobId>;
 }
 

@@ -1,0 +1,5 @@
+error: a job's result is `text` (UTF-8, read whole) or `bytes`
+ --> tests/fail/result_bad_form.rs:2:53
+  |
+2 | pub trait T { #[method(1, job, stall = 60, result = json)] fn a(&mut self) -> lemnos_core::Result<lemnos_core::JobId>; }
+  |                                                     ^^^^

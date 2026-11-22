@@ -457,7 +457,7 @@ fn validate_names_a_file_it_cant_read() {
 /// it fails.
 #[lemnos_core::contract("counting", version = 1)]
 pub trait Counting {
-    #[method(1, job, stall = 60)]
+    #[method(1, job, stall = 60, result = bytes)]
     fn count(&mut self, to: u32) -> lemnos_core::Result<lemnos_core::JobId>;
 }
 

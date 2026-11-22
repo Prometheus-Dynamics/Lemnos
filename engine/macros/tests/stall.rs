@@ -5,9 +5,9 @@ use lemnos_core::{Contract, JobId, Result, contract, layout};
 
 #[contract("stall.thing", version = 1)]
 pub trait Stalls {
-    #[method(1, job, stall = 900)]
+    #[method(1, job, stall = 900, result = bytes)]
     fn long(&mut self) -> Result<JobId>;
-    #[method(2, job, stall = 5)]
+    #[method(2, job, stall = 5, result = bytes)]
     fn short(&mut self) -> Result<JobId>;
     #[method(3)]
     fn read(&mut self) -> Result<u32>;
@@ -28,9 +28,9 @@ fn the_stall_bound_is_not_part_of_the_contract_hash() {
     #[allow(dead_code)]
     #[contract("stall.thing", version = 1)]
     pub trait Other {
-        #[method(1, job, stall = 1)]
+        #[method(1, job, stall = 1, result = bytes)]
         fn long(&mut self) -> Result<JobId>;
-        #[method(2, job, stall = 1)]
+        #[method(2, job, stall = 1, result = bytes)]
         fn short(&mut self) -> Result<JobId>;
         #[method(3)]
         fn read(&mut self) -> Result<u32>;

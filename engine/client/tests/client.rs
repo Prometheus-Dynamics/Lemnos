@@ -851,7 +851,7 @@ fn a_polled_call_on_an_old_handle_is_stale() {
 
 #[contract("example.counter", version = 1)]
 pub trait Jobbing {
-    #[method(2, job, stall = 60)]
+    #[method(2, job, stall = 60, result = bytes)]
     fn run(&mut self, how: u8) -> Result<lemnos_core::JobId>;
 }
 
