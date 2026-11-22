@@ -2156,11 +2156,20 @@ impl Inner {
             return;
         };
         let now = self.clock.now_ns();
+        let began = std::time::Instant::now();
         let ticked = catch_unwind(AssertUnwindSafe(|| {
             let next = self.tick_instance(slot, instance.as_mut(), now);
             self.poll_jobs(slot, instance.as_mut());
             (next, asks_rebind(instance.as_ref()))
         }));
+        // Each tick's duration, for the start trace: the test reads the longest tick of an install from it.
+        start_trace(|| {
+            format!(
+                "SLOT-TICK device {} us {}",
+                slot.spec.id,
+                began.elapsed().as_micros()
+            )
+        });
         match ticked {
             Ok((next, None)) => {
                 slot.hinted.store(false, Ordering::Release);

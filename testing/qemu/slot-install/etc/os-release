@@ -1,0 +1,4 @@
+NAME="Lemnos slot install guest"
+ID=lemnos-slot-install
+PRETTY_NAME="Lemnos slot install guest (test only)"
+VERSION_ID="0"

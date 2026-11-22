@@ -1,0 +1,16 @@
+# The guest's install run (testing/qemu/slot-install/guest/slot-install.sh). Starts after the packaged daemon is
+# ready; its output goes to the journal and the console, where the host reads the SLOT-INSTALL-GUEST lines.
+[Unit]
+Description=Slot install check: the install through the daemon's socket, under competitors
+After=lemnosd.service
+Requires=lemnosd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/lemnos-guest/slot-install.sh
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

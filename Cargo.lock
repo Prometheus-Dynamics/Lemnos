@@ -3096,6 +3096,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-slot-install-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-core",
+ "lemnos-driver-system-slots",
+ "lemnos-firmware-check",
+ "lemnos-slot-store",
+]
+
+[[package]]
 name = "lemnos-slot-store"
 version = "2.0.1-dev"
 dependencies = [
