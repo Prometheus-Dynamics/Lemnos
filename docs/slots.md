@@ -3009,13 +3009,28 @@ So it writes a whole disk image to the board's storage with `system.flash/1`, se
 writes them and invents none of them.
 
 Settings (`system-flash`'s `config`): `path` (the one target, a block device: the only place a path
-comes from), `allow_first_flash` (`false` by default: a write is refused unless it is `true`, which
+comes from) or `controller` (the device-tree path of the storage controller the target is the one whole disk
+under; see "The target by its controller" below), `allow_first_flash` (`false` by default: a write is refused unless it is `true`, which
 only a flasher's board file sets), `kind` (`block`, `file` for a regular file in tests, or `mtd`
 for a raw NAND partition: see "Raw NAND" below),
 `max_dict_mb` (8 by default; 1 to 8, the ceiling: a board file may lower it, never raise it),
 `keys` (given by the host from `[security] keys`, the board's one trust root: one per line, 64 hex digits, a space, then the owner; a `keys` in the device's own config is refused), and `mountinfo` (the mount table the running-system
 check reads, `/proc/self/mountinfo` by default). A board's `[board] id` is given to the driver, and a
 manifest for another board is refused first.
+
+### The target by its controller
+
+A board whose kernel may number its disks otherwise (an eMMC beside an SD card or a USB disk) names the target by
+its storage controller: `controller = "/soc@107c000000/mmc@fff000"`, the device-tree path the controller's sysfs
+`of_node` names, as the slot driver's `boot_sources` do. The target is the one whole disk under that controller,
+found the slot driver's way (`lemnos_slot_store::disk::disk_under`): an eMMC's hardware areas (`mmcblk0boot0`,
+`mmcblk0boot1`, `rpmb`), hidden paths and empty slots are set aside, so the target is the eMMC's user area and its
+boot areas are never written. No disk, or two, under the controller is refused by name (`info` says what was seen).
+The disk is looked up again at each `info`, `write` and `verify`, so a disk that registers after the daemon starts
+(an eMMC's initialisation) is taken once it is there. Its node is `/dev/<disk>`, and it must be the device sysfs
+names for the disk (its `dev` number), else the write is refused by name. `sysfs` (default `/sys`) and `dev`
+(default `/dev`) are where they are looked up: test settings only. A controller names a disk, never a NAND partition
+(`kind = "mtd"` is refused with it), and `path` and `controller` together are refused.
 
 ### The image
 
@@ -3168,7 +3183,10 @@ signature sidecar: the record is in the manifest's `signature` field and in the 
    The bridge holds one chunk at a time.
 3. At the commit the bridge checks the stream's SHA-256 against the sender's, then waits for the
    job: the answer is `committed` with the raw byte count and the signature outcome, or `rejected`
-   with the job's status or the refusal.
+   with the job's status or the refusal. A committed answer's detail is fields, not a sentence:
+   `raw_bytes=<n> outcome=<code>`, one space between them, the code the job's (`0` verified, `1` not
+   checked: unsigned, `2` not checked: unknown key) or `none` when the job reported none. A reader
+   ignores a field it does not know; fields are only ever added after these.
 
 A push that breaks is begun again from zero; a streamed image is not resumed.
 

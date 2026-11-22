@@ -262,7 +262,12 @@ pub struct SystemFlash {
     indicator: Option<Dev<dyn IndicatorContract>>,
     /// The state last sent to the indicator, so only a change is sent.
     shown: Option<(&'static str, u16)>,
+    /// The target's node when the board names it by `path`; when it names its `controller`, the node
+    /// is found at each look ([`SystemFlash::target`]).
     path: std::path::PathBuf,
+    /// The storage controller the target is the one whole disk under (`controller`, a device-tree path),
+    /// with the sysfs and `/dev` it is looked up in.
+    controller: Option<Controller>,
     kind: Kind,
     /// The raw NAND settings, when the target is a `mtd` partition.
     mtd: Option<Mtd>,
@@ -327,8 +332,39 @@ impl SystemFlash {
     }
 
     /// The target as it is now, or the reason it isn't there. A test target for NAND is a regular file.
+    /// Named by its controller, it is looked up again each time: the one whole disk under it (an
+    /// eMMC's boot areas set aside), at `/dev/<disk>`, and that node must be the disk sysfs names.
     fn target(&self) -> std::result::Result<Found, String> {
-        target::find(&self.path, self.find_kind())
+        let Some(controller) = &self.controller else {
+            return target::find(&self.path, self.find_kind());
+        };
+        let disk =
+            match lemnos_slot_store::disk::disk_under(&controller.sysfs, &controller.node, "") {
+                lemnos_slot_store::disk::BootDisk::One(disk) => disk,
+                lemnos_slot_store::disk::BootDisk::NoneYet(why)
+                | lemnos_slot_store::disk::BootDisk::Refused(why) => {
+                    return Err(format!("the target can't be found: {why}"));
+                }
+            };
+        let found = target::find(&controller.dev.join(&disk), self.kind)?;
+        if self.kind == Kind::Block {
+            let named =
+                fs::read_to_string(controller.sysfs.join("class/block").join(&disk).join("dev"))
+                    .map_err(|e| {
+                        format!("the target {disk}'s device number can't be read from sysfs: {e}")
+                    })?;
+            let (major, minor) = target::major_minor(found.dev);
+            let number = format!("{major}:{minor}");
+            if named.trim() != number {
+                return Err(format!(
+                    "the target {} is device {number}, not {disk} ({}), the disk under {}",
+                    found.path.display(),
+                    named.trim(),
+                    controller.node
+                ));
+            }
+        }
+        Ok(found)
     }
 
     /// The kind `find` checks the target as: a NAND stand-in is a regular file.
@@ -678,9 +714,12 @@ fn io_failure(error: &io::Error, what: &str) -> (Status, String) {
     (Status::IO, format!("{what}: {error}"))
 }
 
-/// Every setting the driver reads. `path` is required; the rest have defaults.
+/// Every setting the driver reads. One of `path` and `controller` is required; the rest have defaults.
 const KEYS: &[Key] = &[
-    Key::required("path", SettingKind::Str),
+    Key::optional("path", SettingKind::Str),
+    Key::optional("controller", SettingKind::Str),
+    // The `/dev` a controller's disk is opened in (a test's stand-in directory).
+    Key::optional("dev", SettingKind::Str),
     Key::optional("kind", SettingKind::Str),
     Key::optional("image", SettingKind::Str),
     Key::optional("erase_size", SettingKind::Int),
@@ -696,6 +735,52 @@ const KEYS: &[Key] = &[
     Key::optional("require_signed", SettingKind::Bool),
     Key::optional("mountinfo", SettingKind::Str),
 ];
+
+/// A target named by its storage controller: the device-tree path, and the sysfs and `/dev` it is found in.
+#[derive(Debug, Clone)]
+struct Controller {
+    node: String,
+    sysfs: std::path::PathBuf,
+    dev: std::path::PathBuf,
+}
+
+/// The target's name in the board file: `path` (its node), or `controller` (the device-tree path of the storage
+/// controller it is the one whole disk under: the eMMC's, whose `/dev` name the kernel may number otherwise).
+/// Exactly one; a controller's target is a block device (a regular file in tests), never a NAND partition.
+fn controller_of<'a>(
+    cfg: &Config<'a>,
+) -> core::result::Result<Option<Controller>, ConfigError<'a>> {
+    match (cfg.str("path"), cfg.str("controller")) {
+        (Some(_), None) if cfg.str("dev").is_some() => Err(ConfigError::new(
+            "dev",
+            "is only for a target named by controller",
+        )),
+        (Some(_), None) => Ok(None),
+        (None, Some(node)) if !node.starts_with('/') || node.contains(char::is_whitespace) => {
+            Err(ConfigError::new(
+                "controller",
+                "must be a device-tree path: /, then no spaces",
+            ))
+        }
+        (None, Some(_)) if cfg.str("kind") == Some("mtd") => Err(ConfigError::new(
+            "controller",
+            "names a disk: a NAND partition is named by path",
+        )),
+        (None, Some(node)) => Ok(Some(Controller {
+            node: node.to_string(),
+            sysfs: cfg.str("sysfs").unwrap_or("/sys").into(),
+            dev: cfg.str("dev").unwrap_or("/dev").into(),
+        })),
+        (Some(_), Some(_)) => Err(ConfigError::new(
+            "controller",
+            "and path name the target twice: give one",
+        )),
+        (None, None) => Err(ConfigError::new(
+            "path",
+            "or controller is required: the target",
+        )),
+    }
+}
 
 /// The target kind and, for `mtd`, its NAND settings. Refused with the key named.
 fn kind_and_mtd<'a>(
@@ -776,6 +861,7 @@ impl Lifecycle for SystemFlash {
 
     fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
         cfg.check_keys(KEYS)?;
+        controller_of(cfg)?;
         kind_and_mtd(cfg)?;
         max_dict_mb(cfg)?;
         Ok(())
@@ -786,7 +872,8 @@ impl Lifecycle for SystemFlash {
         if cfg.get("require_signed").is_some() || cfg.get("security_view").is_some() {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let path = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;
+        let controller = controller_of(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+        let path = cfg.str("path").unwrap_or_default();
         let (kind, mtd) = kind_and_mtd(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         let format = mtd.as_ref().map_or(manifest::DISK, |m| m.image.format());
         let max_mb = max_dict_mb(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
@@ -800,6 +887,7 @@ impl Lifecycle for SystemFlash {
             indicator: needs.indicator,
             shown: None,
             path: path.into(),
+            controller,
             kind,
             mtd,
             format,

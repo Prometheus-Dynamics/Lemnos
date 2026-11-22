@@ -1,0 +1,20 @@
+[package]
+name = "lemnos-flasher-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The first flash on an eMMC in a QEMU guest (testing/flasher): the real lemnosd and the bridge's stream write an xz disk image to the one whole disk under the eMMC's controller, verify it, and leave the eMMC's hardware boot areas as they were"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-client = { path = "../../../engine/client" }
+lemnos-contract-system-flash = { path = "../../../contracts/system-flash" }
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-orion = { path = "../../../service/orion" }
+# The transfer states the bridge answers with: the Orion revision the bridge pins.
+orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "172054f4fd88e98e096c0134b17a5c27ccb3abb3", default-features = false, features = ["files"] }
+rustix = { version = "1.1.6", features = ["fs", "mount", "process", "system"] }
+sha2 = { version = "0.10", default-features = false }

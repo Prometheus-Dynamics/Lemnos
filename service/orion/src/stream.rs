@@ -298,17 +298,10 @@ impl Streamer {
                     .get(..8)
                     .and_then(|b| <[u8; 8]>::try_from(b).ok())
                     .map_or(0, u64::from_le_bytes);
-                // The outcome code after the byte count: how the signature stood (see `manifest`).
-                let signed = match result.get(8) {
-                    Some(0) => "verified",
-                    Some(1) => "not checked: unsigned",
-                    Some(2) => "not checked: signed by an unknown key",
-                    _ => "not reported",
-                };
                 Answer {
                     received: active.got,
                     state: FileState::Committed,
-                    detail: format!("{raw} bytes written; signature {signed}"),
+                    detail: committed_detail(raw, result.get(8).copied()),
                 }
             }
             Some((status, _)) => rejected(format!("the write ended with status {}", status.0)),
@@ -319,6 +312,18 @@ impl Streamer {
 
 /// The name this streamer gives lemnosd.
 pub const STREAMS_CLIENT_NAME: &str = "lemnos-orion-streams";
+
+/// The detail of a committed image: fields, not a sentence, so a sender maps them without parsing words.
+/// `raw_bytes=<the raw image's bytes written> outcome=<code>`, separated by one space; the code is the write
+/// job's signature outcome after its byte count: `0` verified, `1` not checked (unsigned), `2` not checked
+/// (signed by a key the board does not know), `none` when the job reported none. A reader ignores a field it
+/// does not know, so a field may be added after these.
+pub fn committed_detail(raw: u64, outcome: Option<u8>) -> String {
+    match outcome {
+        Some(code @ 0..=2) => format!("raw_bytes={raw} outcome={code}"),
+        _ => format!("raw_bytes={raw} outcome=none"),
+    }
+}
 
 /// The answer for a refused transfer.
 fn rejected(detail: String) -> Answer {
@@ -356,4 +361,24 @@ fn json_record(text: &str) -> Result<Vec<u8>, String> {
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::committed_detail;
+
+    #[test]
+    fn a_committed_image_s_detail_is_its_fields_for_every_outcome() {
+        assert_eq!(
+            committed_detail(16384, Some(0)),
+            "raw_bytes=16384 outcome=0"
+        );
+        assert_eq!(
+            committed_detail(16384, Some(1)),
+            "raw_bytes=16384 outcome=1"
+        );
+        assert_eq!(committed_detail(7, Some(2)), "raw_bytes=7 outcome=2");
+        assert_eq!(committed_detail(7, None), "raw_bytes=7 outcome=none");
+        assert_eq!(committed_detail(7, Some(9)), "raw_bytes=7 outcome=none");
+    }
 }

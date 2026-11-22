@@ -273,10 +273,16 @@ pub fn boot_disk(sys: &Path, table: &Table, source: &str) -> Result<String, Stri
 
 /// One look for the boot disk for `source`, telling "none yet" (worth a wait) apart from a refusal.
 pub fn find_boot_disk(sys: &Path, table: &Table, source: &str) -> BootDisk {
-    let controller = match table.controller(source) {
-        Ok(controller) => controller,
-        Err(why) => return BootDisk::Refused(why),
-    };
+    match table.controller(source) {
+        Ok(controller) => disk_under(sys, controller, &format!(" (boot source {source})")),
+        Err(why) => BootDisk::Refused(why),
+    }
+}
+
+/// One look for the one whole disk under the storage controller at device-tree path `controller`:
+/// an eMMC's hardware areas, hidden paths and empty slots set aside ([`set_aside`]). `named` follows
+/// the controller when none is found (the boot source it was looked for, or nothing).
+pub fn disk_under(sys: &Path, controller: &str, named: &str) -> BootDisk {
     let (disks, aside) = block_disks(sys);
     let aside = if aside.is_empty() {
         String::new()
@@ -303,7 +309,7 @@ pub fn find_boot_disk(sys: &Path, table: &Table, source: &str) -> BootDisk {
                 })
                 .collect();
             BootDisk::NoneYet(format!(
-                "no whole disk sits under {controller} (boot source {source}); disks seen: {}{aside}",
+                "no whole disk sits under {controller}{named}; disks seen: {}{aside}",
                 if seen.is_empty() {
                     "none".into()
                 } else {
@@ -333,16 +339,20 @@ pub fn boot_partition(sys: &Path, dev: &Path, disk: &str) -> Option<PathBuf> {
     partition_of(sys, disk, 1).map(|p| dev.join(p.name))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The fake sysfs the tests build, and the reference board's own block listing on it: shared with the
+/// drivers that find a disk by its controller (`testing` feature), so every one is tested on the board's shape.
+#[cfg(any(test, feature = "testing"))]
+pub mod fixture {
+    use super::DEVICE_TREE;
+    use std::fs;
     use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
 
     /// A fake sysfs under the scratch directory of this test run, removed when dropped.
-    struct Sys(PathBuf);
+    pub struct Sys(PathBuf);
 
     impl Sys {
-        fn new(name: &str) -> Self {
+        pub fn new(name: &str) -> Self {
             let root =
                 std::env::temp_dir().join(format!("lemnos-disk-{}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
@@ -351,11 +361,11 @@ mod tests {
             fs::create_dir_all(root.join(DEVICE_TREE)).unwrap();
             Self(root)
         }
-        fn path(&self) -> &Path {
+        pub fn path(&self) -> &Path {
             &self.0
         }
         /// A device-tree node, as a directory with a `of_node` link to it (sysfs's form).
-        fn controller(&self, dt: &str, dir: &str) -> PathBuf {
+        pub fn controller(&self, dt: &str, dir: &str) -> PathBuf {
             let node = self
                 .path()
                 .join(DEVICE_TREE)
@@ -368,7 +378,7 @@ mod tests {
         }
         /// A whole disk `name` under `parent` (its controller's device directory), with its
         /// partitions `(name, number)`, as the kernel lays them out.
-        fn disk(&self, parent: &Path, name: &str, parts: &[(&str, u32)]) {
+        pub fn disk(&self, parent: &Path, name: &str, parts: &[(&str, u32)]) {
             let dir = parent.join(name);
             fs::create_dir_all(&dir).unwrap();
             symlink(&dir, self.path().join("class/block").join(name)).unwrap();
@@ -387,41 +397,12 @@ mod tests {
         }
     }
 
-    fn table() -> Table {
-        Table::parse(&[
-            "rpi-boot-mode-1=/soc/mmc@7e202000",
-            "/mmc@fe2c0000=/axi/pcie@1000120000",
-        ])
-        .unwrap()
-    }
-
-    #[test]
-    fn the_disk_under_the_named_controller_is_the_boot_disk() {
-        let sys = Sys::new("one");
-        let sd = sys.controller("/soc/mmc@7e202000", "sd-host");
-        let nvme = sys.controller("/axi/pcie@1000120000", "pcie");
-        sys.disk(&sd, "mmcblk0", &[("mmcblk0p1", 1), ("mmcblk0p2", 2)]);
-        sys.disk(&nvme, "nvme0n1", &[("nvme0n1p1", 1)]);
-        assert_eq!(
-            boot_disk(sys.path(), &table(), "rpi-boot-mode-1").unwrap(),
-            "mmcblk0"
-        );
-        assert_eq!(
-            boot_disk(sys.path(), &table(), "/mmc@fe2c0000").unwrap(),
-            "nvme0n1"
-        );
-        assert_eq!(
-            boot_partition(sys.path(), Path::new("/dev"), "mmcblk0"),
-            Some(PathBuf::from("/dev/mmcblk0p1"))
-        );
-    }
-
     /// The reference board's block devices exactly as its sysfs lists them (a RAM-boot listing of
     /// `/sys/class/block` with each device's real path and attributes): the controller's `of_node`
     /// is on `mmc_host`; the card's user area `mmcblk0` is in the card's `block` directory; its boot
     /// areas sit inside `mmcblk0`'s directory, as its partitions do, with no partition file
     /// (`force_ro` and `ro` 1, 8192 sectors each); loops and device-mapper under `virtual`.
-    fn emmc_board(sys: &Sys) {
+    pub fn emmc_board(sys: &Sys) {
         let host = sys.controller(
             "/soc@107c000000/mmc@fff000",
             "platform/soc@107c000000/1000fff000.mmc/mmc_host",
@@ -500,6 +481,41 @@ mod tests {
                 ],
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixture::{Sys, emmc_board};
+    use super::*;
+
+    fn table() -> Table {
+        Table::parse(&[
+            "rpi-boot-mode-1=/soc/mmc@7e202000",
+            "/mmc@fe2c0000=/axi/pcie@1000120000",
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn the_disk_under_the_named_controller_is_the_boot_disk() {
+        let sys = Sys::new("one");
+        let sd = sys.controller("/soc/mmc@7e202000", "sd-host");
+        let nvme = sys.controller("/axi/pcie@1000120000", "pcie");
+        sys.disk(&sd, "mmcblk0", &[("mmcblk0p1", 1), ("mmcblk0p2", 2)]);
+        sys.disk(&nvme, "nvme0n1", &[("nvme0n1p1", 1)]);
+        assert_eq!(
+            boot_disk(sys.path(), &table(), "rpi-boot-mode-1").unwrap(),
+            "mmcblk0"
+        );
+        assert_eq!(
+            boot_disk(sys.path(), &table(), "/mmc@fe2c0000").unwrap(),
+            "nvme0n1"
+        );
+        assert_eq!(
+            boot_partition(sys.path(), Path::new("/dev"), "mmcblk0"),
+            Some(PathBuf::from("/dev/mmcblk0p1"))
+        );
     }
 
     fn emmc_table() -> Table {

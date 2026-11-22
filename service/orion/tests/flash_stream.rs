@@ -693,10 +693,7 @@ fn a_streamed_image_is_written_to_the_target_and_only_its_manifest_is_on_disk() 
     );
     let sent = s.push("image.img.xz", &image);
     assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
-    assert_eq!(
-        sent.detail,
-        format!("{SMALL} bytes written; signature not checked: unsigned")
-    );
+    assert_eq!(sent.detail, format!("raw_bytes={SMALL} outcome=1"));
     assert_eq!(
         &std::fs::read(&s.target).expect("target")[..SMALL as usize],
         fixture("small.img").as_slice()
@@ -723,10 +720,7 @@ fn a_signed_image_is_verified_by_the_device_from_its_manifest_and_its_own_record
     );
     let sent = s.push("image.img.xz", &fixture("signed.img.xz"));
     assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
-    assert_eq!(
-        sent.detail,
-        format!("{SMALL} bytes written; signature verified")
-    );
+    assert_eq!(sent.detail, format!("raw_bytes={SMALL} outcome=0"));
     assert_eq!(
         &std::fs::read(&s.target).expect("target")[..SMALL as usize],
         fixture("small.img").as_slice()

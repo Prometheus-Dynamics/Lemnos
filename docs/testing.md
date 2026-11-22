@@ -241,6 +241,16 @@ CI runs it against a kernel built with lock and memory checking on. That kernel 
 testing/qemu/build-kernel.sh "$TMPDIR/kernel"
 ```
 
+The first flash on an eMMC runs in an arm64 guest of its own (`testing/flasher/run.sh`): the real lemnosd and the
+bridge's stream write an xz disk image to the one whole disk under the eMMC's controller (QEMU's `emmc` on
+`sdhci-pci`, with two hardware boot areas, as the reference board's eMMC has), verify it, and check that the boot areas
+and every byte after the image are as they were. Its kernel is built from a kernel source tree by
+`testing/flasher/build-kernel.sh` (`testing/flasher/kernel.config` on allnoconfig):
+
+```sh needs:an-arm64-guest-kernel
+KERNEL=<arm64 Image> testing/flasher/run.sh
+```
+
 `testing/bench/module.md` has the module route's software cost against the stock route, measured
 in this harness. Those are numbers from a virtual machine with simulated adapters. They say nothing
 about a real bus.

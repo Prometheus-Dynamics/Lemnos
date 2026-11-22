@@ -1,0 +1,74 @@
+# The reference board's flasher: the RAM-only image that writes a whole disk image to a blank board's eMMC
+# (docs/slots.md, "First flash"). Its id is the board's own, since an image's manifest names the board it is for.
+# It runs from RAM, so nothing it mounts is on the eMMC; the board carries no slots or data partition yet.
+#
+# - `flash` is the first-flash target: the one whole disk under the eMMC's controller, named by its device-tree
+#   path, not by a /dev name the kernel may number otherwise; the eMMC's hardware boot areas are never the target.
+#   `allow_first_flash` is set only here.
+# - The ring shows the write's states through `indicator`.
+# - The gadget carries the bridge's link; the identity gives it the board serial.
+# - The watchdog is the daemon's keep-alive, as on the board's own image.
+# - `reboot` restarts the board into its new slot once the image is written and verified.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "reference"
+soc = "bcm2712-rp1"
+base = "module-io"
+
+# The hardware the devices below use, as the board's own file names it.
+[[hardware]]
+controller = "pio"
+
+[[hardware]]
+name = "udc:1000480000.usb"
+controller = "usb"
+
+[[hardware]]
+controller = "watchdog"
+
+# The board's one trust root: the flasher ships the board's keys, so a signed image verifies (outcome 0).
+[security]
+record = "/var/lib/lemnos/security.rec"
+keys = "/etc/lemnos/slot-keys"
+
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
+[[devices]]
+id = "watchdog"
+driver = "hw-watchdog"
+keepalive = true
+uses = { watchdog = "watchdog:/soc@107c000000/watchdog@7d200000" }
+config = { timeout_s = 15 }
+
+[[devices]]
+id = "gadget"
+driver = "usb-gadget"
+uses = { function = "udc:1000480000.usb" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Lemnos board", identity = "identity" }
+
+[[devices]]
+id = "ring"
+driver = "ws2812"
+bus = "pio-out:gpio=13"
+config = { count = 16, wire = "rgb", brightness = 255 }
+
+[[devices]]
+id = "indicator"
+driver = "indicator"
+uses = { pixels = "ring" }
+config = { brightness = 128 }
+
+[[devices]]
+id = "flash"
+driver = "system-flash"
+uses = { indicator = "indicator" }
+config = { controller = "/soc@107c000000/mmc@fff000", allow_first_flash = true }
+
+[[devices]]
+id = "reboot"
+driver = "system-reboot"

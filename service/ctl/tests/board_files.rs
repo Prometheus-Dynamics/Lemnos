@@ -82,6 +82,14 @@ const TABLE: &[Row] = &[
         validate: Validate::Pass,
         daemon: Daemon::Pass,
     },
+    // The reference board's flasher: its gadget reads the board serial as the reference board's does.
+    Row {
+        file: "testing/boards/bcm2712-flasher.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Machine(
+            "device \"gadget\": Status(-22): the board serial is not known: cannot read /proc/device-tree/serial-number",
+        ),
+    },
     Row {
         file: "testing/boards/guest.toml",
         validate: Validate::Pass,
