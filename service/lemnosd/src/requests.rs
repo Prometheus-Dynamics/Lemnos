@@ -133,6 +133,7 @@ impl Client {
         } = frame
         {
             self.name = name.to_string();
+            self.core.host.name_caller(self.conn.id, name);
             return self.hello(version, events, parts.0);
         }
         if !self.greeted {

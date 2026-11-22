@@ -594,6 +594,10 @@ struct Slot {
     revision: AtomicU64,
     /// A call into this device never came back.
     hung: AtomicBool,
+    /// The driver is in its tick (with what the host asks of it around the tick): set as the tick
+    /// starts and cleared as it ends, and cleared as other work starts. A deadline's line says
+    /// whether the work it abandoned was in the tick a call or the host's work runs after itself.
+    in_tick: AtomicBool,
     errors: AtomicU32,
     /// Optional dependencies that were absent at the last bind.
     missing: Mutex<Vec<String>>,
@@ -690,6 +694,40 @@ fn instance_for_teardown(slot: &Slot) -> Option<MutexGuard<'_, Option<Box<dyn In
             }
         }
     }
+}
+
+/// The instance of `slot` for a call or the host's work on its lane, or `None` once the device is
+/// hung. Uncontended, as a lane runs one thing at a time; held only by a teardown or rebind (brief)
+/// or by a call abandoned at its deadline, which marks the device hung. Polled, so work queued on a
+/// new lane behind an abandoned call is refused within a millisecond of the mark instead of
+/// waiting out a deadline of its own.
+fn instance_unless_hung(slot: &Slot) -> Option<MutexGuard<'_, Option<Box<dyn Instance>>>> {
+    loop {
+        match slot.instance.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if slot.hung.load(Ordering::Acquire) {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+/// What ran on a device's lane, for the line its deadline writes.
+#[derive(Debug, Clone, Copy)]
+enum Ran {
+    /// The driver's tick.
+    Tick,
+    /// A method of the driver's contracts, for a caller.
+    Call { method: MethodId, caller: CallerId },
+    /// The host's own work on the driver for a caller, `what` naming it (`describe`, `caller_gone`).
+    Work {
+        what: &'static str,
+        caller: CallerId,
+    },
 }
 
 /// How many distinct callers a device keeps track of for [`Router::others_use`].
@@ -858,6 +896,7 @@ impl Slot {
             state: Mutex::new(state),
             revision: AtomicU64::new(0),
             hung: AtomicBool::new(false),
+            in_tick: AtomicBool::new(false),
             end: Mutex::new(None),
             errors: AtomicU32::new(0),
             missing: Mutex::new(Vec::new()),
@@ -926,6 +965,17 @@ impl Slot {
 
     fn tracks_callers(&self) -> bool {
         self.entry.is_some_and(|entry| entry.tracks_callers)
+    }
+
+    /// `method` as its contract names it, `contract.method`, for a line about the call. A method
+    /// the driver's contracts don't have is given by its numbers.
+    fn method_text(&self, method: MethodId) -> String {
+        let named = self.entry.and_then(|entry| {
+            let contract = entry.manifest.provides.get(usize::from(method.contract))?;
+            let info = contract.methods.iter().find(|m| m.id == method.method)?;
+            Some(format!("{}.{}", contract.tag.name(), info.name))
+        });
+        named.unwrap_or_else(|| format!("method {} of contract {}", method.method, method.contract))
     }
 
     fn runs_jobs(&self) -> bool {
@@ -1020,6 +1070,9 @@ struct Inner {
     routes: OnceLock<&'static Routes>,
     /// Long jobs still open, and what their starters haven't been told yet.
     jobs: Mutex<Jobs>,
+    /// The names callers gave themselves ([`Host::name_caller`]), until they go: what a line
+    /// about a call calls its caller by.
+    caller_names: Mutex<Vec<(CallerId, String)>>,
 }
 
 /// The most long jobs open at once, across every device.
@@ -1610,7 +1663,11 @@ impl Inner {
             (open.device, open.driver_job)
         };
         let slot = self.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.on_lane(slot, move |instance| instance.job_cancel(driver_job));
+        let ran = Ran::Work {
+            what: "job_cancel",
+            caller,
+        };
+        self.on_lane(slot, ran, move |instance| instance.job_cancel(driver_job));
         Ok(())
     }
 
@@ -2210,7 +2267,7 @@ impl Inner {
             slot: Arc::clone(&slot),
         });
         if let Err(LaneError::Deadline) = lane.run(&[], &mut [], self.options.call_deadline, work) {
-            self.on_deadline(&slot, "tick");
+            self.on_deadline(&slot, Ran::Tick);
         }
     }
 
@@ -2267,7 +2324,10 @@ impl Inner {
         if is_off(slot) {
             return Err(Status::NO_DEVICE);
         }
-        let mut guard = lock(&slot.instance);
+        // A call that went hung after the check above holds the instance: refused, not waited on.
+        let Some(mut guard) = instance_unless_hung(slot) else {
+            return Err(Status::NO_DEVICE);
+        };
         let Some(instance) = guard.as_mut() else {
             return Err(Status::NO_DEVICE);
         };
@@ -2285,6 +2345,7 @@ impl Inner {
             if let Some(trace) = trace {
                 trace.sink.started(trace.ticket);
             }
+            slot.in_tick.store(false, Ordering::Release);
             let mut status = instance.dispatch(method, args, &mut writer);
             self.stamp_running_ok(slot, instance.as_ref(), slot.is_running());
             if as_job && status.is_ok() {
@@ -2367,21 +2428,58 @@ impl Inner {
     }
 
     /// Whichever call was running, the lane is gone. Every device on it
-    /// keeps working through a new lane; only `slot` is marked.
-    fn on_deadline(&self, slot: &Slot, call: &'static str) {
+    /// keeps working through a new lane; only `slot` is marked. The line names what ran: the
+    /// tick, the method and its caller, or the host's own work and whose it was.
+    fn on_deadline(&self, slot: &Slot, ran: Ran) {
         self.abandon_lane(slot);
         slot.hung.store(true, Ordering::Release);
         let jobs = self.open_job_ids(slot);
         warn(|| {
             format!(
-                "device {} (driver {}): a {call} ran past its {} ms deadline; its driver is abandoned until the call returns; job(s) {} end interrupted",
+                "device {} (driver {}): {} ran past its {} ms deadline; its driver is abandoned until the call returns; job(s) {} end interrupted",
                 slot.spec.id,
                 slot.spec.driver,
+                self.ran_text(slot, ran),
                 self.options.call_deadline.as_millis(),
                 jobs_text(&jobs),
             )
         });
         self.fault(slot, "a call did not finish in time");
+    }
+
+    /// What ran, in words: `its tick`, `the call usb.function.control_in from caller 7
+    /// (lemnos-orion)`, `caller_gone for caller 7 (lemnos-orion)`.
+    fn ran_text(&self, slot: &Slot, ran: Ran) -> String {
+        let after = if slot.in_tick.load(Ordering::Acquire) {
+            ", in the tick after it,"
+        } else {
+            ""
+        };
+        match ran {
+            Ran::Tick => "its tick".to_string(),
+            Ran::Call { method, caller } => format!(
+                "the call {} from {}{after}",
+                slot.method_text(method),
+                self.caller_text(caller)
+            ),
+            Ran::Work { what, caller } => {
+                format!("{what} for {}{after}", self.caller_text(caller))
+            }
+        }
+    }
+
+    /// A caller as a line names it: its number, and the name it gave when it gave one.
+    fn caller_text(&self, caller: CallerId) -> String {
+        if caller == CallerId::LOCAL {
+            return "the daemon".to_string();
+        }
+        match lock(&self.caller_names)
+            .iter()
+            .find(|(id, _)| *id == caller)
+        {
+            Some((_, name)) => format!("caller {} ({name})", caller.0),
+            None => format!("caller {}", caller.0),
+        }
     }
 
     /// The ids of the open jobs of `slot`'s device.
@@ -2396,20 +2494,31 @@ impl Inner {
 
     /// Runs `work` on a device's driver, on its lane and inside the panic boundary, then ticks
     /// it if it ticks and passes on what changed about its jobs.
+    ///
+    /// A hung device is not given the work: its instance is the abandoned call's until that call
+    /// returns, and the rebind after it starts a new one with nothing to tell. Waiting on it would
+    /// only run out a second deadline on the new lane.
     fn on_lane(
         &'static self,
         slot: Arc<Slot>,
+        ran: Ran,
         work: impl FnOnce(&mut dyn Instance) + Send + 'static,
     ) {
+        if slot.hung.load(Ordering::Acquire) {
+            return;
+        }
         let Ok(lane) = self.lane(&slot) else {
             return;
         };
         let target = Arc::clone(&slot);
         let work = Work::Once(Box::new(move |_: &[u8], _: &mut [u8]| {
-            let mut guard = lock(&target.instance);
+            let Some(mut guard) = instance_unless_hung(&target) else {
+                return Ok(0);
+            };
             let Some(instance) = guard.as_mut() else {
                 return Ok(0);
             };
+            target.in_tick.store(false, Ordering::Release);
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 work(instance.as_mut());
                 self.stamp_running_ok(&target, instance.as_ref(), target.is_running());
@@ -2434,7 +2543,7 @@ impl Inner {
             Ok(0)
         }));
         if let Err(LaneError::Deadline) = lane.run(&[], &mut [], self.options.call_deadline, work) {
-            self.on_deadline(&slot, "call");
+            self.on_deadline(&slot, ran);
         }
     }
 
@@ -2448,7 +2557,11 @@ impl Inner {
             .map(|job| job.driver_job)
             .collect();
         let tells = slot.tracks_callers();
-        self.on_lane(slot, move |instance| {
+        let ran = Ran::Work {
+            what: "caller_gone",
+            caller,
+        };
+        self.on_lane(slot, ran, move |instance| {
             for job in started {
                 instance.job_cancel(job);
             }
@@ -2461,23 +2574,34 @@ impl Inner {
     /// Runs `work` on the device's lane for `caller`, with the driver told who is calling when
     /// it tracks callers, and returns what `work` answered. A call that runs over its deadline
     /// is `TIMED_OUT`, as a call is. `work` must not block.
+    ///
+    /// A hung device is `NO_DEVICE`, as a call to it is, and never waits on the abandoned call's
+    /// instance.
     fn on_lane_answer<T: Send + 'static>(
         &'static self,
         slot: Arc<Slot>,
         caller: CallerId,
+        what: &'static str,
         work: impl FnOnce(&mut dyn Instance) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        if slot.hung.load(Ordering::Acquire) {
+            return Err(Status::NO_DEVICE);
+        }
         let lane = self.lane(&slot).map_err(|_| Status::NO_MEMORY)?;
         let answer: Arc<Mutex<Option<Result<T>>>> = Arc::new(Mutex::new(None));
         let cell = Arc::clone(&answer);
         let target = Arc::clone(&slot);
         let lane_work = Work::Once(Box::new(move |_: &[u8], _: &mut [u8]| {
-            let mut guard = lock(&target.instance);
+            let Some(mut guard) = instance_unless_hung(&target) else {
+                *lock(&cell) = Some(Err(Status::NO_DEVICE));
+                return Ok(0);
+            };
             let Some(instance) = guard.as_mut() else {
                 *lock(&cell) = Some(Err(Status::NO_DEVICE));
                 return Ok(0);
             };
             let tells = target.tracks_callers();
+            target.in_tick.store(false, Ordering::Release);
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 if tells {
                     instance.caller(caller);
@@ -2499,7 +2623,7 @@ impl Inner {
         match lane.run(&[], &mut [], self.options.call_deadline, lane_work) {
             Ok(_) => lock(&answer).take().unwrap_or(Err(Status::NO_DEVICE)),
             Err(LaneError::Deadline) => {
-                self.on_deadline(&slot, "call");
+                self.on_deadline(&slot, Ran::Work { what, caller });
                 Err(Status::TIMED_OUT)
             }
             Err(LaneError::Busy) => Err(Status::TIMED_OUT),
@@ -2539,7 +2663,7 @@ impl Inner {
             Ok(result) => result,
             Err(LaneError::Deadline) => {
                 // The work may already be running on the lane: it reports its own end when it ends.
-                self.on_deadline(&slot, "call");
+                self.on_deadline(&slot, Ran::Call { method, caller });
                 Err(Status::TIMED_OUT)
             }
             Err(LaneError::Busy) => {
@@ -2786,6 +2910,7 @@ impl Inner {
         // A wake that came before this tick is what the tick is about to find: only a wake that
         // comes while it runs needs another (see `settle`).
         slot.kicked.store(false, Ordering::SeqCst);
+        slot.in_tick.store(true, Ordering::Release);
         if slot.entry.is_some_and(|entry| entry.watches) {
             instance.board(&BoardRead { inner: self });
         }
@@ -2809,6 +2934,7 @@ impl Inner {
                 None => self.unstall(slot),
             }
         }
+        slot.in_tick.store(false, Ordering::Release);
         next
     }
 
@@ -3487,6 +3613,7 @@ impl Host {
             reading: OnceLock::new(),
             routes: OnceLock::new(),
             jobs: Mutex::new(Jobs::new()),
+            caller_names: Mutex::new(Vec::new()),
         }));
         // Lives as long as `inner` does, which is for good.
         let _ = inner.reading.set(Box::leak(Box::new(Reading(inner))));
@@ -3619,13 +3746,16 @@ impl Host {
         if slot.hung.load(Ordering::Acquire) || is_off(&slot) {
             return Err(Status::NO_DEVICE);
         }
-        let mut out =
-            self.inner
-                .on_lane_answer(Arc::clone(&slot), CallerId::LOCAL, |instance| {
-                    let mut out = Description::new();
-                    instance.describe(&mut out);
-                    Ok(out)
-                })?;
+        let mut out = self.inner.on_lane_answer(
+            Arc::clone(&slot),
+            CallerId::LOCAL,
+            "describe",
+            |instance| {
+                let mut out = Description::new();
+                instance.describe(&mut out);
+                Ok(out)
+            },
+        )?;
         if is_off(&slot) {
             return Err(Status::NO_DEVICE);
         }
@@ -3656,6 +3786,17 @@ impl Host {
         reply: &mut [u8],
     ) -> Result<usize> {
         self.call_as(CallerId::LOCAL, device, method, args, reply)
+    }
+
+    /// Gives `caller` a name for the host's lines about its calls: a line about a call that ran past
+    /// its deadline says `caller 7 (name)`. Kept until [`Host::caller_gone`]; naming it again replaces
+    /// the name. The daemon names each client by the name it gave when it connected.
+    pub fn name_caller(&self, caller: CallerId, name: &str) {
+        let mut names = lock(&self.inner.caller_names);
+        match names.iter_mut().find(|(id, _)| *id == caller) {
+            Some((_, kept)) => name.clone_into(kept),
+            None => names.push((caller, name.to_string())),
+        }
     }
 
     /// Whether a caller other than `caller` is using `device`: one that has called it and has not
@@ -3711,7 +3852,9 @@ impl Host {
     pub fn usb_endpoints(&self, caller: CallerId, device: u32) -> Result<[OwnedFd; 2]> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
         self.inner
-            .on_lane_answer(slot, caller, move |instance| instance.endpoints(caller))
+            .on_lane_answer(slot, caller, "the endpoints' lend", move |instance| {
+                instance.endpoints(caller)
+            })
     }
 
     /// [`Host::usb_endpoints`] with a third descriptor, END, as `[OUT, IN, END]`. END is the read
@@ -3723,11 +3866,12 @@ impl Host {
     /// END.
     pub fn usb_endpoints_end(&self, caller: CallerId, device: u32) -> Result<[OwnedFd; 3]> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        let [out, input] =
-            self.inner
-                .on_lane_answer(Arc::clone(&slot), caller, move |instance| {
-                    instance.endpoints(caller)
-                })?;
+        let [out, input] = self.inner.on_lane_answer(
+            Arc::clone(&slot),
+            caller,
+            "the endpoints' lend",
+            move |instance| instance.endpoints(caller),
+        )?;
         let end = slot.end_for(caller)?;
         Ok([out, input, end])
     }
@@ -3735,11 +3879,12 @@ impl Host {
     /// Gives up the endpoints `caller` holds on a device. `NOT_FOUND` if it holds none.
     pub fn usb_endpoints_release(&self, caller: CallerId, device: u32) -> Result<()> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        let done = self
-            .inner
-            .on_lane_answer(Arc::clone(&slot), caller, move |instance| {
-                instance.release_endpoints(caller)
-            });
+        let done = self.inner.on_lane_answer(
+            Arc::clone(&slot),
+            caller,
+            "the endpoints' release",
+            move |instance| instance.release_endpoints(caller),
+        );
         slot.end_close_for(caller);
         done
     }
@@ -3818,6 +3963,7 @@ impl Host {
     /// Tells every driver that tracks callers that `caller` has gone, and cancels every job it
     /// started. Blocks until each driver has answered or its call deadline has passed.
     pub fn caller_gone(&self, caller: CallerId) {
+        lock(&self.inner.caller_names).retain(|(id, _)| *id != caller);
         self.inner.streams.caller_gone(caller);
         let mut index = 0;
         while let Some(slot) = self.inner.slot(index) {

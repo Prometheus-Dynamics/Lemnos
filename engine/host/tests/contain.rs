@@ -323,9 +323,8 @@ fn a_deadline_a_refused_rebind_and_the_release_each_leave_a_warning() {
         host.call(bad, method(4), &args, &mut [0; 8]),
         Err(Status::TIMED_OUT)
     );
-    assert!(warned(
-        "device bad (driver fake-counter): a call ran past its"
-    ));
+    assert!(warned("device bad (driver fake-counter): the call "));
+    assert!(warned(" from the daemon ran past its 100 ms deadline"));
     // The stuck call still holds the old instance: the rebind is refused, and says so.
     clock.advance(Duration::from_secs(1));
     host.tick();
