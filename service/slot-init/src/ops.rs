@@ -62,6 +62,9 @@ pub trait Ops {
     /// Asks the firmware for its flashing mode at the next boot (the Pi family's RPIBOOT: the board
     /// then waits for a USB host with no timeout). The caller restarts when this returns `Ok`.
     fn request_flash_mode(&self) -> Result<(), String>;
+    /// Clears the firmware's boot count (the Pi family's mailbox tag `0x0003808d`, value zero): done
+    /// before a restart that is Lemnos's own, so it never counts toward the count fallback.
+    fn clear_boot_count(&self) -> Result<(), String>;
     /// The boot partition's raw records and pointers, opened on its block node `dev` (nothing is
     /// mounted). The tests use an in-memory fake.
     fn open_boot(

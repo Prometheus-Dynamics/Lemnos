@@ -567,6 +567,34 @@ impl Boot<'_> {
         }
     }
 
+    /// Before the restart into a trial: the firmware's count is cleared, and the restart baseline with
+    /// it, so an attempt never counts toward `config.txt`'s `[boot_count>3]` (the restarts into the
+    /// trial and its failures would otherwise carry the board to `previous.txt`, away from the default
+    /// the trial was taken from). Only on a board whose firmware has the count. A clear the firmware
+    /// refuses does not stop the attempt: the log says this restart is counted.
+    fn clear_count_before_own_restart(&self) {
+        if self.boot_count().is_none() {
+            return;
+        }
+        if let Err(error) = self.ops.clear_boot_count() {
+            self.log(&format!(
+                "the firmware's boot count couldn't be cleared before the restart into the trial ({error}): this restart is counted"
+            ));
+            return;
+        }
+        match self.open_raw().and_then(|mut raw| {
+            if raw.baseline()?.is_some_and(|b| b != 0) {
+                raw.set_baseline(0)?;
+            }
+            Ok(())
+        }) {
+            Ok(()) => self.log("the firmware's boot count is cleared before the restart into the trial"),
+            Err(error) => self.log(&format!(
+                "the firmware's boot count is cleared; the restart baseline couldn't be set to 0 ({error}): the next boot reads it as a power loss"
+            )),
+        }
+    }
+
     /// Unmounts both partitions, syncs, and restarts.
     fn restart(&self, argument: Option<&str>) {
         self.unmount_boot();
@@ -579,7 +607,8 @@ impl Boot<'_> {
     }
 
     /// The restarts since the last good boot (M36b). The raw count is the restarts since power loss,
-    /// which no Lemnos boot clears; the baseline record (`count.rec`) is the count the last good boot,
+    /// or the last clear (lemnosd's, or this program's before its restart into a trial, which also sets
+    /// the baseline to 0); the baseline record (`count.rec`) is the count the last good boot,
     /// or the first boot, started from. A first boot keeps the count as its baseline; a count below
     /// the baseline is a power loss and the baseline goes to zero. Each change is written and said in
     /// the log. `Ok(None)`: no firmware count on this board. `Err`: the restarts can't be known, so
@@ -1299,6 +1328,7 @@ impl Boot<'_> {
                         self.log(&format!(
                             "trial {slot} takes an attempt, {left} left; restarting into it"
                         ));
+                        self.clear_count_before_own_restart();
                         self.restart(Some(tryboot::RESTART_ARG));
                         Some(format!("restarting into trial {slot}"))
                     }

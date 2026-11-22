@@ -105,7 +105,8 @@ pub const fn pick(count: u8) -> Pick {
 }
 
 /// The restarts since the last good boot, from the firmware's count (`chosen/bootloader/count`, the
-/// restarts since power loss, which no Lemnos boot clears) and the baseline record (M36b).
+/// restarts since power loss or the last clear: lemnosd's at a good boot and before its restarts,
+/// slot-init's before its restart into a trial) and the baseline record (M36b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Since {
     /// No baseline is kept (a first flash, or a first boot): this count is the baseline, and no

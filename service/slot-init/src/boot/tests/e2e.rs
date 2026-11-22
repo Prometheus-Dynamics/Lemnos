@@ -367,3 +367,122 @@ fn end_to_end_uboot_form_install_trial_confirm_keep_previous_free() {
     verify(&board, &parts, "C removed");
     let _: PathBuf = node;
 }
+
+/// What the firmware did on one boot of [`a_trial_whose_kernel_never_boots`]'s run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Boot {
+    /// The pointer `default.txt` or `previous.txt` started this slot, with the count it read; slot-init
+    /// restarted into the trial.
+    TookAttempt(String, u32),
+    /// `tryboot.txt` started the trial, whose kernel never came up: the watchdog reset the board.
+    TrialHung(u32),
+    /// This slot booted into its root with this count.
+    Landed(String, u32),
+}
+
+/// The Pi firmware form, run boot by boot: the firmware's count climbs by one on every boot and
+/// is cleared only when slot-init clears it; with the tryboot flag the firmware starts the trial's
+/// bay, else `config.txt`'s pick (`[boot_count>3]` → `previous.txt`). A trial boot never reaches
+/// slot-init (its kernel hangs) and the watchdog resets the board. Returns each boot until a slot is
+/// booted into its root.
+fn a_trial_whose_kernel_never_boots(board: &Board) -> Vec<Boot> {
+    let mut count = 0u32;
+    let mut tryboot = false;
+    let mut boots = Vec::new();
+    for _ in 0..16 {
+        count += 1;
+        if std::mem::take(&mut tryboot) {
+            boots.push(Boot::TrialHung(count));
+            continue;
+        }
+        let pointer =
+            match lemnos_slot_store::firmware::pick(u8::try_from(count).unwrap_or(u8::MAX)) {
+                lemnos_slot_store::firmware::Pick::Default => Pointer::Default,
+                lemnos_slot_store::firmware::Pick::Previous => Pointer::Previous,
+            };
+        let slot = board.pointer(pointer).expect("the pointer names a slot");
+        let bay = bay_of(board, &slot).expect("the slot has a bay");
+        start(board, &bay_cmdline(board, &bay));
+        board.write(
+            lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+            &[0, 0, 0, 0],
+        );
+        boot_count(board, count);
+        let (fake, why) = board.boot(&[]);
+        let calls = fake.calls();
+        let read = count;
+        if calls.iter().any(|c| c == "clear boot count") {
+            count = 0;
+        }
+        if fake.last() == "restart 0 tryboot" {
+            boots.push(Boot::TookAttempt(slot, read));
+            tryboot = true;
+            continue;
+        }
+        assert_eq!(why, "", "{:?}", fake.logs.borrow());
+        assert_eq!(fake.last(), "switch_root newroot", "{calls:?}");
+        boots.push(Boot::Landed(
+            board
+                .read("newroot/data/board/slots/booted")
+                .trim()
+                .to_string(),
+            count,
+        ));
+        return boots;
+    }
+    panic!("no boot reached a root: {boots:?}");
+}
+
+/// TRIAL-COUNT: default A (os-2), previous Z (os-1), a trial of B (os-3) with 3 attempts whose kernel
+/// never boots. Every attempt is A's slot-init restarting into the trial, and the trial's hang: two
+/// boots each. Those restarts are Lemnos's own, so they must not count toward the firmware's fallback:
+/// the board comes back to A, the default it trusted, with a count of two (the last hang and its own
+/// boot), and the trial runs out there. (Before the fix the count climbed through the attempts, the fifth boot read
+/// `previous.txt`, and the board landed on Z: the daemon then took that as an arrival on the previous
+/// by the count, against A.)
+#[test]
+fn a_trial_whose_kernel_never_boots_comes_back_to_the_default_and_the_count_stays_low() {
+    let board = Board::fresh(tryboot_image(Vec::new()), false);
+    let node = board.node();
+    let mut record = Tryboot {
+        boot: board.layout.boot.clone(),
+        node: Ok(node),
+        restarter: restarter(),
+    };
+    register(&board, "os-1", 1);
+    // A (os-2) confirmed over Z (os-1), then B (os-3) into the bay no pointer names.
+    let p = payloads("os-2");
+    record.install("os-2", &refs(&p)).unwrap();
+    register(&board, "os-2", 2);
+    record.set_default("os-2").unwrap();
+    state(&board, "os-2", "os-1");
+    let p = payloads("os-3");
+    record.install("os-3", &refs(&p)).unwrap();
+    register(&board, "os-3", 3);
+    assert_eq!(board.pointer(Pointer::Default).as_deref(), Some("os-2"));
+    assert_eq!(board.pointer(Pointer::Previous).as_deref(), Some("os-1"));
+    record.set_trial("os-3", 3).unwrap();
+    let boots = a_trial_whose_kernel_never_boots(&board);
+    let landed = boots.last().cloned();
+    // The last hang and the boot after it: two.
+    assert_eq!(
+        landed,
+        Some(Boot::Landed("os-2".into(), 2)),
+        "the boots: {boots:?}"
+    );
+    let attempts = boots
+        .iter()
+        .filter(|b| matches!(b, Boot::TookAttempt(..)))
+        .count();
+    assert_eq!(attempts, 3, "the boots: {boots:?}");
+    let threshold = u32::from(lemnos_slot_store::firmware::FALLBACK_AFTER);
+    assert!(
+        boots.iter().all(|b| match b {
+            Boot::TookAttempt(slot, count) => slot == "os-2" && *count <= 2,
+            Boot::TrialHung(count) => *count <= 1,
+            Boot::Landed(_, count) => *count <= threshold,
+        }),
+        "every attempt was taken from the default, and no boot read a count near the fallback: {boots:?}"
+    );
+    assert_eq!(board.trial(), None, "the trial ran out on the default");
+}

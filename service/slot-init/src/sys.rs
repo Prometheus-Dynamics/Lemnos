@@ -126,6 +126,21 @@ impl System {
     }
 }
 
+impl System {
+    /// The firmware mailbox's node. To confirm on a board: devtmpfs makes /dev/vcio when the
+    /// firmware driver is built in or loaded; it is waited for as the UBI block node's wait does.
+    fn vcio(&self) -> std::path::PathBuf {
+        let node = self.dev.join("vcio");
+        for _ in 0..50 {
+            if node.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        node
+    }
+}
+
 impl Ops for System {
     fn log(&self, line: &str) {
         self.kmsg(&format!("{line}\n"));
@@ -300,17 +315,16 @@ impl Ops for System {
     }
 
     fn request_flash_mode(&self) -> Result<(), String> {
-        // To confirm on a board: devtmpfs makes /dev/vcio when the firmware driver is built in or
-        // loaded; wait for it as the UBI block node's wait does.
-        let node = self.dev.join("vcio");
-        for _ in 0..50 {
-            if node.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let node = self.vcio();
         lemnos_driver_rpi_firmware_sys::Mailbox::open(&node)
             .and_then(|mailbox| mailbox.request_rpiboot())
+            .map_err(|e| format!("{}: {e}", node.display()))
+    }
+
+    fn clear_boot_count(&self) -> Result<(), String> {
+        let node = self.vcio();
+        lemnos_driver_rpi_firmware_sys::Mailbox::open(&node)
+            .and_then(|mailbox| mailbox.clear_boot_count())
             .map_err(|e| format!("{}: {e}", node.display()))
     }
 }

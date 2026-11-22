@@ -5,7 +5,7 @@
 //! big-endian bytes) and cleared through the firmware mailbox ([`lemnos_driver_rpi_firmware_sys`]).
 //! Both locations are the board's settings: `device_tree` (`/proc/device-tree` by default) and
 //! `vcio` (`/dev/vcio`). Lemnos clears the count at a boot that is good and just before a restart
-//! it makes; it never clears it in slot-init.
+//! it makes. slot-init clears it in one place only: before its restart into a trial (`0 tryboot`).
 //!
 //! The records the sequence writes (the episodes) are the boot partition's raw records through
 //! [`crate::boot::BootRecord`]; the history and the state are the data partition's files.

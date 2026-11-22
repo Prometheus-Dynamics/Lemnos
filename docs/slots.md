@@ -1777,10 +1777,19 @@ rotation above still reads the raw count.
   slots device's root phase opens it before the drop and holds it for the daemon's life; every
   clear takes a copy of that descriptor. The root phase's line says `<vcio>: held for the boot
   count`, or why it is not held (then no clear can work, and the health says each failure).
-- The count is cleared by lemnosd, never by slot-init, in two places: at a boot that is good (a
-  confirmed trial, or a default boot that has run its uptime with its boot files matching the
-  manifest) and before each restart Lemnos makes. The restart check runs first: a refused check
-  makes no restart. A count that can't be cleared does not refuse the restart the board was asked for:
+- The count is cleared at a boot that is good (by lemnosd: a confirmed trial, or a default boot that
+  has run its uptime with its boot files matching the manifest) and before each restart Lemnos makes:
+  lemnosd's restarts (the restart check runs first: a refused check makes no restart), and slot-init's
+  restart into a trial (`0 tryboot`), which clears the count and sets the restart baseline to 0 before
+  it restarts. slot-init clears nothing else: a default that fails in it, or after it, still counts.
+  Without that clear, a trial whose kernel never boots pushed the board to `previous.txt`: each attempt
+  is two boots (the default's pass and the trial's hang), so the fifth boot read a count of 5, above
+  `[boot_count>3]`, and the board landed on the previous slot instead of the default, where the daemon
+  took it as an arrival by the count against the default (an episode, and a demotion at the second
+  such trial with the default threshold). Test:
+  `a_trial_whose_kernel_never_boots_comes_back_to_the_default_and_the_count_stays_low`
+  (`service/slot-init/src/boot/tests/e2e.rs`, the firmware modelled boot by boot; it lands on the
+  previous before the fix). A count that can't be cleared does not refuse the restart the board was asked for:
   the state names it ("this boot is counted") and the indicator shows failed.
 - **A refused clear is retried (M36c).** A clear the mailbox refuses after a good boot, or on an arrival
   from the count, is owed: the driver's tick tries it again, the wait starting at 1 s, doubling after
@@ -1842,7 +1851,8 @@ rotation above still reads the raw count.
 
   A healthy board never reaches the limit. Each good boot keeps the count it started from as the baseline,
   so plain restarts and trials, each boot good, count at most the restarts since the last good one. A failed
-  trial and the default's good boot after it add two. A board whose daemon comes up but can't read its boot
+  trial adds at most two: its last hang and the default's boot after it, since the restart into each attempt
+  clears the count. A board whose daemon comes up but can't read its boot
   records to say whose they are (`foreign-unknown`) judges no boot good, so the baseline doesn't move. Once
   the daemon has run its uptime, it clears the firmware's count through the mailbox instead, and writes
   nothing to the records or the state. The next boot reads a count below the baseline, as after a power
@@ -2745,9 +2755,10 @@ written, with
 `{slot, outcome: confirmed|fell-back, by: auto|call, caller, reason, time}`. `caller` is the caller's
 number for a `call` and null for `auto`.
 
-**The extra pass on tryboot.** The firmware keeps no counter, so on the `tryboot` form every trial
-boot runs the default slot's kernel and initramfs first: the initramfs takes the attempt and
-restarts with `0 tryboot`. That is one extra firmware, kernel and initramfs pass on each trial boot.
+**The extra pass on tryboot.** The firmware keeps no count of a trial's attempts (its `boot_count`
+counts every boot, and is what the fallback to `previous.txt` reads), so on the `tryboot` form every
+trial boot runs the default slot's kernel and initramfs first: the initramfs takes the attempt, clears
+the firmware's count (the restart is Lemnos's own), and restarts with `0 tryboot`. That is one extra firmware, kernel and initramfs pass on each trial boot.
 It is the price of the guarantee that a trial kernel which can never boot always falls back: the
 attempt is taken before the trial's kernel runs, so a power cut cannot leave the trial without
 its count. `testing/board-runs/I5f.md` measures it. **Untested on board.**

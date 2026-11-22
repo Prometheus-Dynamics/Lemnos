@@ -11,7 +11,9 @@
 //!     good and point at the previous; then clear the count;
 //!   - `Power` or `Unknown` (no bit rule names the reset), files match: clear the count, no episode.
 //! - Boot good: clear the slot's episodes, then the count.
-//! - Before an intended restart of Lemnos's own: clear the count.
+//! - Before an intended restart of Lemnos's own the count is cleared too, outside this sequence: by
+//!   lemnosd's restart check (`guard_check` in `drivers/system-slots`) and by slot-init before its
+//!   restart into a trial (its tryboot pass).
 
 use crate::fallback::{self, Cause, Decision};
 
@@ -106,11 +108,6 @@ pub fn on_arrival<A: Actions>(a: &mut A, arrival: &Arrival) -> Result<Outcome, A
 /// Boot good on `slot`: its episodes go, then the count.
 pub fn on_boot_good<A: Actions>(a: &mut A, slot: &str) -> Result<(), A::Error> {
     a.clear_episodes(slot)?;
-    a.clear_count()
-}
-
-/// Lemnos's own restart: the count is cleared first, so an intended restart never counts.
-pub fn before_own_restart<A: Actions>(a: &mut A) -> Result<(), A::Error> {
     a.clear_count()
 }
 

@@ -184,14 +184,6 @@ fn a_boot_good_clears_the_episodes_then_the_count() {
     );
 }
 
-#[test]
-fn an_intended_restart_clears_the_count_before_it_happens() {
-    let mut b = Board::new("os-1", "os-0", 6);
-    before_own_restart(&mut b).unwrap();
-    assert_eq!(b.count, 0);
-    assert_eq!(b.log, vec!["clear_count"]);
-}
-
 /// Every cut point of each path: the default is the original or the previous; a demotion always
 /// marks the original not good; the episode record moves by at most one, and only against the
 /// original; the count is clear after any cut (a power loss clears it); and an arrival that was cut

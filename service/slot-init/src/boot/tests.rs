@@ -304,6 +304,10 @@ impl Ops for Fake {
         self.call("flash mode".into())
     }
 
+    fn clear_boot_count(&self) -> Result<(), String> {
+        self.call("clear boot count".into())
+    }
+
     /// The environment partition is a plain file here; its next write may be cut.
     fn open_uboot_env(&self, node: &Path) -> Result<(Box<dyn EnvDev>, u64), String> {
         let (inner, bytes) =
@@ -1772,6 +1776,48 @@ fn a_pending_tryboot_trial_takes_an_attempt_and_restarts_into_it_before_anything
     assert!(!fake.called("mount vfat"));
     assert!(!fake.called("mount ext4"));
     assert!(!fake.called("verity "));
+}
+
+/// TRIAL-COUNT: the restart into a trial is Lemnos's own, so on a board whose firmware has the count
+/// the count is cleared first, and the restart baseline goes to 0 with it; then the restart. On a board
+/// with no count nothing is asked of the firmware.
+#[test]
+fn the_restart_into_a_trial_clears_the_firmware_count_first_where_there_is_one() {
+    let board = Board::new();
+    board.set_trial("os-1", 2);
+    boot_count(&board, 3);
+    set_baseline(&board, 2);
+    let (fake, _) = board.boot(&[]);
+    let calls = fake.calls();
+    let clear = calls.iter().position(|c| c == "clear boot count");
+    let restart = calls.iter().position(|c| c == "restart 0 tryboot");
+    assert!(clear.is_some() && clear < restart, "{calls:?}");
+    assert_eq!(baseline_of(&board), Some(0));
+
+    let board = Board::new();
+    board.set_trial("os-1", 2);
+    let (fake, _) = board.boot(&[]);
+    assert!(!fake.called("clear boot count"), "{:?}", fake.calls());
+    assert_eq!(fake.last(), "restart 0 tryboot");
+}
+
+/// A clear the firmware refuses does not hold the attempt back: the restart still happens, and the
+/// log says this one is counted.
+#[test]
+fn a_refused_count_clear_still_restarts_into_the_trial_and_says_it_is_counted() {
+    let board = Board::new();
+    board.set_trial("os-1", 2);
+    boot_count(&board, 1);
+    let (fake, _) = board.boot(&["clear boot count"]);
+    assert_eq!(fake.last(), "restart 0 tryboot");
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("couldn't be cleared") && l.contains("this restart is counted")),
+        "{:?}",
+        fake.logs.borrow()
+    );
 }
 
 #[test]
