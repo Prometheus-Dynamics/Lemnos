@@ -44,7 +44,7 @@ impl Slow for SlowDriver {
     }
 }
 
-fn start() -> (Service, Scratch, PathBuf) {
+fn start(call_deadline: Duration) -> (Service, Scratch, PathBuf) {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = Scratch(std::env::temp_dir().join(format!(
         "lemnos-ctl-outcome-{}-{}",
@@ -61,7 +61,7 @@ fn start() -> (Service, Scratch, PathBuf) {
         drivers: vec![entry::<SlowDriver>()],
         backend: Box::new(SimBoard::new()),
         options: Options {
-            call_deadline: Duration::from_secs(20),
+            call_deadline,
             ..Options::default()
         },
     })
@@ -69,9 +69,7 @@ fn start() -> (Service, Scratch, PathBuf) {
     (service, dir, socket)
 }
 
-#[test]
-fn a_call_whose_answer_times_out_reads_its_outcome_from_the_service() {
-    let (_service, _dir, socket) = start();
+fn mark(socket: &std::path::Path) -> std::result::Result<Vec<u8>, String> {
     let args: Vec<String> = [
         "--socket",
         &socket.display().to_string(),
@@ -83,13 +81,28 @@ fn a_call_whose_answer_times_out_reads_its_outcome_from_the_service() {
     .map(ToString::to_string)
     .collect();
     let mut out = Vec::new();
-    let error = lemnos_ctl::run(&args, &mut out).unwrap_err();
+    lemnos_ctl::run(&args, &mut out).map(|()| out)
+}
+
+/// The driver's call applied and its answer was lost: the tool reports the outcome and exits 0.
+#[test]
+fn a_lost_reply_whose_call_applied_prints_the_outcome_and_exits_zero() {
+    let (_service, _dir, socket) = start(Duration::from_secs(20));
+    let out = mark(&socket).expect("an applied call exits 0");
+    let text = String::from_utf8(out).unwrap();
     assert!(
-        error.contains("outcome: applied (status 0)"),
-        "the tool said: {error}"
+        text.contains("s: no answer in time; outcome: applied (status 0)"),
+        "the tool said: {text}"
     );
+}
+
+/// The call is still running when the tool asks: the outcome is pending, and the tool exits nonzero.
+#[test]
+fn a_lost_reply_whose_call_is_still_running_exits_nonzero() {
+    let (_service, _dir, socket) = start(Duration::from_secs(1));
+    let error = mark(&socket).expect_err("a pending call exits nonzero");
     assert!(
-        !error.contains("outcome: unknown"),
+        error.contains("outcome: still running"),
         "the tool said: {error}"
     );
 }

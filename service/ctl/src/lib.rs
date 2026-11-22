@@ -156,6 +156,28 @@ fn text(error: Error) -> String {
 
 /// A call's error as the tool prints it. A reply that did not fit the out buffer says how to ask
 /// for more ([`too_small`]).
+/// The line for a call whose answer never came, from the outcome the service gave (or why it gave
+/// none). `Ok` only for an applied call, which exits 0; the others are `Err`, which exits nonzero.
+fn lost_reply(
+    device: &str,
+    error: &Error,
+    outcome: Result<lemnos_client::Outcome, Error>,
+) -> Result<String, String> {
+    let (applied, outcome) = match outcome {
+        Ok(lemnos_client::Outcome::Applied(status)) => {
+            (true, format!("applied (status {})", status.0))
+        }
+        Ok(lemnos_client::Outcome::NotApplied(status)) => {
+            (false, format!("not applied (status {})", status.0))
+        }
+        Ok(lemnos_client::Outcome::Pending) => (false, "still running".to_string()),
+        Ok(lemnos_client::Outcome::Unknown) => (false, "unknown".to_string()),
+        Err(why) => (false, format!("unknown ({why})")),
+    };
+    let text = format!("{device}: {error}; outcome: {outcome}");
+    if applied { Ok(text) } else { Err(text) }
+}
+
 /// Whether a call's error leaves open if it applied: the answer never came back.
 fn reply_lost(error: &Error) -> bool {
     matches!(error, Error::TimedOut | Error::Disconnected)
@@ -994,18 +1016,11 @@ impl Tool<'_> {
     /// A refused call's text. On a device that is not running, the sentence read and watch print
     /// (its state and reason) replaces the host's refusal, which says only that the call failed.
     /// Only the refusal path looks the device up again: a call that runs costs nothing extra.
-    /// The outcome of a call whose answer never came, as the service last heard of it.
-    fn asked(&self, device: &str, token: u64, error: &Error) -> String {
-        let outcome = match self.client.outcome(token) {
-            Ok(lemnos_client::Outcome::Applied(status)) => format!("applied (status {})", status.0),
-            Ok(lemnos_client::Outcome::NotApplied(status)) => {
-                format!("not applied (status {})", status.0)
-            }
-            Ok(lemnos_client::Outcome::Pending) => "still running".to_string(),
-            Ok(lemnos_client::Outcome::Unknown) => "unknown".to_string(),
-            Err(why) => format!("unknown ({why})"),
-        };
-        format!("{device}: {error}; outcome: {outcome}")
+    /// The outcome of a call whose answer never came, as the service last heard of it. `Ok` is the
+    /// line for a call that applied, which exits 0 because the call took effect. Anything else is an
+    /// `Err` and exits nonzero, as a plain timeout does.
+    fn asked(&self, device: &str, token: u64, error: &Error) -> Result<String, String> {
+        lost_reply(device, error, self.client.outcome(token))
     }
 
     fn refused(&self, device: &str, text: String) -> String {
@@ -1171,14 +1186,16 @@ impl Tool<'_> {
         Ok(())
     }
 
+    /// Makes the call. `None` is a call that applied whose reply was lost: its line is printed here,
+    /// and the caller has no value to show.
     fn invoke(
-        &self,
+        &mut self,
         device: &str,
         description: &DeviceDescription,
         contract: usize,
         method: &OwnedMethod,
         call: &Call,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Option<Vec<u8>>, String> {
         let tag = &description.contracts[contract].tag;
         let mut handle = self.client.open_tag(device, tag).map_err(text)?;
         let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
@@ -1189,11 +1206,15 @@ impl Tool<'_> {
         {
             Ok(n) => n,
             // No answer came back, so the call may still have applied: the service keeps the outcome.
-            Err(error) if reply_lost(&error) => return Err(self.asked(device, token, &error)),
+            Err(error) if reply_lost(&error) => {
+                let applied = self.asked(device, token, &error)?;
+                line(self.out, format_args!("{applied}"))?;
+                return Ok(None);
+            }
             Err(error) => return Err(self.refused(device, refusal(error, call))),
         };
         reply.truncate(n);
-        Ok(reply)
+        Ok(Some(reply))
     }
 
     fn read_item(
@@ -1207,7 +1228,9 @@ impl Tool<'_> {
             return Err(format!("{} takes arguments; use call", item.name));
         }
         let call = encode_call(method, &[] as &[&str])?;
-        let reply = self.invoke(device, description, contract, method, &call)?;
+        let Some(reply) = self.invoke(device, description, contract, method, &call)? else {
+            return Ok(());
+        };
         self.print_value(item, method, &reply)
     }
 
@@ -1462,7 +1485,9 @@ impl Tool<'_> {
         if method.job {
             return self.job(name, &description, contract, method, &call.args);
         }
-        let reply = self.invoke(name, &description, contract, method, &call)?;
+        let Some(reply) = self.invoke(name, &description, contract, method, &call)? else {
+            return Ok(());
+        };
         if method.returns != OwnedShape::Unit {
             let value = render_reply(method, &reply)?;
             line(self.out, format_args!("{value}"))?;
@@ -1594,5 +1619,39 @@ mod watch_wait_tests {
         assert_eq!(patience_bound(100, Patience::Bound(bound)), Some(bound));
         assert_eq!(patience_bound(1000, Patience::Bound(bound)), Some(bound));
         assert_eq!(patience_bound(100, Patience::Forever), None);
+    }
+}
+
+#[cfg(test)]
+mod lost_reply_tests {
+    use super::{Error, lost_reply};
+    use lemnos_client::Outcome;
+    use lemnos_core::Status;
+
+    #[test]
+    fn only_an_applied_call_is_ok_and_every_other_outcome_is_an_error() {
+        let lost = Error::TimedOut;
+        assert_eq!(
+            lost_reply("s", &lost, Ok(Outcome::Applied(Status::OK))),
+            Ok("s: no answer in time; outcome: applied (status 0)".to_string())
+        );
+        assert_eq!(
+            lost_reply("s", &lost, Ok(Outcome::NotApplied(Status::NOT_FOUND))),
+            Err("s: no answer in time; outcome: not applied (status -2)".to_string())
+        );
+        assert_eq!(
+            lost_reply("s", &lost, Ok(Outcome::Pending)),
+            Err("s: no answer in time; outcome: still running".to_string())
+        );
+        assert_eq!(
+            lost_reply("s", &lost, Ok(Outcome::Unknown)),
+            Err("s: no answer in time; outcome: unknown".to_string())
+        );
+        assert_eq!(
+            lost_reply("s", &lost, Err(Error::Disconnected)),
+            Err(
+                "s: no answer in time; outcome: unknown (not connected to the service)".to_string()
+            )
+        );
     }
 }
