@@ -352,6 +352,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 
 | Check | Result |
 |---|---|
+| [`RESTART-UNIT.md`](../testing/board-runs/RESTART-UNIT.md) | The daemon's restart through the restart helper under the packaged units, in QEMU under systemd: the helper's check and its refusals of a peer in group lemnos and of a request that is not verb and nonce; the StartUnit failure disarms a trial with its reason; an accepted reboot keeps the trial armed. Not run on the board; the BusyBox restart and the stop bound are not covered (see the note) |
 | [`MR1.md`](../testing/board-runs/MR1.md) | The maskrom reflash of the RK3566 board: the on-chip stage and the shared wire pass their tests on the host (the PC-side host is in another project); the reboot-mode entry, the watchdog's survival through the boot ROM, the 472 load address and the first SD write are untested on board. Nothing has been run on the board |
 | [`ZERO3E-MR1.md`](../testing/board-runs/ZERO3E-MR1.md) | The ZERO 3E maskrom run sheet (RK3566): the watchdog-return line (run, passed), the 471 stub that clears OS_REG0 (built, qemu-rehearsed), and steps E, 1a, 1b, U1 (not run: no PC-side host, no go). Untested on board. |
 | [`BOARD-USB0.md`](../testing/board-runs/BOARD-USB0.md) | The RK3566 bench board on its mainline image, asked for its identity and blocks: none of the open probe records can run there (no vendor service node, no NPU node); what an image or a serial console would unlock. Read-only session. **untested on board** |
