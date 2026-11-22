@@ -628,6 +628,15 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
         }
         None => load_map(&board, socs.as_deref())?,
     };
+    // The rules come before the overlay: a board whose overlay is refused still gets its late grants.
+    if let Some(file) = udev_out {
+        std::fs::write(&file, lemnos_devtree::udev::fragment(&board))
+            .map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = mdev_out {
+        std::fs::write(&file, lemnos_devtree::mdev::fragment(&board))
+            .map_err(|e| format!("{file}: {e}"))?;
+    }
     let generated = lemnos_devtree::generate(&board, &map, &driver_manifests())
         .map_err(|e| format!("{path}: {e}"))?;
     match overlay_out {
@@ -656,14 +665,6 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     if let Some(file) = cmdline_out {
         let line = kernel_cmdline(&generated.modprobe);
         std::fs::write(&file, line).map_err(|e| format!("{file}: {e}"))?;
-    }
-    if let Some(file) = udev_out {
-        std::fs::write(&file, lemnos_devtree::udev::fragment(&board))
-            .map_err(|e| format!("{file}: {e}"))?;
-    }
-    if let Some(file) = mdev_out {
-        std::fs::write(&file, lemnos_devtree::mdev::fragment(&board))
-            .map_err(|e| format!("{file}: {e}"))?;
     }
     if let Some(file) = bridge_env_out {
         let text = bridge_env::text(&board).map_err(|e| format!("{path}: --bridge-env: {e}"))?;

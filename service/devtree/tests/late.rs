@@ -87,11 +87,46 @@ fn a_board_with_no_fan_or_channel_gets_no_late_lines() {
     assert!(!mdev::fragment(&board).contains("Late grants"));
 }
 
+fn chip_fixture() -> BoardFile {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/late-grants-chip.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    board::parse(&text).unwrap_or_else(|e| panic!("{e}"))
+}
+
 #[test]
-fn a_channel_named_by_its_chip_name_gets_no_grant_and_the_generator_refuses_it() {
-    // `pwmchipN:CH` is not a name the board file's generator accepts (probe order): the board refuses it.
+fn the_chip_named_fixture_gives_its_fragments_as_golden() {
+    let board = chip_fixture();
+    assert_eq!(
+        udev::fragment(&board),
+        golden("late-grants-chip-udev.rules")
+    );
+    assert_eq!(mdev::fragment(&board), golden("late-grants-chip-mdev.conf"));
+}
+
+#[test]
+fn a_channel_named_by_its_chip_gets_a_rule_on_that_chips_export_and_no_other_chip() {
+    // `pwmchipN:CH` is granted by the chip's kernel name (the board's own number), on the chip's change for the export.
+    let text = udev::fragment(&chip_fixture());
+    let rule = text
+        .lines()
+        .find(|l| l.contains("ENV{EXPORT}==\"pwm1\""))
+        .expect("the chip channel's rule");
+    assert!(rule.contains("KERNEL==\"pwmchip0\""), "{rule}");
+    assert!(rule.contains("ACTION==\"change\""), "{rule}");
+    assert!(rule.contains("$sys$devpath/$env{EXPORT}/period"), "{rule}");
+    assert!(!text.contains("pwmchip1"), "{text}");
+    let mdev = mdev::fragment(&chip_fixture());
+    assert!(
+        mdev.contains("-SUBSYSTEM=^pwm$;EXPORT=^pwm1$;^pwmchip0$ root:root 0660 */bin/sh -c"),
+        "{mdev}"
+    );
+}
+
+#[test]
+fn a_chip_name_that_is_not_pwmchip_digits_gets_no_grant() {
     let board = board_with(
-        "[[devices]]\nid = \"f\"\ndriver = \"pwm-channel-fan\"\nuses = { pwm = \"pwmchip0:1\" }\nconfig = { frequency_hz = 25000, min_duty = 200, kick_ms = 500 }\n",
+        "[[devices]]\nid = \"f\"\ndriver = \"pwm-channel-fan\"\nuses = { pwm = \"pwmchipX:1\" }\nconfig = { frequency_hz = 25000, min_duty = 200, kick_ms = 500 }\n",
     );
     assert!(!udev::fragment(&board).contains("ENV{EXPORT}"));
 }

@@ -137,6 +137,10 @@ pub fn late_line(late: &Late) -> String {
                 chmod_loop(&attrs, "/sys$DEVPATH")
             )
         }
+        Late::PwmChip { chip, channel } => format!(
+            "-SUBSYSTEM=^pwm$;EXPORT=^pwm{channel}$;^{chip}$ root:root 0660 */bin/sh -c '{}'",
+            chmod_loop(&attrs, "/sys$DEVPATH/$EXPORT")
+        ),
         Late::PwmChannel { node, channel } => format!(
             "-SUBSYSTEM=^pwm$;EXPORT=^pwm{channel}$;^pwmchip[0-9]+$ root:root 0660 */bin/sh -c 'test \"$(readlink -f /sys$DEVPATH/device/of_node)\" = /sys/firmware/devicetree/base{node} && {}'",
             chmod_loop(&attrs, "/sys$DEVPATH/$EXPORT")

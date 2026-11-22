@@ -46,6 +46,8 @@ BASE = {
     "packaging/init/mdev.conf.fragment": "# header\n^foo0$                  root:lemnos 0660\n",
     "service/devtree/tests/golden/late-grants-udev.rules": "# header\n",
     "service/devtree/tests/golden/late-grants-mdev.conf": "# header\n",
+    "service/devtree/tests/golden/late-grants-chip-udev.rules": "# header\n",
+    "service/devtree/tests/golden/late-grants-chip-mdev.conf": "# header\n",
     "packaging/systemd/grants.toml": """grant = [
   {path = "/run/lemnos", kind = "path", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "RuntimeDirectory:lemnos", drivers = ["service/lemnosd"], reason = "the socket directory"},
   {path = "CAP_SYS_RAWIO", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SYS_RAWIO", drivers = ["service/lemnosd"], needle = "CAP_SYS_RAWIO", reason = "the kept capability"},

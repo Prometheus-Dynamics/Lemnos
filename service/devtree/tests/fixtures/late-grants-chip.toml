@@ -1,0 +1,21 @@
+# The late-grant fixture for a chip-named channel (HOTPLUG-GRANT): a hwmon fan named `pwmfan`, and a PWM channel the
+# board names by its kernel chip, `pwmchip0:1`. The board's overlay cannot place a chip-named channel, so `tree` refuses
+# its overlay; its late-grant rules are still written (service/ctl tree writes them first). The golden files beside this
+# one are those rules.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "late-grants-chip"
+soc = "bcm2712-rp1"
+
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+config = { name = "pwmfan" }
+
+[[devices]]
+id = "channel-fan"
+driver = "pwm-channel-fan"
+uses = { pwm = "pwmchip0:1" }
+config = { frequency_hz = 25000, min_duty = 200, kick_ms = 500 }

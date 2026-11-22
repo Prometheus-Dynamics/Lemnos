@@ -80,6 +80,9 @@ HOTPLUG_GROUP = "chgrp lemnos"
 # The generator's golden output for the late-grant fixture board: the lines a root-phase row may name.
 HOTPLUG_UDEV_GOLDEN = "service/devtree/tests/golden/late-grants-udev.rules"
 HOTPLUG_MDEV_GOLDEN = "service/devtree/tests/golden/late-grants-mdev.conf"
+# The same for the chip-named channel's fixture (`pwmchipN:CH`).
+HOTPLUG_CHIP_UDEV_GOLDEN = "service/devtree/tests/golden/late-grants-chip-udev.rules"
+HOTPLUG_CHIP_MDEV_GOLDEN = "service/devtree/tests/golden/late-grants-chip-mdev.conf"
 
 # Directives whose values are grants (the unit and drop-ins). A value's tokens are checked one by one.
 GRANT_DIRECTIVES = ("ReadWritePaths", "RuntimeDirectory", "CapabilityBoundingSet", "SystemCallFilter",
@@ -367,14 +370,14 @@ def hotplug_golden():
     """(udev, mdev) the late-grant lines the board's generator makes, from its golden output for the fixture board
     (service/devtree/tests/golden/late-grants-*: `lemnos-ctl tree` renders the same text, and a test holds them equal)."""
     out = []
-    for path in (HOTPLUG_UDEV_GOLDEN, HOTPLUG_MDEV_GOLDEN):
+    for path in (HOTPLUG_UDEV_GOLDEN, HOTPLUG_MDEV_GOLDEN, HOTPLUG_CHIP_UDEV_GOLDEN, HOTPLUG_CHIP_MDEV_GOLDEN):
         try:
             text = read(path)
         except OSError as error:
             fail(f"{path}: the generator's late-grant golden is not there: {error.strerror}")
             text = ""
         out.append({" ".join(raw.split()) for raw in text.split("\n") if HOTPLUG_GROUP in raw})
-    return out[0], out[1]
+    return out[0] | out[2], out[1] | out[3]
 
 
 def check_hotplug(rows):

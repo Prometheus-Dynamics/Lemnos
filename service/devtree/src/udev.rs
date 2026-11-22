@@ -62,7 +62,7 @@ pub fn late_rules(late: &Late) -> Vec<String> {
             let matching = match late {
                 Late::HwmonName(name) => format!(r#"ATTR{{name}}=="{name}""#),
                 Late::HwmonDir(dir) => format!(r#"KERNEL=="{dir}""#),
-                Late::PwmChannel { .. } => unreachable!(),
+                Late::PwmChannel { .. } | Late::PwmChip { .. } => unreachable!(),
             };
             attrs
                 .iter()
@@ -74,6 +74,18 @@ pub fn late_rules(late: &Late) -> Vec<String> {
                     )
                 })
                 .collect()
+        }
+        Late::PwmChip { chip, channel } => {
+            let files: Vec<String> = attrs
+                .iter()
+                .map(|a| format!("$sys$devpath/$env{{EXPORT}}/{a}"))
+                .collect();
+            let files = files.join(" ");
+            vec![format!(
+                r#"SUBSYSTEM=="pwm", ACTION=="change", KERNEL=="{chip}", ENV{{EXPORT}}=="pwm{channel}", RUN+="/bin/chgrp {g} {files}", RUN+="/bin/chmod {m} {files}""#,
+                g = crate::permissions::DAEMON_GROUP,
+                m = crate::permissions::NODE_MODE,
+            )]
         }
         Late::PwmChannel { node, channel } => {
             let files: Vec<String> = attrs

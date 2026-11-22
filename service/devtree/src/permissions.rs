@@ -145,6 +145,10 @@ pub enum Late {
     /// writes it, from `/`). Its chip is found by the node its parent device names (`device/of_node`), since the
     /// kernel's chip number is probe order.
     PwmChannel { node: String, channel: u32 },
+    /// A PWM channel on the chip the board names by its kernel name (`pwmchipN:CH`). The number is the board's
+    /// own: the rule holds for the boot the board file describes, and a boot that numbers the chips otherwise
+    /// grants nothing (the board's `validate` warns about the name).
+    PwmChip { chip: String, channel: u32 },
 }
 
 /// The attributes a fan's late grant gives the daemon: its duty and the mode that makes the duty take effect.
@@ -159,7 +163,7 @@ impl Late {
     pub fn attributes(&self) -> &'static [&'static str] {
         match self {
             Self::HwmonName(_) | Self::HwmonDir(_) => &HWMON_ATTRIBUTES,
-            Self::PwmChannel { .. } => &CHANNEL_ATTRIBUTES,
+            Self::PwmChannel { .. } | Self::PwmChip { .. } => &CHANNEL_ATTRIBUTES,
         }
     }
 }
@@ -203,6 +207,22 @@ pub fn late_grants(board: &BoardFile) -> Vec<Late> {
                 let Some(name) = device.uses.get("pwm") else {
                     continue;
                 };
+                if let Some((chip, channel)) = name
+                    .split_once(':')
+                    .filter(|(c, _)| c.starts_with("pwmchip"))
+                {
+                    let digits = chip.strip_prefix("pwmchip").unwrap_or("");
+                    if let Ok(channel) = channel.parse::<u32>()
+                        && !digits.is_empty()
+                        && digits.chars().all(|c| c.is_ascii_digit())
+                    {
+                        out.push(Late::PwmChip {
+                            chip: chip.to_owned(),
+                            channel,
+                        });
+                    }
+                    continue;
+                }
                 let Some((node, channel)) =
                     name.strip_prefix("pwm:").and_then(|r| r.rsplit_once(':'))
                 else {
