@@ -6,8 +6,9 @@
 //! removed when it ends. Through the Lemnos module the claim and its client are the module's, as
 //! for `pio-i2c`; without it the stock PIO node is used. The stock node must exist either way.
 //!
-//! The program is placed at the first origin that fits in instruction memory, and its jumps are
-//! moved there. The clock divider comes from the block's clock, 200 MHz on the RP1.
+//! The program is placed at the first origin that fits in instruction memory. It goes to the loader
+//! as the driver wrote it, origin-relative: the RP1 firmware moves every JMP by the origin it loads
+//! at, so moving them here as well would send each jump that far past its target. The clock divider comes from the block's clock, 200 MHz on the RP1.
 
 use std::io;
 use std::path::Path;
@@ -70,21 +71,6 @@ fn clkdiv_for(hz: u32) -> Result<(u16, u8), String> {
     Ok((int as u16, frac))
 }
 
-/// `program` with every JMP target moved by `base`. A JMP is the instruction whose top three bits
-/// are zero; its target is the low five bits.
-fn relocate(program: &[u16], base: u16) -> Vec<u16> {
-    program
-        .iter()
-        .map(|&word| {
-            if word >> 13 == 0 {
-                (word & !0x1f) | ((word & 0x1f) + base)
-            } else {
-                word
-            }
-        })
-        .collect()
-}
-
 /// A validated job: the program's length and the wrap window, in range.
 fn check(job: &PioJob<'_>) -> Result<(), ErrorKind> {
     let len = job.program.len();
@@ -131,10 +117,7 @@ impl PioOut {
         let len = job.program.len();
         let mut base = None;
         for origin in 0..=(INSTRUCTION_COUNT - len) as u16 {
-            match self
-                .device
-                .add_program(origin, &relocate(job.program, origin))
-            {
+            match self.device.add_program(origin, job.program) {
                 Ok(placed) if placed == origin => {
                     base = Some(origin);
                     break;
@@ -296,14 +279,6 @@ mod tests {
         );
         assert_eq!(open(&dir, "i2c-1", None).err(), Some(Status::NOT_FOUND));
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn jumps_move_with_the_program_and_nothing_else_does() {
-        // jmp 3 (cond not-x, side 1 delay 1) and jmp 0 (always), then an out and a nop.
-        let program = [0x1123, 0x1400, 0x6221, 0xa442];
-        let moved = relocate(&program, 5);
-        assert_eq!(moved, vec![0x1128, 0x1405, 0x6221, 0xa442]);
     }
 
     #[test]

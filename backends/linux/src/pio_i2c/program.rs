@@ -111,13 +111,16 @@ fn mov_null(side: bool, delay: u16) -> u16 {
     0xa000 | (ds(side, delay) << 8) | (MOV_PINDIRS << 5) | 0b011
 }
 
-/// The program, loaded at instruction offset `base`.
-pub fn program(base: u16, scl: u16) -> [u16; PROGRAM_LEN] {
-    let b = base;
-    let low_pull = b + LOW_PULL;
-    let data = b + DATA;
-    let write = b + WRITE_BODY;
-    let read = b + READ_BODY;
+/// The program image as the loader takes it: origin-relative, every JMP target counted from
+/// instruction 0 of the program. The RP1 firmware moves each JMP by the origin it loads the image
+/// at (the Raspberry Pi kernel's PIO drivers and piolib hand it origin-0 images and never move a
+/// jump themselves). Everything sent to a running machine is absolute instead: exec'd jumps, the
+/// `out pc` entries of data words, the wrap and the start PC all add the base.
+pub fn program(scl: u16) -> [u16; PROGRAM_LEN] {
+    let low_pull = LOW_PULL;
+    let data = DATA;
+    let write = WRITE_BODY;
+    let read = READ_BODY;
     let mut p = [0u16; PROGRAM_LEN];
     // 0..=1: the op table. Entries base+0 and base+1 are the WRITE and READ bodies.
     p[0] = jmp(COND_ALWAYS, write, LOW, 0);
@@ -290,21 +293,21 @@ mod tests {
 
     #[test]
     fn program_jump_targets_stay_inside_the_program() {
-        for base in 0..=5u16 {
-            let p = program(base, 7);
-            assert_eq!(p.len(), PROGRAM_LEN);
-            assert!(usize::from(base) + PROGRAM_LEN <= 32);
-            for (i, &word) in p.iter().enumerate() {
-                if word >> 13 == 0 {
-                    let target = word & 0x1f;
-                    assert!(
-                        (base..base + PROGRAM_LEN as u16).contains(&target),
-                        "instruction {i} jumps to {target}, outside base {base}"
-                    );
-                }
+        let p = program(7);
+        assert_eq!(p.len(), PROGRAM_LEN);
+        for (i, &word) in p.iter().enumerate() {
+            if word >> 13 == 0 {
+                let target = word & 0x1f;
+                assert!(
+                    usize::from(target) < PROGRAM_LEN,
+                    "instruction {i} jumps to {target}, outside the program"
+                );
             }
-            assert_eq!(p[0] & 0x1f, base + WRITE_BODY);
-            assert_eq!(p[1] & 0x1f, base + READ_BODY);
+        }
+        assert_eq!(p[0] & 0x1f, WRITE_BODY);
+        assert_eq!(p[1] & 0x1f, READ_BODY);
+        for base in 0..=5u16 {
+            assert!(usize::from(base) + PROGRAM_LEN <= 32);
             assert_eq!(initial_pc(base), base + REL_PULL);
             assert_eq!(idle_wrap(base), (base + REL_PULL, base + REL_WRAP_TOP));
         }

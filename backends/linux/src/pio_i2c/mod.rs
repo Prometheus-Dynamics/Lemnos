@@ -11,6 +11,8 @@
 
 mod bus;
 pub(crate) mod device;
+#[cfg(test)]
+mod model;
 mod program;
 mod protocol;
 mod selector;

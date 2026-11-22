@@ -453,7 +453,7 @@ fn pin_mask(sda: u8, scl: u8) -> u32 {
 fn load_program<D: Pio>(device: &D, scl: u8) -> io::Result<u16> {
     let mut last = None;
     for base in 0..=(INSTRUCTION_COUNT as u16 - PROGRAM_LEN as u16) {
-        match device.add_program(base, &program(base, u16::from(scl))) {
+        match device.add_program(base, &program(u16::from(scl))) {
             Ok(offset) if offset == base => return Ok(base),
             Ok(offset) => {
                 let _ = device.remove_program(offset, PROGRAM_LEN as u16);
