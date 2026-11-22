@@ -622,6 +622,14 @@ impl BayVolume<FileSectors> {
             crate::boot_node::open(node, true).map_err(|e| format!("{}: {e}", node.display()))?;
         BayVolume::on(FileSectors::new(file, 0)).map_err(|e| format!("{}: {e}", node.display()))
     }
+
+    /// Opens the node read-only and reads its bay layout: the reads (a slot's bay, the layout) of a daemon
+    /// whose root phase handed the boot partition over read-only. Nothing is mounted.
+    pub fn open_read(node: &Path) -> Result<Self, String> {
+        let file =
+            crate::boot_node::open(node, false).map_err(|e| format!("{}: {e}", node.display()))?;
+        BayVolume::on(FileSectors::new(file, 0)).map_err(|e| format!("{}: {e}", node.display()))
+    }
 }
 
 impl<D: Sectors + ReadAt> BayVolume<D> {

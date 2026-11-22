@@ -43,6 +43,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use crate::twocopy::crc32;
 
@@ -242,16 +243,109 @@ pub trait EnvDev {
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()>;
 }
 
-/// The environment's node, a block device or a file, opened read-write.
+/// Why a write of a node the root phase handed over read only is refused, by name. The reason the root
+/// phase gave follows it (a FAT environment on the boot partition, say).
+pub const READ_ONLY: &str =
+    "the daemon holds the U-Boot environment read only, so nothing in it is written";
+
+/// A node the root phase opened before the daemon dropped to its own user: the daemon can't open it by
+/// name (it is `root:disk`), so [`FileEnv::open`] hands out a copy of this file instead.
+struct Handed {
+    node: PathBuf,
+    /// The disk whose environment partition this is, for the GPT form (`None` for a device form node).
+    disk: Option<PathBuf>,
+    file: File,
+    /// Why writes are refused, `None` when the file is read-write.
+    refused: Option<String>,
+    /// The partitions the root phase found named `uboot-env` on `disk` (see [`Handover::named`]).
+    named: usize,
+}
+
+static HANDED: Mutex<Vec<Handed>> = Mutex::new(Vec::new());
+
+/// The environment partition of a disk, as the root phase handed it over ([`hand_over`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handover {
+    /// The partition's own node, opened by the root phase (not the disk: the kernel confines writes to it).
+    pub node: PathBuf,
+    /// Why writes are refused, `None` when the partition is read-write.
+    pub refused: Option<String>,
+    /// How many partitions of the disk's primary table the root phase found named `uboot-env` (what
+    /// `boot.cmd` asks before it saves): the daemon can't read that table by name, so it keeps this.
+    pub named: usize,
+}
+
+/// Keeps `file`, opened on `node` by the root phase before the drop, for [`FileEnv::open`]. `disk` is
+/// the disk the node is a partition of (`None` for a device form node, which is its own environment).
+/// A later hand-over of the same node replaces the earlier one. The file is close-on-exec (the standard
+/// library opens every file so), so no child process inherits it.
+pub fn hand_over(
+    node: &Path,
+    disk: Option<&Path>,
+    file: File,
+    refused: Option<String>,
+    named: usize,
+) {
+    let mut handed = HANDED.lock().unwrap_or_else(PoisonError::into_inner);
+    handed.retain(|h| h.node != node);
+    handed.push(Handed {
+        node: node.to_path_buf(),
+        disk: disk.map(Path::to_path_buf),
+        file,
+        refused,
+        named,
+    });
+}
+
+/// The environment partition the root phase handed over for `disk`, if it did.
+pub fn handover_of(disk: &Path) -> Option<Handover> {
+    let handed = HANDED.lock().unwrap_or_else(PoisonError::into_inner);
+    handed
+        .iter()
+        .find(|h| h.disk.as_deref() == Some(disk))
+        .map(|h| Handover {
+            node: h.node.clone(),
+            refused: h.refused.clone(),
+            named: h.named,
+        })
+}
+
+/// The environment's node, a block device or a file. [`FileEnv::open`] opens it read-write, or takes the
+/// copy the root phase handed over ([`hand_over`]).
 pub struct FileEnv {
     file: File,
+    /// Why writes are refused (the file is read-only), `None` when they are allowed.
+    refused: Option<String>,
 }
 
 impl FileEnv {
-    /// Opens `node` read-write. Nothing is mounted.
+    /// Opens `node` read-write, or the copy the root phase handed over for it (read-only when that was
+    /// refused). Nothing is mounted.
     pub fn open(node: &Path) -> io::Result<Self> {
+        {
+            let handed = HANDED.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(h) = handed.iter().find(|h| h.node == node) {
+                return Ok(Self {
+                    file: h.file.try_clone()?,
+                    refused: h.refused.clone(),
+                });
+            }
+        }
         let file = OpenOptions::new().read(true).write(true).open(node)?;
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            refused: None,
+        })
+    }
+
+    /// Opens `node` read-only, by name: the root phase reads the disk's table with it, and no write is
+    /// possible through it.
+    pub fn open_read(node: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new().read(true).open(node)?;
+        Ok(Self {
+            file,
+            refused: Some("it was opened read only".into()),
+        })
     }
 
     /// Opens `node` as [`FileEnv::open`] does, and returns its length in bytes (a block device's
@@ -269,6 +363,12 @@ impl EnvDev for FileEnv {
     }
 
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        if let Some(why) = &self.refused {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{READ_ONLY} ({why})"),
+            ));
+        }
         self.file.write_all_at(bytes, offset)?;
         self.file.sync_data()
     }
@@ -367,7 +467,9 @@ pub enum FatEnv {
 
 /// The state of [`FAT_ENV_FILE`] on the boot partition at `boot`.
 pub fn fat_env(boot: &Path) -> FatEnv {
-    let mut file = match File::open(boot) {
+    // Through the boot node's own open: the daemon holds the boot partition only as the root phase handed it
+    // over, so this is the one way it can read the FAT file at run time.
+    let mut file = match crate::boot_node::open(boot, false) {
         Ok(file) => file,
         Err(e) => return FatEnv::Unreadable(format!("{}: {e}", boot.display())),
     };
@@ -393,6 +495,22 @@ pub fn refuse_if_fat_env(boot: &Path) -> Result<(), String> {
             "refusing to write the U-Boot environment on the GPT partition: the boot partition can't be read as FAT, so {FAT_ENV_FILE} can't be ruled out ({why}); nothing was written"
         )),
     }
+}
+
+/// `geometry`, refused by name when a copy runs past the end of the `bytes`-long node.
+fn within(geometry: Geometry, bytes: u64) -> Result<Geometry, String> {
+    let padded = geometry.padded() as u64;
+    for (name, at) in [
+        ("the first copy", geometry.offset),
+        ("the second copy", geometry.offset_redund),
+    ] {
+        if at.saturating_add(padded) > bytes {
+            return Err(format!(
+                "{name} of the environment ({padded} bytes at {at}) runs past the end of its {bytes}-byte device"
+            ));
+        }
+    }
+    Ok(geometry)
 }
 
 pub fn set<D: EnvDev + ?Sized>(
@@ -529,18 +647,18 @@ impl Place {
             }
             Self::Device { geometry, .. } => *geometry,
         };
-        let padded = geometry.padded() as u64;
-        for (name, at) in [
-            ("the first copy", geometry.offset),
-            ("the second copy", geometry.offset_redund),
-        ] {
-            if at.saturating_add(padded) > bytes {
-                return Err(format!(
-                    "{name} of the environment ({padded} bytes at {at}) runs past the end of its {bytes}-byte device"
-                ));
-            }
-        }
-        Ok(geometry)
+        within(geometry, bytes)
+    }
+
+    /// The geometry of a GPT place whose environment partition is the node open (`bytes` long): the
+    /// root phase's hand-over of the partition, whose offsets are the partition's own, not the disk's.
+    /// Refused for the device form, whose geometry is the one it states.
+    pub fn geometry_in_partition(&self, bytes: u64) -> Result<Geometry, String> {
+        let Self::Gpt { size } = self else {
+            return Err("the device form's geometry is the one it states".into());
+        };
+        let geometry = Geometry::in_partition(*size, 0, bytes / SECTOR as u64)?;
+        within(geometry, bytes)
     }
 
     /// The locator's text: a header that says who wrote it, then one `key = value` per line.

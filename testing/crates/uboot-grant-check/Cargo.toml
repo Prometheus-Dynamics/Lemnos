@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-uboot-grant-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The U-Boot environment's write path in the QEMU harness: a guest with a GPT environment partition, the daemon's root phase and its drop, the daemon's set_default through the partition the root phase handed over, and the environment read back as root"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-driver-system-slots = { path = "../../../drivers/system-slots" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+lemnos-slot-store = { path = "../../../drivers/slot-store" }
+rustix = { version = "1.1.6", features = ["fs", "mount", "process", "system"] }

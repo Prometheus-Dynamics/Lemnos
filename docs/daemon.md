@@ -154,8 +154,11 @@ socket's directory. After the gadget helper is forked, the drivers' root phases 
 read-only, read whose records are on it, and open it read-write only when they are this system's; the
 descriptor is kept for the driver after the drop (`lemnos_slot_store::boot_node::hand_over`), so the node
 stays root's. Each prints one line, `lemnosd: root phase: <driver>: <what it did>`. The U-Boot
-environment's whole-disk node, the data partition's grow and UBI volumes are not handed over: under the
-unit their writes fail by name. The USB gadgets are not a step: the root phase describes them (`gadget::describe`) and
+environment is handed over too, by its own node: the `uboot` record's root phase (`uboot::root_phase`) hands the boot
+partition over read only, and the U-Boot environment's partition (the GPT form: the node the kernel names for the partition
+the environment's type GUID is on, found through sysfs; or the device a `uboot_env_device` names) read-write, or read only
+when the boot partition holds the FAT environment. The disk's own node is not handed over. The data partition's grow and
+UBI volumes are not handed over either: under the unit their writes fail by name. The USB gadgets are not a step: the root phase describes them (`gadget::describe`) and
 forks the [privileged helper](#privileged-helper) and its root parent for them, which keep root after the drop. No unit or
 script gives the daemon a user, or a file capability. The steps and the drop are described in
 [`packaging/README.md`](../packaging/README.md#one-privilege-path).

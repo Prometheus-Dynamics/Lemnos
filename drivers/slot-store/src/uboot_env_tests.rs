@@ -824,3 +824,49 @@ fn a_restart_count_clear_cut_at_every_byte_leaves_the_old_or_the_new_environment
         }
     }
 }
+
+#[test]
+fn a_node_handed_over_read_only_refuses_the_write_by_name_with_the_reason() {
+    use super::{FileEnv, READ_ONLY, hand_over};
+    use std::os::unix::fs::FileExt;
+    // A stand-in node: a regular file (a block node in the daemon), handed over as the root phase does.
+    let node = std::env::temp_dir().join(format!("lemnos-uboot-ro-{}", std::process::id()));
+    std::fs::write(&node, vec![0u8; 4096]).unwrap();
+    let read = std::fs::File::open(&node).unwrap();
+    hand_over(
+        &node,
+        None,
+        read,
+        Some("the boot partition holds uboot.env".into()),
+        0,
+    );
+    let mut dev = FileEnv::open(&node).unwrap();
+    let err = dev.write_at(0, &[1, 2, 3]).unwrap_err();
+    assert!(err.to_string().starts_with(READ_ONLY), "{err}");
+    assert!(
+        err.to_string()
+            .contains("the boot partition holds uboot.env"),
+        "{err}"
+    );
+    // Reads go through the handed file, and nothing reached the node.
+    let mut buf = [9u8; 3];
+    super::EnvDev::read_at(&mut dev, 0, &mut buf).unwrap();
+    assert_eq!(buf, [0, 0, 0]);
+    assert!(std::fs::read(&node).unwrap().iter().all(|b| *b == 0));
+    // A read-write hand-over of the same node takes its place: writes go through.
+    let write = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&node)
+        .unwrap();
+    hand_over(&node, None, write, None, 0);
+    let mut dev = FileEnv::open(&node).unwrap();
+    super::EnvDev::write_at(&mut dev, 0, &[7, 7, 7]).unwrap();
+    let mut out = [0u8; 3];
+    std::fs::File::open(&node)
+        .unwrap()
+        .read_exact_at(&mut out, 0)
+        .unwrap();
+    assert_eq!(out, [7, 7, 7]);
+    let _ = std::fs::remove_file(&node);
+}

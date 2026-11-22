@@ -51,9 +51,14 @@ fn le64(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(word)
 }
 
-/// The primary table's entries, each `(type GUID bytes, first, last, name)`. Refused by name when the
+/// One entry of the primary table: `(type GUID bytes, partition, name, number)`.
+type Entry = ([u8; 16], Part, String, u32);
+
+/// The primary table's entries, each `(type GUID bytes, first, last, name, number)`, the number being the
+/// partition's one-based position in the entry array: the kernel's partition number for a GPT disk (its
+/// `efi_partition` numbers each entry `index + 1`, empty entries included). Refused by name when the
 /// header or the entry array can't be read or fails its CRC.
-fn entries<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Vec<([u8; 16], Part, String)>, String> {
+fn entries<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Vec<Entry>, String> {
     let mut header = vec![0u8; SECTOR];
     dev.read_at(SECTOR as u64, &mut header)
         .map_err(|e| format!("the GPT header can't be read: {e}"))?;
@@ -85,7 +90,7 @@ fn entries<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Vec<([u8; 16], Part, Strin
         return Err("the GPT entry array's CRC is wrong".into());
     }
     let mut out = Vec::new();
-    for raw in table.chunks_exact(entry as usize) {
+    for (index, raw) in table.chunks_exact(entry as usize).enumerate() {
         if raw[..16] == [0u8; 16] {
             continue;
         }
@@ -102,7 +107,7 @@ fn entries<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Vec<([u8; 16], Part, Strin
         let name = String::from_utf16_lossy(&units);
         let mut kind = [0u8; 16];
         kind.copy_from_slice(&raw[..16]);
-        out.push((kind, part, name));
+        out.push((kind, part, name, index as u32 + 1));
     }
     Ok(out)
 }
@@ -110,12 +115,18 @@ fn entries<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Vec<([u8; 16], Part, Strin
 /// The one partition with the environment's type GUID. Refused by name when the disk has no valid
 /// GPT, no such partition, or several.
 pub fn find_env_partition<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Part, String> {
-    let found: Vec<Part> = entries(dev)?
+    find_env_partition_numbered(dev).map(|(part, _)| part)
+}
+
+/// [`find_env_partition`], with the partition's number (see [`entries`]): the number the kernel gives
+/// the partition's node (`/sys/block/<disk>/<node>/partition`).
+pub fn find_env_partition_numbered<D: EnvDev + ?Sized>(dev: &mut D) -> Result<(Part, u32), String> {
+    let found: Vec<(Part, u32)> = entries(dev)?
         .into_iter()
-        .filter(|(kind, _, _)| *kind == ENV_TYPE_BYTES)
-        .map(|(_, part, _)| part)
+        .filter(|(kind, _, _, _)| *kind == ENV_TYPE_BYTES)
+        .map(|(_, part, _, number)| (part, number))
         .collect();
-    if found.iter().any(|part| part.last < part.first) {
+    if found.iter().any(|(part, _)| part.last < part.first) {
         return Err("a GPT entry ends before it starts".into());
     }
     match found.as_slice() {
@@ -135,7 +146,7 @@ pub fn find_env_partition<D: EnvDev + ?Sized>(dev: &mut D) -> Result<Part, Strin
 pub fn count_named<D: EnvDev + ?Sized>(dev: &mut D, name: &str) -> Result<usize, String> {
     Ok(entries(dev)?
         .iter()
-        .filter(|(_, _, found)| found == name)
+        .filter(|(_, _, found, _)| found == name)
         .count())
 }
 
@@ -181,6 +192,31 @@ mod tests {
         let env = FileEnv::open(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         env
+    }
+
+    #[test]
+    fn the_environment_partition_is_numbered_by_its_entry_position() {
+        // The kernel numbers a GPT partition by its entry's place in the array, one-based, and an empty entry
+        // takes a number too. Here the environment is the second entry: partition 2, the disk's `p2`.
+        let disk = image(&[(OTHER, 34, 99), (ENV_TYPE_BYTES, 100, 227)], 512);
+        assert_eq!(
+            find_env_partition_numbered(&mut on(&disk, "numbered")).unwrap(),
+            (
+                Part {
+                    first: 100,
+                    last: 227
+                },
+                2
+            )
+        );
+        // An empty first entry (all-zero type) is skipped but still counted: the environment is partition 2.
+        let empty_first = image(&[([0; 16], 0, 0), (ENV_TYPE_BYTES, 100, 227)], 512);
+        assert_eq!(
+            find_env_partition_numbered(&mut on(&empty_first, "numbered-empty"))
+                .unwrap()
+                .1,
+            2
+        );
     }
 
     #[test]

@@ -96,6 +96,25 @@ pub fn node_for_items(items: &[&str]) -> Result<PathBuf, String> {
     node_for_table(&table)
 }
 
+/// The device node of partition `number` of the whole disk `disk` (a node under the roots' `dev`), found
+/// through sysfs: the kernel names each partition's entry under the disk's (`<disk>p<N>` or `<disk><N>`) and
+/// gives its number in the entry's `partition` file, and its node is that name under `dev`. Nothing reads the
+/// disk's table here, so the daemon can resolve it (its root phase has no more to read than the number).
+///
+/// # Errors
+///
+/// `disk` is not a node name, or the disk has no partition `number` in sysfs.
+pub fn partition_node(disk: &Path, number: u32) -> Result<PathBuf, String> {
+    let roots = current();
+    let whole = disk
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} is not a disk's node", disk.display()))?;
+    disk::partition_of(&roots.sys, whole, number)
+        .map(|part| roots.dev.join(part.name))
+        .ok_or_else(|| format!("{whole} has no partition {number} in sysfs"))
+}
+
 /// A boot node the daemon's root phase opened before it dropped to its own user: the dropped daemon
 /// can't open the node by name (it is `root:disk 0660`), so every reader and writer of the boot
 /// partition goes through [`open`], which hands out a copy of this one.

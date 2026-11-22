@@ -1114,6 +1114,14 @@ is newer), and on a tie the primary copy, the one at `CONFIG_ENV_OFFSET` (in the
   not set while U-Boot runs on its built-in defaults, so the script sets it and runs `saveenv`.
 - The serial byte is not covered by the CRC. Its order makes that harmless: the new serial is the
   active one plus one, so a torn copy whose serial still reads old loses to the active copy.
+- **Who writes it at run time.** The daemon writes the environment through the file its root phase handed
+  over (`uboot::root_phase`, `lemnos_slot_store::uboot_env::hand_over`), never by opening the disk: the disk is
+  `root:disk` and the daemon's user is not in that group. The root phase finds the partition by its type
+  GUID, numbers it from the GPT (the entry's place in the table, which is the kernel's partition number), and
+  hands over that partition's node. Its offsets are the partition's own, and the kernel confines the write to
+  it. Read only, the daemon refuses a write by name with the reason (`refusing to write the U-Boot environment
+  on the GPT partition: the boot partition holds uboot.env`, when the FAT file is there). A device-form
+  environment is handed over as its device. slot-init writes the same copies in its own unit, as root.
 - slot-init reaches the environment through `uboot-env.txt`, the locator at the boot partition's root,
   which `lemnos-ctl boot-partition` writes at image build from the board file (`form = "gpt"` with the
   size, or `form = "device"` with the device, size and offsets; unknown keys, a wrong version or

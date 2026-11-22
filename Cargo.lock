@@ -3160,6 +3160,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-uboot-grant-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-driver-system-slots",
+ "lemnos-linux-sys",
+ "lemnos-slot-store",
+ "rustix",
+]
+
+[[package]]
 name = "lemnos-unbind-check"
 version = "2.0.1-dev"
 dependencies = [

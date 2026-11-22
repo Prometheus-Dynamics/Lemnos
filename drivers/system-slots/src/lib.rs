@@ -325,9 +325,11 @@ fn boot_node_of(cfg: &Config<'_>) -> core::result::Result<PathBuf, String> {
 /// The daemon's root phase for a slots device, run as root before the drop to the daemon's user,
 /// which can't open the boot node by name. For the `tryboot` record the boot partition is probed
 /// read only and handed over read-write only when its records are ours
-/// (`lemnos_slot_store::boot_raw::prepare`). The other records' nodes are not handed over (the
-/// `uboot` record's environment is on the whole disk; raw NAND's volumes come and go): under the
-/// daemon's own user their writes fail, by name, in health. Returns one line for the daemon's log.
+/// (`lemnos_slot_store::boot_raw::prepare`). For the `uboot` record the boot partition is handed over
+/// read only, and the environment's own partition (the GPT form) or named device is handed over, read-write
+/// unless the boot partition holds the FAT environment ([`uboot::root_phase`]). Raw NAND's volumes come and
+/// go and are not handed over: under the daemon's own user their writes fail, by name, in health. Returns one
+/// line for the daemon's log.
 #[must_use]
 pub fn root_phase(cfg: &Config<'_>) -> String {
     use lemnos_slot_store::boot_raw::{Prepared, prepare};
@@ -341,6 +343,12 @@ pub fn root_phase(cfg: &Config<'_>) -> String {
                 Prepared::Failed(why) => format!("not handed over: {why}"),
             },
             Err(why) => format!("the boot partition isn't known: {why}"),
+        },
+        "uboot" => match uboot_env_place(cfg) {
+            Ok(place) => uboot::root_phase(&place, &boot_disk_of(cfg), &boot_node_of(cfg)),
+            Err(_) => {
+                "the uboot record's environment settings are refused: nothing is handed over".into()
+            }
         },
         other => format!(
             "the {other} record's node is not handed over: its writes need root, and fail by name under the daemon's user"

@@ -12,13 +12,15 @@
 //! script mirrors. The file-based record of the earlier design (`boot-record.env` on the boot
 //! partition) is refused at run time: nothing on the boot partition is written for it.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lemnos_slot_store::bays::{self, Protected};
+use lemnos_slot_store::boot_node;
 use lemnos_slot_store::boot_raw::{BayVolume, Trial};
+use lemnos_slot_store::gpt;
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use lemnos_slot_store::uboot_env::{self, FileEnv, Geometry, Place};
 
@@ -462,6 +464,86 @@ pub enum TrialUpdates {
     Unavailable(Unavailable),
 }
 
+/// The `uboot` record's root phase, run by the daemon as root before it drops to its own user, with the
+/// environment's `place`, the boot disk's node and the boot partition's node (or why either is unknown).
+/// The boot partition is handed over read only: its bays and its FAT file are read at run time. The
+/// environment is handed over as its own node, never the disk: the GPT form's partition (found on the
+/// disk here, before the drop, and numbered through sysfs) read-write, unless the boot partition holds
+/// the FAT environment U-Boot reads first, when it is read only and the daemon's writes are refused by
+/// that reason. The device form's named device is handed over read-write (its writes are confined to the
+/// two copies). Returns one line for the daemon's log.
+pub fn root_phase(
+    place: &Place,
+    disk: &Result<PathBuf, String>,
+    boot: &Result<PathBuf, String>,
+) -> String {
+    let boot_line = match boot {
+        Ok(node) => match File::open(node) {
+            Ok(file) => {
+                boot_node::hand_over(node, file, false);
+                format!("{}: handed over read only", node.display())
+            }
+            Err(e) => format!("{}: not handed over: {e}", node.display()),
+        },
+        Err(why) => format!("the boot partition isn't known: {why}"),
+    };
+    let env_line = match place {
+        Place::Gpt { .. } => match disk {
+            Ok(disk) => gpt_partition(disk, boot).unwrap_or_else(|why| {
+                format!("the environment partition is not handed over: {why}")
+            }),
+            Err(why) => format!(
+                "the boot disk isn't known, so the environment partition is not handed over: {why}"
+            ),
+        },
+        Place::Device { device, .. } => device_node(device)
+            .unwrap_or_else(|why| format!("the environment's device is not handed over: {why}")),
+    };
+    format!("{boot_line}; {env_line}")
+}
+
+/// The GPT form's environment partition, for [`root_phase`]: the disk's table is read by name (the root
+/// phase is root), the partition's node is the kernel's `<disk>p<N>` (or `<disk><N>`) found through sysfs,
+/// and that node is handed over, read-write when [`uboot_env::refuse_if_fat_env`] is clean on the boot partition.
+fn gpt_partition(disk: &Path, boot: &Result<PathBuf, String>) -> Result<String, String> {
+    let mut table = FileEnv::open_read(disk).map_err(|e| format!("{}: {e}", disk.display()))?;
+    let (_, number) = gpt::find_env_partition_numbered(&mut table)?;
+    let named = gpt::count_named(&mut table, ENV_PARTITION)?;
+    drop(table);
+    let node = boot_node::partition_node(disk, number)?;
+    let refused = match boot {
+        Ok(boot) => uboot_env::refuse_if_fat_env(boot).err(),
+        Err(why) => Some(format!(
+            "the boot partition isn't known, so {} can't be ruled out: {why}",
+            uboot_env::FAT_ENV_FILE
+        )),
+    };
+    let write = refused.is_none();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(write)
+        .open(&node)
+        .map_err(|e| format!("{}: {e}", node.display()))?;
+    uboot_env::hand_over(&node, Some(disk), file, refused, named);
+    Ok(format!(
+        "{}: handed over {}",
+        node.display(),
+        if write { "read-write" } else { "read only" }
+    ))
+}
+
+/// The device form's named device, for [`root_phase`]: handed over read-write.
+fn device_node(device: &str) -> Result<String, String> {
+    let node = PathBuf::from(device);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&node)
+        .map_err(|e| format!("{device}: {e}"))?;
+    uboot_env::hand_over(&node, None, file, None, 0);
+    Ok(format!("{device}: handed over read-write"))
+}
+
 /// The `uboot` record: `default`, `trial` and `trial_attempts` are variables of U-Boot's own
 /// redundant environment, at `place` (a raw, two-copy record, `lemnos_slot_store::uboot_env`).
 /// `packaging/uboot/boot.cmd` reads them and saves the environment with `saveenv` before it starts a
@@ -481,9 +563,21 @@ pub struct UbootEnv {
 }
 
 impl UbootEnv {
-    /// The environment opened: its device and the geometry the place gives on it. The boot disk is
-    /// only needed for the GPT form; the device form names its device.
+    /// The environment opened: its device and the geometry the place gives on it. The GPT form takes the
+    /// environment partition the root phase handed over for the disk (its offsets are the partition's own);
+    /// without one it opens the disk by name, which the daemon's user is refused. The device form names its device.
     fn open(&self) -> io::Result<(FileEnv, Geometry)> {
+        if let (Place::Gpt { .. }, Ok(disk)) = (&self.place, &self.disk)
+            && let Some(handed) = uboot_env::handover_of(disk)
+        {
+            let (dev, bytes) = FileEnv::open_sized(&handed.node)
+                .map_err(|e| io::Error::other(format!("{}: {e}", handed.node.display())))?;
+            let geometry = self
+                .place
+                .geometry_in_partition(bytes)
+                .map_err(io::Error::other)?;
+            return Ok((dev, geometry));
+        }
         let node = match &self.place {
             Place::Gpt { .. } => {
                 let disk = self.disk.as_ref().map_err(|why| {
@@ -536,24 +630,39 @@ impl UbootEnv {
         let fail = |reason: Reason, detail: String| {
             TrialUpdates::Unavailable(Unavailable { reason, detail })
         };
-        let table = match (&self.partitions, &self.place) {
-            (Some(path), _) => path.clone(),
-            (None, Place::Gpt { .. }) => match &self.disk {
-                Ok(disk) => disk.clone(),
-                Err(why) => {
-                    return fail(
-                        Reason::EnvUnreadable,
-                        format!("the boot disk isn't known: {why}"),
-                    );
-                }
-            },
-            (None, Place::Device { device, .. }) => PathBuf::from(device),
+        // The GPT form's table was read by the root phase when it handed the partition over: the daemon
+        // can't read the disk by name, so that count stands for it.
+        let handed = match (&self.partitions, &self.place, &self.disk) {
+            (None, Place::Gpt { .. }, Ok(disk)) => uboot_env::handover_of(disk),
+            _ => None,
         };
-        let mut dev = match FileEnv::open(&table) {
-            Ok(dev) => dev,
-            Err(e) => return fail(Reason::EnvUnreadable, format!("{}: {e}", table.display())),
+        let (table, named) = match handed {
+            Some(handed) => (self.disk.clone().unwrap_or_default(), Ok(handed.named)),
+            None => {
+                let table = match (&self.partitions, &self.place) {
+                    (Some(path), _) => path.clone(),
+                    (None, Place::Gpt { .. }) => match &self.disk {
+                        Ok(disk) => disk.clone(),
+                        Err(why) => {
+                            return fail(
+                                Reason::EnvUnreadable,
+                                format!("the boot disk isn't known: {why}"),
+                            );
+                        }
+                    },
+                    (None, Place::Device { device, .. }) => PathBuf::from(device),
+                };
+                let mut dev = match FileEnv::open(&table) {
+                    Ok(dev) => dev,
+                    Err(e) => {
+                        return fail(Reason::EnvUnreadable, format!("{}: {e}", table.display()));
+                    }
+                };
+                let named = gpt::count_named(&mut dev, ENV_PARTITION);
+                (table, named)
+            }
         };
-        match lemnos_slot_store::gpt::count_named(&mut dev, ENV_PARTITION) {
+        match named {
             Ok(1..) => {}
             Ok(0) => {
                 return fail(
@@ -614,6 +723,16 @@ impl UbootEnv {
         BayVolume::open(node).map_err(io::Error::other)
     }
 
+    /// The boot partition's bays, read only: a slot's bay and the layout (what `set_default` reads).
+    fn raw_read(&self) -> io::Result<BayVolume> {
+        let node = self.boot_node.as_ref().map_err(|why| {
+            io::Error::other(format!(
+                "the boot partition's device isn't known ({why}): its payload bays can't be read"
+            ))
+        })?;
+        BayVolume::open_read(node).map_err(io::Error::other)
+    }
+
     /// The bays the environment protects: the default's (`default_bay`), the trial's (`trial_bay`),
     /// the previous's (`previous_bay`, written by [`BootRecord::set_default`]) and a trial with attempts left.
     fn protected(&self) -> io::Result<Protected> {
@@ -642,7 +761,7 @@ impl UbootEnv {
     /// The bay (`bayN`) a slot's files are in: the environment's `default_bay` and `trial_bay`
     /// name it, so `boot.cmd` reads the bay's extlinux without a lookup of its own.
     fn bay_name(&self, id: &str) -> io::Result<String> {
-        let (dir, _) = self.raw()?.slot_bay(id).map_err(io::Error::other)?;
+        let (dir, _) = self.raw_read()?.slot_bay(id).map_err(io::Error::other)?;
         Ok(dir.rsplit('/').next().unwrap_or_default().to_string())
     }
 
@@ -774,7 +893,7 @@ impl BootRecord for UbootEnv {
     }
 
     fn declared(&self) -> io::Result<(Vec<String>, Option<String>)> {
-        Ok(crate::boot::declared_of(&self.raw()?.bay_layout()))
+        Ok(crate::boot::declared_of(&self.raw_read()?.bay_layout()))
     }
 
     /// The slot's payloads into a free bay; the set's extlinux is composed from its command line.
@@ -804,7 +923,7 @@ impl BootRecord for UbootEnv {
     }
 
     fn slot_bay(&self, id: &str) -> io::Result<(String, Vec<(String, u64)>)> {
-        self.raw()?.slot_bay(id).map_err(io::Error::other)
+        self.raw_read()?.slot_bay(id).map_err(io::Error::other)
     }
 
     /// The root copy is the install-time fallback (see [`Uboot`]): nothing is rewritten here.
@@ -813,6 +932,8 @@ impl BootRecord for UbootEnv {
     }
 }
 
+#[cfg(test)]
+mod grant_tests;
 #[cfg(test)]
 pub(crate) mod hush;
 #[cfg(test)]
