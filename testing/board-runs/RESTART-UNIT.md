@@ -49,12 +49,13 @@ Fail-before on origin/next `52ed5c2d` (the daemon with `systemctl reboot` as the
   `restart-failed` with the reason, and the caller gets the error.
 - a: PASS. Trial accepted, then SIGTERM under the reboot; the slow unit stops; the reboot goes through (QEMU 0); the boot
   partition verifies; the next boot's state still has install-1 on trial (a2 PASS). Run with CASES=ca.
-- b: NOT REACHABLE on systemd 259 as designed. The reboot job queued behind the blocker still starts the shutdown at once
-  (`Stopped target multi-user.target`), so the helper's bound never expires and the daemon's trial call is cut off
-  (`answered Disconnected`) before the state can read `restart-failed`. The bound is covered only by the helper's unit tests
-  with a stand-in manager. Run with CASES=b (run 13).
-- Fail-before for b on `52ed5c2d` is NOT established: that base's install timed out at the last write (3,080,192 of
-  3,128,832 bytes), the SLOT-INSTALL-INT open item, so no trial was armed and the guest ran past its bound.
+- b: FAIL on the bound, as observed (runs 14-16). The blocker is a slow stop ordered after lemnosd (its stop takes 40 s,
+  past the helper's 20 s bound). On systemd the reboot job starts the shutdown at once: the helper answers `stopping`, the
+  trial's reply is `answered ok`, and the state stays `rebooting` with `slot_trial` install-1 for all 40 s of the stop. The
+  bound never fires. lemnosd answers state queries throughout the stop, and stops after the blocker.
+- Fail-before for b on origin/next `a8b857e0` (no RESTART-UNIT commits): the install passes and d passes; the trial answers
+  `Refused { status: Status(-5) }`; the state stays `rebooting` with `slot_trial` install-1, no restart-failed, and no reboot
+  (the guest runs to the 900 s bound).
 
 ## BusyBox init (QEMU, not on the board)
 
