@@ -40,6 +40,15 @@ fn service(dir: &std::path::Path) -> (Service, std::path::PathBuf) {
     (service, socket)
 }
 
+/// Removes the test's scratch directory when the test ends, passed or panicked.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn the_latch_on_its_own_lands_every_post_on_the_predicted_frame() {
     assert!(lemnos_camera_sim::pisp::install());
@@ -47,6 +56,7 @@ fn the_latch_on_its_own_lands_every_post_on_the_predicted_frame() {
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
     let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
+    let _remove = RemoveOnDrop(dir.clone());
     let (service, socket) = service(&dir);
     let client = Client::connect(&socket, "chain-latch-sim").unwrap();
     client.set_timeout(Duration::from_secs(30));
@@ -64,7 +74,6 @@ fn the_latch_on_its_own_lands_every_post_on_the_predicted_frame() {
         &mut |line| lines.push(line),
     );
     service.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     if std::env::var_os("CHAIN_SHOW").is_some() {
         let _ = writeln!(std::io::stdout(), "{}", lines.join("\n"));
     }

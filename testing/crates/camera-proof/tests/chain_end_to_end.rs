@@ -37,17 +37,28 @@ fn scratch() -> PathBuf {
     dir
 }
 
+/// Removes the test's scratch directory when the test ends, passed or panicked.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     assert!(lemnos_camera_sim::pisp::install());
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
     // The chain's clock is the sim's: frames move it, and the proof reads it from this file.
     let clock_dir = scratch();
+    let _remove_clock = RemoveOnDrop(clock_dir.clone());
     let clock = clock_dir.join("sim-clock");
     lemnos_camera_sim::time::install_file(&clock).unwrap();
     profile::reset();
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir = scratch();
+    let _remove = RemoveOnDrop(dir.clone());
     let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let buffers = SimBuffers::probe();
     let kind = buffers.kind();
@@ -139,7 +150,6 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
         )
     });
     service.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     check(text.contains("chain proof: pass"), || text.clone());
     // Exact counts, whatever the host's load: the sim clock moves only with frame starts, so
     // nothing is late, nothing is dropped and no placeholder is delivered in a steady run.

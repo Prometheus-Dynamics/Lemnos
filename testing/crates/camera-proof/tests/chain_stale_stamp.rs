@@ -26,6 +26,15 @@ fn scratch() -> PathBuf {
     dir
 }
 
+/// Removes the test's scratch directory when the test ends, passed or panicked.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_stale_frame_start_fails_the_chain_proof_on_its_age_check() {
     assert!(lemnos_camera_sim::pisp::install());
@@ -38,6 +47,7 @@ fn a_stale_frame_start_fails_the_chain_proof_on_its_age_check() {
     lemnos_camera_sim::time::install_file(&clock).unwrap();
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir = scratch();
+    let _remove = RemoveOnDrop(dir.clone());
     let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let buffers = SimBuffers::probe();
     let kind = buffers.kind();
@@ -88,7 +98,6 @@ fn a_stale_frame_start_fails_the_chain_proof_on_its_age_check() {
         );
     }
     service.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(!output.status.success(), "a stale stamp passed:\n{text}");
     assert!(
         text.contains("frames taken more than 1 s after their start: front end ")

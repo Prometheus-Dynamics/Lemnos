@@ -19,6 +19,15 @@ use sim_timing::SimTiming;
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
 
+/// Removes the test's scratch directory when the test ends, passed or panicked.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_sensor_that_latches_a_frame_early_fails_the_latch() {
     assert!(lemnos_camera_sim::pisp::install());
@@ -28,6 +37,7 @@ fn a_sensor_that_latches_a_frame_early_fails_the_latch() {
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
+    let _remove = RemoveOnDrop(dir.clone());
     let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
@@ -58,7 +68,6 @@ fn a_sensor_that_latches_a_frame_early_fails_the_latch() {
         &mut |line| lines.push(line),
     );
     service.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     if std::env::var_os("CHAIN_SHOW").is_some() {
         let _ = writeln!(std::io::stdout(), "{}", lines.join("\n"));
     }

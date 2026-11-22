@@ -24,6 +24,15 @@ use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
 
+/// Removes the test's scratch directory when the test ends, passed or panicked.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn the_latch_beside_the_chain_fails_as_on_a_board() {
     assert!(lemnos_camera_sim::pisp::install());
@@ -31,6 +40,7 @@ fn the_latch_beside_the_chain_fails_as_on_a_board() {
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir: PathBuf = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
+    let _remove = RemoveOnDrop(dir.clone());
     let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
@@ -67,7 +77,6 @@ fn the_latch_beside_the_chain_fails_as_on_a_board() {
     };
     let (ok, text) = run(&["--latch-trials", "2"]);
     service.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(!ok, "a latch beside the chain must fail the proof:\n{text}");
     // The latch's raw start is the receiver's refusal while the front end holds the block: the
     // proof's failure names the latch, and the latch's own error names the start that was refused
