@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// The bytes a target is read and written in, and checked by.
 pub const SECTOR: u64 = 512;
@@ -79,8 +80,11 @@ pub fn find(path: &Path, kind: Kind) -> Result<Found, Unusable> {
     let size = match kind {
         Kind::File => meta.len(),
         Kind::Block | Kind::Mtd => {
-            let mut file =
-                File::open(path).map_err(|e| format!("the target can't be opened: {e}"))?;
+            let mut file = match held(path) {
+                Some(file) => file,
+                None => File::open(path),
+            }
+            .map_err(|e| unopened(path, &e))?;
             io::Seek::seek(&mut file, io::SeekFrom::End(0))
                 .map_err(|e| format!("the target's size can't be read: {e}"))?
         }
@@ -99,7 +103,60 @@ pub fn find(path: &Path, kind: Kind) -> Result<Found, Unusable> {
 ///
 /// When the OS refuses it.
 pub fn open(found: &Found, write: bool) -> io::Result<File> {
-    OpenOptions::new().read(true).write(write).open(&found.path)
+    if let Some(file) = held(&found.path) {
+        return file;
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(write)
+        .open(&found.path)
+        .map_err(|e| io::Error::new(e.kind(), unopened(&found.path, &e)))
+}
+
+/// A target the daemon's root phase opened read-write before it dropped to its own user: the dropped
+/// daemon can't open a disk node by name (`root:disk 0660`, or `root:root 0600` where only devtmpfs makes
+/// it), so [`find`] and [`open`] take a copy of this one.
+struct Held {
+    path: PathBuf,
+    file: File,
+}
+
+static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
+
+/// Keeps `file`, opened read-write on `path` by the root phase, for [`find`] and [`open`]. A later hand-over of
+/// the same path replaces the earlier one. The file is close-on-exec, so no child process inherits it. The copies
+/// share one file position: every read and write of a target gives its own offset (`read_at`, `write_all_at`).
+pub fn hand_over(path: &Path, file: File) {
+    let mut held = HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.retain(|h| h.path != path);
+    held.push(Held {
+        path: path.to_path_buf(),
+        file,
+    });
+}
+
+/// A copy of the file the root phase handed over for `path`, when it did.
+fn held(path: &Path) -> Option<io::Result<File>> {
+    let held = HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.iter()
+        .find(|h| h.path == path)
+        .map(|h| h.file.try_clone())
+}
+
+/// Why the target can't be opened by name: a refusal by its owner says the root phase did not hand it over.
+fn unopened(path: &Path, error: &io::Error) -> String {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        format!(
+            "the target {} can't be opened ({error}): it is root's, and the daemon's root phase did not hand it over (it was not there when the daemon started, or the root phase refused it; its line in the daemon's log says which)",
+            path.display()
+        )
+    } else {
+        format!("the target {} can't be opened: {error}", path.display())
+    }
 }
 
 /// The device number of a Linux `dev_t`: `(major, minor)`.
@@ -213,6 +270,53 @@ pub fn holds_something(file: &File) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FLASH-TARGET-GRANT: a target the root phase handed over is looked at and written through the held file,
+    /// after its node can no longer be opened by name (as the eMMC's node is to the dropped daemon); one that
+    /// wasn't handed over is refused by name, saying the root phase did not hand it over.
+    #[test]
+    fn a_handed_over_target_is_written_through_the_held_file_and_one_not_handed_over_is_refused_by_name()
+     {
+        use std::io::{Read, Seek, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("flash-held-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let held_path = dir.join("held.img");
+        let other = dir.join("other.img");
+        fs::write(&held_path, vec![0u8; 4096]).unwrap();
+        fs::write(&other, vec![0u8; 4096]).unwrap();
+        hand_over(
+            &held_path,
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&held_path)
+                .unwrap(),
+        );
+        for path in [&held_path, &other] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        // A test run as root opens anything by name: the refusal half needs an unprivileged user.
+        let root = OpenOptions::new().read(true).open(&other).is_ok();
+        let found = find(&held_path, Kind::File).unwrap();
+        let mut file = open(&found, true).unwrap();
+        file.seek(io::SeekFrom::Start(512)).unwrap();
+        file.write_all(b"written").unwrap();
+        let mut back = [0u8; 7];
+        let mut again = open(&found, false).unwrap();
+        again.seek(io::SeekFrom::Start(512)).unwrap();
+        again.read_exact(&mut back).unwrap();
+        assert_eq!(&back, b"written");
+        if !root {
+            let found = find(&other, Kind::File).unwrap();
+            let error = open(&found, true).unwrap_err().to_string();
+            assert!(error.contains("did not hand it over"), "{error}");
+        }
+        for path in [&held_path, &other] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_dev_t_splits_into_major_and_minor() {

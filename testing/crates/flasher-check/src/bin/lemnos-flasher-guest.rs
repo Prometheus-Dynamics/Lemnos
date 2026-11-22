@@ -2,16 +2,21 @@
 
 //! The first flash on an eMMC, in a QEMU guest (test only, never shipped; testing/flasher/run.sh). Run as the
 //! guest's init: it mounts the kernel's file systems, waits for the eMMC (QEMU's `emmc` with two hardware boot
-//! areas, as the board's eMMC has), and starts the real lemnosd on a board file whose `system-flash` device names
-//! its target by the eMMC's controller (`/pcie@10000000`, the guest's PCIe host, where the board names its eMMC
+//! areas, as the board's eMMC has), and starts the real lemnosd, dropped to the daemon's user (uid and gid 990,
+//! `--user`/`--group`, as the board's flasher runs it: the eMMC's node stays root's, so only the root phase's
+//! hand-over lets it write), on a board file whose `system-flash` device names its target by the eMMC's controller (`/pcie@10000000`, the guest's PCIe host, where the board names its eMMC
 //! controller). Then, as the board's flasher does:
 //!
 //! 1. The bridge's own stream (`lemnos_orion::stream::Streamer`) takes the transport manifest and the xz image in
 //!    chunks, and commits: the answer is `committed`, its detail the fields `raw_bytes=<n> outcome=1` (unsigned).
-//! 2. A `verify` job reads the target back: its result is `raw_bytes=<the raw byte count>`.
-//! 3. The eMMC's user area holds the image (its SHA-256 read back from `/dev/mmcblk0`), the boot areas are
-//!    byte-identical to what they held before, and the kernel read the new partition table (`mmcblk0p1` is there,
-//!    its size the image's).
+//! 2. The device's `info` says the kernel did not re-read the partition table: `BLKRRPART` needs `CAP_SYS_ADMIN`,
+//!    which the daemon's user does not keep, and the restart the flasher does next makes the new table the one in use.
+//! 3. A `verify` job reads the target back: its result is `raw_bytes=<the raw byte count>`.
+//! 4. The eMMC's user area holds the image (its SHA-256 read back from `/dev/mmcblk0`), the boot areas are
+//!    byte-identical to what they held before, and the kernel still has the blank disk's table (no `mmcblk0p1`).
+//!
+//! Every chunk's answer is timed: the longest is printed, and a refused chunk says how long it and the longest
+//! before it took.
 //!
 //! It prints `flasher: passed (<n> checks)` or each failure, then powers the guest off.
 
@@ -29,6 +34,8 @@ use orion::files::FileState;
 use sha2::{Digest, Sha256};
 
 const SOCKET: &str = "/run/lemnosd.sock";
+/// The daemon's user and group on the board's flasher image (the packaged `lemnos` account's ids).
+const DAEMON_ID: &str = "990";
 const BOARD: &str = "/run/board.toml";
 const STREAMS: &str = "/run/streams";
 const NAME: &str = "image.img.xz";
@@ -121,7 +128,9 @@ config = {{ controller = "{CONTROLLER}", allow_first_flash = true }}
 fn start_daemon() -> Result<Child, String> {
     fs::write(BOARD, board_text()).map_err(|e| format!("the board file: {e}"))?;
     Command::new("/lemnosd")
-        .args(["--board", BOARD, "--socket", SOCKET])
+        .args([
+            "--board", BOARD, "--socket", SOCKET, "--user", DAEMON_ID, "--group", DAEMON_ID,
+        ])
         .spawn()
         .map_err(|e| format!("start lemnosd: {e}"))
 }
@@ -170,17 +179,52 @@ fn run(c: &mut Checks) -> Result<(), String> {
         "the eMMC is blank: no partition before the flash",
     );
 
+    {
+        use std::os::unix::fs::MetadataExt;
+        let node = fs::metadata("/dev/mmcblk0").map_err(|e| format!("/dev/mmcblk0: {e}"))?;
+        c.check(
+            node.uid() == 0 && node.mode() & 0o007 == 0 && node.gid() != 990,
+            &format!(
+                "the eMMC's node is root's, not the daemon's to open by name (uid {} gid {} mode {:o})",
+                node.uid(),
+                node.gid(),
+                node.mode() & 0o777
+            ),
+        );
+    }
     let mut daemon = start_daemon()?;
-    let result = flash(c, &facts, &boot_before);
+    let result = flash(c, &facts, &boot_before, daemon.id());
     let _ = daemon.kill();
     let _ = daemon.wait();
     result
 }
 
-fn flash(c: &mut Checks, facts: &Facts, boot_before: &[String; 2]) -> Result<(), String> {
+fn flash(
+    c: &mut Checks,
+    facts: &Facts,
+    boot_before: &[String; 2],
+    daemon: u32,
+) -> Result<(), String> {
     let client =
         lemnos_client::Client::connect_within(SOCKET, "flasher-check", Duration::from_secs(20))
             .map_err(|e| format!("connect: {e:?}"))?;
+    // Answering means the start is over, the drop included: the daemon runs as its own user from here.
+    let status = fs::read_to_string(format!("/proc/{daemon}/status")).unwrap_or_default();
+    let ids = |key: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default()
+    };
+    c.check(
+        ids("Uid:") == "990 990 990 990" && ids("Gid:") == "990 990 990 990",
+        &format!(
+            "the daemon runs as its own user: Uid {} Gid {}",
+            ids("Uid:"),
+            ids("Gid:")
+        ),
+    );
     // The transport manifest first, then the stream, as the sender pushes them.
     fs::create_dir_all(STREAMS).map_err(|e| e.to_string())?;
     fs::copy(
@@ -207,17 +251,35 @@ fn flash(c: &mut Checks, facts: &Facts, boot_before: &[String; 2]) -> Result<(),
         return Err("the stream did not begin".into());
     }
     let mut at = 0u64;
+    let mut longest = (Duration::ZERO, 0u64);
     for piece in stream.chunks(CHUNK) {
+        let asked = std::time::Instant::now();
         let answer = streamer.chunk(1, at, piece);
+        let took = asked.elapsed();
         if answer.state != FileState::Receiving {
             c.check(
                 false,
-                &format!("chunk at {at}: {:?} {}", answer.state, answer.detail),
+                &format!(
+                    "chunk at {at}: {:?} {} (after {} ms; the longest before it {} ms, at {})",
+                    answer.state,
+                    answer.detail,
+                    took.as_millis(),
+                    longest.0.as_millis(),
+                    longest.1
+                ),
             );
             return Err("the stream broke".into());
         }
+        if took > longest.0 {
+            longest = (took, at);
+        }
         at += piece.len() as u64;
     }
+    println!(
+        "flasher: the longest chunk answer took {} ms, at {}",
+        longest.0.as_millis(),
+        longest.1
+    );
     let committed = streamer.commit(1);
     c.check(
         committed.state == FileState::Committed && committed.detail == committed_detail(facts.raw, Some(1)),
@@ -227,16 +289,33 @@ fn flash(c: &mut Checks, facts: &Facts, boot_before: &[String; 2]) -> Result<(),
         ),
     );
 
-    // The verify: a second job, which reads the target back for the manifest's size.
-    let verify = <dyn Flash as Contract>::INFO
-        .methods
-        .iter()
-        .find(|m| m.name == "verify")
-        .map(|m| m.id)
-        .ok_or("no verify method")?;
+    let method = |name: &str| {
+        <dyn Flash as Contract>::INFO
+            .methods
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| m.id)
+            .ok_or(format!("no {name} method"))
+    };
     let mut handle = client
         .open_tag("flash", <dyn Flash as Contract>::INFO.tag.as_str())
         .map_err(|e| format!("open: {e:?}"))?;
+
+    // The partition re-read needs CAP_SYS_ADMIN, which the daemon does not keep: the write is whole, and its
+    // `info` says by name that the kernel did not re-read the table (the restart the flasher does next does).
+    let mut text = vec![0u8; 8192];
+    let cap = u32::try_from(text.len()).unwrap_or(u32::MAX).to_le_bytes();
+    let n = client
+        .call(&mut handle, method("info")?, &cap, &mut text)
+        .map_err(|e| format!("info: {e:?}"))?;
+    let info = String::from_utf8_lossy(&text[..n]).into_owned();
+    c.check(
+        info.contains("the image is written, but the kernel did not re-read its partition table"),
+        &format!("the write's info names the re-read the daemon's user can't do: {info}"),
+    );
+
+    // The verify: a second job, which reads the target back for the manifest's size.
+    let verify = method("verify")?;
     let job = client
         .start_job(&mut handle, verify, &[])
         .map_err(|e| format!("verify: {e:?}"))?;
@@ -266,9 +345,9 @@ fn flash(c: &mut Checks, facts: &Facts, boot_before: &[String; 2]) -> Result<(),
         .map(|s| s.trim().to_string())
         .map_err(|e| e.to_string());
     c.check(
-        part.as_deref().ok() == Some(facts.part_sectors.to_string().as_str()),
+        part.is_err(),
         &format!(
-            "the kernel read the new table: mmcblk0p1 is {} sectors: {part:?}",
+            "the kernel still has the blank disk's table until the restart (the image's mmcblk0p1 is {} sectors): {part:?}",
             facts.part_sectors
         ),
     );

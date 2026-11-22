@@ -3090,11 +3090,29 @@ its storage controller: `controller = "/soc@107c000000/mmc@fff000"`, the device-
 found the slot driver's way (`lemnos_slot_store::disk::disk_under`): an eMMC's hardware areas (`mmcblk0boot0`,
 `mmcblk0boot1`, `rpmb`), hidden paths and empty slots are set aside, so the target is the eMMC's user area and its
 boot areas are never written. No disk, or two, under the controller is refused by name (`info` says what was seen).
-The disk is looked up again at each `info`, `write` and `verify`, so a disk that registers after the daemon starts
-(an eMMC's initialisation) is taken once it is there. Its node is `/dev/<disk>`, and it must be the device sysfs
+The disk is looked up again at each `info`, `write` and `verify`, so for a daemon running as root a disk that
+registers after it starts (an eMMC's initialisation) is taken once it is there; under its own user, see "The target
+under the daemon's user" below. Its node is `/dev/<disk>`, and it must be the device sysfs
 names for the disk (its `dev` number), else the write is refused by name. `sysfs` (default `/sys`) and `dev`
 (default `/dev`) are where they are looked up: test settings only. A controller names a disk, never a NAND partition
 (`kind = "mtd"` is refused with it), and `path` and `controller` together are refused.
+
+### The target under the daemon's user
+
+A target is a disk node, `root:disk 0660` or `root:root 0600`, which the daemon's own user can't open by name. The
+driver's root phase (`lemnos_driver_system_flash::root_phase`, one of the daemon's `ROOT_PHASES`) opens it read-write
+before the drop: the `path`, or the one whole disk under the `controller` as it is then. The node stays root's; the
+open file is kept for the driver (`target::hand_over`), and every later `info`, `write` and `verify` takes a copy of
+it. The copies share one file position, so every read and write gives its own offset. The root phase's line in the
+daemon's log says which it did: `<node>: handed over read-write`, or `not handed over` with the reason. Not handed
+over: a regular-file target (a test's, opened by name); a target the running system is mounted from (its write is
+refused anyway); and a target that isn't there when the daemon starts. Under the daemon's user a target can be written
+only if it was there at the root phase: one that wasn't is refused at its `info` and its `write` by name ("it is
+root's, and the daemon's root phase did not hand it over"), and the job is not started. A flasher image's kernel
+registers the eMMC before its init starts the daemon. The partition re-read after a write (`BLKRRPART`) needs
+`CAP_SYS_ADMIN`, which the daemon does not keep: under its user, a write that is otherwise whole ends with the
+sentence that the kernel did not re-read the table, and the restart the flasher does next makes the new table the one
+in use.
 
 ### The image
 

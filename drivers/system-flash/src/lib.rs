@@ -744,6 +744,70 @@ struct Controller {
     dev: std::path::PathBuf,
 }
 
+/// The daemon's root phase for a flash device, run as root before the drop to the daemon's user, which can't
+/// open a disk node by name. The target as the settings name it (its `path`, or the one whole disk under its
+/// `controller` now) is opened read-write and handed over ([`target::hand_over`]); every later look and write
+/// takes a copy. Not handed over: a regular-file target (a test's, opened by name), a target that isn't there yet
+/// (a disk that registers later can't be opened under the daemon's user, and its open says so by name), and a
+/// target the running system is mounted from (a write to it is refused anyway). Returns one line for the log.
+#[must_use]
+pub fn root_phase(cfg: &Config<'_>) -> String {
+    let Ok((kind, mtd)) = kind_and_mtd(cfg) else {
+        return "the target's settings are refused: nothing is handed over".into();
+    };
+    if kind == Kind::File || mtd.as_ref().is_some_and(|m| m.fake.is_some()) {
+        return "the target is a regular file: opened by name, nothing is handed over".into();
+    }
+    let path = match controller_of(cfg) {
+        Ok(None) => std::path::PathBuf::from(cfg.str("path").unwrap_or_default()),
+        Ok(Some(controller)) => {
+            match lemnos_slot_store::disk::disk_under(&controller.sysfs, &controller.node, "") {
+                lemnos_slot_store::disk::BootDisk::One(disk) => controller.dev.join(disk),
+                lemnos_slot_store::disk::BootDisk::NoneYet(why)
+                | lemnos_slot_store::disk::BootDisk::Refused(why) => {
+                    return format!(
+                        "not handed over: the target under {} isn't there ({why}); a disk that registers later can't be opened under the daemon's user",
+                        controller.node
+                    );
+                }
+            }
+        }
+        Err(_) => return "the target's settings are refused: nothing is handed over".into(),
+    };
+    let found = match target::find(&path, kind) {
+        Ok(found) => found,
+        Err(why) => return format!("not handed over: {why}"),
+    };
+    let table = cfg.str("mountinfo").unwrap_or("/proc/self/mountinfo");
+    if kind == Kind::Block {
+        match fs::read_to_string(table) {
+            Ok(table) => {
+                if let Some(mount) =
+                    target::mounted_on(&table, target::major_minor(found.dev), &target::sysfs_disk)
+                {
+                    return format!(
+                        "{}: not handed over: the running system is mounted from it ({mount})",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                return format!(
+                    "{}: not handed over: the mount table can't be read ({e})",
+                    path.display()
+                );
+            }
+        }
+    }
+    match fs::OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => {
+            target::hand_over(&path, file);
+            format!("{}: handed over read-write", path.display())
+        }
+        Err(e) => format!("{}: not handed over: {e}", path.display()),
+    }
+}
+
 /// The target's name in the board file: `path` (its node), or `controller` (the device-tree path of the storage
 /// controller it is the one whole disk under: the eMMC's, whose `/dev` name the kernel may number otherwise).
 /// Exactly one; a controller's target is a block device (a regular file in tests), never a NAND partition.

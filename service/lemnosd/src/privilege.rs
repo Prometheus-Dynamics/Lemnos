@@ -186,6 +186,7 @@ pub type RootPhase = fn(&lemnos_core::Config<'_>) -> String;
 pub const ROOT_PHASES: &[(&str, RootPhase)] = &[
     ("system-slots", lemnos_driver_system_slots::root_phase),
     ("system-security", lemnos_driver_system_security::root_phase),
+    ("system-flash", lemnos_driver_system_flash::root_phase),
     (
         "system-reboot",
         lemnos_driver_system_slots::reboot_root_phase,

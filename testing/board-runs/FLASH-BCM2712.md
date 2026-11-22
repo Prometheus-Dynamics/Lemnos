@@ -30,7 +30,8 @@ been flashed this way.
   Result: `flasher: passed (10 checks)`: the stream committed with `raw_bytes=8388608 outcome=1`; the verify job read
   back 8388608; `/dev/mmcblk0` holds the image (SHA-256 read back); both boot areas byte-identical; `mmcblk0p1` read
   from the new table (12288 sectors). Host side: `emmc: boot areas unchanged (2097152 bytes); user area holds the image
-  (8388608 bytes); the rest unchanged`.
+  (8388608 bytes); the rest unchanged`. That run's daemon was root; the guest now runs it as its own user, and
+  `FLASH-TARGET-GRANT.md` has that run.
 
 ## The board step (for the board session's sheet)
 
