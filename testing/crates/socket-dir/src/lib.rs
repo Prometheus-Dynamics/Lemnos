@@ -21,9 +21,11 @@ const BASE: &str = "/tmp";
 
 /// A new, empty directory under [`BASE`], readable only by this user. It is unique to this
 /// process and call: a name another process or an earlier run left is skipped. The caller removes
-/// it when done. Fails when the base cannot be written.
+/// it when done. The base is made first when it is missing (a QEMU guest's initramfs has no
+/// `/tmp`). Fails when the base cannot be made or written.
 pub fn scratch_dir() -> io::Result<PathBuf> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
+    std::fs::create_dir_all(BASE)?;
     let pid = std::process::id();
     loop {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
