@@ -33,12 +33,18 @@
 //!            "failures":N,"failed":false,
 //!            "signature":"verified|not_checked_unknown_key|not_checked_unsigned",
 //!            "build":"clean|dev-reuse|<other text as written>|not recorded",
-//!            "medium":"sd|emmc|spi-nand|spi-nor|<other text as written>|not recorded"}]}
+//!            "medium":"sd|emmc|spi-nand|spi-nor|<other text as written>|not recorded",
+//!            "slot_sig":"kept|unsigned|<the sentence of a signed slot whose slot.sig was not kept>"}]}
 //! ```
 //!
 //! `build` is the slot's `build.mode` and `medium` its `medium` (`slot.json`, `docs/slots.md`): text as
 //! the slot's manifest says it, `not recorded` when the manifest says neither. A `dev-reuse` slot is
 //! always unsigned, so its `signature` is `not_checked_unsigned`.
+//!
+//! `slot_sig` says whether the board kept the bundle's `slot.sig` (`<data>/slots/<id>.sig`, unchanged):
+//! `kept`; `unsigned` for a slot installed from an unsigned bundle; or, for a signed slot installed before
+//! signatures were kept, the sentence `slot <id> was installed before signatures were kept: no slot.sig on
+//! the board; install it again from a signed bundle, or sign it`.
 //!
 //! `signed` is the older label of the same fact (`trusted` is `verified`, `untrusted` is
 //! `not_checked_unknown_key`, `unsigned` is `not_checked_unsigned`); a slot installed before the

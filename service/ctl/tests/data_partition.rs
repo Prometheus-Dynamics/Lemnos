@@ -1151,3 +1151,74 @@ fn every_directory_the_first_flash_tree_makes_is_given_to_the_daemon_or_only_rea
         "the tree holds the boot-file store: {made:?}"
     );
 }
+
+/// KEEP-SIG: the first-flash tree of a signed bundle keeps its `slot.sig` unchanged as `slots/<id>.sig`, beside
+/// `slots/<id>.json`, the bundle's `slot.json` byte for byte. A bundle rebuilt from the two (with the same image
+/// and boot files, in the bundle's order) passes the install's own signature check with the board's signing
+/// switch on (the reference board requires signatures): the signature policy decides it verified, and
+/// `data-partition --install` takes it and names the key.
+#[test]
+fn the_first_flash_tree_keeps_the_bundles_slot_sig_and_a_bundle_rebuilt_from_it_installs_signed() {
+    let slot = slot_in("keep-sig");
+    let out = slot.dir.join("data");
+    let (r, text) = write_partition(&slot, &out, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+    let kept = std::fs::read(out.join("slots/a1.sig")).expect("the tree has slots/a1.sig");
+    assert_eq!(
+        kept,
+        slot_sig(&slot.bundle),
+        "slots/a1.sig is the bundle's slot.sig"
+    );
+    assert_eq!(kept.len(), 108);
+    let manifest = std::fs::read(out.join("slots/a1.json")).unwrap();
+
+    // The rebuilt bundle: slot.json and slot.sig from the board's files, everything else the bundle's.
+    let mut m = Members::default();
+    Tar::default()
+        .feed(&std::fs::read(&slot.bundle).unwrap(), &mut m)
+        .unwrap();
+    assert_eq!(m.0[0].0, "slot.json");
+    assert_eq!(
+        m.0[0].1, manifest,
+        "slots/a1.json is the bundle's slot.json"
+    );
+    assert_eq!(m.0[1].0, "slot.sig");
+    let rebuilt: Vec<(String, Vec<u8>)> =
+        m.0.into_iter()
+            .map(|(n, b)| match n.as_str() {
+                "slot.json" => (n, manifest.clone()),
+                "slot.sig" => (n, kept.clone()),
+                _ => (n, b),
+            })
+            .collect();
+    let borrowed: Vec<(&str, &[u8])> = rebuilt
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let rebuilt_path = slot.dir.join("rebuilt.bundle");
+    std::fs::write(&rebuilt_path, write::archive(&borrowed)).unwrap();
+
+    let keys = parse_keys(&format!("{PUBKEY7} pubkey")).unwrap();
+    let check = lemnos_driver_system_slots::signature_check(&keys, &manifest, &kept);
+    let outcome = lemnos_slot_store::signing::decide(true, "the rebuilt bundle", check)
+        .unwrap_or_else(|why| panic!("the switch refuses the rebuilt bundle: {why:?}"));
+    assert_eq!(outcome.word(), "verified");
+
+    let again = slot.dir.join("data-again");
+    let rebuilt_slot = Slot {
+        dir: slot.dir.clone(),
+        board: slot.board.clone(),
+        bundle: rebuilt_path.display().to_string(),
+        payloads: slot.payloads.clone(),
+        image: slot.image.clone(),
+        keys: slot.keys.clone(),
+    };
+    let (r, text) = write_partition(&rebuilt_slot, &again, &[]);
+    r.unwrap_or_else(|e| panic!("{e}\n{text}"));
+    assert!(
+        text.trim_end()
+            .ends_with(&format!("signed with key id {KEY_ID7}")),
+        "{text}"
+    );
+    assert_eq!(std::fs::read(again.join("slots/a1.sig")).unwrap(), kept);
+}

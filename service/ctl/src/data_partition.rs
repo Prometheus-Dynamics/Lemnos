@@ -220,7 +220,8 @@ fn write(o: &Options, out: &mut dyn Write) -> Result<(), String> {
     )
     .unwrap_or_default();
     let signature = meta_value(&meta, "SIGNATURE");
-    // The data partition keeps the outcome word, not the key id: the id is the bundle's own `slot.sig`.
+    // The meta keeps the outcome word, not the key id: the id is read from the bundle's `slot.sig`, which the
+    // tree also keeps unchanged as `slots/<id>.sig`.
     let signed = if signature == NOT_CHECKED_UNSIGNED {
         "unsigned".to_string()
     } else {

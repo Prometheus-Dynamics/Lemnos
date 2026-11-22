@@ -166,6 +166,23 @@ the slot id's form at `slot.json`). Tests: `a_refused_bundle_writes_nothing_and_
 `slot_json_must_be_the_first_member`, `slot_sig_must_be_the_second_member`,
 `a_repeated_member_or_an_unknown_one_is_refused_by_name`.
 
+### The kept signature
+
+The install keeps the bundle's `slot.sig`, the 108-byte record, unchanged as `<data>/slots/<id>.sig`, beside
+`<id>.json`, which is the bundle's `slot.json` byte for byte. The two rebuild the bundle's signed part: a tar
+of `slot.json` (the `<id>.json` bytes) first, `slot.sig` (the `<id>.sig` bytes) second, then `rootfs.erofs`
+and `boot/`, each copied unchanged, verifies as the bundle did. The record is written beside and renamed
+into place before the manifest's rename (the install's commit point), so a power cut never leaves a
+manifest with half a record. An unsigned bundle keeps none, and its install removes a record an earlier
+install of the same id left. `remove` deletes it with the image, the manifest and the slot's metadata. The offline
+writer (`lemnos-ctl data-partition --install`) runs the same install, so a first-flash image made from a
+signed bundle carries `slots/<id>.sig`.
+
+A signed slot installed before signatures were kept has no record. `list`'s `slot_sig` and
+`lemnos_driver_system_slots::kept_signature` name that case: `slot <id> was installed before signatures
+were kept: no slot.sig on the board; install it again from a signed bundle, or sign it`. It is never taken
+as unsigned or as forged.
+
 ### What the signature binds
 
 The signature covers `slot.json`, so everything the bundle's other members are checked against is
@@ -444,6 +461,8 @@ refusal is `NOT_PERMITTED` with the reason in `list`'s `error`, and nothing is i
   beside the signature. A slot that records neither reads `not recorded`. `info` adds
   `default_build`, `default_medium` (the default's, the same words) and `booted_medium` (see "The
   medium check").
+- `"slot_sig"`, after `"medium"`, last: whether the board kept the bundle's `slot.sig` (see "The kept
+  signature"): `kept`, `unsigned`, or the sentence of a signed slot installed before signatures were kept.
 
 ### The medium check
 

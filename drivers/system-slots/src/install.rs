@@ -1009,6 +1009,16 @@ impl Install {
         File::open(&manifest_tmp)
             .and_then(|f| f.sync_all())
             .map_err(&io)?;
+        // The bundle's slot.sig, kept unchanged beside the manifest it signs: with `<id>.json` it rebuilds
+        // the bundle's signed part. Written before the commit point (the manifest's rename), so a power cut
+        // never leaves a manifest with half a signature.
+        let signature_tmp = images.join(format!(".{id}.sig.tmp"));
+        if !self.unpack.signature.is_empty() {
+            fs::write(&signature_tmp, &self.unpack.signature).map_err(&io)?;
+            File::open(&signature_tmp)
+                .and_then(|f| f.sync_all())
+                .map_err(&io)?;
+        }
         self.fin.bay = false;
         let unpack = &self.unpack;
         match &unpack.volume {
@@ -1019,6 +1029,16 @@ impl Install {
             None => fs::rename(unpack.work.join("rootfs.erofs"), layout.image(&id)).map_err(&io)?,
         }
         crate::store::sync_dir(&images).map_err(&io)?;
+        if self.unpack.signature.is_empty() {
+            // An unsigned bundle keeps none, and an earlier install's signature is not this manifest's.
+            match fs::remove_file(layout.signature(&id)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io(error)),
+            }
+        } else {
+            fs::rename(&signature_tmp, layout.signature(&id)).map_err(&io)?;
+        }
         fs::rename(&manifest_tmp, layout.manifest(&id)).map_err(&io)?;
         crate::store::sync_dir(&images).map_err(&io)?;
         let _ = fs::remove_dir_all(&unpack.work);

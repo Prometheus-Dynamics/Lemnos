@@ -1284,6 +1284,7 @@ impl SystemSlots {
         for path in [
             self.layout.image(id),
             self.layout.manifest(id),
+            self.layout.signature(id),
             self.layout.meta(id),
         ] {
             match fs::remove_file(&path) {
@@ -1717,8 +1718,21 @@ impl SystemSlots {
                 },
                 &mut out,
             );
-            out.push(if key == "build" { ',' } else { '}' });
+            out.push(',');
         }
+        // Whether the bundle's slot.sig is kept: `kept`, `unsigned`, or the sentence of a signed slot
+        // installed before signatures were kept.
+        out.push_str("\"slot_sig\":");
+        quoted(
+            &match kept_signature(&self.layout, id) {
+                Ok(KeptSignature::Kept(_)) => "kept".to_string(),
+                Ok(KeptSignature::Unsigned) => "unsigned".to_string(),
+                Ok(KeptSignature::NotKept(sentence)) => sentence,
+                Err(error) => format!("slot.sig could not be read: {error}"),
+            },
+            &mut out,
+        );
+        out.push('}');
         out
     }
 
@@ -1919,6 +1933,35 @@ fn permille(done: u64, total: u64) -> u16 {
 /// A slot's signature word: `verified`, `not_checked_unknown_key` or `not_checked_unsigned`.
 fn signature_word(meta: &Meta) -> &'static str {
     signing::recorded(meta.get("SIGNATURE"), meta.get("SIGNED"))
+}
+
+/// What the board kept of an installed slot's `slot.sig` (`<data>/slots/<id>.sig`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeptSignature {
+    /// The record as the bundle carried it: with `<id>.json` it rebuilds the bundle's signed part.
+    Kept(Vec<u8>),
+    /// The slot was installed from an unsigned bundle: there is nothing to keep.
+    Unsigned,
+    /// A signed slot with no record on the board: it was installed before signatures were kept. The
+    /// sentence says so and what to do; it is never taken as unsigned or as forged.
+    NotKept(String),
+}
+
+/// The slot's kept `slot.sig`, read from `layout` for slot `id` (`docs/slots.md`, "The kept signature").
+pub fn kept_signature(layout: &Layout, id: &str) -> std::io::Result<KeptSignature> {
+    match fs::read(layout.signature(id)) {
+        Ok(record) => Ok(KeptSignature::Kept(record)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if signature_word(&Meta::load(layout, id)) == signing::NOT_CHECKED_UNSIGNED {
+                Ok(KeptSignature::Unsigned)
+            } else {
+                Ok(KeptSignature::NotKept(format!(
+                    "slot {id} was installed before signatures were kept: no slot.sig on the board; install it again from a signed bundle, or sign it"
+                )))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The data partition's PARTUUID: the device mounted at `data`, found among

@@ -6808,3 +6808,141 @@ fn the_slow_boot_file_look_runs_off_the_tick_and_its_answer_is_taken_by_a_later_
     assert_eq!(checked.load(Ordering::SeqCst), 1);
     assert_eq!(board.state().error, "os-1 doesn't match, nor os-0");
 }
+
+/// The `slot_sig` word `list` gives for `id`.
+fn listed_slot_sig(board: &mut Board, id: &str) -> String {
+    let json = Json::parse(&board.list()).unwrap();
+    let Some(Json::List(slots)) = json.get("slots") else {
+        panic!("no slots")
+    };
+    slots
+        .iter()
+        .find(|slot| slot.get("id").and_then(Json::text) == Some(id))
+        .and_then(|slot| slot.get("slot_sig").and_then(Json::text))
+        .unwrap_or_else(|| panic!("{id} has no slot_sig"))
+        .to_string()
+}
+
+#[test]
+fn a_signed_install_keeps_its_slot_sig_byte_for_byte_and_remove_deletes_it() {
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    let layout = board.layout().clone();
+    let kept = fs::read(layout.signature("os-2")).expect("slots/os-2.sig");
+    assert_eq!(kept, Bundle::new("os-2").pack_record());
+    assert_eq!(kept.len(), crate::SIGNATURE_LEN);
+    assert_eq!(
+        crate::kept_signature(&layout, "os-2").unwrap(),
+        crate::KeptSignature::Kept(kept)
+    );
+    assert_eq!(listed_slot_sig(&mut board, "os-2"), "kept");
+    assert!(!board.work_left(), "no .sig.tmp is left");
+    board.slots.remove("os-2").unwrap();
+    assert!(
+        !layout.signature("os-2").exists(),
+        "remove deletes the kept slot.sig"
+    );
+}
+
+#[test]
+fn an_unsigned_install_keeps_no_slot_sig_and_clears_one_an_earlier_install_left() {
+    let mut board = Board::new("os-1");
+    let layout = board.layout().clone();
+    // A record an earlier install of the same id left behind: it is not this manifest's.
+    fs::write(layout.signature("os-2"), Bundle::new("os-2").pack_record()).unwrap();
+    let mut unsigned = Bundle::new("os-2");
+    unsigned.sign = false;
+    let (status, _, _) = board.stream(1, &unsigned.pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert!(!layout.signature("os-2").exists());
+    assert_eq!(
+        crate::kept_signature(&layout, "os-2").unwrap(),
+        crate::KeptSignature::Unsigned
+    );
+    assert_eq!(listed_slot_sig(&mut board, "os-2"), "unsigned");
+}
+
+#[test]
+fn a_signed_slot_with_no_kept_slot_sig_is_named_as_installed_before_signatures_were_kept() {
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    let layout = board.layout().clone();
+    // A slot installed before the install kept slot.sig: signed in its record, no file.
+    fs::remove_file(layout.signature("os-2")).unwrap();
+    let sentence = "slot os-2 was installed before signatures were kept: no slot.sig on the board; install it again from a signed bundle, or sign it";
+    assert_eq!(
+        crate::kept_signature(&layout, "os-2").unwrap(),
+        crate::KeptSignature::NotKept(sentence.into())
+    );
+    assert_eq!(listed_slot_sig(&mut board, "os-2"), sentence);
+    // It is still the signed slot it was: never taken as unsigned.
+    assert_eq!(
+        listed(&mut board, "os-2"),
+        ("trusted".to_string(), "verified".to_string())
+    );
+}
+
+#[test]
+fn a_bundle_rebuilt_from_the_kept_manifest_and_slot_sig_installs_with_the_switch_on() {
+    use lemnos_slot_store::tar::{Kind, Sink, Tar};
+    #[derive(Default)]
+    struct Members(Vec<(String, Vec<u8>)>);
+    impl Sink for Members {
+        fn begin(&mut self, name: &str, kind: Kind, _: u64) -> Result<(), String> {
+            let name = if kind == Kind::Dir {
+                format!("{name}/")
+            } else {
+                name.to_string()
+            };
+            self.0.push((name, Vec::new()));
+            Ok(())
+        }
+        fn data(&mut self, bytes: &[u8]) -> Result<(), String> {
+            self.0.last_mut().unwrap().1.extend_from_slice(bytes);
+            Ok(())
+        }
+        fn end(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let mut first = Board::new("os-1");
+    first.install_ok("os-2");
+    let layout = first.layout().clone();
+    let manifest = fs::read(layout.manifest("os-2")).unwrap();
+    let kept = fs::read(layout.signature("os-2")).unwrap();
+    let image = fs::read(layout.image("os-2")).unwrap();
+
+    // slot.json first, slot.sig second, then rootfs.erofs and boot/, each copied unchanged.
+    let mut m = Members::default();
+    Tar::default()
+        .feed(&Bundle::new("os-2").pack(), &mut m)
+        .unwrap();
+    let order: Vec<&str> = m.0.iter().take(4).map(|(n, _)| n.as_str()).collect();
+    assert_eq!(order, ["slot.json", "slot.sig", "rootfs.erofs", "boot/"]);
+    let rebuilt: Vec<(String, Vec<u8>)> =
+        m.0.into_iter()
+            .map(|(n, b)| match n.as_str() {
+                "slot.json" => (n, manifest.clone()),
+                "slot.sig" => (n, kept.clone()),
+                "rootfs.erofs" => (n, image.clone()),
+                _ => (n, b),
+            })
+            .collect();
+    let borrowed: Vec<(&str, &[u8])> = rebuilt
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let bundle = archive(&borrowed);
+
+    let mut second = Board::new("os-1");
+    security::set_view_for_thread(Some(view_file(&second.dir.0, true)));
+    let (status, result, _) = second.stream(1, &bundle, 4096);
+    assert_eq!(status, Status::OK, "{}", second.state().error);
+    assert_eq!(result, b"os-2");
+    assert_eq!(
+        listed(&mut second, "os-2"),
+        ("trusted".to_string(), "verified".to_string())
+    );
+    assert_eq!(fs::read(second.layout().signature("os-2")).unwrap(), kept);
+    security::set_view_for_thread(None);
+}

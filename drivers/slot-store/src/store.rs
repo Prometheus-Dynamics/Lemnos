@@ -8,6 +8,8 @@
 //! slots/<id>.erofs            the root filesystem image, its dm-verity hash tree appended
 //!                             (on raw NAND, the UBI volume slot-<id> instead: see crate::ubi)
 //! slots/<id>.json             its manifest
+//! slots/<id>.sig              the bundle's slot.sig (the 108-byte signature record), unchanged; none for an
+//!                             unsigned bundle. With <id>.json it rebuilds the bundle's signed part
 //! slots/<id>.boot             "<sha256>  <path>" for each file of its boot directory
 //! slots/bootfiles/<sha256>    those files, kept by content
 //! board/slots/state.env       DEFAULT, PREVIOUS, TRIAL, STAGED, STATE, ERROR, PROGRESS, STARTED_BY
@@ -91,6 +93,11 @@ impl Layout {
 
     pub fn manifest(&self, id: &str) -> PathBuf {
         self.images().join(format!("{id}.json"))
+    }
+
+    /// The bundle's `slot.sig` as it came, kept beside the manifest it signs.
+    pub fn signature(&self, id: &str) -> PathBuf {
+        self.images().join(format!("{id}.sig"))
     }
 
     pub fn boot_list(&self, id: &str) -> PathBuf {
