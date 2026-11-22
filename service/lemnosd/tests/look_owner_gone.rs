@@ -118,7 +118,7 @@ impl Drop for Reaped {
 }
 
 fn start(dir: &Path) -> Service {
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(dir, "sock").unwrap();
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
                 [[devices]]\nid = \"strip\"\ndriver = \"pixel-stand-in\"\n\
                 [[devices]]\nid = \"light\"\ndriver = \"status-light\"\n\
@@ -169,11 +169,11 @@ fn light_client_role() {
 
 #[test]
 fn a_killed_clients_look_leaves_the_light_within_the_bound() {
-    let dir = Dir(std::env::temp_dir().join(format!("light-caller-gone-{}", std::process::id())));
+    let dir = Dir(lemnos_socket_dir::scratch_dir().unwrap());
     let _ = std::fs::remove_dir_all(&dir.0);
     std::fs::create_dir_all(&dir.0).unwrap();
     let service = start(&dir.0);
-    let socket = dir.0.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir.0, "sock").unwrap();
 
     // Another client's look, on layer 1 at priority 50: it must survive the kill.
     let other = Client::connect(&socket, "other").unwrap();

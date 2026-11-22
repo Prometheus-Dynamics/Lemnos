@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-socket-dir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Where a test's Unix socket goes: a short directory of its own, whatever TMPDIR is"
+
+[lints]
+workspace = true

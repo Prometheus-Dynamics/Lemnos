@@ -60,10 +60,10 @@ impl Gating for GateHolder {
 
 #[test]
 fn a_stop_finishes_with_a_call_held_and_removes_the_socket() {
-    let dir = std::env::temp_dir().join(format!("lemnosd-held-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
                 [[devices]]\nid = \"g\"\ndriver = \"gate-holder\"\n";
     let service = Service::start(Config {

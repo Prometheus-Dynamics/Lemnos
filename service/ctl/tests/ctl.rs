@@ -4,7 +4,6 @@
 mod scratch;
 use scratch::Scratch;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use lemnos_fake_devices::{FakeCounter, FakeMagnetometer};
 use lemnos_host::board::{parse, parse_lenient};
@@ -25,13 +24,8 @@ fn start() -> Running {
 
 /// A service that reports `packages` as what became of its driver packages.
 fn start_with(packages: PackageReport) -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "lemnos-ctl-test-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
-    let socket = dir.join("sock");
+    let dir = Scratch(lemnos_socket_dir::scratch_dir().unwrap());
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
         [[devices]]\nid = \"thing\"\ndriver = \"fake-counter\"\n[devices.config]\nstart = 41\n\
         [[devices]]\nid = \"broken\"\ndriver = \"nothing-by-this-name\"\n\
@@ -275,7 +269,7 @@ fn packages_shows_what_was_loaded_and_why_the_rest_was_refused() {
 
     // A real scan of a directory holding a file that is no package, in open mode, and beside it
     // a package that loaded.
-    let dir = std::env::temp_dir().join(format!("lemnos-ctl-packages-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&*dir).unwrap();
     std::fs::write(dir.join("junk.so"), "not a shared object").unwrap();
     let mut drivers = vec![entry::<FakeCounter>()];
@@ -333,12 +327,7 @@ fn packages_shows_what_was_loaded_and_why_the_rest_was_refused() {
 
 /// Writes `text` to a board file of its own and runs `validate` on it, with no daemon.
 fn validate(text: &str) -> Result<String, String> {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-ctl-validate-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&*dir).unwrap();
     let path = dir.join("board.toml");
     std::fs::write(&path, text).unwrap();
@@ -530,13 +519,8 @@ impl Counting for Counter {
 }
 
 fn start_counting() -> (Running, PathBuf) {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "lemnos-ctl-jobs-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
-    let socket = dir.join("sock");
+    let dir = Scratch(lemnos_socket_dir::scratch_dir().unwrap());
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let kept = dir.to_path_buf();
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
         [[devices]]\nid = \"counter\"\ndriver = \"counting\"\n";

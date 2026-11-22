@@ -5,7 +5,6 @@ pub mod filled;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -116,24 +115,8 @@ pub fn start_board_logged(
     buffers: Option<Arc<dyn BufferSource>>,
     log: Option<lemnosd::LogSink>,
 ) -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    // The time keeps the name apart from one an earlier run with the same process id left.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!(
-        "lemnosd-test-{}-{nanos}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    // Whatever is at the name is not ours to keep: clear it, then make the directory.
-    if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-        let _ = std::fs::remove_dir_all(&dir);
-    } else {
-        let _ = std::fs::remove_file(&dir);
-    }
-    std::fs::create_dir(&dir).unwrap();
-    let socket = dir.join("sock");
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text =
         format!("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n{devices}");
     // Built the way docs ask a consumer to build it, so a later field doesn't break it.

@@ -2,8 +2,6 @@
 //! not have, are refused by name, by `lemnos-ctl validate` and by the daemon's start. The daemon
 //! starts without the refused device and every other device runs.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use lemnos_host::board::parse;
 use lemnos_host::{Options, settings_refusals};
 use lemnos_sim::SimBoard;
@@ -16,12 +14,7 @@ const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid =
 const LEASE: &str = "[[devices]]\nid = \"lease\"\ndriver = \"gpu-lease\"\n";
 
 fn validate(text: &str) -> Result<String, String> {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-ctl-uses-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("board.toml");
     std::fs::write(&path, text).unwrap();
@@ -39,12 +32,9 @@ fn validate(text: &str) -> Result<String, String> {
 
 /// The rows of `lemnos-ctl list` against a daemon started on `text`.
 fn list(text: &str) -> String {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let socket = std::env::temp_dir().join(format!(
-        "lemnos-uses-{}-{}.sock",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
+    let _dir = Dir(dir);
     let service = Service::start(Config {
         socket: socket.clone(),
         name: "t".to_string(),
@@ -205,5 +195,14 @@ fn every_builtin_driver_refuses_an_unconsumed_uses_key_and_config_key_by_name() 
             ),
             "{name}: {reason}"
         );
+    }
+}
+
+/// A directory removed when it goes.
+struct Dir(std::path::PathBuf);
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }

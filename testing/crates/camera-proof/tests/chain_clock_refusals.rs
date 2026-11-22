@@ -39,8 +39,8 @@ impl Drop for Scratch {
     }
 }
 
-fn scratch(name: &str) -> Scratch {
-    let dir = std::env::temp_dir().join(format!("chain-clock-{name}-{}", std::process::id()));
+fn scratch(_name: &str) -> Scratch {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     Scratch::of_dir(dir)
 }
@@ -114,7 +114,7 @@ fn a_clock_moved_backwards_mid_run_refuses_the_chain_proof() {
     // The sim's writer moves the clock on as frames start, and the proof reads it from the file.
     lemnos_camera_sim::time::install_file(&clock).unwrap();
     let board = chain_board(REFERENCE_BOARD).unwrap();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
             socket: socket.clone(),

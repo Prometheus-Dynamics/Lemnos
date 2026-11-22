@@ -87,15 +87,8 @@ impl Drop for TempDir {
     }
 }
 
-pub fn temp_dir(label: &str) -> TempDir {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-client-{label}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    TempDir(dir)
+pub fn temp_dir(_label: &str) -> TempDir {
+    TempDir(lemnos_socket_dir::scratch_dir().unwrap())
 }
 
 impl FakeHost {

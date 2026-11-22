@@ -46,6 +46,7 @@ lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnosd = { path = "../lemnosd" }
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 syn.workspace = true
 lemnos-driver-named-files = { path = "../../drivers/named-files" }
 lemnos-contract-accelerometer = { path = "../../contracts/accelerometer" }

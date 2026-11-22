@@ -92,6 +92,7 @@ lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 # generated: end drivers
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-contract-light = { path = "../../contracts/light" }
 lemnos-contract-raw-bus = { path = "../../contracts/raw-bus" }
 lemnos-contract-pixels = { path = "../../contracts/pixels" }

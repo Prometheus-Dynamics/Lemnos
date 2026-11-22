@@ -3,8 +3,6 @@
 //! driver can read, a loop of `uses`. Each one shows failed with its reason, and every other device
 //! runs. `lemnos-ctl validate` refuses the board for what it can know without hardware.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use lemnos_host::Options;
 use lemnos_host::board::{parse, parse_lenient};
 use lemnos_linux::Owner;
@@ -16,12 +14,7 @@ const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid =
 
 /// A board file in a directory of its own, validated with `lemnos-ctl validate`. Returns the error.
 fn validate(text: &str) -> Result<String, String> {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-ctl-start-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("board.toml");
     std::fs::write(&path, text).unwrap();
@@ -42,16 +35,22 @@ fn validate(text: &str) -> Result<String, String> {
 struct Running {
     _service: Service,
     socket: std::path::PathBuf,
+    _dir: Dir,
+}
+
+/// A directory removed when it goes.
+struct Dir(std::path::PathBuf);
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn start(mut board: lemnos_host::board::BoardFile) -> Result<Running, String> {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
     gadget::resolve(&mut board);
-    let socket = std::env::temp_dir().join(format!(
-        "lemnos-start-{}-{}.sock",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let config = Config {
         socket: socket.clone(),
         name: "t".to_string(),
@@ -64,6 +63,7 @@ fn start(mut board: lemnos_host::board::BoardFile) -> Result<Running, String> {
     Ok(Running {
         _service: service,
         socket,
+        _dir: Dir(dir),
     })
 }
 

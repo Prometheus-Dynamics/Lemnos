@@ -1,7 +1,6 @@
 //! The real service hears a backend's hints: a device that was absent binds when it arrives,
 //! not when its retry comes round.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_core::{Config as DriverConfig, Lifecycle, Line, Result, contract, driver};
@@ -48,19 +47,14 @@ impl Drop for Dir {
 }
 
 fn start() -> (Service, Dir, SimBoard) {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnosd-hotplug-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let guard = Dir(dir.clone());
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
                 [[devices]]\nid = \"cam\"\ndriver = \"plug\"\nbus = \"port-a\"\n";
     let board = SimBoard::new();
     let service = Service::start(Config {
-        socket: dir.join("sock"),
+        socket: lemnos_socket_dir::socket(&dir, "sock").unwrap(),
         name: "test-host".to_string(),
         board: parse(text).unwrap(),
         drivers: vec![entry::<Plug>()],

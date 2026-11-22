@@ -36,6 +36,7 @@ sha2 = { version = "0.10", default-features = false }
 rustix = { version = "1", default-features = false, features = ["std", "event"] }
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 # The test relay forwards the file descriptors Orion's transport passes with its frames.
 rustix = { version = "1", default-features = false, features = ["std", "net"] }
 # A real comm core and real node logic, in-process, for the integration tests.

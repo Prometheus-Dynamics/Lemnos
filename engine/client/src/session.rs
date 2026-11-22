@@ -2485,10 +2485,11 @@ mod tests {
 
     /// A path with no socket at it, so every try is refused at once.
     fn absent(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "lemnos-client-absent-{label}-{}",
-            std::process::id()
-        ))
+        lemnos_socket_dir::socket(
+            std::path::Path::new("/tmp"),
+            &format!("lemnos-client-absent-{label}-{}", std::process::id()),
+        )
+        .unwrap()
     }
 
     /// Turns `session` as a caller that keeps waiting does (`next_value`, `wait_job_event`)

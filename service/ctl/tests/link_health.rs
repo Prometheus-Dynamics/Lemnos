@@ -36,9 +36,9 @@ fn a_healthy_chain_with_stated_wiring_reads_ok_in_list_chain_and_describe() {
     assert!(lemnos_camera_sim::pisp::install());
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
     let board = chain_board(REFERENCE_BOARD).unwrap();
-    let dir = std::env::temp_dir().join(format!("link-health-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
             socket: socket.clone(),

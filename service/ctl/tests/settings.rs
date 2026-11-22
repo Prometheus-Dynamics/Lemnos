@@ -2,8 +2,6 @@
 //! validate` and the daemon's start run the same check, so a board file refused by one is refused
 //! by the other, naming the device and the key.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use lemnos_host::Options;
 use lemnos_host::board::parse;
 use lemnos_sim::SimBoard;
@@ -13,12 +11,7 @@ const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid =
 
 /// Writes `text` to a board file of its own and runs `validate` on it, with no daemon.
 fn validate(text: &str) -> Result<String, String> {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-ctl-settings-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("board.toml");
     std::fs::write(&path, text).unwrap();
@@ -39,15 +32,21 @@ fn validate(text: &str) -> Result<String, String> {
 struct Running {
     _service: Service,
     socket: std::path::PathBuf,
+    _dir: Dir,
+}
+
+/// A directory removed when it goes.
+struct Dir(std::path::PathBuf);
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn running(text: &str) -> Result<Running, String> {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let socket = std::env::temp_dir().join(format!(
-        "lemnos-settings-{}-{}.sock",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let config = Config {
         socket: socket.clone(),
         name: "t".to_string(),
@@ -60,6 +59,7 @@ fn running(text: &str) -> Result<Running, String> {
     Ok(Running {
         _service: service,
         socket,
+        _dir: Dir(dir),
     })
 }
 

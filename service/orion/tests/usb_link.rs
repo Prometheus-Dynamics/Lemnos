@@ -9,7 +9,6 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -40,11 +39,8 @@ const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid 
     [[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\nuses = { function = \"udc0\" }\n\
     config = { vendor = 0x1209, product = 1, interfaces = \"interface 0xff 0 0 pipe\\nendpoint in bulk\\nendpoint out bulk\\n\" }\n";
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
-fn dir(test: &str) -> PathBuf {
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("lu-{test}-{}-{n}", std::process::id()));
+fn dir(_test: &str) -> PathBuf {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("test directory");
     dir
@@ -230,10 +226,10 @@ fn a_link_offered_from_the_gadget_carries_frames_both_ways_until_the_hold_is_ove
     let (in_device, in_host) = UnixStream::pair().expect("pair");
     let function =
         MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let _service = start_lemnosd(&lemnosd, &function);
     keep_configured(&function);
-    let orion = dir.join("orion.sock");
+    let orion = lemnos_socket_dir::socket(&dir, "orion.sock").unwrap();
     let _comm = start_comm(&orion, &["usb0"]);
     let config = bridge_config(&lemnosd, &orion);
     let hold = spawn_hold(config, "usb0");
@@ -271,10 +267,10 @@ fn a_link_the_comm_core_does_not_have_is_refused_and_the_pair_is_given_back() {
     let (in_device, _in_host) = UnixStream::pair().expect("pair");
     let function =
         MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let _service = start_lemnosd(&lemnosd, &function);
     keep_configured(&function);
-    let orion = dir.join("orion.sock");
+    let orion = lemnos_socket_dir::socket(&dir, "orion.sock").unwrap();
     let _comm = start_comm(&orion, &["usb0"]);
     let config = bridge_config(&lemnosd, &orion);
 
@@ -311,10 +307,10 @@ fn a_link_comes_back_after_the_controller_lets_go_on_the_same_endpoints() {
     let (in_device, in_host) = UnixStream::pair().expect("pair");
     let function =
         MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let _service = start_lemnosd(&lemnosd, &function);
     keep_configured(&function);
-    let orion = dir.join("orion.sock");
+    let orion = lemnos_socket_dir::socket(&dir, "orion.sock").unwrap();
     let _comm = start_comm(&orion, &["usb0"]);
     let hold = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
 
@@ -365,10 +361,10 @@ fn a_hold_ends_when_the_device_is_switched_off_and_the_pair_is_offered_again() {
     let (in_device, _in_host) = UnixStream::pair().expect("pair");
     let function =
         MockUsbFunction::with_endpoint_files(OwnedFd::from(out_device), OwnedFd::from(in_device));
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let _service = start_lemnosd(&lemnosd, &function);
     keep_configured(&function);
-    let orion = dir.join("orion.sock");
+    let orion = lemnos_socket_dir::socket(&dir, "orion.sock").unwrap();
     let _comm = start_comm(&orion, &["usb0"]);
     let hold = spawn_hold(bridge_config(&lemnosd, &orion), "usb0");
     std::thread::sleep(Duration::from_millis(300));

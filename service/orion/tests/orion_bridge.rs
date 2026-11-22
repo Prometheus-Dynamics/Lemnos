@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -46,8 +46,6 @@ const WAIT: Duration = Duration::from_secs(20);
 /// `Rejected`, with this as the code (`ending_of_status`).
 const NO_DEVICE_CODE: u32 = 19;
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
 /// A fresh directory for one test. Unix socket paths are short, so the name is short.
 /// A scratch directory under TMPDIR, removed when the test ends, whether it passed or panicked.
 struct Scratch(std::path::PathBuf);
@@ -65,9 +63,8 @@ impl Drop for Scratch {
     }
 }
 
-fn dir(test: &str) -> Scratch {
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("lo-{test}-{}-{n}", std::process::id()));
+fn dir(_test: &str) -> Scratch {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("test directory");
     Scratch(dir)
@@ -113,7 +110,7 @@ impl Logic {
     fn start(dir: &Path) -> Self {
         let mut source = orion_config::Source::parse("", []).expect("no settings");
         let mut settings = NodeSettings::from_source(&mut source).expect("defaults");
-        settings.config.socket = dir.join("orion.sock");
+        settings.config.socket = lemnos_socket_dir::socket(dir, "orion.sock").unwrap();
         settings.config.state_dir = dir.join("state");
         settings.files_dir = dir.join("files");
         settings.audit = None;
@@ -315,7 +312,7 @@ fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) ->
 #[test]
 fn devices_are_resources_their_values_and_status_are_topics() {
     let dir = dir("pushed");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -404,7 +401,7 @@ fn devices_are_resources_their_values_and_status_are_topics() {
 #[test]
 fn a_device_state_topic_is_declared_latest_so_a_late_subscriber_is_given_it() {
     let dir = dir("latest");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -431,7 +428,7 @@ fn a_device_state_topic_is_declared_latest_so_a_late_subscriber_is_given_it() {
 #[test]
 fn a_bridge_started_before_its_comm_core_waits_for_it() {
     let dir = dir("waits");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let mut board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -453,9 +450,13 @@ fn a_bridge_started_before_its_comm_core_waits_for_it() {
 #[test]
 fn a_bridge_waiting_for_its_comm_core_stops_when_asked() {
     let dir = dir("stop-wait");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let _service = start_lemnosd(&lemnosd);
-    let bridge = start_bridge(&lemnosd, &dir.join("no-comm-core.sock"), None);
+    let bridge = start_bridge(
+        &lemnosd,
+        &lemnos_socket_dir::socket(&dir, "no-comm-core.sock").unwrap(),
+        None,
+    );
     std::thread::sleep(Duration::from_secs(1));
     let (done, stopped) = mpsc::channel();
     std::thread::spawn(move || {
@@ -470,7 +471,7 @@ fn a_bridge_waiting_for_its_comm_core_stops_when_asked() {
 #[test]
 fn actions_set_call_and_switch_a_device() {
     let dir = dir("actions");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -546,7 +547,7 @@ fn actions_set_call_and_switch_a_device() {
 #[test]
 fn a_comm_core_restart_gets_every_device_and_value_again() {
     let dir = dir("restart");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let mut board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -598,7 +599,7 @@ fn a_comm_core_restart_gets_every_device_and_value_again() {
 #[test]
 fn a_node_that_is_not_the_configured_one_gets_nothing() {
     let dir = dir("node");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -622,7 +623,7 @@ fn a_node_that_is_not_the_configured_one_gets_nothing() {
 #[test]
 fn a_stopped_lemnosd_takes_its_devices_and_topics_away_and_brings_them_back() {
     let dir = dir("lemnosd");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let service = start_lemnosd(&lemnosd);
@@ -679,7 +680,7 @@ fn a_stopped_lemnosd_takes_its_devices_and_topics_away_and_brings_them_back() {
 #[test]
 fn a_device_that_starts_running_later_is_described_then() {
     let dir = dir("later");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -826,7 +827,7 @@ fn hello_with(dashboard: &Orion, name: &str) -> BTreeMap<String, String> {
 #[test]
 fn the_board_publishes_its_identity_facts_and_what_it_offers() {
     let dir = dir("facts");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial\t\t: 0000000000ABCDEF\n");
     files.boot("os-2", "an-os", "2.0");
     let board = Board::start_for_node(&dir);
@@ -862,7 +863,7 @@ fn the_board_publishes_its_identity_facts_and_what_it_offers() {
 #[test]
 fn a_fact_that_cannot_be_read_is_absent() {
     let dir = dir("absent");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     // No Serial line, and no slot is booted: those two facts cannot be known.
     let files = IdentityFiles::new(&dir, "model name : no serial here\n");
     let board = Board::start_for_node(&dir);
@@ -894,7 +895,7 @@ fn a_fact_that_cannot_be_read_is_absent() {
 #[test]
 fn the_running_slot_is_followed_without_a_rebind() {
     let dir = dir("slot");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
     files.boot("os-2", "an-os", "2.0");
     let board = Board::start_for_node(&dir);
@@ -918,7 +919,7 @@ fn the_running_slot_is_followed_without_a_rebind() {
 #[test]
 fn a_slot_that_becomes_known_after_the_start_is_published() {
     let dir = dir("late-slot");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
@@ -941,7 +942,7 @@ fn a_slot_that_becomes_known_after_the_start_is_published() {
 #[test]
 fn offers_follow_a_device_going_and_coming() {
     let dir = dir("offers");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
     files.boot("os-2", "an-os", "2.0");
     let board = Board::start_for_node(&dir);
@@ -991,7 +992,7 @@ fn outbuf_board(files: &IdentityFiles) -> String {
 #[test]
 fn the_call_action_carries_an_out_buffer_reply_whole_or_names_why_not() {
     let dir = dir("outbuf");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial\t\t: 0000000000ABCDEF\n");
     files.boot("os-2", "an-os", "2.0");
     // A slot is listed once its image is there, as the manifest's 4096 bytes.
@@ -1070,7 +1071,7 @@ fn page_field<'a>(json: &'a str, key: &str) -> &'a str {
 #[test]
 fn the_slot_list_is_walked_page_by_page_through_the_bridge_with_nothing_lost_or_repeated() {
     let dir = dir("paged");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial\t\t: 0000000000ABCDEF\n");
     files.boot("os-2", "an-os", "2.0");
     image(&files.dir, "os-2");
@@ -1188,7 +1189,7 @@ fn latest_sample(subscriber: &mut Subscriber, field: u16) -> Option<(Vec<u8>, Sa
 #[test]
 fn a_fact_that_comes_and_goes_moves_nothing_else() {
     let dir = dir("fact-moves");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
@@ -1324,7 +1325,7 @@ fn a_fact_and_a_device_coming_and_going_move_an_unrelated_device_not_at_all() {
     // used to withdraw and declare the whole session again, which the counter's topic and resource
     // show at once. Now only the fact, or the imu, is said: the counter must not move at all.
     let dir = dir("unrelated");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let files = IdentityFiles::new(&dir, "Serial : 0000000000abcdef\n");
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
@@ -1393,7 +1394,7 @@ fn start_tracked_opt(
     dir: &Path,
     lease: Option<Duration>,
 ) -> (Board, Logic, Service, Bridge, Orion) {
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(dir, "lemnosd.sock").unwrap();
     let board_text = format!("{BOARD}[[devices]]\nid = \"tracked\"\ndriver = \"tracked\"\n");
     let board = Board::start_for_node(dir);
     let logic = Logic::start(dir);
@@ -2161,7 +2162,7 @@ fn a_detached_run_is_re_attached_from_a_session_connected_after_its_starter_ende
 #[test]
 fn values_keep_the_time_the_driver_read_them_on_the_monotonic_clock() {
     let dir = dir("stamps");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd(&lemnosd);
@@ -2186,7 +2187,7 @@ fn values_keep_the_time_the_driver_read_them_on_the_monotonic_clock() {
 #[test]
 fn an_idle_session_is_kept_while_nothing_changes() {
     let dir = dir("idle");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     // The comm core gives a quiet session 2 s, with a 50 ms heartbeat. The bridge pings, so it is
     // never quiet for that long, and nothing is said to Orion meanwhile. The idle time is long so
     // that only a bridge thread not run for 2 s could be dropped: a shorter one let a loaded machine
@@ -2223,7 +2224,7 @@ fn an_idle_session_is_kept_while_nothing_changes() {
 #[test]
 fn a_comm_core_with_a_short_idle_time_is_connected_to_again() {
     let dir = dir("short-idle");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let options = || BoardOptions {
         for_node: true,
         heartbeat_ms: 50,
@@ -2313,7 +2314,7 @@ fn start_lemnosd_self_test(socket: &Path) -> Service {
 #[test]
 fn the_board_self_test_is_listed_run_and_read_through_the_bridge() {
     let dir = dir("self-test");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd_self_test(&lemnosd);
@@ -2391,7 +2392,7 @@ fn the_board_self_test_is_listed_run_and_read_through_the_bridge() {
 #[test]
 fn a_device_that_cannot_come_up_is_described_with_its_state_and_reason() {
     let dir = dir("refused");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd_refused(&lemnosd);
@@ -2457,7 +2458,7 @@ fn refusal_board() -> String {
 #[test]
 fn every_refusal_kind_reaches_the_status_topic_and_describe_unchanged() {
     let dir = dir("refusal-kinds");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let _logic = Logic::start(&dir);
     let _service = start_lemnosd_board(&lemnosd, &refusal_board());

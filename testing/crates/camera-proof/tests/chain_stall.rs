@@ -56,9 +56,11 @@ fn a_paused_consumer_loses_the_starts_it_queued_nothing_for_and_its_queued_frame
     lemnos_camera_sim::pisp::set_paced(true);
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
     let board = chain_board(REFERENCE_BOARD).unwrap();
-    let dir = std::env::temp_dir().join(format!("chain-stall-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
+    // Removed however the test ends, a panic included.
+    let _remove = RemoveOnDrop(dir.clone());
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
             socket: socket.clone(),
@@ -194,5 +196,13 @@ fn a_paused_consumer_loses_the_starts_it_queued_nothing_for_and_its_queued_frame
         );
     }
     service.stop();
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A directory removed when it goes, so a failing test leaves nothing behind.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }

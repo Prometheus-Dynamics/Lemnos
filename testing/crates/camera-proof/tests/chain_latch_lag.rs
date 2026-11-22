@@ -26,9 +26,9 @@ fn a_sensor_that_latches_a_frame_early_fails_the_latch() {
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
     lemnos_camera_sim::world(|w| w.latch_frames = 1);
     let board = chain_board(REFERENCE_BOARD).unwrap();
-    let dir = std::env::temp_dir().join(format!("chain-latch-lag-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
             socket: socket.clone(),

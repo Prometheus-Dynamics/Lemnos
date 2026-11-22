@@ -5,7 +5,6 @@
 mod scratch;
 use scratch::Scratch;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_fake_devices::FakeProbe;
@@ -21,13 +20,8 @@ struct Running {
 }
 
 fn start() -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "lemnos-ctl-jobs-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
-    let socket = dir.join("sock");
+    let dir = Scratch(lemnos_socket_dir::scratch_dir().unwrap());
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
         [[devices]]\nid = \"probe\"\ndriver = \"fake-probe\"\n";
     let service = Service::start(Config {

@@ -3,7 +3,7 @@
 //! publishes. Each test binary includes this file with `#[path]`; it has no test of its own.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -63,9 +63,8 @@ impl Drop for Scratch {
     }
 }
 
-pub fn dir(test: &str) -> Scratch {
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("lo-{test}-{}-{n}", std::process::id()));
+pub fn dir(_test: &str) -> Scratch {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("test directory");
     Scratch(dir)
@@ -97,7 +96,7 @@ impl Logic {
     pub fn start(dir: &Path) -> Self {
         let mut source = orion_config::Source::parse("", []).expect("no settings");
         let mut settings = NodeSettings::from_source(&mut source).expect("defaults");
-        settings.config.socket = dir.join("orion.sock");
+        settings.config.socket = lemnos_socket_dir::socket(dir, "orion.sock").unwrap();
         settings.config.state_dir = dir.join("state");
         settings.files_dir = dir.join("files");
         settings.audit = None;
@@ -268,7 +267,7 @@ pub fn counter(subscriber: &mut Subscriber) -> Option<f64> {
 
 /// The board, its comm core, lemnosd, and a relay the bridge reaches Orion through.
 pub fn start_relayed(dir: &Path) -> (Board, Logic, Service, PathBuf) {
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(dir, "lemnosd.sock").unwrap();
     let board = Board::start_with(dir, board_options());
     let logic = Logic::start(dir);
     let service = start_lemnosd(&lemnosd);

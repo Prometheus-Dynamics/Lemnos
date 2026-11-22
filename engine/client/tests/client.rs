@@ -197,7 +197,7 @@ fn a_device_is_found_by_tag() {
 fn no_service_is_an_error_from_connect() {
     let dir = temp_dir("none");
     assert_eq!(
-        Client::connect(dir.0.join("sock"), "t").unwrap_err(),
+        Client::connect(lemnos_socket_dir::socket(&dir.0, "sock").unwrap(), "t").unwrap_err(),
         Error::Disconnected
     );
 }
@@ -439,7 +439,7 @@ fn a_bounded_connect_connects_when_the_service_appears_inside_the_bound() {
 #[test]
 fn a_bounded_connect_fails_at_its_bound_when_the_service_never_appears() {
     let dir = temp_dir("never");
-    let path = dir.0.join("sock");
+    let path = lemnos_socket_dir::socket(&dir.0, "sock").unwrap();
     let bound = Duration::from_millis(1500);
     let started = Instant::now();
     let error = Client::connect_within(&path, "t", bound).unwrap_err();
@@ -458,7 +458,7 @@ fn a_bounded_connect_fails_at_its_bound_when_the_service_never_appears() {
 #[test]
 fn a_zero_bound_connects_as_connect_does() {
     let dir = temp_dir("zero");
-    let path = dir.0.join("sock");
+    let path = lemnos_socket_dir::socket(&dir.0, "sock").unwrap();
     let started = Instant::now();
     let bounded = Client::connect_within(&path, "t", Duration::ZERO).unwrap_err();
     let plain = Client::connect(&path, "t").unwrap_err();
@@ -772,7 +772,7 @@ fn a_subscription_comes_back_after_a_restart_with_the_same_identity() {
 #[test]
 fn a_program_can_start_before_the_service() {
     let dir = temp_dir("late");
-    let client = Client::connecting(dir.0.join("sock"), "t");
+    let client = Client::connecting(lemnos_socket_dir::socket(&dir.0, "sock").unwrap(), "t");
     let started = Instant::now();
     assert_eq!(client.list().unwrap_err(), Error::Disconnected);
     // The first call is the first try, and the refusal is its answer.

@@ -29,10 +29,9 @@ fn the_latch_beside_the_chain_fails_as_on_a_board() {
     assert!(lemnos_camera_sim::pisp::install());
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
     let board = chain_board(REFERENCE_BOARD).unwrap();
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("chain-latch-beside-{}", std::process::id()));
+    let dir: PathBuf = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
             socket: socket.clone(),

@@ -3,7 +3,6 @@
 //! the node does not serve.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_driver_named_files::NamedFilesDriver;
@@ -20,12 +19,7 @@ struct Running {
 
 /// A service with one `named-files` device, reading from a fresh temporary directory tree.
 fn start() -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-ctl-files-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("data")).unwrap();
     std::fs::create_dir_all(dir.join("boot")).unwrap();
@@ -33,7 +27,7 @@ fn start() -> Running {
     std::fs::write(dir.join("boot/trial-reason"), "power lost\n").unwrap();
     let big: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(dir.join("gen/overlay.dts"), &big).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"files\"\ndriver = \"named-files\"\n\

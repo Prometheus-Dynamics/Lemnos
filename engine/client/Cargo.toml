@@ -25,6 +25,7 @@ shm-ring-doorbell = { path = "../../shm/ring-doorbell" }
 tokio = { workspace = true, optional = true, features = ["net", "time"] }
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }
 lemnos-macros = { path = "../macros" }
 # The typed contract the example opens.

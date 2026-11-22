@@ -6,7 +6,6 @@ mod scratch;
 use scratch::Scratch;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_core::{Contract, ContractInfo, Description, Manifest};
@@ -309,18 +308,12 @@ struct Running {
     _dir: Scratch,
 }
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
 fn start_slots() -> Running {
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "lemnos-ctl-out-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
+    let dir = Scratch(lemnos_socket_dir::scratch_dir().unwrap());
     let (data, boot) = (dir.join("data"), dir.join("boot"));
     std::fs::create_dir_all(data.join("slots")).unwrap();
     std::fs::create_dir_all(boot.join("slots")).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\n\

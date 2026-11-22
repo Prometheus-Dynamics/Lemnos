@@ -31,5 +31,6 @@ lemnos-linux = { path = "../../../backends/linux" }
 
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../socket-dir" }
 lemnos-camera-sim = { path = "../camera-sim" }
 lemnosd = { path = "../../../service/lemnosd" }

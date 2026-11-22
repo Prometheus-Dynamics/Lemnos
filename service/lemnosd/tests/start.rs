@@ -25,8 +25,8 @@ impl Drop for Daemon {
     }
 }
 
-fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lemnosd-start-{}-{name}", std::process::id()));
+fn scratch(_name: &str) -> std::path::PathBuf {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let board = dir.join("board.toml");
@@ -40,7 +40,7 @@ fn spawn(dir: &Path, extra: &[&str]) -> (Daemon, std::path::PathBuf) {
         .args(["--sim", "--board"])
         .arg(dir.join("board.toml"))
         .arg("--socket")
-        .arg(dir.join("sock"))
+        .arg(lemnos_socket_dir::socket(dir, "sock").unwrap())
         .args(extra)
         .stdin(Stdio::null())
         .stderr(std::fs::File::create(&stderr).unwrap())
@@ -54,7 +54,7 @@ fn a_gadget_with_no_identity_device_is_refused_and_the_daemon_stays_up() {
     let dir = scratch("identity");
     let (mut daemon, stderr) = spawn(&dir, &[]);
     let start = Instant::now();
-    while UnixStream::connect(dir.join("sock")).is_err() {
+    while UnixStream::connect(lemnos_socket_dir::socket(&dir, "sock").unwrap()).is_err() {
         assert!(start.elapsed() < PATIENCE, "the daemon never listened");
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -110,7 +110,7 @@ fn a_file_that_is_not_a_board_stops_the_daemon_at_start_and_names_it() {
     assert_eq!(status.code(), Some(1), "{log}");
     assert!(log.contains("board.toml"), "{log}");
     assert!(
-        !dir.join("sock").exists(),
+        !lemnos_socket_dir::socket(&dir, "sock").unwrap().exists(),
         "a daemon that refused its file listened"
     );
     let _ = std::fs::remove_dir_all(dir);

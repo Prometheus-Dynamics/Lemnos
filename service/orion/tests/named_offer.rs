@@ -6,7 +6,6 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_driver_named_files::NamedFilesDriver;
@@ -354,8 +353,6 @@ fn the_loop_restarts_after_an_offer_ends_and_never_waits_more_than_8_seconds() {
 
 // ---- end to end: the bridge binary, a real Orion node, lemnosd with the named-files device --------
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
 struct Scratch(PathBuf);
 
 impl std::ops::Deref for Scratch {
@@ -372,9 +369,8 @@ impl Drop for Scratch {
 }
 
 /// A scratch directory under TMPDIR. Socket paths must stay under 108 bytes, so the name is short.
-fn scratch(test: &str) -> Scratch {
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("no-{test}-{}-{n}", std::process::id()));
+fn scratch(_test: &str) -> Scratch {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
     Scratch(dir)
@@ -390,7 +386,7 @@ impl Logic {
     fn start(dir: &Path) -> Self {
         let mut source = orion_config::Source::parse("", []).expect("no settings");
         let mut settings = NodeSettings::from_source(&mut source).expect("defaults");
-        settings.config.socket = dir.join("orion.sock");
+        settings.config.socket = lemnos_socket_dir::socket(dir, "orion.sock").unwrap();
         settings.config.state_dir = dir.join("state");
         settings.files_dir = dir.join("files");
         settings.audit = None;
@@ -464,7 +460,7 @@ fn setup(test: &str, overlay: &Path) -> Setup {
 /// As [`setup`], with the dashboard taking frames of at most `max_frame` bytes.
 fn setup_with(test: &str, overlay: &Path, max_frame: u32) -> Setup {
     let dir = scratch(test);
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let logic = Logic::start(&dir);
     let text = format!(

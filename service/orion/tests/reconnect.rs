@@ -217,8 +217,14 @@ fn a_stalled_open_link_keeps_its_session_and_publishing_resumes_on_it() {
     let dir = dir("stalled");
     let (board, _logic, _service, lemnosd) = start_relayed(&dir);
     let board_socket = board.socket().to_path_buf();
-    let relay = Relay::start(&dir.join("relay.sock"), board_socket.clone());
-    let _bridge = start_bridge(&lemnosd, &dir.join("relay.sock"));
+    let relay = Relay::start(
+        &lemnos_socket_dir::socket(&dir, "relay.sock").unwrap(),
+        board_socket.clone(),
+    );
+    let _bridge = start_bridge(
+        &lemnosd,
+        &lemnos_socket_dir::socket(&dir, "relay.sock").unwrap(),
+    );
     let dash = dashboard(&board_socket);
     let mut count = wait_for("the counter's first value", || {
         dash.subscribe("lemnos.thing.values").ok()
@@ -260,7 +266,7 @@ fn a_closed_link_is_lost_and_the_session_is_published_again() {
     let dir = dir("closed");
     let (board, _logic, _service, lemnosd) = start_relayed(&dir);
     let board_socket = board.socket().to_path_buf();
-    let relay_socket = dir.join("relay.sock");
+    let relay_socket = lemnos_socket_dir::socket(&dir, "relay.sock").unwrap();
     let relay = Relay::start(&relay_socket, board_socket.clone());
     let _bridge = start_bridge(&lemnosd, &relay_socket);
     let dash = dashboard(&board_socket);

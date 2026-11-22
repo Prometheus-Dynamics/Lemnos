@@ -177,7 +177,7 @@ fn a_c_compiler_agrees_on_every_layout() {
         status,
         len
     );
-    let dir = std::env::temp_dir().join(format!("lemnos-capi-layout-{}-a", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("check.c");
     std::fs::write(&file, source).unwrap();
@@ -220,9 +220,9 @@ fn a_service_from_another_lemnos_revision_is_refused_through_the_c_surface() {
             .push_str(core::str::from_utf8(bytes).unwrap());
     }
 
-    let dir = std::env::temp_dir().join(format!("lemnos-capi-layout-{}-b", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("svc.sock");
+    let path = lemnos_socket_dir::socket(&dir, "svc.sock").unwrap();
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap();
     let served = std::thread::spawn(move || {

@@ -21,9 +21,8 @@ fn eventually(mut done: impl FnMut() -> bool) {
 }
 
 /// A node directory with `dev/watchdog0`, a plain file, and no sysfs tree.
-fn node(name: &str) -> (PathBuf, PathBuf) {
-    let root =
-        std::env::temp_dir().join(format!("lemnosd-keepalive-{name}-{}", std::process::id()));
+fn node(_name: &str) -> (PathBuf, PathBuf) {
+    let root = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("dev")).unwrap();
     let file = root.join("dev/watchdog0");

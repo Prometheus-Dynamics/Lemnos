@@ -17,15 +17,11 @@ fn eventually(mut done: impl FnMut() -> bool, what: &str) {
 }
 
 fn stops_on(signal: &str, backend: &[&str]) {
-    let dir = std::env::temp_dir().join(format!(
-        "lemnosd-signal-{}-{signal}-{}",
-        std::process::id(),
-        backend.len()
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let board = dir.join("board.toml");
     std::fs::write(&board, BOARD).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let mut daemon = Reaped(
         Command::new(env!("CARGO_BIN_EXE_lemnosd"))
             .args(backend)
@@ -109,12 +105,12 @@ fn stop_signal_blocked(pid: u32) -> bool {
 /// regression guard: a SIGTERM sent before the mask is blocked, during exec, is not covered.
 #[test]
 fn sigterm_during_start_up_is_a_clean_stop() {
-    let dir = std::env::temp_dir().join(format!("lemnosd-early-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let board = dir.join("board.toml");
     std::fs::write(&board, BOARD).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let mut daemon = Reaped(
         Command::new(env!("CARGO_BIN_EXE_lemnosd"))
             .args(["--sim", "--board"])

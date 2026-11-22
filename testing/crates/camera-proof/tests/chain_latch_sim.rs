@@ -23,7 +23,7 @@ const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
 /// Starts the chain's service on a scratch socket, with the simulated sensor, receiver and blocks.
 fn service(dir: &std::path::Path) -> (Service, std::path::PathBuf) {
     let board = chain_board(REFERENCE_BOARD).unwrap();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
             socket: socket.clone(),
@@ -45,7 +45,7 @@ fn the_latch_on_its_own_lands_every_post_on_the_predicted_frame() {
     assert!(lemnos_camera_sim::pisp::install());
     lemnos_camera_sim::pisp::set_paced(true);
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
-    let dir = std::env::temp_dir().join(format!("chain-latch-sim-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let (service, socket) = service(&dir);
     let client = Client::connect(&socket, "chain-latch-sim").unwrap();

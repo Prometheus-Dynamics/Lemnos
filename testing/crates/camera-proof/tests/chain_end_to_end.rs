@@ -32,7 +32,7 @@ fn check(ok: bool, what: impl FnOnce() -> String) {
 }
 
 fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("chain-end-to-end-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -48,7 +48,7 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
     profile::reset();
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir = scratch();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let buffers = SimBuffers::probe();
     let kind = buffers.kind();
     let service = Service::start_with_buffers(

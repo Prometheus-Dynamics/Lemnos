@@ -6,7 +6,6 @@
 mod scratch;
 use scratch::Scratch;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_host::Options;
@@ -25,13 +24,8 @@ struct Running {
     _dir: Scratch,
 }
 
-fn scratch(tag: &str) -> Scratch {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "lemnos-walk-{tag}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
+fn scratch(_tag: &str) -> Scratch {
+    let dir = Scratch(lemnos_socket_dir::scratch_dir().unwrap());
     std::fs::create_dir_all(&*dir).unwrap();
     dir
 }
@@ -42,7 +36,7 @@ fn board_text(devices: &str) -> String {
 
 fn start(devices: &str, board: SimBoard) -> Running {
     let dir = scratch("show");
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let config = Config {
         socket: socket.clone(),
         name: "walk".to_string(),

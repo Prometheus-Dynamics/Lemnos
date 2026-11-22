@@ -33,7 +33,6 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, DeviceState};
@@ -116,19 +115,10 @@ impl StandIn {
         Self::begin(dir.to_path_buf(), false, devices, sim, Vec::new())
     }
 
-    /// A new, empty directory under the temp dir, named for this process; the caller removes it.
+    /// A new, empty directory for the service's socket, short whatever TMPDIR is; the caller
+    /// removes it.
     pub fn new_dir() -> Result<PathBuf, Error> {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "lemnos-standin-{}-{nanos}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&dir)?;
-        Ok(dir)
+        Ok(lemnos_socket_dir::scratch_dir()?)
     }
 
     fn begin(
@@ -138,9 +128,10 @@ impl StandIn {
         sim: SimBoard,
         extra: Vec<fn() -> DriverEntry>,
     ) -> Result<Self, Error> {
+        let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock")?;
         let mut standin = Self {
             service: None,
-            socket: dir.join("lemnosd.sock"),
+            socket,
             dir,
             board: format!(
                 "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"standin\"\n{devices}"

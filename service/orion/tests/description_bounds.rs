@@ -6,7 +6,6 @@
 //! Run with `--nocapture` to print the table.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, DeviceState};
@@ -16,13 +15,8 @@ use lemnos_orion::{description, source};
 use lemnos_sim_walk::{NOT_SIMULATED, NOT_WALKED, SIMULATED, walk};
 use lemnosd::{Config, Service};
 
-fn scratch(tag: &str) -> PathBuf {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-bounds-{tag}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+fn scratch(_tag: &str) -> PathBuf {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -58,7 +52,7 @@ fn every_built_in_drivers_description_keeps_the_bounds_through_the_text_form() {
     devices.push_str("\n[[devices]]\nid = \"never-started\"\ndriver = \"g2d\"\ndisabled = true\n");
     let text =
         format!("format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"walk\"\n{devices}");
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let service = Service::start(Config {
         socket: socket.clone(),
         name: "bounds".to_string(),

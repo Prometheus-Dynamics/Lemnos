@@ -10,6 +10,7 @@ description = "Lend check in the QEMU harness: a receiver's dma-bufs lent, with 
 workspace = true
 
 [dependencies]
+lemnos-socket-dir = { path = "../socket-dir" }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-core = { path = "../../../engine/core", features = ["std"] }
 lemnos-daemon-ready = { path = "../daemon-ready" }

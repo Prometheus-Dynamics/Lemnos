@@ -1,6 +1,5 @@
 //! A lease ends with its connection: a real service, through its socket, by the client.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_client::Client;
@@ -16,14 +15,9 @@ const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid 
 
 #[test]
 fn a_lease_ends_with_its_connection_and_the_next_waiter_is_granted() {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "gpu-lease-connection-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let _service = Service::start(Config {
         socket: socket.clone(),
         name: "test-host".to_string(),

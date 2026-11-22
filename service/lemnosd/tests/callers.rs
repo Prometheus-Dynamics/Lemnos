@@ -1,6 +1,5 @@
 //! When a client's connection closes, drivers are told, whatever way it closed.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, Error};
@@ -71,15 +70,10 @@ impl Drop for Dir {
 }
 
 fn start() -> (Service, Dir, std::path::PathBuf) {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnosd-callers-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let guard = Dir(dir.clone());
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
                 [[devices]]\nid = \"h\"\ndriver = \"holder\"\n";
     let service = Service::start(Config {

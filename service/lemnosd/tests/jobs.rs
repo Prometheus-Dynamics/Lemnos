@@ -1,6 +1,5 @@
 //! Long jobs through the real service: progress, cancel, the starter going away, and a restart.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_client::Client;
@@ -162,14 +161,9 @@ fn serve(socket: &std::path::Path) -> Service {
 }
 
 fn start() -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnosd-jobs-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     Running {
         service: Some(serve(&socket)),
         socket,

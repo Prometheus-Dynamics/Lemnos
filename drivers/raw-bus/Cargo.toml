@@ -14,6 +14,7 @@ lemnos-hal = { path = "../../engine/hal" }
 lemnos-contract-raw-bus = { path = "../../contracts/raw-bus" }
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-client = { path = "../../engine/client" }

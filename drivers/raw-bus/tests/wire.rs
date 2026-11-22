@@ -3,7 +3,6 @@
 //! and read that cross the socket, and the typed client's own limit.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use lemnos_client::{Client, Error};
@@ -52,14 +51,9 @@ impl Drop for Running {
 }
 
 fn start() -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "raw-bus-wire-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
 
     let board = SimBoard::new();
     let i2c = board.add_i2c("i2c");

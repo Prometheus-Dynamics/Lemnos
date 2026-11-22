@@ -88,15 +88,10 @@ impl Drop for Dir {
 }
 
 fn start(period_ns: u64) -> (Service, Dir, std::path::PathBuf) {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnosd-ticks-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let guard = Dir(dir.clone());
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"t\"\ndriver = \"ticker\"\nconfig = {{ period_ns = {period_ns} }}\n"

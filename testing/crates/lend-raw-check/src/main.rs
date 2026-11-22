@@ -145,7 +145,7 @@ fn board(heap: &str, receiver: &str, back_end: &str) -> String {
 fn start_daemon(lemnosd: &Path, dir: &Path, board: &str) -> Result<(Daemon, PathBuf), String> {
     let board_path = dir.join("board.toml");
     step("write the board", std::fs::write(&board_path, board))?;
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(dir, "sock").unwrap();
     let _ = std::fs::remove_file(&socket);
     let ready = Ready::new()?;
     // ROOT-STANZA: /dev/lemnos and the test module's receiver nodes stay root 0600 in the guest (no udev)
@@ -268,7 +268,7 @@ fn run(
     heap: &str,
     report: &mut Report,
 ) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("lemnos-lend-raw-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     step("make the directory", std::fs::create_dir_all(&dir))?;
     let (daemon, socket) = start_daemon(lemnosd, &dir, &board(heap, receiver, back_end))?;
     let client = step("connect", Client::connect(&socket, "lend-raw-check"))?;

@@ -53,9 +53,9 @@ fn request(request_type: u8) -> ControlSetup {
 
 #[test]
 fn the_tool_answers_requests_and_echoes_what_the_host_sends() {
-    let dir: PathBuf = std::env::temp_dir().join(format!("lemnos-usb-echo-{}", std::process::id()));
+    let dir: PathBuf = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let sim = SimBoard::new();
     let usb = sim.add_usb_function("udc0");
     let service = Service::start(Config {

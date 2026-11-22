@@ -2896,8 +2896,8 @@ fn a_socket_whose_backlog_is_full_is_busy_and_never_blocks_a_look() {
 
     use crate::trial::{self, Source};
 
-    let dir = TempDir::new("socket");
-    let path = dir.0.join("health.sock");
+    let dir = TempDir(lemnos_socket_dir::scratch_dir().unwrap());
+    let path = lemnos_socket_dir::socket(&dir.0, "health.sock").unwrap();
     let listener = UnixListener::bind(&path).unwrap();
     // Nothing accepts, so connections queue until the backlog is full.
     let mut queued = 0;

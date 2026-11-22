@@ -15,6 +15,7 @@ lemnos-contract-security-precondition = { path = "../../contracts/security-preco
 orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "927f704a40d008d4702d478974fcbf4ef89f747c", default-features = false }
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "927f704a40d008d4702d478974fcbf4ef89f747c", default-features = false }

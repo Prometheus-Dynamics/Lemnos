@@ -5,7 +5,6 @@
 mod scratch;
 use scratch::Scratch;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use lemnos_host::Options;
@@ -31,14 +30,9 @@ struct Running {
 }
 
 fn start() -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "lemnos-show-test-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
+    let dir = Scratch(lemnos_socket_dir::scratch_dir().unwrap());
     std::fs::create_dir_all(&*dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let board = SimBoard::new();
     board.add_line("gpio-power");
     board.add_pwm("pwm-fan");

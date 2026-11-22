@@ -27,10 +27,9 @@ fn a_sensor_that_nacks_its_bus_refuses_the_chain_by_name() {
         .remove(&0x60);
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(world);
     let board = chain_board(REFERENCE_BOARD).unwrap();
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("chain-sensor-nack-{}", std::process::id()));
+    let dir: PathBuf = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let service = Service::start_with_buffers(
         Config {
             socket: socket.clone(),

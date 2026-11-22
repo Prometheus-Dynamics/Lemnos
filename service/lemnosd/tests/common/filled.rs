@@ -4,7 +4,6 @@
 //! theirs, and publishes what they make together on `output`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use lemnos_client::{FrameStream, Session, StreamPlatform};
@@ -185,14 +184,9 @@ impl Filled for FilledDriver {
 /// The service with the driver bound: `config` is shared memory, and `input` and `output` are
 /// dma-bufs from `buffers` (with `heap` naming where, when it isn't the default).
 pub fn start(buffers: Arc<dyn BufferSource>, heap: &str) -> Running {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnosd-filled-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir, "sock").unwrap();
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"f\"\ndriver = \"filled\"\n\

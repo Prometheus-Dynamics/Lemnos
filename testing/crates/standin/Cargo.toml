@@ -13,6 +13,7 @@ description = "A real lemnosd for a consumer's tests: the service and every buil
 workspace = true
 
 [dependencies]
+lemnos-socket-dir = { path = "../socket-dir" }
 # The service as it ships, less the Orion precheck: a consumer's tests have no Orion.
 lemnosd = { path = "../../../service/lemnosd", default-features = false }
 lemnos-host = { path = "../../../engine/host" }

@@ -133,9 +133,8 @@ struct Packages {
 }
 
 impl Packages {
-    fn new(name: &str, key: &SigningKey) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("lemnosd-daemon-{}-{name}", std::process::id()));
+    fn new(_name: &str, key: &SigningKey) -> Self {
+        let root = lemnos_socket_dir::scratch_dir().unwrap();
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("packages");
         std::fs::create_dir_all(&dir).unwrap();
@@ -193,7 +192,7 @@ struct Daemon {
 
 impl Daemon {
     fn start(packages: &Packages, args: &[&str]) -> Self {
-        let socket = packages.root().join("sock");
+        let socket = lemnos_socket_dir::socket(packages.root(), "sock").unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_lemnosd"))
             .arg("--sim")
             .arg("--board")

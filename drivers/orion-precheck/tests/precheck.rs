@@ -92,8 +92,8 @@ impl Drop for Scratch {
     }
 }
 
-fn dir(name: &str) -> Scratch {
-    let dir = std::env::temp_dir().join(format!("lo-precheck-{name}-{}", std::process::id()));
+fn dir(_name: &str) -> Scratch {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("test directory");
     Scratch(dir)
@@ -184,7 +184,7 @@ fn a_node_below_the_precheck_level_says_the_level_needed_and_seen() {
 #[test]
 fn a_silent_node_is_did_not_answer_within_the_deadline() {
     let dir = dir("silent");
-    let socket = dir.join("silent.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "silent.sock").unwrap();
     let listener = UnixListener::bind(&socket).expect("the silent node listens");
     std::thread::spawn(move || {
         let mut held = Vec::new();
@@ -214,7 +214,7 @@ fn a_silent_node_is_did_not_answer_within_the_deadline() {
 #[test]
 fn no_comm_core_is_did_not_answer_at_once_and_the_driver_keeps_trying() {
     let dir = dir("absent");
-    let mut dev = device(&dir.join("absent.sock"));
+    let mut dev = device(&lemnos_socket_dir::socket(&dir, "absent.sock").unwrap());
     let (on, elapsed) = ask(&mut dev, true);
     assert!(
         on.starts_with("missing: orion: it did not answer ("),

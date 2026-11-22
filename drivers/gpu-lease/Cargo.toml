@@ -13,6 +13,7 @@ lemnos-core = { path = "../../engine/core" }
 lemnos-contract-gpu-lease = { path = "../../contracts/gpu-lease" }
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-client = { path = "../../engine/client" }

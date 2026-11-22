@@ -6,7 +6,7 @@
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -51,14 +51,9 @@ impl Running {
 }
 
 fn place() -> (PathBuf, PathBuf) {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lemnos-capi-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    (dir.join("sock"), dir)
+    (lemnos_socket_dir::socket(&dir, "sock").unwrap(), dir)
 }
 
 fn config(socket: PathBuf, devices: &str) -> Config {

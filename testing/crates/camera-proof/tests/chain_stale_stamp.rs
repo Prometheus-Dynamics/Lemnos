@@ -21,7 +21,7 @@ use lemnosd::{Config, Service};
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
 
 fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("chain-end-to-end-{}", std::process::id()));
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -38,7 +38,7 @@ fn a_stale_frame_start_fails_the_chain_proof_on_its_age_check() {
     lemnos_camera_sim::time::install_file(&clock).unwrap();
     let board = chain_board(REFERENCE_BOARD).unwrap();
     let dir = scratch();
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let buffers = SimBuffers::probe();
     let kind = buffers.kind();
     let service = Service::start_with_buffers(

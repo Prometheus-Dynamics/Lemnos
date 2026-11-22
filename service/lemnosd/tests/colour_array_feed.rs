@@ -84,7 +84,7 @@ fn start(dir: &Path) -> Service {
                 uses = { pixels = \"strip\" }\n\
                 config = { count = 4, fade_ms = 0, look_brightness = 1.0 }\n";
     Service::start(Config {
-        socket: dir.join("sock"),
+        socket: lemnos_socket_dir::socket(dir, "sock").unwrap(),
         name: "test-host".to_string(),
         board: parse(text).unwrap(),
         drivers: vec![entry::<StatusLight>(), entry::<PixelStandIn>()],
@@ -103,10 +103,10 @@ fn frame(n: u8) -> Vec<u8> {
 
 #[test]
 fn a_burst_of_frames_reaches_a_subscriber_coalesced_to_the_latest_at_the_cap() {
-    let dir = Dir(std::env::temp_dir().join(format!("lemnos-feed-{}", std::process::id())));
+    let dir = Dir(lemnos_socket_dir::scratch_dir().unwrap());
     std::fs::create_dir_all(&dir.0).unwrap();
     let _service = start(&dir.0);
-    let socket = dir.0.join("sock");
+    let socket = lemnos_socket_dir::socket(&dir.0, "sock").unwrap();
 
     let reader = Client::connect(socket.clone(), "reader").unwrap();
     let mut handle = reader.open_tag("light", "light/1").unwrap();

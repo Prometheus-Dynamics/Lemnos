@@ -1044,6 +1044,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-sim",
  "lemnos-sim-clock",
+ "lemnos-socket-dir",
  "lemnos-wire",
  "lemnosd",
 ]
@@ -1087,6 +1088,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-socket-dir",
  "lemnos-wire",
  "lemnosd",
 ]
@@ -1117,6 +1119,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-macros",
  "lemnos-measure",
+ "lemnos-socket-dir",
  "lemnos-wire",
  "shm-ring",
  "shm-ring-buffers",
@@ -1454,6 +1457,7 @@ dependencies = [
  "lemnos-sim",
  "lemnos-sim-walk",
  "lemnos-slot-store",
+ "lemnos-socket-dir",
  "lemnos-wire",
  "lemnosd",
  "sha2 0.10.9",
@@ -1667,6 +1671,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-host",
  "lemnos-sim",
+ "lemnos-socket-dir",
  "lemnosd",
 ]
 
@@ -1931,6 +1936,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-host",
  "lemnos-sim",
+ "lemnos-socket-dir",
  "orion",
  "orion-comm-app",
  "orion-config",
@@ -2006,6 +2012,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-host",
  "lemnos-sim",
+ "lemnos-socket-dir",
  "lemnos-wire",
  "lemnosd",
 ]
@@ -2366,6 +2373,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-sim",
  "lemnos-slot-store",
+ "lemnos-socket-dir",
  "libc",
  "sha2 0.10.9",
 ]
@@ -2710,6 +2718,7 @@ dependencies = [
  "lemnos-driver-pisp",
  "lemnos-linux-stream",
  "lemnos-linux-sys",
+ "lemnos-socket-dir",
 ]
 
 [[package]]
@@ -2851,6 +2860,7 @@ dependencies = [
  "lemnos-sim",
  "lemnos-sim-walk",
  "lemnos-slot-store",
+ "lemnos-socket-dir",
  "lemnos-wire",
  "lemnosd",
  "orion",
@@ -3098,6 +3108,10 @@ name = "lemnos-soc"
 version = "2.0.1-dev"
 
 [[package]]
+name = "lemnos-socket-dir"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-standin"
 version = "2.0.1-dev"
 dependencies = [
@@ -3110,6 +3124,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-host",
  "lemnos-sim",
+ "lemnos-socket-dir",
  "lemnosd",
 ]
 
@@ -3130,6 +3145,7 @@ dependencies = [
  "lemnos-daemon-ready",
  "lemnos-linux-stream",
  "lemnos-linux-sys",
+ "lemnos-socket-dir",
 ]
 
 [[package]]
@@ -3171,6 +3187,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-stream",
  "lemnos-sim",
+ "lemnos-socket-dir",
  "lemnosd",
 ]
 
@@ -3296,6 +3313,7 @@ dependencies = [
  "lemnos-shipped-features",
  "lemnos-sim",
  "lemnos-slot-store",
+ "lemnos-socket-dir",
  "lemnos-wire",
  "shm-ring",
  "shm-ring-buffers",

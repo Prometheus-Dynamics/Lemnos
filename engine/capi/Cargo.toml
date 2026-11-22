@@ -45,6 +45,7 @@ lemnos-wire = { path = "../wire" }
 lemnos-linux-stream = { path = "../../backends/linux-stream" }
 
 [dev-dependencies]
+lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-hal = { path = "../hal", features = ["std"] }
 lemnos-host = { path = "../host" }

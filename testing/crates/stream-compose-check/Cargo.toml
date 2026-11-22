@@ -10,6 +10,7 @@ description = "Composition check in the QEMU harness: the fake receiver's frames
 workspace = true
 
 [dependencies]
+lemnos-socket-dir = { path = "../socket-dir" }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }

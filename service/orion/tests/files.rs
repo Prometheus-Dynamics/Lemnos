@@ -4,7 +4,6 @@
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -26,8 +25,6 @@ use tokio::sync::oneshot;
 const WAIT: Duration = Duration::from_secs(60);
 const BLOCK: usize = 4096;
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
 /// A scratch directory under TMPDIR, removed when the test ends, whether it passed or panicked.
 struct Scratch(std::path::PathBuf);
 
@@ -44,9 +41,8 @@ impl Drop for Scratch {
     }
 }
 
-fn dir(test: &str) -> Scratch {
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("lf-{test}-{}-{n}", std::process::id()));
+fn dir(_test: &str) -> Scratch {
+    let dir = lemnos_socket_dir::scratch_dir().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("test directory");
     Scratch(dir)
@@ -155,7 +151,7 @@ impl Logic {
     fn start(dir: &Path) -> Self {
         let mut source = orion_config::Source::parse("", []).expect("no settings");
         let mut settings = NodeSettings::from_source(&mut source).expect("defaults");
-        settings.config.socket = dir.join("orion.sock");
+        settings.config.socket = lemnos_socket_dir::socket(dir, "orion.sock").unwrap();
         settings.config.state_dir = dir.join("state");
         settings.files_dir = dir.join("files");
         settings.audit = None;
@@ -288,7 +284,7 @@ struct Setup {
 
 fn setup(test: &str, reserve_mb: u64) -> Setup {
     let dir = dir(test);
-    let socket = dir.join("lemnosd.sock");
+    let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let logic = Logic::start(&dir);
     let service = start_lemnosd(&dir, &socket, reserve_mb);

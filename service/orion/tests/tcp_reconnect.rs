@@ -110,7 +110,7 @@ struct Up {
 
 fn up(test: &str) -> Up {
     let dir = dir(test);
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_with(&dir, board_options());
     let logic = Logic::start(&dir);
     let service = start_lemnosd(&lemnosd);
@@ -306,7 +306,7 @@ fn a_tcp_caller_reset_with_unread_bytes_releases_its_holds() {
 #[test]
 fn a_bridge_given_a_carrier_that_cannot_publish_is_refused_once_and_stops() {
     let dir = dir("tcp-refused");
-    let lemnosd = dir.join("lemnosd.sock");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_with(&dir, board_options());
     let logic = Logic::start(&dir);
     let service = start_lemnosd(&lemnosd);
