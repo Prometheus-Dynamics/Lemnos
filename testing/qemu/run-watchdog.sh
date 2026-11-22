@@ -177,15 +177,31 @@ run_mode() {
 # piece TEXT NAME: the seconds after the hook's last feed of the daemon's piece NAME, or empty.
 piece() { tr -d '\r' <"$1" | sed -n "s/.*user: piece: $2 at \([0-9.-]*\) s after the hook's last feed.*/\1/p" | head -1; }
 
-# end_after_feed MODE PIECE: the seconds from the feed named PIECE to the guest's end. The end and the hook's handover
-# line are host stamps; the feed's own offset from the hook's last feed is taken off the end's offset from the hook, so
-# a feed line the console prints late (a guest whose output is read late) does not move the answer. The stamp of the
-# feed's line is not used: it is when the host read the line, not when lemnosd fed.
+# feed_offset MODE: the root-phase feed's offset from the hook's last feed, from two CLOCK_MONOTONIC stamps in the
+# console's text: lemnosd's start trace "root phase: watchdog fed" (T) and the hook's "hook: last feed at" (H). The offset
+# is T - H. Neither stamp is the time the host read a line, so a late reader moves neither. Fails if either is missing.
+feed_offset() {
+  local mode="$1" t h
+  t="$(tr -d '\r' <"$work/text-$mode.log" | sed -n 's/.*lemnosd: start trace: \([0-9.]*\) root phase: watchdog fed.*/\1/p' | head -1)"
+  h="$(tr -d '\r' <"$work/text-$mode.log" | sed -n 's/.*hook: last feed at \([0-9.]*\),.*/\1/p' | head -1)"
+  [[ -n "$t" ]] || fail "$mode: no lemnosd start trace stamp for the root-phase feed"
+  [[ -n "$h" ]] || fail "$mode: no hook last-feed stamp"
+  awk -v t="$t" -v h="$h" 'BEGIN{printf "%.6f", t-h}'
+}
+
+# end_after_feed MODE: the seconds from the root-phase feed to the guest's end. The end is a host stamp (QEMU's exit);
+# the hook's handover line gives its host stamp, taken as the hook made its last feed. The end less that stamp is the
+# end's offset from the hook's last feed, and the feed's offset (feed_offset) is taken off it.
+# Diagnostic only, not used: what the console stamp of the feed line would give, and the feed line's printed offset.
 end_after_feed() {
-  local mode="$1" name="$2" hooked off
+  local mode="$1" hooked off feed_stamp printed
   hooked="$(awk '/hook: last feed at/ {print $1; exit}' "$work/console-$mode.stamped")"
-  off="$(piece "$work/text-$mode.log" "$name")"
-  [[ -n "$hooked" && -n "$off" ]] || fail "$mode: no hook stamp or no offset for the feed: $name"
+  [[ -n "$hooked" ]] || fail "$mode: no host stamp for the hook's last feed"
+  off="$(feed_offset "$mode")" || fail "$mode: the feed offset has no stamp (see above)"
+  feed_stamp="$(awk '/user: piece: root-phase feed/ {print $1; exit}' "$work/console-$mode.stamped")"
+  printed="$(piece "$work/text-$mode.log" 'root-phase feed')"
+  awk -v e="$end" -v h="$hooked" -v o="$off" -v f="${feed_stamp:-0}" -v p="${printed:--1}" -v m="$mode" 'BEGIN{
+    printf "qemu-watchdog: %s: feed offset (T - H) %.6f s; diagnostic only: the feed line'"'"'s console stamp gives %.1f s, its printed offset gives %.1f s\n", m, o, e-f, (e-h)-p > "/dev/stderr" }'
   awk -v e="$end" -v h="$hooked" -v o="$off" 'BEGIN{printf "%.1f", (e-h)-o}'
 }
 
@@ -274,7 +290,7 @@ for mode in $MODES; do
       if [[ -n "$(piece "$text" 'watchdog first feed')" ]]; then fail "daemon-stop: the watchdog was fed after the root phase with lemnosd stopped"; fi
       [[ -n "$(piece "$text" 'root-phase feed')" ]] || { markers "$text"; fail "daemon-stop: no root-phase feed"; }
       # The reset is due within the period of the root phase's feed: the stamp of its piece line.
-      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
+      elapsed="$(end_after_feed "$mode")"
       window=$((DOG_SECONDS + TIMING_SLACK))
       echo "qemu-watchdog: daemon-stop: the guest ended ${elapsed} s after the root phase's feed (due by ${window} s)" >&2
       awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "daemon-stop: the guest ended ${elapsed} s after the root phase's feed, past ${window} s"
@@ -286,7 +302,7 @@ for mode in $MODES; do
       if grep -qF "the guest stayed up" "$text"; then fail "daemon-loop: the guest stayed up through the restarts"; fi
       feeds="$(grep -c 'user: piece: root-phase feed' "$text" || true)"
       [[ "$feeds" == 1 ]] || fail "daemon-loop: ${feeds} starts fed the watchdog; only the boot's first may"
-      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
+      elapsed="$(end_after_feed "$mode")"
       window=$((DOG_SECONDS + TIMING_SLACK))
       starts="$(grep -c 'killed after its root phase' "$text" || true)"
       echo "qemu-watchdog: daemon-loop: ${starts} starts, one fed; the guest ended ${elapsed} s after that feed (due by ${window} s)" >&2
@@ -300,7 +316,7 @@ for mode in $MODES; do
       expect "$mode" "$text" 'root phase: watchdog adopted, not fed'
       feeds="$(grep -c 'user: piece: root-phase feed' "$text" || true)"
       [[ "$feeds" == 1 ]] || fail "daemon-loop-bind: ${feeds} starts fed the watchdog; only the boot's first may"
-      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
+      elapsed="$(end_after_feed "$mode")"
       window=$((DOG_SECONDS + TIMING_SLACK))
       starts="$(grep -c 'killed after its watchdog bind' "$text" || true)"
       echo "qemu-watchdog: daemon-loop-bind: ${starts} starts, one fed; the guest ended ${elapsed} s after that feed (due by ${window} s)" >&2
@@ -320,7 +336,7 @@ for mode in $MODES; do
       expect "$mode" "$text" "user: daemon (pid1-hang-stop): lemnosd stopped after its root phase's feed"
       if grep -qF "stayed up 45 s with PID 1 hung" "$text"; then fail "pid1-hang-stop: the guest stayed up with lemnosd stopped"; fi
       if [[ -n "$(piece "$text" 'watchdog first feed')" ]]; then fail "pid1-hang-stop: the watchdog was fed after the root phase with lemnosd stopped"; fi
-      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
+      elapsed="$(end_after_feed "$mode")"
       window=$((DOG_SECONDS + TIMING_SLACK))
       echo "qemu-watchdog: pid1-hang-stop: PID 1 hung and lemnosd stopped: the guest ended ${elapsed} s after the root phase's feed (due by ${window} s)" >&2
       awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "pid1-hang-stop: the guest ended ${elapsed} s after the root phase's feed, past ${window} s"
