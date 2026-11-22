@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-restart-lemnosd-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The slot install check, test only: a bundle installed through the real lemnosd's socket by its client, in the QEMU guest under systemd, and the boot partition's bay set read back; the host side makes the payload and the rootfs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-client = { path = "../../../engine/client" }
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-driver-system-slots = { path = "../../../drivers/system-slots" }
+lemnos-firmware-check = { path = "../../../service/firmware-check" }
+lemnos-slot-store = { path = "../../../drivers/slot-store" }

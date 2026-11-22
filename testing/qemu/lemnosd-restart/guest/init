@@ -1,0 +1,28 @@
+#!/bin/bash
+# The initramfs's /init (testing/qemu/run-lemnosd-restart.sh). systemd's early /dev mount fails on the initramfs's
+# own rootfs, so the guest moves into a tmpfs root (/newroot) and runs systemd there, as PID 1, by chroot. The
+# data partition (the disk's second partition, ext4) is mounted at /data in that root; the boot partition
+# (the first, FAT) is read and written by the daemon through its node, as on a board.
+exec </dev/console >/dev/console 2>&1
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+# The initramfs has no device nodes until devtmpfs is mounted: the disk's partitions and /dev/null come from it.
+mount -t devtmpfs devtmpfs /dev || echo "init: no devtmpfs"
+mkdir -p /newroot
+mount -t tmpfs -o mode=0755,size=300m tmpfs /newroot || { echo "init: no tmpfs root"; exec /bin/sh; }
+for entry in /* ; do
+	case "$entry" in
+	/newroot|/proc|/sys|/dev|/init) continue ;;
+	esac
+	cp -a "$entry" /newroot/
+done
+mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/run /newroot/tmp /newroot/data
+mount --bind /dev /newroot/dev
+if mount -t ext4 /dev/vda2 /newroot/data; then
+	chown 900:900 /newroot/data/board /newroot/data/board/slots /newroot/data/slots /newroot/data/slots/.incoming 2>/dev/null
+	echo "init: the data partition is mounted at /data"
+else
+	echo "init: the data partition did not mount"
+fi
+echo "init: the guest's root is /newroot; starting systemd"
+exec chroot /newroot /usr/lib/systemd/systemd

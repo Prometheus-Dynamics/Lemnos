@@ -1453,6 +1453,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-identity",
  "lemnos-linux",
+ "lemnos-restart",
  "lemnos-shipped-features",
  "lemnos-sim",
  "lemnos-sim-walk",
@@ -2371,6 +2372,7 @@ dependencies = [
  "lemnos-driver-rpi-firmware-sys",
  "lemnos-host",
  "lemnos-linux-sys",
+ "lemnos-restart",
  "lemnos-sim",
  "lemnos-slot-store",
  "lemnos-socket-dir",
@@ -2986,6 +2988,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-restart-lemnosd-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-client",
+ "lemnos-core",
+ "lemnos-driver-system-slots",
+ "lemnos-firmware-check",
+ "lemnos-slot-store",
+]
+
+[[package]]
+name = "lemnos-restart-probe"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-restart",
+]
+
+[[package]]
 name = "lemnos-rockchip-maskrom-stage"
 version = "2.0.1-dev"
 dependencies = [
@@ -3001,6 +3021,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-daemon-ready",
  "lemnos-driver-system-slots",
+ "lemnos-restart",
  "lemnos-slot-store",
 ]
 

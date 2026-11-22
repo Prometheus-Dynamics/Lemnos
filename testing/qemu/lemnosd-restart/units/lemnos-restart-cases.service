@@ -1,0 +1,16 @@
+# The lemnosd restart cases (testing/qemu/lemnosd-restart/guest/cases.sh). Runs once the packaged daemon and the restart
+# helper are up; the guest's console is where the host reads its lines. DefaultDependencies=no: a shutdown does not stop
+# the cases before the reboot case has its answer.
+[Unit]
+Description=Restart guest: the lemnosd restart cases
+DefaultDependencies=no
+Wants=lemnosd.service lemnos-restart.socket
+After=lemnosd.service lemnos-restart.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/lemnos-guest/cases.sh
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

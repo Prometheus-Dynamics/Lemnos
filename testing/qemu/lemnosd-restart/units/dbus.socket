@@ -1,0 +1,8 @@
+[Unit]
+Description=Guest system bus socket
+DefaultDependencies=no
+[Socket]
+ExecStartPre=/usr/bin/mkdir -p /run/dbus
+ListenStream=/run/dbus/system_bus_socket
+[Install]
+WantedBy=sockets.target
