@@ -73,6 +73,7 @@ At the top:
 | `[host]` | How the host treats every driver (below). Optional |
 | `[[devices]]` | One table per device, in any order |
 | `[[each]]` | One table per kind of hardware that gets a device of its own wherever it is found. See [One device for each that fits](#one-device-for-each-that-fits) |
+| `[meta]` | Image-builder metadata, as string values. The daemon ignores it. See [`[meta]`](#meta) |
 
 In a device:
 
@@ -85,7 +86,7 @@ In a device:
 | `uses` | A table from one of the driver's need names to a device `id` or a resource name. A key the driver does not take, or a device id the board does not have or that does not serve the need's contract, is refused by name (above) |
 | `link` | The `id` of another device this one is wired to. The host only hands it over, and `lemnos-ctl validate` refuses a `link` to a device the board doesn't have. `lemnos-ctl chain` follows it. A driver that needs the link takes it at bind (a `#[link]` field) and confirms it from the hardware side: see [Drivers and contracts](drivers.md#contracts) |
 | `lend` | The stream of the device whose `link` names this one, that this device reads as a lend: each job that names a buffer of it is given that buffer, lent, with no copy. Left out, this device gets no lend. The host resolves exactly that stream, on the one device linked to this one; none, or more than one, and the lend is refused at bind |
-| `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own; a key it does not read is refused by name (above) |
+| `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own; a key it does not read is refused by name (above). A device's I2C address is one of these, as `config = { address = 0x40 }`: `address` as a device key of its own is refused, and the refusal says so |
 | `disabled` | `true` starts the device off. `lemnos-ctl on` turns it on |
 | `auto_off_after` | Opts this device in to being turned off after this many failed binds in a row, at least 1. Left out, it is retried forever. `lemnos-ctl on` brings it back |
 | `owner` | `"lemnos"` (the default) or `"host"`. With `"host"` the operating system owns the hardware and Lemnos only reads it. See [Concepts](concepts.md#who-owns-the-hardware) |
@@ -414,6 +415,22 @@ Three checks, in the image builder, before a `uboot` slot image is built. Each i
 A board whose environment was rebuilt by an earlier U-Boot holds no marker until a U-Boot that carries
 it rebuilds the environment (see [Slots](slots.md#trial-updates-on-the-uboot-record)). Until then `info`
 says `trial_block` `loader-not-updated`, and no trial is recorded.
+
+## `[meta]`
+
+`[meta]` holds what the tool that writes the board file wants to record about it: where it came
+from, the package it was built for, a name for a person to read. Every value is a string. The daemon
+ignores the table, and `lemnos-ctl validate` accepts it. A value that is not a string (a number, a
+boolean, a table or a list) is refused by name.
+
+```toml
+[meta]
+generated_by = "image-tool tools/gen-board.py"
+name = "Example"
+```
+
+Metadata is not written at the top level. A top-level `generated_by` or `name` is refused, and the
+refusal says to put it in `[meta]`. The same two keys under `[board]` are refused the same way.
 
 ## `[board]` identity
 

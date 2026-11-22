@@ -577,6 +577,12 @@ pub struct BoardInfo {
     /// The base tree the board is built on, by its name in the SoC map. Only the generator reads it.
     #[serde(default)]
     pub base: Option<String>,
+    /// Not a `[board]` key: metadata goes in `[meta]`. Named here only to refuse it with the hint.
+    #[serde(default)]
+    generated_by: Option<toml::Value>,
+    /// Not a `[board]` key: named here only to refuse it with the `[meta]` hint.
+    #[serde(default)]
+    name: Option<toml::Value>,
 }
 
 /// A piece of hardware the board uses: a controller of the SoC map, with the pin set it is wired
@@ -696,6 +702,10 @@ pub struct DeviceSpec {
     /// it (it is not read from the file). A refused device shows failed with this reason.
     #[serde(skip)]
     pub refused: Option<String>,
+    /// Not a device key: the I2C address is `config = { address = ... }`. Named here only to
+    /// refuse it with that hint.
+    #[serde(default)]
+    address: Option<toml::Value>,
 }
 
 /// One device for each resource the backend finds that fits a pattern: a USB camera of any make
@@ -772,6 +782,7 @@ impl EachSpec {
             auto_off_after: self.auto_off_after,
             keepalive: false,
             refused: self.refused.clone(),
+            address: None,
         }
     }
 }
@@ -804,6 +815,16 @@ pub struct BoardFile {
     /// there; none has a default.
     #[serde(default)]
     pub boot: BootSpec,
+    /// `[meta]`: what the tool that writes the board file records about it, as strings. The daemon
+    /// ignores it. See `docs/boards.md`.
+    #[serde(default, deserialize_with = "meta_strings")]
+    pub meta: BTreeMap<String, String>,
+    /// Not a top-level key: metadata goes in `[meta]`. Named here only to refuse it with the hint.
+    #[serde(default)]
+    generated_by: Option<toml::Value>,
+    /// Not a top-level key: named here only to refuse it with the `[meta]` hint.
+    #[serde(default)]
+    name: Option<toml::Value>,
 }
 
 /// `[boot]`: the size of each payload bay on the boot partition, in bytes. A bay is one role's
@@ -1064,6 +1085,16 @@ fn parse_checked(text: &str) -> Result<(BoardFile, Vec<BoardError>), BoardError>
     if board.schema_version > SCHEMA_VERSION {
         return Err(BoardError::Version(board.schema_version));
     }
+    for (key, present) in [
+        ("generated_by", board.generated_by.is_some()),
+        ("name", board.name.is_some()),
+        ("generated_by", board.board.generated_by.is_some()),
+        ("name", board.board.name.is_some()),
+    ] {
+        if present {
+            return Err(metadata_key_refusal(key));
+        }
+    }
     board.host.check()?;
     let mut problems = Vec::new();
     for (key, path) in [
@@ -1100,10 +1131,57 @@ fn parse_checked(text: &str) -> Result<(BoardFile, Vec<BoardError>), BoardError>
     Ok((board, problems))
 }
 
+/// `[meta]`: every value must be a string. A value of another type is refused by its key, with
+/// the type it has: `[meta] count: expected a string, found an integer`.
+fn meta_strings<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeMap::<String, toml::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(key, value)| match value {
+            toml::Value::String(text) => Ok((key, text)),
+            other => {
+                let found = match other {
+                    toml::Value::Integer(_) => "an integer",
+                    toml::Value::Float(_) => "a float",
+                    toml::Value::Boolean(_) => "a boolean",
+                    toml::Value::Datetime(_) => "a datetime",
+                    toml::Value::Array(_) => "an array",
+                    toml::Value::Table(_) => "a table",
+                    toml::Value::String(_) => "a string",
+                };
+                Err(serde::de::Error::custom(format!(
+                    "[meta] {key}: expected a string, found {found}"
+                )))
+            }
+        })
+        .collect()
+}
+
+/// The refusal for a metadata key written where a board key goes: it belongs in `[meta]`.
+fn metadata_key_refusal(key: &str) -> BoardError {
+    BoardError::Parse(format!(
+        "`{key}` is not a board key: write it in `[meta]` as `{key} = \"...\"`"
+    ))
+}
+
 /// The first problem a device has of its own, checked in the order the file has always been read.
 fn device_problem(device: &DeviceSpec, seen: &mut BTreeSet<String>) -> Option<BoardError> {
     if !seen.insert(device.id.clone()) {
         return Some(BoardError::Duplicate(device.id.clone()));
+    }
+    if let Some(value) = &device.address {
+        // The hint shows the address as the file would write it: an integer in hex.
+        let shown = match (value.as_integer(), value.as_str()) {
+            (Some(n), _) if n >= 0 => format!("0x{n:x}"),
+            (_, Some(text)) => format!("{text:?}"),
+            _ => format!("{value:?}"),
+        };
+        return Some(BoardError::Parse(format!(
+            "device {:?}: `address` is not a device key: write it in `config = {{ address = {shown} }}`",
+            device.id
+        )));
     }
     if device.id.contains(EACH_SEPARATOR) {
         return Some(BoardError::At(device.id.clone()));
@@ -1355,6 +1433,46 @@ mod tests {
     fn an_unknown_top_level_key_is_refused_by_name() {
         let error = parse(&format!("{HEAD}looks = 1\n")).unwrap_err();
         assert!(error.to_string().contains("looks"), "{error}");
+    }
+
+    #[test]
+    fn a_meta_table_of_strings_is_accepted_and_kept_apart_from_the_board() {
+        let board = parse(&format!(
+            "{HEAD}[meta]\ngenerated_by = \"image-tool gen-board.py\"\nname = \"Example\"\n"
+        ))
+        .unwrap();
+        assert_eq!(board.meta.get("name").map(String::as_str), Some("Example"));
+        assert_eq!(board.meta.len(), 2);
+    }
+
+    #[test]
+    fn a_non_string_meta_value_is_refused_by_name() {
+        for (key, value) in [
+            ("count", "count = 3"),
+            ("flag", "flag = true"),
+            ("nested", "nested = { a = \"b\" }"),
+        ] {
+            let error = parse(&format!("{HEAD}[meta]\n{value}\n")).unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains(&format!("[meta] {key}")), "{value}: {text}");
+            assert!(text.contains("expected a string"), "{value}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_top_level_generated_by_is_refused_with_the_meta_hint() {
+        let error = parse(&format!("{HEAD}generated_by = \"image-tool\"\n")).unwrap_err();
+        assert!(error.to_string().contains("generated_by"), "{error}");
+        assert!(error.to_string().contains("[meta]"), "{error}");
+    }
+
+    #[test]
+    fn a_device_address_is_refused_with_the_config_hint() {
+        let error = with("[[devices]]\nid = \"a\"\ndriver = \"b\"\naddress = 0x18\n").unwrap_err();
+        assert!(
+            error.to_string().contains("`config = { address = 0x18 }`"),
+            "{error}"
+        );
     }
 
     #[test]
