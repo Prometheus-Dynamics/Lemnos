@@ -101,6 +101,8 @@ path = "/axi/pcie@1000120000/rp1/csi@110000"
 sysfs = "1f00110000.csi"
 stock_driver = "rp1-cfe"
 compatible = "raspberrypi,rp1-cfe"
+# The module's receiver driver (rs/rp1_csi2.rs), not its block driver.
+module_driver = "lemnos-rp1-csi2"
 stock_modules = ["rp1-cfe"]
 reason = "the camera receiver; the module drives it, and the stock receiver driver must not bind"
 

@@ -32,21 +32,27 @@ const USAGE: &str = "lemnosd [--sim] [--board PATH] [--socket PATH] [--check] \
 
 /// Prints each way the live device tree differs from the board file, from the SoC map the board
 /// names (read from `$LEMNOS_SOCS`, `/usr/share/lemnos/socs` by default). Reports only.
-fn report_live_tree(board: &lemnos_host::board::BoardFile) {
+fn soc_map(board: &lemnos_host::board::BoardFile) -> Option<lemnos_devtree::SocMap> {
     let dir = std::env::var("LEMNOS_SOCS").unwrap_or_else(|_| "/usr/share/lemnos/socs".into());
-    let Some(soc) = board.board.soc.as_deref() else {
-        return;
-    };
+    let soc = board.board.soc.as_deref()?;
     let path = format!("{dir}/{soc}.toml");
-    let map = match std::fs::read_to_string(&path)
+    match std::fs::read_to_string(&path)
         .map_err(|e| format!("{path}: {e}"))
         .and_then(|text| lemnos_devtree::SocMap::parse(&text))
     {
-        Ok(map) => map,
+        Ok(map) => Some(map),
         Err(error) => {
             let _ = writeln!(std::io::stderr(), "lemnosd: live tree not checked: {error}");
-            return;
+            None
         }
+    }
+}
+
+/// Prints each way the live device tree differs from the board file, from its SoC map. Run after the
+/// root phase, so a node the root phase gave to the module is checked as it now is.
+fn report_live_tree(board: &lemnos_host::board::BoardFile, map: Option<&lemnos_devtree::SocMap>) {
+    let Some(map) = map else {
+        return;
     };
     let chips: Vec<(String, u32)> = lemnos_linux::gpio_chips(std::path::Path::new("/dev"))
         .into_iter()
@@ -60,7 +66,7 @@ fn report_live_tree(board: &lemnos_host::board::BoardFile) {
         gpio_debug: std::path::Path::new("/sys/kernel/debug/gpio"),
         regulators: std::path::Path::new("/sys/class/regulator"),
     };
-    let findings = lemnos_devtree::check(board, &map, &live);
+    let findings = lemnos_devtree::check(board, map, &live);
     for problem in &findings.problems {
         let _ = writeln!(std::io::stderr(), "lemnosd: live tree: {problem}");
     }
@@ -253,11 +259,9 @@ fn main() -> ExitCode {
     for (_, reason) in &refused {
         let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
     }
-    // The live device tree against what the board file needs, when the board names a SoC map. A
-    // mismatch is reported and the daemon starts anyway: nothing here stops or changes hardware.
-    if !sim && board_file.board.soc.is_some() {
-        report_live_tree(&board_file);
-    }
+    // The board's SoC map: the root phase claims the module's nodes from it, and the live tree is
+    // checked against it after that. None under --sim, which touches no hardware.
+    let map = if sim { None } else { soc_map(&board_file) };
     // The root phase: as root, the privileged start, then the drop to the requested user. Without
     // root there is nothing to drop, and the daemon says which capabilities it lacks.
     let drop = match privilege::request(user, group) {
@@ -269,7 +273,13 @@ fn main() -> ExitCode {
     let mut root = privilege::Started::default();
     match (drop, lemnos_linux_sys::privilege::observe()) {
         (Some(request), Ok(now)) if now.euid == 0 => {
-            match privilege::start(&request, &board_file, Path::new(&socket), !sim) {
+            match privilege::start(
+                &request,
+                &board_file,
+                map.as_ref(),
+                Path::new(&socket),
+                !sim,
+            ) {
                 Ok(started) => root = started,
                 Err(error) => return complain(&error),
             }
@@ -288,6 +298,9 @@ fn main() -> ExitCode {
     if tracing {
         lemnosd::start_trace_line("root phase done (the drop included, when asked)");
     }
+    // The live device tree against what the board file needs, when the board names a SoC map, after
+    // the root phase's claim. A mismatch is reported and the daemon starts anyway.
+    report_live_tree(&board_file, map.as_ref());
     // A device the root phase could not set up is refused, and the daemon starts without it.
     for line in &root.warnings {
         let _ = writeln!(std::io::stderr(), "lemnosd: {board}: {line}");

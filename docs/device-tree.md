@@ -386,8 +386,18 @@ mechanism covers a line that must be on at boot, such as a USB port's power.
 - **Whether the stock driver binds.** An enabled node with a stock driver's `compatible` binds that
   driver when it loads, unless the module claims the node (`driver_override`) or the loader blocks
   the driver. That is a runtime choice, not a property of the tree, so the overlay cannot prevent
-  it. The module configuration blacklists the stock module, and the start check reports a stock
-  driver bound to a node the board gives to the module, naming both.
+  it. The module configuration blacklists the stock module. A stock driver built into the kernel is
+  not stopped by a blacklist, so lemnosd's root phase claims each node the board gives to the module,
+  as root, before the drop:
+  1. it sets `driver_override` to the module's driver the SoC map names for the node
+     (`module_driver`, `lemnos` by default);
+  2. it unbinds the stock driver the map names, when that driver holds the node;
+  3. it binds the node to the module's driver.
+
+  It writes one line per node to the journal. A node held by a driver the map does not name is left
+  as it is, and the line says so. When the module is not loaded yet, the override is set and the
+  kernel binds the node when the module loads. The start check runs after the claim, and reports a
+  stock driver still bound to such a node, naming both.
 - **Stable names are resolved at bind.** A `gpio:` label is matched against the live chips when a
   device binds, and a `pwm:` node against the live PWM chips. The start check (and `validate`
   without `--no-live`) checks them against the machine: a GPIO label must be on a chip the machine

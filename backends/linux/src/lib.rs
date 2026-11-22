@@ -10,6 +10,7 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod claim;
 mod clock;
 mod gadget;
 mod gpio;

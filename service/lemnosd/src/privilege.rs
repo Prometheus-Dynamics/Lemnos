@@ -218,6 +218,76 @@ fn stored_watchdogs() -> Vec<std::fs::File> {
         .collect()
 }
 
+/// Claims, as root, every node the board gives to the kernel module (`[[hardware]]` with `module`):
+/// its `driver_override` is set to the module's driver the SoC map names for it (`module_driver`,
+/// `lemnos` by default), the stock driver the map names lets it go when it holds the node, and the
+/// module's driver binds it ([`lemnos_linux::claim::claim`]). The module has no match table and a
+/// built-in stock driver binds its node at boot, so without this the module owns nothing. One line
+/// for each node. A node held by a driver the map does not name is left as it is, and said. Nothing
+/// here stops the start: a node the module does not hold makes its devices fail at their binds,
+/// by name.
+pub fn claim_module_nodes(
+    board: &BoardFile,
+    map: Option<&lemnos_devtree::SocMap>,
+    platform: &Path,
+) {
+    use std::io::Write;
+    let given: Vec<_> = board
+        .hardware
+        .iter()
+        .filter(|h| h.module.is_some())
+        .collect();
+    if given.is_empty() {
+        return;
+    }
+    let Some(map) = map else {
+        let _ = writeln!(
+            io::stderr(),
+            "lemnosd: root phase: module nodes: not claimed: the board's SoC map can't be read (see the live tree line)"
+        );
+        return;
+    };
+    for hardware in given {
+        let line = match map.controllers.get(&hardware.controller) {
+            None => format!("not in the SoC map: {}", hardware.controller),
+            Some(controller) => match &controller.sysfs {
+                None => "the SoC map names no platform device for it (sysfs)".to_string(),
+                Some(device) => {
+                    let driver = controller.module_driver.as_deref().unwrap_or("lemnos");
+                    match lemnos_linux::claim::claim(
+                        platform,
+                        device,
+                        driver,
+                        controller.stock_driver.as_deref(),
+                    ) {
+                        Ok(lemnos_linux::claim::Claimed::Already) => {
+                            format!("{device}: already {driver}'s")
+                        }
+                        Ok(lemnos_linux::claim::Claimed::Bound { unbound }) => match unbound {
+                            Some(stock) => {
+                                format!("{device}: {stock} let it go; bound to {driver}")
+                            }
+                            None => format!("{device}: bound to {driver}"),
+                        },
+                        Ok(lemnos_linux::claim::Claimed::Waiting { unbound }) => format!(
+                            "{device}: driver_override is {driver}{}; {driver} is not registered yet (the kernel binds the node when the module loads)",
+                            unbound
+                                .map(|s| format!(", {s} let it go"))
+                                .unwrap_or_default()
+                        ),
+                        Err(why) => format!("not claimed: {why}"),
+                    }
+                }
+            },
+        };
+        let label = hardware.name.as_deref().unwrap_or(&hardware.controller);
+        let _ = writeln!(
+            io::stderr(),
+            "lemnosd: root phase: module node {label}: {line}"
+        );
+    }
+}
+
 /// Holds the nodes of every keep-alive device across the drop (`LinuxBoard::hold_before_drop`), as
 /// root, before the drop. A node is held in one of two ways:
 ///
@@ -379,6 +449,7 @@ pub fn run_steps(steps: &[Step], cx: &Context<'_>) -> Result<Refusals, String> {
 pub fn start(
     request: &Request,
     board: &BoardFile,
+    map: Option<&lemnos_devtree::SocMap>,
     socket: &Path,
     helper: bool,
 ) -> Result<Started, String> {
@@ -401,6 +472,11 @@ pub fn start(
     };
     refused
         .extend(driver_root_phases(&cx).map_err(|error| format!("driver root phases: {error}"))?);
+    // The module's nodes, on a real board only (`helper` is false under --sim, which touches no
+    // hardware).
+    if helper {
+        claim_module_nodes(board, map, Path::new("/sys/bus/platform"));
+    }
     let fed = hold_keepalive_nodes(board, &lemnos_linux::LinuxBoard::new(), &mut stored);
     for file in stored.drain(..) {
         let _ = writeln!(

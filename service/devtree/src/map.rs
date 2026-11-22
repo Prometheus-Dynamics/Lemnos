@@ -146,6 +146,10 @@ pub struct Controller {
     /// The module roles this node may be given besides `owned`, from [`MODULE_ROLES`].
     #[serde(default)]
     pub module_roles: Vec<String>,
+    /// The kernel module's platform driver that takes the node when a board gives it to the module
+    /// (its `driver_override`). Default `lemnos`, the module's block driver.
+    #[serde(default)]
+    pub module_driver: Option<String>,
     /// Other nodes the controller needs enabled to work: its PHY and PHY ports, say. Each is
     /// enabled with the controller when the board entry takes it: an entry with no `option` is
     /// always enabled, and one with an `option` only when the board names that option.
