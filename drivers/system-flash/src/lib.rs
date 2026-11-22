@@ -245,7 +245,7 @@ struct Job {
     id: JobId,
     starter: CallerId,
     work: Work,
-    /// The write's signature outcome code, sent after its byte count in the result.
+    /// The write's signature outcome code, the result's `outcome` field.
     code: u8,
     /// The stream's bytes (for a write) or the image's (for a verify), and how many are taken.
     size: u64,
@@ -941,15 +941,9 @@ impl Lifecycle for SystemFlash {
                 };
             }
             Some(Ok(number)) => {
-                let is_write = matches!(running.work, Work::Write(_));
-                let sent = result.write(&number.to_le_bytes()).and_then(|()| {
-                    if is_write {
-                        result.write(&[running.code])
-                    } else {
-                        Ok(())
-                    }
-                });
-                JobState::Finished(match sent {
+                let outcome = matches!(running.work, Work::Write(_)).then_some(running.code);
+                let text = lemnos_contract_system_flash::write_result(*number, outcome);
+                JobState::Finished(match result.write(text.as_bytes()) {
                     Ok(()) => Status::OK,
                     Err(status) => status,
                 })

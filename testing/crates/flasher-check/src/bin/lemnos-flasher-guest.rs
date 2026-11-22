@@ -8,7 +8,7 @@
 //!
 //! 1. The bridge's own stream (`lemnos_orion::stream::Streamer`) takes the transport manifest and the xz image in
 //!    chunks, and commits: the answer is `committed`, its detail the fields `raw_bytes=<n> outcome=1` (unsigned).
-//! 2. A `verify` job reads the target back: the raw byte count.
+//! 2. A `verify` job reads the target back: its result is `raw_bytes=<the raw byte count>`.
 //! 3. The eMMC's user area holds the image (its SHA-256 read back from `/dev/mmcblk0`), the boot areas are
 //!    byte-identical to what they held before, and the kernel read the new partition table (`mmcblk0p1` is there,
 //!    its size the image's).
@@ -242,8 +242,11 @@ fn flash(c: &mut Checks, facts: &Facts, boot_before: &[String; 2]) -> Result<(),
         .map_err(|e| format!("verify: {e:?}"))?;
     let ended = client.wait_job(job, Duration::from_secs(120), &mut |_, _| {});
     c.check(
-        matches!(&ended, Some((status, result)) if status.0 == 0 && result.get(..8) == Some(&facts.raw.to_le_bytes()[..])),
-        &format!("the verify read the target back: {ended:?}"),
+        matches!(&ended, Some((status, result)) if status.0 == 0 && *result == format!("raw_bytes={}", facts.raw).into_bytes()),
+        &format!(
+            "the verify read the target back, its result in fields: {:?}",
+            ended.as_ref().map(|(s, r)| (s.0, String::from_utf8_lossy(r).into_owned()))
+        ),
     );
 
     let user = sha256_of("/dev/mmcblk0", Some(facts.raw))?;

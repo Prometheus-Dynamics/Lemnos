@@ -12,6 +12,8 @@ been flashed this way.
 - `drivers/slot-store`: `disk::disk_under`, and the reference board's own block listing as a shared fixture
   (`disk::fixture::emmc_board`, `testing` feature), which system-flash's tests use too.
 - `service/orion` (the bridge): a committed image's answer detail is fields, `raw_bytes=<n> outcome=<0|1|2|none>`.
+  Both jobs' results are text in the same fields (`write`: `raw_bytes=<n> outcome=<code>`, `verify`: `raw_bytes=<n>`),
+  so the bridge's `call verify` output is that text.
 - `testing/boards/bcm2712-flasher.toml`: the reference board's flasher board file: `flash` on
   `controller = "/soc@107c000000/mmc@fff000"` with `allow_first_flash`, the ring as its indicator, the gadget for the
   bridge's link, the watchdog as keep-alive, `reboot`.
@@ -43,7 +45,10 @@ image as `image.img.xz` with its transport manifest.
    target the eMMC's user area, not a boot area), the daemon's probe-to-bind time (`testing/board-runs/WDT-CHAIN.md`).
 2. Push `image.img.xz.json`, then `image.img.xz`, to `lemnos/flash/`. Expect the answer `committed` with
    `raw_bytes=<the image's size> outcome=0` (signed by a key in the board's list).
-3. `verify`: expect status 0 and the raw size.
+3. `verify` (through the bridge, `lemnos.flash.call verify`): expect `Succeeded` with the output
+   `raw_bytes=<the image's size>`, the commit's fields form.
+   If step 2's push breaks, push `image.img.xz` again: the manifest stays on the flasher (docs/slots.md, "The
+   manifest after a broken push").
 4. Restart through `reboot`. Expect the board to boot its new slot from the eMMC.
 5. Read back on the booted board: the boot areas' hashes (`mmcblk0boot0`, `mmcblk0boot1`) against their hashes from
    before the flash (recorded in step 1 from the flasher).

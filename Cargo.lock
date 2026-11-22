@@ -2857,6 +2857,7 @@ dependencies = [
  "lemnos-client",
  "lemnos-contract-indicator",
  "lemnos-contract-self-test",
+ "lemnos-contract-system-flash",
  "lemnos-core",
  "lemnos-driver-board-self-test",
  "lemnos-driver-indicator",

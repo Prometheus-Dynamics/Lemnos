@@ -3126,8 +3126,8 @@ The board checks, in order, and before the first byte is written:
 | on | signed | known key, verifies | accepted | `verified` |
 
 The outcome is reported as a stable word in `info` (`manifest.signed`, with `manifest.reason`), in
-the log, and in the write job's result after its byte count: `0` verified, `1` not checked (unsigned),
-`2` not checked (unknown key). The sender's UI shows the word and its reason.
+the log, and in the write job's result as its `outcome` field: `0` verified, `1` not checked
+(unsigned), `2` not checked (unknown key). The sender's UI shows the word and its reason.
 
 In every accepted row the file's own second stream must be the record given at `manifest`, byte for
 byte. An empty record and a file with no second stream count as the same. A raw image has no second
@@ -3138,15 +3138,23 @@ stream, so the record check does not apply to it.
 1. `manifest(json, record)`: accepts the transport JSON and the record (empty when unsigned, which is
    what the table above is about). Nothing is written.
 2. `write(size, format)`: a long job. `size` is the stream's bytes as sent (both streams), `format` is
-   1 for xz and 0 for raw. Its progress is the stream bytes taken; its result is the raw image's byte
-   count, `u64` little-endian, then the outcome code.
+   1 for xz and 0 for raw. Its progress is the stream bytes taken; its result is text in fields,
+   `raw_bytes=<the raw image's byte count> outcome=<code>`.
 3. `data(offset, bytes)`: the stream in order from offset 0. The last piece ends the stream, and the
    job then checks the image, its record, and ends.
 4. `verify()`: optional, a second long job. It reads the target back from its start for the
-   manifest's size and checks the hash.
+   manifest's size and checks the hash. Its result is text in fields, `raw_bytes=<the byte count
+   checked>`.
 5. The flasher restarts the board. The driver does not restart it.
 
-The job's results: `0` with the raw byte count and the outcome code, after the image's hash matches
+A job's result is text in fields, `name=value` with one space between them, never a number in
+binary: a caller, `lemnos-ctl` and the Orion bridge all show and read the same bytes, and nothing
+depends on whether a count's bytes happen to be text. The contract crate's `write_result` writes it
+and `read_result` reads it; a reader ignores a field it does not know, and fields are only ever added
+after these. Through the bridge, `lemnos.<device>.call verify` ends `Succeeded` with the output
+`raw_bytes=<n>`, the same form as the commit's detail below.
+
+The job's statuses: `0` with the raw byte count and the outcome code, after the image's hash matches
 and its record is the one given; `-22` for a malformed stream, a stream cut short, a dictionary over
 the limit, a size or hash that isn't the manifest's, a stream that holds more than its image, a file
 that is not an image (a second stream that is not one record, or a third stream), or a file record
@@ -3189,6 +3197,30 @@ signature sidecar: the record is in the manifest's `signature` field and in the 
    ignores a field it does not know; fields are only ever added after these.
 
 A push that breaks is begun again from zero; a streamed image is not resumed.
+
+**The manifest after a broken push.** The manifest is a file in the device's directory, committed
+like any small file (written under a hidden name, renamed into place once its SHA-256 checks). It
+stays there until a push of the same name replaces it: a broken image push, the sender's session
+ending, the bridge's own Orion session reconnecting and the bridge restarting all leave it. So an
+image push begun again, on the same session or a new one, needs no manifest pushed first; pushing
+it again is allowed and replaces it. Each begin reads the manifest from the file and gives it to the
+device again. A begin while the broken stream is still open ends that stream first: its write job is
+cancelled, and the host ends the job in the same driver entry as the cancel, so the device takes the
+manifest again without `BUSY`. A manifest that is not the image's (an earlier image's, say) is not a
+silent risk: the device checks the stream against it and the push ends `rejected`. The directory is
+the board's (`LEMNOS_ORION_FILES`); on a flasher in RAM it goes with a reboot, and the manifest is
+then pushed again. A manifest push that itself breaks leaves the manifest that was there.
+
+**How the PC reaches a flasher's node.** A sender reaches `lemnos.flash` and `lemnos.reboot` as a
+remote client of the board's comm core, over tcp with Orion's signed handshake and an enrolled
+operator, carried on the gadget's CDC NCM function. The FunctionFS link (`orion-link`) is not that
+route: Orion's `links.usb` is a link to a device. Its far end says hello as a device and does not
+reach the node's actions or file sinks (Orion at `3f60576c`). The flasher's board file needs nothing
+beyond its gadget with the default composition: its NCM function gives the board the interface
+`lemnos0` with addresses derived from the board's serial (`contracts/usb-link.toml`, `[network]`).
+The image gives `lemnos0` its address and runs the comm core with a tcp listener on it, and the
+PC gives its own end an address. Those are the image's and the PC's settings, not Lemnos's.
+
 
 ### Raw NAND
 

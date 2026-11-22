@@ -30,6 +30,8 @@ orion-msg-session = { git = "https://github.com/Prometheus-Dynamics/Orion.git", 
 orion-wire = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "172054f4fd88e98e096c0134b17a5c27ccb3abb3" }
 lemnos-linux-stream = { path = "../../backends/linux-stream" }
 lemnos-slot-store = { path = "../../drivers/slot-store" }
+# The write job's result fields, read the one way its contract writes them.
+lemnos-contract-system-flash = { path = "../../contracts/system-flash" }
 # Already in the tree through Orion's client: waits on the Orion session and the wake-up together.
 # The SHA-256 a file sent to a device is checked against; already in the tree.
 sha2 = { version = "0.10", default-features = false }

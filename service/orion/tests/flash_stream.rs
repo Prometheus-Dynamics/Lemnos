@@ -682,6 +682,117 @@ fn a_stream_whose_sender_goes_quiet_frees_its_device_after_the_stall_bound() {
     );
 }
 
+/// The manifest rule after a broken push: the manifest is a file in the device's directory, and it
+/// stays there until a push of the same name replaces it. A push that breaks mid-image, on a sender
+/// session that then goes, is begun again by a new session with no manifest pushed first; the
+/// begun-again stream ends the broken one (its write is cancelled) and gives the manifest to the
+/// device again, and the image is committed with its fields. The broken stream is still open when the
+/// new one begins (the stall bound is the default, far longer than the test), so this is the case
+/// where the device's earlier write has to be ended before its manifest is taken again.
+#[test]
+fn an_image_begun_again_on_a_new_session_after_a_broken_push_needs_no_manifest_again() {
+    let s = setup("again", SMALL + 4096);
+    let manifest = manifest(BOARD, SMALL_SHA, None);
+    assert_eq!(
+        s.push("image.img.xz.json", &manifest).state,
+        FileState::Committed
+    );
+    let image = fixture("crc64.img.xz");
+    let (let_go, wait) = mpsc::channel();
+    let quiet = Quiet {
+        limit: image.len(),
+        image: image.clone(),
+        at: 0,
+        read_all: false,
+        pace: None,
+        first: None,
+        wait,
+    };
+    let socket = s._board.socket().to_path_buf();
+    let broken = std::thread::spawn(move || {
+        let sender = wait_for("the first sender", || {
+            Orion::connect_once(
+                &Address::Local(socket.clone()),
+                "first",
+                orion::Options::default(),
+            )
+            .ok()
+        });
+        let mut quiet = quiet;
+        let pushed = sender
+            .files()
+            .push("lemnos/flash/image.img.xz", &mut quiet, |_, _| {});
+        // The sender's session goes with its thread: the push is broken, never committed.
+        pushed.map(|t| t.state)
+    });
+    wait_for("the broken stream to hold the device", || {
+        device_busy(&s).then_some(())
+    });
+    let _ = let_go.send(());
+    let first = broken.join().expect("the first sender");
+    assert!(
+        !matches!(first, Ok(FileState::Committed)),
+        "the broken push was committed: {first:?}"
+    );
+    // A new session begins the image again, and pushes no manifest.
+    let again = wait_for("a new sender", || {
+        Orion::connect_once(
+            &Address::Local(s._board.socket().to_path_buf()),
+            "again",
+            orion::Options::default(),
+        )
+        .ok()
+    });
+    let sent = again
+        .files()
+        .push(
+            "lemnos/flash/image.img.xz",
+            &mut Cursor::new(&image),
+            |_, _| {},
+        )
+        .expect("the push begun again");
+    assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
+    assert_eq!(sent.detail, format!("raw_bytes={SMALL} outcome=1"));
+    assert_eq!(
+        &std::fs::read(&s.target).expect("target")[..SMALL as usize],
+        fixture("small.img").as_slice()
+    );
+    assert_eq!(
+        std::fs::read(s.incoming().join("image.img.xz.json")).expect("the manifest stays"),
+        manifest
+    );
+}
+
+/// A verify run through the bridge's call action ends with its result in fields, the commit's form:
+/// `raw_bytes=<n>`, never eight bytes shown as text or hex by what they happen to be.
+#[test]
+fn a_verify_called_through_the_bridge_answers_in_fields() {
+    let s = setup("verify", SMALL + 4096);
+    assert_eq!(
+        s.push("image.img.xz.json", &manifest(BOARD, SMALL_SHA, None))
+            .state,
+        FileState::Committed
+    );
+    let sent = s.push("image.img.xz", &fixture("crc64.img.xz"));
+    assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
+    let mut run = s
+        .dashboard
+        .run(&ActionCall {
+            name: "lemnos.flash.call",
+            target: Target::Resource("lemnos.flash".parse().expect("name")),
+            args: b"verify",
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    let finished = run.finish(WAIT).expect("the verify ends");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
+    assert_eq!(
+        String::from_utf8(finished.output).expect("text"),
+        format!("raw_bytes={SMALL}")
+    );
+}
+
 #[test]
 fn a_streamed_image_is_written_to_the_target_and_only_its_manifest_is_on_disk() {
     let s = setup("stream", SMALL + 4096);

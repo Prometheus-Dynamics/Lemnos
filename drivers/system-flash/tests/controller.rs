@@ -93,7 +93,7 @@ fn info(driver: &mut SystemFlash) -> String {
 }
 
 fn finished(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>) {
-    let mut out = [0u8; 16];
+    let mut out = [0u8; 64];
     let mut reply = Reply::new(&mut out);
     let status = match driver.job(job, &mut reply) {
         JobState::Finished(status) => status,
@@ -124,8 +124,7 @@ fn on_the_board_s_emmc_the_controller_s_target_is_the_user_area_and_the_boot_are
     let dev = Dev::new("emmc");
     let mut driver = start(&sys, &dev);
     let (status, reply) = write_small(&mut driver);
-    let mut want = SMALL.to_le_bytes().to_vec();
-    want.push(1);
+    let want = format!("raw_bytes={SMALL} outcome=1").into_bytes();
     assert_eq!((status, reply), (Status::OK, want), "{}", info(&mut driver));
     let user = fs::read(dev.0.join("mmcblk0")).unwrap();
     assert_eq!(&user[..SMALL as usize], fixture("small.img").as_slice());

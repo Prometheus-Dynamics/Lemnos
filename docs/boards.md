@@ -1038,7 +1038,11 @@ gadget gets a file holding a comment and no line, and a gadget whose first inter
 device. Without the line the bridge offers nothing and says so once in its log: `no USB link is configured
 (LEMNOS_ORION_LINKS is unset): none is offered`. The comm core must know a USB link by the same name, so its
 own configuration has a USB link called `orion-link` (or the composition's name); that is Orion's
-configuration, and is stated here, not specified or written by Lemnos. The QEMU check
+configuration, and is stated here, not specified or written by Lemnos. The link is a device link
+on Orion's side: its far end says hello as a device of the board's comm core. A program that needs
+the node's actions and file sinks from the other end of the cable connects to the comm core over tcp
+on the NCM function instead (see [the flasher's route](slots.md), "How the PC reaches a flasher's
+node"). The QEMU check
 `testing/crates/orion-link-check` runs the whole join with the default names.
 
 ### The link's identity and its Windows descriptors

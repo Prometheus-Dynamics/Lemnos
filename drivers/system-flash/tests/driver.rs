@@ -245,9 +245,9 @@ fn hex_to(text: &str) -> [u8; 32] {
     out
 }
 
-/// The job's status and its reply: the byte count, then the outcome code for a write.
+/// The job's status and its reply: its result's fields (see [`written`] and [`checked`]).
 fn job_result(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>) {
-    let mut out = [0u8; 16];
+    let mut out = [0u8; 64];
     let (status, n) = {
         let mut reply = Reply::new(&mut out);
         let status = match driver.job(job, &mut reply) {
@@ -264,7 +264,7 @@ fn job_result(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>) {
 fn run_to_end(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>, u64) {
     let mut ticks = 0u64;
     loop {
-        let mut out = [0u8; 16];
+        let mut out = [0u8; 64];
         let (state, n) = {
             let mut reply = Reply::new(&mut out);
             let state = driver.job(job, &mut reply);
@@ -280,11 +280,14 @@ fn run_to_end(driver: &mut SystemFlash, job: JobId) -> (Status, Vec<u8>, u64) {
     }
 }
 
-/// The bytes a write's result carries: the image's byte count, then the outcome code.
+/// A write's result: its fields, the image's byte count and the outcome code.
 fn written(count: u64, code: u8) -> Vec<u8> {
-    let mut out = count.to_le_bytes().to_vec();
-    out.push(code);
-    out
+    format!("raw_bytes={count} outcome={code}").into_bytes()
+}
+
+/// A verify's result: its one field, the byte count checked.
+fn checked(count: u64) -> Vec<u8> {
+    format!("raw_bytes={count}").into_bytes()
 }
 
 fn info(driver: &mut SystemFlash) -> String {
@@ -333,7 +336,7 @@ fn an_xz_stream_is_written_verified_and_its_result_is_the_raw_count() {
     let check = driver.verify().unwrap();
     let (status, reply, ticks) = run_to_end(&mut driver, check);
     assert!(ticks >= 1, "a verify ticks while it reads");
-    assert_eq!((status, reply), (Status::OK, SMALL.to_le_bytes().to_vec()));
+    assert_eq!((status, reply), (Status::OK, checked(SMALL)));
     assert!(info(&mut driver).contains("\"state\":\"verified\""));
 }
 
@@ -1254,10 +1257,7 @@ fn a_threaded_xz_image_is_written_and_verified_against_the_builders_hash() {
 
     let check = driver.verify().unwrap();
     let (status, reply, _) = run_to_end(&mut driver, check);
-    assert_eq!(
-        (status, reply),
-        (Status::OK, THREADED_LEN.to_le_bytes().to_vec())
-    );
+    assert_eq!((status, reply), (Status::OK, checked(THREADED_LEN)));
     assert!(info(&mut driver).contains("\"state\":\"verified\""));
 }
 
@@ -1336,10 +1336,7 @@ fn a_four_block_xz_image_is_written_block_by_block_and_verified() {
 
     let check = driver.verify().unwrap();
     let (status, reply, _) = run_to_end(&mut driver, check);
-    assert_eq!(
-        (status, reply),
-        (Status::OK, MULTI_LEN.to_le_bytes().to_vec())
-    );
+    assert_eq!((status, reply), (Status::OK, checked(MULTI_LEN)));
     assert!(info(&mut driver).contains("\"state\":\"verified\""));
 }
 

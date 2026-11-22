@@ -16,7 +16,8 @@
 //! starter may send a job's data. Each chunk is acknowledged to the sender only after the device
 //! took it, so a slow device stops the sender (Orion keeps only a few chunks in flight). Memory
 //! is one chunk. The stream's SHA-256 is checked against the transfer's digest at its commit; the
-//! job's own result (the device checks the decoded image) is the answer the sender gets.
+//! job's own result (the device checks the decoded image) is the answer the sender gets: its fields,
+//! read with the contract's `read_result`, as the commit's detail (see [`committed_detail`]).
 //!
 //! The protocol the device's methods take is the one its contract documents (`system.flash/1`:
 //! `manifest(bytes, bytes)`, `write(u64, u8)` a long job, `data(u64, bytes)`); the arguments are
@@ -27,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, Handle};
+use lemnos_contract_system_flash::read_result;
 use lemnos_slot_store::json::Json;
 use lemnos_wire::text::find_method;
 use orion::files::FileState;
@@ -293,17 +295,18 @@ impl Streamer {
             return rejected("lemnosd went away before the write ended".into());
         };
         match client.wait_job(job, JOB_WAIT, &mut |_, _| {}) {
-            Some((status, result)) if status.0 == 0 => {
-                let raw = result
-                    .get(..8)
-                    .and_then(|b| <[u8; 8]>::try_from(b).ok())
-                    .map_or(0, u64::from_le_bytes);
-                Answer {
+            Some((status, result)) if status.0 == 0 => match read_result(&result) {
+                Some(fields) => Answer {
                     received: active.got,
                     state: FileState::Committed,
-                    detail: committed_detail(raw, result.get(8).copied()),
-                }
-            }
+                    detail: committed_detail(fields.raw_bytes, fields.outcome),
+                },
+                // The image is written, but its result is not the contract's: say so, never a count.
+                None => rejected(format!(
+                    "the write ended, but its result is not system.flash's fields: {}",
+                    String::from_utf8_lossy(&result)
+                )),
+            },
             Some((status, _)) => rejected(format!("the write ended with status {}", status.0)),
             None => rejected("the write did not end".into()),
         }
