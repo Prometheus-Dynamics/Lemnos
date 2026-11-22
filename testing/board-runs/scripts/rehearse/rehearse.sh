@@ -51,7 +51,7 @@ feed
 hw_pid=""
 cleanup() {
   [ -n "$hw_pid" ] && kill "$hw_pid" 2>/dev/null
-  for g in $(cat "$W/pgids" 2>/dev/null); do kill -KILL -- "-$g" 2>/dev/null; done
+  for g in $(cat "$W/pgids" 2>/dev/null); do is_group "$g" && kill -KILL -- "-$g" 2>/dev/null; done
   [ -n "${drv_pid:-}" ] && kill "$drv_pid" 2>/dev/null
 }
 trap cleanup EXIT
@@ -107,6 +107,8 @@ esac
 } >"$out"
 rundir=$(readlink -f "$CR/data/board/checks/$id/latest")
 pid=$(cat "$rundir/check.pid")
+# The check's group, for the stand-in's freeze (bin/systemctl, group_is_check): the only group it may stop.
+echo "$pid" >"$W/check.group"
 
 case $case in
 link-missing)
@@ -132,10 +134,10 @@ killed | hang | restore-fails | restore-fails-long | comm-fails)
   comm-fails) echo 6 >"$W/fail/orion-comm"; systemctl stop orion-comm >/dev/null ;;
   esac
   if [ "$case" = hang ]; then
-    kill -STOP -- "-$pid"
+    { is_group "$pid" || { echo "== rehearsal: check.pid holds no group id ($pid): STOP" >>"$out"; exit 1; }; } && kill -STOP -- "-$pid"
     echo "== rehearsal: froze the check's process group $pid (SIGSTOP) after: $line" >>"$out"
   else
-    kill -KILL -- "-$pid"
+    { is_group "$pid" || { echo "== rehearsal: check.pid holds no group id ($pid): STOP" >>"$out"; exit 1; }; } && kill -KILL -- "-$pid"
     echo "== rehearsal: killed the check's process group $pid (SIGKILL) after: $line" >>"$out"
   fi
   [ "$case" = restore-fails ] || [ "$case" = restore-fails-long ] && echo "== rehearsal: the next $(cat "$W/fail/lemnosd") starts of lemnosd fail" >>"$out"

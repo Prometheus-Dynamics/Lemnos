@@ -14,13 +14,21 @@ export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 GATE_KILL_GRACE=3
 
 gate_out="$(mktemp -d "${TMPDIR:-/tmp}/gate-out.XXXXXX")"
+# is_group ID: true only for a plain number above 1 that is not this shell's own process group: the only ids a
+# group kill here may take (never -1, 0, or this shell's group, whatever a pid file held). Checked by
+# scripts/check-signals.py, which refuses a group kill whose line does not call it.
+is_group() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -gt 1 ] || return 1
+  [ "$1" != "$(sed 's/^.*) //' /proc/$$/stat | cut -d' ' -f3)" ]
+}
 declare -A lane_pid=([c]=0 [s]=0 [t]=0 [f]=0)
 stop_lanes() {
   # Only the lanes this shell started, their children, and the steps still running. Each lane and each
   # step is its own process group; a running step's pid and token are in $gate_out/<key>.pid.
   local lane f pid token
   for lane in c s t f; do
-    [ "${lane_pid[$lane]}" = 0 ] || kill -TERM -- "-${lane_pid[$lane]}" 2>/dev/null || true
+    is_group "${lane_pid[$lane]}" && kill -TERM -- "-${lane_pid[$lane]}" 2>/dev/null || true
   done
   for f in "$gate_out"/*.pid; do
     [ -e "$f" ] || continue
@@ -285,6 +293,10 @@ side_lane() {
   lane_step format 180 cargo fmt --all --check
   # The steps below are the gate's checks that run the same as before, in this lane: none builds.
   lane_step boundaries 180 scripts/check-boundaries.sh
+  # No script in the repository signals -1, 0 or a negative pid without a guard, or runs pkill, killall, fuser -k or a
+  # pgrep fed to kill (scripts/check-signals.py). Its own cases (testing/signals) plant text fixtures and run the checker by path.
+  lane_step signals 180 scripts/check-signals.py
+  lane_step signals-tests 180 python3 -I testing/signals/test_check_signals.py
   # The bridge and Orion share one copy of each shm-* crate (the root Cargo.toml's patch of the Orion source).
   lane_step orion-copies 180 scripts/check-orion-copies.sh
   # The consumer-lock checkers (scripts/check-lemnos-pin.sh, scripts/check-shm-one-source.sh) pass the pinned fixture lock

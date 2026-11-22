@@ -30,6 +30,13 @@ kmsg() { printf '[%s] %s\n' "$(awk '{print $1}' /proc/uptime)" "$1" >>"$W/dmesg.
 unit() { local u=${1%.service}; printf '%s' "${u%.mount}"; }
 state() { cat "$W/units/$(unit "$1").state" 2>/dev/null || echo inactive; }
 set_state() { printf '%s\n' "$2" >"$W/units/$(unit "$1").state"; }
+# is_group ID: true only for a plain number above 1 that is not this shell's own process group: the
+# only ids a group kill here may take (never -1, -0 or this shell's group, whatever a pid file held).
+is_group() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -gt 1 ] || return 1
+  [ "$1" != "$(sed 's/^.*) //' /proc/$$/stat | cut -d' ' -f3)" ]
+}
 register() { printf '%s\n' "$1" >>"$W/pgids"; }
 feed() { touch "$CR/dev/watchdog"; }
 GADGET_DIR=$CR/sys/kernel/config/usb_gadget/lemnos-$UDC_NAME

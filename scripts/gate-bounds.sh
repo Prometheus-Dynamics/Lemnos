@@ -43,14 +43,23 @@ gate_sweep() {
   done <<<"$hits"
 }
 
+# is_group ID: true only for a plain number above 1 that is not this shell's own process group: the only ids a
+# group kill here may take (never -1, 0, or this shell's group, whatever a pid file held). Checked by
+# scripts/check-signals.py, which refuses a group kill whose line does not call it.
+is_group() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -gt 1 ] || return 1
+  [ "$1" != "$(sed 's/^.*) //' /proc/$$/stat | cut -d' ' -f3)" ]
+}
+
 # stop_step <pgid> <token>: ends a step's processes. TERM to the group and to the token's processes, then,
 # after the grace, KILL to both. The step's output is a file, so nothing left running can hold the gate open.
 stop_step() {
   local pgid="$1" token="$2"
-  kill -TERM -- "-$pgid" 2>/dev/null || true
+  is_group "$pgid" && kill -TERM -- "-$pgid" 2>/dev/null || true
   gate_sweep "$token" TERM
   sleep "$GATE_KILL_GRACE"
-  kill -KILL -- "-$pgid" 2>/dev/null || true
+  is_group "$pgid" && kill -KILL -- "-$pgid" 2>/dev/null || true
   gate_sweep "$token" KILL
 }
 

@@ -5,7 +5,7 @@ while :; do
   age=$(( $(date +%s) - $(stat -c %Y "$CR/dev/watchdog") ))
   if [ "$age" -ge "$WD_PERIOD" ]; then
     printf '%s RESET: the watchdog was not fed for %s s\n' "$(now)" "$age" >>"$W/events.log"
-    for g in $(cat "$W/pgids" 2>/dev/null); do kill -KILL -- "-$g" 2>/dev/null; done
+    for g in $(cat "$W/pgids" 2>/dev/null); do is_group "$g" && kill -KILL -- "-$g" 2>/dev/null; done
     : >"$W/pgids"
     sleep 0.2
     # What a reboot clears: runtime drop-ins, mounts, the gadget tree, unit states; a new boot id.

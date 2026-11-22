@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# is_group ID: true only for a plain number above 1 that is not this shell's own process group: the
+# only ids a group kill here may take (never -1, -0 or this shell's group, whatever a pid file held).
+is_group() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -gt 1 ] || return 1
+  [ "$1" != "$(sed 's/^.*) //' /proc/$$/stat | cut -d' ' -f3)" ]
+}
 # The detached form of the board checks that stop lemnosd or the comm core (B20, E25, E36, H4a, V1g).
 # Run as root on the board. Each record's "Detached form" section gives the procedure.
 #
@@ -182,7 +189,7 @@ restore)
     bounded 10 systemctl kill --signal=KILL "lemnos-check-$CHECK_ID.service"
     log "restore-$name" "killed the check's unit lemnos-check-$CHECK_ID: exit $?"
   elif [ -n "$pid" ] && grep -q 'lemnos-check' "/proc/$pid/cmdline" 2>/dev/null; then
-    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid"
+    { is_group "$pid" && kill -KILL -- "-$pid" 2>/dev/null; } || kill -KILL "$pid"
     log "restore-$name" "killed the check, pid $pid"
   else
     log "restore-$name" "the check is not running"

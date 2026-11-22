@@ -20,7 +20,11 @@ done
 verb=${args[0]:-}
 u=$(unit "${args[1]:-}")
 transient() { case $u in lemnos-check-* | lemnos-restore-*) return 0 ;; *) return 1 ;; esac; }
-alive_pgid() { local g; g=$(cat "$W/units/$u.pgid" 2>/dev/null) && [ -n "$g" ] && kill -0 -- "-$g" 2>/dev/null; }
+# group_is_check GROUP: true only for the group rehearse.sh recorded as the check's (check.group). The caller of this
+# stub is in that group, so is_group (which refuses the caller's own group) cannot be the test for it.
+group_is_check() { [ -n "$1" ] && [ "$1" = "$(cat "$W/check.group" 2>/dev/null)" ]; }
+# alive_pgid: a process of the unit's recorded group is still there (a read of ps; no signal is sent).
+alive_pgid() { local g; g=$(cat "$W/units/$u.pgid" 2>/dev/null) && [ -n "$g" ] && ps -A -o pgid= | tr -d ' ' | grep -qx -- "$g"; }
 case $verb in
 is-active)
   if transient; then
@@ -83,8 +87,7 @@ stop)
     if [ "$n" -le 1 ]; then
       rm -f "$W/freeze-after-stop"
       g=$(ps -o pgid= -p $$ | tr -d ' ')
-      echo "$g" >"$W/frozen"
-      kill -STOP -- "-$g"
+      group_is_check "$g" && { echo "$g" >"$W/frozen"; kill -STOP -- "-$g"; } || echo "$(now) stub: the caller's group $g is not the recorded check group: no freeze" >>"$W/events.log"
     else
       echo $((n - 1)) >"$W/freeze-after-stop"
     fi
@@ -95,7 +98,7 @@ restart)
 kill)
   sig=${sig#SIG}
   if transient; then
-    g=$(cat "$W/units/$u.pgid" 2>/dev/null); [ -n "$g" ] && kill -"$sig" -- "-$g"; exit ;
+    g=$(cat "$W/units/$u.pgid" 2>/dev/null); [ -n "$g" ] && is_group "$g" && kill -"$sig" -- "-$g"; exit ;
   fi
   p=$(cat "$W/units/$u.main" 2>/dev/null); [ -n "$p" ] && kill -"$sig" "$p"; exit ;;
 *) echo "stand-in systemctl: verb '$verb' not modelled" >&2; exit 1 ;;
