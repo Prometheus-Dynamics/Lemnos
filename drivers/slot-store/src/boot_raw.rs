@@ -679,6 +679,54 @@ impl<D: Sectors + ReadAt> BayVolume<D> {
     }
 }
 
+/// One install's payloads on the boot partition, written a step a call (see
+/// [`Boot::into_payloads`]). It owns the partition's device, so the cursor and the open file live
+/// here between the driver's ticks.
+pub struct Payloads {
+    boot: Boot<FileSectors>,
+    run: Option<bays::SetRun>,
+}
+
+impl Payloads {
+    /// One step (at most [`bays::STEP_SECTORS`] sectors). `Ok(true)` once the payloads are
+    /// committed; `Ok(false)` while steps remain or a flush is in flight.
+    pub fn step(&mut self) -> Result<bool, String> {
+        let Some(run) = self.run.as_mut() else {
+            return Ok(true);
+        };
+        match run
+            .step(&mut self.boot.dev, bays::STEP_SECTORS)
+            .map_err(|e| e.to_string())?
+        {
+            bays::Step::Done => {
+                self.run = None;
+                Ok(true)
+            }
+            bays::Step::More | bays::Step::Wait => Ok(false),
+        }
+    }
+}
+
+impl Boot<FileSectors> {
+    /// Starts writing `payloads` (the five roles, then the overlays) into a free bay as `slot`.
+    /// The checks run here, as [`Boot::install_slot`] runs them, and refusals come before any write.
+    /// The writes then run through [`Payloads::step`].
+    pub fn into_payloads(self, slot: &str, payloads: &[Vec<u8>]) -> Result<Payloads, String> {
+        let mut boot = self;
+        let layout = boot.layout.clone()?;
+        let protected = bays::Protected::from_volume(&mut boot.dev).map_err(|e| e.to_string())?;
+        let set = bays::choose_set(&mut boot.dev, slot, &protected).map_err(|e| e.to_string())?;
+        let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+        let run = match bays::begin_stage_with(&mut boot.dev, &layout, set, slot, &refs, &protected)
+            .map_err(|e| e.to_string())?
+        {
+            bays::Begun::Finished(_) => None,
+            bays::Begun::Writing(run) => Some(*run),
+        };
+        Ok(Payloads { boot, run })
+    }
+}
+
 impl<D: Sectors + ReadAt> BootRaw for Boot<D> {
     fn pointer(&mut self, which: Pointer) -> Result<Option<String>, String> {
         self.slot_of_pointer(which)

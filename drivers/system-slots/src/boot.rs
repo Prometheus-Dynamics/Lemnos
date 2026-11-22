@@ -46,6 +46,31 @@ pub(crate) fn loader_reads_record(record: &dyn BootRecord) -> io::Result<()> {
     }
 }
 
+/// One install's payload write, stepped a call per tick by the driver (see
+/// [`BootRecord::payload_begin`]). `step` returns `Ok(true)` once the payloads are committed; until
+/// then the install is still in progress and nothing is a pointer's yet.
+pub trait PayloadRun: Send {
+    fn step(&mut self) -> io::Result<bool>;
+}
+
+/// A payload write that finished when it began (see [`BootRecord::payload_begin`]).
+struct Written;
+
+impl PayloadRun for Written {
+    fn step(&mut self) -> io::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// The bay writer of the `tryboot` form, stepped (see [`lemnos_slot_store::boot_raw::Payloads`]).
+struct Stepped(lemnos_slot_store::boot_raw::Payloads);
+
+impl PayloadRun for Stepped {
+    fn step(&mut self) -> io::Result<bool> {
+        self.0.step().map_err(io::Error::other)
+    }
+}
+
 pub trait BootRecord: Send {
     /// The slot every ordinary boot starts.
     fn set_default(&mut self, id: &str) -> io::Result<()>;
@@ -86,6 +111,14 @@ pub trait BootRecord: Send {
         Ok((Vec::new(), None))
     }
     fn install(&self, slot: &str, payloads: &[&[u8]]) -> io::Result<()>;
+    /// Starts writing a slot's payloads (the five roles, then the overlays) into a bay, to be stepped by
+    /// the driver's ticks. A form with bays it can step overrides this; the default writes them in this
+    /// one call with [`BootRecord::install`]. Refusals come here, before any write.
+    fn payload_begin(&self, slot: &str, payloads: Vec<Vec<u8>>) -> io::Result<Box<dyn PayloadRun>> {
+        let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+        self.install(slot, &refs)?;
+        Ok(Box::new(Written))
+    }
     /// Frees the slot's bay by its record alone. A bay a pointer names is refused.
     fn free(&self, slot: &str) -> io::Result<()>;
     /// The episodes recorded against a slot: kept on the raw boot records, so only the `tryboot`
@@ -373,6 +406,15 @@ impl BootRecord for Tryboot {
             .install_slot(slot, payloads)
             .map(|_| ())
             .map_err(io::Error::other)
+    }
+
+    fn payload_begin(&self, slot: &str, payloads: Vec<Vec<u8>>) -> io::Result<Box<dyn PayloadRun>> {
+        self.config_ready()?;
+        let run = self
+            .raw()?
+            .into_payloads(slot, &payloads)
+            .map_err(io::Error::other)?;
+        Ok(Box::new(Stepped(run)))
     }
 
     fn free(&self, slot: &str) -> io::Result<()> {

@@ -1016,7 +1016,10 @@ fn an_install_writes_its_set_unsynced_and_waits_for_the_medium_once_before_its_c
         install(&mut dev, &layout, 2, "c", &refs(&payloads_c())).unwrap(),
         Done::Installed
     );
-    assert_eq!(dev.flushes, 1, "one wait for the medium per install");
+    assert_eq!(
+        dev.flushes, 2,
+        "two waits for the medium per install into an empty set: the set, then the commit record"
+    );
     let data_sectors: usize = layout
         .written(&refs(&payloads_c()))
         .unwrap()
@@ -1028,11 +1031,11 @@ fn an_install_writes_its_set_unsynced_and_waits_for_the_medium_once_before_its_c
         "every data sector goes down unsynced: {} unsynced, {data_sectors} data sectors",
         dev.unsynced
     );
-    // The synced writes are the records only: the set's record emptied and committed (two copies
-    // each) and the two pointers (two copies each).
+    // The set's sectors and its records go down unsynced and wait for the flushes, which run off the
+    // tick. The synced writes are the two pointers' copies that make_default moves.
     assert!(
-        dev.synced <= 8,
-        "only the records wait for the medium; {} synced writes",
+        dev.synced <= 4,
+        "only the pointers wait for the medium by themselves; {} synced writes",
         dev.synced
     );
     for (path, bytes) in layout.written(&refs(&payloads_c())).unwrap() {
@@ -1075,4 +1078,235 @@ fn a_cut_before_the_flush_leaves_the_set_uncommitted_whatever_reached_the_medium
             .unwrap_or_else(|e| panic!("keep #{k}: reinstall: {e}"));
         check_cut_set(&again.img, &layout, 1).unwrap();
     }
+}
+
+/// The image a power cut leaves: the cached sectors `keep` picks reach the medium, the rest do not.
+fn cut_image(dev: &Cached, keep: fn(usize) -> bool) -> Vec<u8> {
+    let mut img = dev.dev.img.clone();
+    for (i, (lba, sector)) in dev.cache.iter().enumerate() {
+        if keep(i) {
+            let at = *lba as usize * SECTOR;
+            img[at..at + SECTOR].copy_from_slice(sector);
+        }
+    }
+    img
+}
+
+/// The stepped install's budget: one call writes at most this many bulk sectors (plus the set's
+/// few directory sectors in the call that finishes the bulk).
+const BUDGET: u64 = 4;
+
+#[test]
+fn a_stepped_install_writes_a_budget_a_call_and_is_uncommitted_at_every_cut_between_calls() {
+    // The payload step is resumable: each tick writes at most its budget, and a power cut between
+    // two ticks (before the flush that precedes the commit) leaves the set uncommitted whichever
+    // cached sectors reached the medium.
+    let layout = test_layout();
+    let pre = volume_image(&layout);
+    let mut first = Dev::new(pre);
+    install(&mut first, &layout, 2, "c", &refs(&payloads_c())).unwrap();
+    let pre = first.img;
+    let allowed = write_set(&pre, 1);
+    let keeps: [fn(usize) -> bool; 3] = [|_| false, |i| i % 2 == 0, |i| i % 3 == 1];
+    let info_lba = {
+        let mut probe = Dev::new(pre.clone());
+        place_sets(&mut probe).unwrap()[1]
+    };
+    let mut dev = Cached::new(pre.clone());
+    let mut run = SetRun::new(&layout, 1, info_lba, "b", &refs(&payloads_b())).unwrap();
+    let mut calls = 0usize;
+    let mut cuts = 0usize;
+    loop {
+        let before = dev.unsynced;
+        let step = run.step(&mut dev, BUDGET).unwrap();
+        calls += 1;
+        let wrote = dev.unsynced - before;
+        assert!(
+            wrote as u64 <= BUDGET + 8,
+            "call {calls} wrote {wrote} sectors, the budget is {BUDGET}"
+        );
+        if step == Step::Done {
+            break;
+        }
+        for (k, keep) in keeps.into_iter().enumerate() {
+            let img = cut_image(&dev, keep);
+            only_inside(&pre, &Dev::new(img.clone()), &allowed)
+                .unwrap_or_else(|e| panic!("call {calls} keep #{k}: {e}"));
+            check_cut_set(&img, &layout, 1)
+                .unwrap_or_else(|e| panic!("call {calls} keep #{k}: {e}"));
+            check_bootable(&img, &layout, (2, "c"))
+                .unwrap_or_else(|e| panic!("call {calls} keep #{k}: {e}"));
+            cuts += 1;
+        }
+    }
+    assert!(calls >= 5, "the set takes several calls: {calls}");
+    assert!(cuts >= 3 * (calls - 1), "every call boundary was cut");
+    check_cut_set(&dev.dev.img, &layout, 1).unwrap();
+    for (path, bytes) in layout.written(&refs(&payloads_b())).unwrap() {
+        assert_eq!(file(&dev.dev.img, 1, &path), bytes, "{path}");
+    }
+}
+
+/// A device whose flush is a job on the flush worker, held open until the test releases it. Records
+/// every commit-record write made while the latest flush has not finished (a commit before its
+/// barrier), and can fail the flush.
+struct Gated {
+    inner: Cached,
+    info_lba: u64,
+    latest: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pending: Option<std::sync::mpsc::Sender<()>>,
+    early_records: Vec<u64>,
+    fail_flush: bool,
+}
+
+impl ReadAt for Gated {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+}
+
+impl Sectors for Gated {
+    fn read(&mut self, lba: u64, buf: &mut Sector) -> std::io::Result<()> {
+        self.inner.read(lba, buf)
+    }
+
+    fn write(&mut self, lba: u64, buf: &Sector) -> std::io::Result<()> {
+        self.inner.write(lba, buf)
+    }
+
+    fn write_unsynced(&mut self, lba: u64, buf: &Sector) -> std::io::Result<()> {
+        let record = lba == self.info_lba || lba == self.info_lba + 1;
+        if record && !self.latest.load(std::sync::atomic::Ordering::SeqCst) {
+            self.early_records.push(lba);
+        }
+        self.inner.write_unsynced(lba, buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+
+    fn flush_job(&mut self) -> std::io::Result<crate::flush::Job> {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.latest = done.clone();
+        self.pending = Some(release);
+        let fail = self.fail_flush;
+        Ok(Box::new(move || {
+            let _ = held.recv();
+            if fail {
+                return Err(std::io::Error::other("EIO on the flush"));
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }))
+    }
+}
+
+impl Gated {
+    fn new(img: Vec<u8>, info_lba: u64, fail_flush: bool) -> Self {
+        Self {
+            inner: Cached::new(img),
+            info_lba,
+            latest: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            pending: None,
+            early_records: Vec::new(),
+            fail_flush,
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some(release) = self.pending.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[test]
+fn the_commit_record_is_written_only_after_its_flush_has_finished_and_a_cut_while_it_waits_is_uncommitted()
+ {
+    let layout = test_layout();
+    let pre = volume_image(&layout);
+    let mut first = Dev::new(pre);
+    install(&mut first, &layout, 2, "c", &refs(&payloads_c())).unwrap();
+    let pre = first.img;
+    let info_lba = place_sets(&mut Dev::new(pre.clone())).unwrap()[1];
+    let mut dev = Gated::new(pre.clone(), info_lba, false);
+    let mut run = SetRun::new(&layout, 1, info_lba, "b", &refs(&payloads_b())).unwrap();
+    let mut streak = 0;
+    let mut waits = 0;
+    let mut cut_while_waiting = false;
+    for _ in 0..1_000_000 {
+        match run.step(&mut dev, BUDGET).unwrap() {
+            Step::Done => break,
+            Step::More => streak = 0,
+            Step::Wait => {
+                waits += 1;
+                streak += 1;
+                if !cut_while_waiting {
+                    // A cut while a flush is still waiting: the set's sectors may be partly on the
+                    // medium, the record is not, so the set reads uncommitted.
+                    let img = cut_image(&dev.inner, |i| i % 2 == 0);
+                    check_cut_set(&img, &layout, 1).unwrap();
+                    cut_while_waiting = true;
+                }
+                // Hold each flush open for a few polls, so a record written early would show.
+                if streak == 3 {
+                    dev.release();
+                }
+            }
+        }
+    }
+    assert!(waits >= 6, "two barriers waited on: {waits} waits");
+    assert!(
+        dev.early_records.is_empty(),
+        "record written before its flush: {:?}",
+        dev.early_records
+    );
+    assert!(
+        read_info(&mut dev.inner, info_lba)
+            .unwrap()
+            .unwrap()
+            .slot
+            .is_some()
+    );
+}
+
+#[test]
+fn a_failed_flush_fails_the_install_by_name_and_no_record_is_written() {
+    let layout = test_layout();
+    let pre = volume_image(&layout);
+    let mut first = Dev::new(pre);
+    install(&mut first, &layout, 2, "c", &refs(&payloads_c())).unwrap();
+    let pre = first.img;
+    let info_lba = place_sets(&mut Dev::new(pre.clone())).unwrap()[1];
+    let mut dev = Gated::new(pre, info_lba, true);
+    let mut run = SetRun::new(&layout, 1, info_lba, "b", &refs(&payloads_b())).unwrap();
+    let mut error = None;
+    for _ in 0..1_000_000 {
+        match run.step(&mut dev, BUDGET) {
+            Ok(Step::Done) => panic!("a failed flush must not finish the install"),
+            Ok(Step::More) => {}
+            Ok(Step::Wait) => dev.release(),
+            Err(e) => {
+                error = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    let text = error.expect("the install fails");
+    assert!(
+        text.contains("flush failed") && text.contains("EIO on the flush"),
+        "{text}"
+    );
+    assert!(
+        dev.early_records.is_empty(),
+        "no record before the flush: {:?}",
+        dev.early_records
+    );
+    assert_eq!(
+        read_info(&mut dev.inner, info_lba).unwrap().unwrap().slot,
+        None,
+        "the set reads uncommitted"
+    );
 }

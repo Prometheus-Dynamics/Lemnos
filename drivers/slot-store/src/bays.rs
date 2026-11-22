@@ -923,9 +923,255 @@ pub fn check_install(
     Ok(())
 }
 
-/// Steps a to f of an install, for one set: the record emptied, the files and their filesystem
-/// records written and read back ([`bayfat::write_set`]), then the record committed and read back.
-/// Nothing a pointer names is touched.
+/// Sectors one step of an install writes or checks at most: 2048, 1 MiB. Measured on the bench: a
+/// starved unsynced sector write takes about 80 us (1508 ms for the 18.8k sectors of a 9.6 MB boot
+/// set with the daemon at a third of a CPU), so a step stays near 0.16 s, under a tenth of a driver
+/// call's 2 s deadline with room for the host's other work in the same tick.
+pub const STEP_SECTORS: u64 = 2048;
+
+/// What one call of [`SetRun::step`] left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Written, checked and committed: nothing is left.
+    Done,
+    /// The step's sectors are done and more are left.
+    More,
+    /// A flush is in flight on the flush worker; the next call polls it.
+    Wait,
+}
+
+/// Where a set's write stands. The flushes are the three durability points: the emptied record
+/// before any bulk sector, the bulk before the commit record, and the commit record itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Plan,
+    Empty,
+    Bulk(u64),
+    Dirs,
+    Verify(u64),
+    Files,
+    Flush(Next),
+    Commit,
+    Check,
+}
+
+/// The stage a flush leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    Bulk,
+    Commit,
+    Check,
+}
+
+impl Next {
+    fn stage(self) -> Stage {
+        match self {
+            Next::Bulk => Stage::Bulk(0),
+            Next::Commit => Stage::Commit,
+            Next::Check => Stage::Check,
+        }
+    }
+}
+
+/// One bay set's install, as a sequence of steps: the record emptied, the files written and
+/// checked, then the record committed and read back. [`commit_set`] runs it to the end in one call;
+/// the driver runs it a step a tick, so no tick waits on more than [`STEP_SECTORS`] sectors or on a
+/// flush (the flush runs on the flush worker, see [`crate::flush`]). The cursor lives here between
+/// calls. Nothing a pointer names is touched.
+pub struct SetRun {
+    slot: String,
+    set: u8,
+    info_lba: u64,
+    subdirs: Vec<String>,
+    written: Vec<(String, Vec<u8>)>,
+    /// Set by the plan: the set's region, its composed writes and the record it commits.
+    plan: Option<(bayfat::SetWrite, Info)>,
+    barrier: Option<crate::flush::Barrier>,
+    stage: Stage,
+}
+
+impl SetRun {
+    /// The install of `payloads` into bay set `set` as slot `slot`. The files are laid out from the
+    /// layout; a refusal of the payloads themselves comes here, before anything is read.
+    pub fn new(
+        layout: &Layout,
+        set: u8,
+        info_lba: u64,
+        slot: &str,
+        payloads: &[&[u8]],
+    ) -> Result<Self, Error> {
+        let written = layout
+            .written(payloads)
+            .map_err(|e| Error::Refused(format!("{slot}: {e}: nothing was written")))?;
+        Ok(Self {
+            slot: slot.to_string(),
+            set,
+            info_lba,
+            subdirs: layout.subdirs(),
+            written,
+            plan: None,
+            barrier: None,
+            stage: Stage::Plan,
+        })
+    }
+
+    /// Runs the install to its end, waiting on each flush. For callers without ticks.
+    pub fn run<D: Sectors + ReadAt>(&mut self, dev: &mut D) -> Result<(), Error> {
+        loop {
+            match self.step(dev, u64::MAX)? {
+                Step::Done => return Ok(()),
+                Step::More => {}
+                Step::Wait => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+    }
+
+    /// Does the next part of the install: up to `budget` bulk sectors, then stops. Refusals and
+    /// read-back mismatches are errors and nothing after them runs.
+    pub fn step<D: Sectors + ReadAt>(&mut self, dev: &mut D, budget: u64) -> Result<Step, Error> {
+        let mut left = budget.max(1);
+        loop {
+            match self.stage {
+                Stage::Plan => self.plan(dev)?,
+                Stage::Empty => {
+                    // a. The record emptied: the set holds no slot while its files change.
+                    let (_, record) = self.plan.as_ref().expect("planned before the empty");
+                    let empty = Info::empty(record.region).encode();
+                    Pair::at(self.info_lba)
+                        .write_unsynced(dev, Kind::BAY_INFO, &empty)
+                        .map_err(|e| Error::Device(e.to_string()))?;
+                    self.stage = Stage::Flush(Next::Bulk);
+                }
+                Stage::Flush(next) => {
+                    if self.barrier.is_none() {
+                        let job = dev.flush_job().map_err(|e| self.flush_error(e))?;
+                        self.barrier = Some(
+                            crate::flush::Barrier::start(job).map_err(|e| self.flush_error(e))?,
+                        );
+                    }
+                    let barrier = self.barrier.as_mut().expect("started above");
+                    if !barrier.poll().map_err(|e| self.flush_error(e))? {
+                        return Ok(Step::Wait);
+                    }
+                    self.barrier = None;
+                    self.stage = next.stage();
+                }
+                Stage::Bulk(from) => {
+                    let total = self.writes().bulk_len();
+                    let mut i = from;
+                    while i < total && left > 0 {
+                        let members = self.members();
+                        self.writes()
+                            .put_bulk(dev, &members, i, bayfat::Durability::Unsynced)
+                            .map_err(Error::Device)?;
+                        i += 1;
+                        left -= 1;
+                    }
+                    self.stage = if i == total {
+                        Stage::Dirs
+                    } else {
+                        Stage::Bulk(i)
+                    };
+                }
+                Stage::Dirs => {
+                    self.writes()
+                        .put_dirs(dev, bayfat::Durability::Unsynced)
+                        .map_err(Error::Device)?;
+                    self.stage = Stage::Verify(0);
+                }
+                Stage::Verify(from) => {
+                    let total = self.writes().bulk_len();
+                    let mut i = from;
+                    while i < total && left > 0 {
+                        let members = self.members();
+                        self.writes()
+                            .check_bulk(dev, &members, i)
+                            .map_err(Error::Device)?;
+                        i += 1;
+                        left -= 1;
+                    }
+                    self.stage = if i == total {
+                        Stage::Files
+                    } else {
+                        Stage::Verify(i)
+                    };
+                }
+                Stage::Files => {
+                    let members = self.members();
+                    self.writes()
+                        .check_files(dev, &members)
+                        .map_err(Error::Device)?;
+                    self.stage = Stage::Flush(Next::Commit);
+                }
+                Stage::Commit => {
+                    // f. The commit: the record is on the medium once the flush after it finishes.
+                    let (_, record) = self.plan.as_ref().expect("planned before the commit");
+                    let bytes = record.encode();
+                    Pair::at(self.info_lba)
+                        .write_unsynced(dev, Kind::BAY_INFO, &bytes)
+                        .map_err(|e| Error::Device(e.to_string()))?;
+                    self.stage = Stage::Flush(Next::Check);
+                }
+                Stage::Check => {
+                    let (_, record) = self.plan.as_ref().expect("planned before the check");
+                    if read_info(dev, self.info_lba)?.as_ref() != Some(record) {
+                        return Err(Error::Device(format!(
+                            "{}: the set's record did not read back",
+                            self.slot
+                        )));
+                    }
+                    return Ok(Step::Done);
+                }
+            }
+            if matches!(self.stage, Stage::Bulk(_) | Stage::Verify(_)) && left == 0 {
+                return Ok(Step::More);
+            }
+        }
+    }
+
+    /// The plan: the set's record (its region), the volume, and every sector the install will
+    /// write, composed from reads. Refusals come here, before the first write.
+    fn plan<D: Sectors + ReadAt>(&mut self, dev: &mut D) -> Result<(), Error> {
+        let current = read_info(dev, self.info_lba)?.ok_or_else(|| {
+            Error::Refused(format!(
+                "bay{}'s record names no region: the boot partition was not made for layout version \
+                 {LAYOUT_VERSION}: nothing was written",
+                self.set
+            ))
+        })?;
+        let region = current.region;
+        let members = self.members();
+        let dirs: Vec<&str> = self.subdirs.iter().map(String::as_str).collect();
+        let writes =
+            bayfat::SetWrite::prepare(dev, &set_dir(self.set), INFO_NAME, region, &dirs, &members)
+                .map_err(|e| Error::Refused(format!("{}: {e}", self.slot)))?;
+        let record = Info::committed(region, &self.slot, &self.written);
+        self.plan = Some((writes, record));
+        self.stage = if current.slot.is_some() {
+            Stage::Empty
+        } else {
+            Stage::Bulk(0)
+        };
+        Ok(())
+    }
+
+    fn writes(&self) -> &bayfat::SetWrite {
+        &self.plan.as_ref().expect("planned before the writes").0
+    }
+
+    fn members(&self) -> Vec<Member<'_>> {
+        self.written
+            .iter()
+            .map(|(p, b)| Member { path: p, bytes: b })
+            .collect()
+    }
+
+    fn flush_error(&self, e: std::io::Error) -> Error {
+        Error::Device(format!("{}: the flush failed: {e}", self.slot))
+    }
+}
+
+/// Steps a to f of an install, for one set, run to the end in one call (see [`SetRun`]).
 pub fn commit_set<D: Sectors + ReadAt>(
     dev: &mut D,
     layout: &Layout,
@@ -934,58 +1180,7 @@ pub fn commit_set<D: Sectors + ReadAt>(
     slot: &str,
     payloads: &[&[u8]],
 ) -> Result<(), Error> {
-    let written = layout
-        .written(payloads)
-        .map_err(|e| Error::Refused(format!("{slot}: {e}: nothing was written")))?;
-    let current = read_info(dev, info_lba)?.ok_or_else(|| {
-        Error::Refused(format!(
-            "bay{set}'s record names no region: the boot partition was not made for layout version \
-             {LAYOUT_VERSION}: nothing was written"
-        ))
-    })?;
-    let region = current.region;
-    // The plan first: files that do not fit the region are refused with nothing written.
-    let members: Vec<Member<'_>> = written
-        .iter()
-        .map(|(p, b)| Member { path: p, bytes: b })
-        .collect();
-    let v = bootfat::volume(dev).map_err(|e| Error::Device(e.to_string()))?;
-    region.check(&v).map_err(Error::Refused)?;
-    bayfat::plan(&v, region, &members).map_err(|e| Error::Refused(format!("{slot}: {e}")))?;
-    // a. The record emptied: the set holds no slot while its files change.
-    if current.slot.is_some() {
-        Pair::at(info_lba)
-            .write(dev, Kind::BAY_INFO, &Info::empty(region).encode())
-            .map_err(|e| Error::Device(e.to_string()))?;
-    }
-    // b-e.
-    let dirs = layout.subdirs();
-    let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
-    // The set's sectors go down unsynced (one write each, no wait for the medium), then one flush
-    // makes them all durable before the commit record below names them. A cut before the flush
-    // leaves the set empty (step a) and uncommitted; a cut after it leaves the sectors whole.
-    bayfat::write_set_with(
-        dev,
-        &set_dir(set),
-        INFO_NAME,
-        region,
-        &dirs,
-        &members,
-        bayfat::Durability::Unsynced,
-    )
-    .map_err(Error::Device)?;
-    dev.flush().map_err(|e| Error::Device(e.to_string()))?;
-    // f. The commit.
-    let record = Info::committed(region, slot, &written);
-    Pair::at(info_lba)
-        .write(dev, Kind::BAY_INFO, &record.encode())
-        .map_err(|e| Error::Device(e.to_string()))?;
-    if read_info(dev, info_lba)?.as_ref() != Some(&record) {
-        return Err(Error::Device(format!(
-            "{slot}: the set's record did not read back"
-        )));
-    }
-    Ok(())
+    SetRun::new(layout, set, info_lba, slot, payloads)?.run(dev)
 }
 
 /// Installs `payloads` (in payload order) as slot `slot` into bay set `set`, and makes it the
@@ -1017,6 +1212,13 @@ pub fn stage<D: Sectors + ReadAt>(
     stage_with(dev, layout, set, slot, payloads, &protected)
 }
 
+/// Where an install stands after its checks: finished already (the slot is in the bay), or the
+/// writes left to do, as a [`SetRun`].
+pub enum Begun {
+    Finished(Done),
+    Writing(Box<SetRun>),
+}
+
 /// [`stage`] with the caller's protected sets. A default set with no committed slot takes the
 /// install in place; every other protected bay is refused.
 pub fn stage_with<D: Sectors + ReadAt>(
@@ -1027,6 +1229,25 @@ pub fn stage_with<D: Sectors + ReadAt>(
     payloads: &[&[u8]],
     protected: &Protected,
 ) -> Result<Done, Error> {
+    match begin_stage_with(dev, layout, set, slot, payloads, protected)? {
+        Begun::Finished(done) => Ok(done),
+        Begun::Writing(mut run) => {
+            run.run(dev)?;
+            Ok(Done::Installed)
+        }
+    }
+}
+
+/// The checks of [`stage_with`], with the writes left as a [`SetRun`] to step. Nothing is written
+/// here.
+pub fn begin_stage_with<D: Sectors + ReadAt>(
+    dev: &mut D,
+    layout: &Layout,
+    set: u8,
+    slot: &str,
+    payloads: &[&[u8]],
+    protected: &Protected,
+) -> Result<Begun, Error> {
     check_install(layout, set, slot, payloads)?;
     if let Some(t) = &protected.pending {
         return Err(Error::Refused(format!(
@@ -1047,7 +1268,7 @@ pub fn stage_with<D: Sectors + ReadAt>(
                         "{why}: nothing was written, the default keeps booting"
                     ))
                 })?;
-                return Ok(Done::AlreadyInstalled);
+                return Ok(Begun::Finished(Done::AlreadyInstalled));
             }
             Some(Info { slot: Some(_), .. }) => {
                 return Err(Error::Refused(format!(
@@ -1065,8 +1286,9 @@ pub fn stage_with<D: Sectors + ReadAt>(
             "bay{set} is the trial's bay: a new install takes one of the other bays"
         )));
     }
-    commit_set(dev, layout, set, info_lba, slot, payloads)?;
-    Ok(Done::Installed)
+    Ok(Begun::Writing(Box::new(SetRun::new(
+        layout, set, info_lba, slot, payloads,
+    )?)))
 }
 
 /// Makes `set` the default and the old default (`protected.default`) the previous: previous first,

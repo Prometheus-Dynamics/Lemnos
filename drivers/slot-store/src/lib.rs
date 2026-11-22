@@ -30,6 +30,7 @@ pub mod fallback;
 pub mod fatadd;
 pub mod fatimage;
 pub mod firmware;
+pub mod flush;
 pub mod goodboot;
 pub mod gpt;
 pub mod grow;

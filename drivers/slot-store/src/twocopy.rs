@@ -228,6 +228,13 @@ pub trait Sectors {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+    /// The same flush as a job for the flush worker ([`crate::flush::Barrier`]), so a caller's tick
+    /// need not wait for the medium. The job must not depend on `self` after this returns. A device
+    /// that can hand its flush off overrides this; the default flushes here, now.
+    fn flush_job(&mut self) -> io::Result<crate::flush::Job> {
+        let done = self.flush();
+        Ok(Box::new(move || done))
+    }
 }
 
 /// The current value of a record.
@@ -295,6 +302,27 @@ impl Pair {
     /// written. The write goes to the copy that does not hold the highest valid sequence, so the
     /// other copy is the value a cut leaves.
     pub fn write<D: Sectors>(&self, dev: &mut D, kind: Kind, payload: &[u8]) -> Result<u64, Error> {
+        self.write_as(dev, kind, payload, true)
+    }
+
+    /// [`write`](Self::write) with the sector left for the caller's flush: the record is on the
+    /// medium once the caller's [`Sectors::flush`] (or its flush job) has finished.
+    pub fn write_unsynced<D: Sectors>(
+        &self,
+        dev: &mut D,
+        kind: Kind,
+        payload: &[u8],
+    ) -> Result<u64, Error> {
+        self.write_as(dev, kind, payload, false)
+    }
+
+    fn write_as<D: Sectors>(
+        &self,
+        dev: &mut D,
+        kind: Kind,
+        payload: &[u8],
+        synced: bool,
+    ) -> Result<u64, Error> {
         let copies = self.read_both(dev)?;
         let mut target = 0usize;
         let mut max_seq = None::<u64>;
@@ -326,7 +354,11 @@ impl Pair {
         let seq = max_seq.map_or(1, |m| m + 1);
         let mut sector = [0u8; SECTOR];
         encode(kind, seq, payload, &mut sector)?;
-        dev.write(self.lba + target as u64, &sector)?;
+        if synced {
+            dev.write(self.lba + target as u64, &sector)?;
+        } else {
+            dev.write_unsynced(self.lba + target as u64, &sector)?;
+        }
         Ok(seq)
     }
 
@@ -394,6 +426,13 @@ impl Sectors for FileSectors {
 
     fn flush(&mut self) -> io::Result<()> {
         self.file.sync_data()
+    }
+
+    fn flush_job(&mut self) -> io::Result<crate::flush::Job> {
+        // A duplicate of the descriptor names the same open file, so its fdatasync flushes what
+        // the writes above left in the page cache.
+        let file = self.file.try_clone()?;
+        Ok(Box::new(move || file.sync_data()))
     }
 }
 

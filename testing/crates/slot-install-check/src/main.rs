@@ -222,6 +222,19 @@ fn install(socket: &str, bundle: &Path, slot: &str, boot_node: &Path) -> Result<
     let slots = Slots { client };
     let mut c = Checks::new();
 
+    // The daemon opens its socket before the slots driver is bound (the first bind is a retry away),
+    // and a call before that is refused NO_DEVICE (-19). Wait, bounded, until the driver answers, so
+    // the install is not refused for the bind; nothing is retried after the install starts.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match slots.text("info") {
+            Ok(_) => break,
+            Err(e) if e.contains("Status(-19)") && std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => return Err(format!("the slots driver did not bind: {e}")),
+        }
+    }
     let (mut install_handle, install_id) = slots.handle("install")?;
     let (mut write_handle, write_id) = slots.handle("write")?;
     let args = Args::new()

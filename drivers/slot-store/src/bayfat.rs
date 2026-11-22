@@ -346,8 +346,194 @@ fn put_sector<D: Sectors>(
     }
 }
 
-/// [`write_set`], with the sectors' durability chosen by the caller. The install path writes its
-/// bulk unsynced and flushes once before its commit record; every other caller keeps `Synced`.
+/// One set's writes, composed from reads before the first write, so that they can be made in
+/// steps: the bulk sectors (the members' data, then the region's FAT in every copy, last copy
+/// first) are numbered `0..bulk_len()`, and each one is written or checked on its own. The
+/// directories are small and go in one call. Nothing here is written until the caller writes it.
+pub(crate) struct SetWrite {
+    v: Volume,
+    plan: Plan,
+    /// The region's FAT, one copy's bytes.
+    fat: Vec<u8>,
+    /// The first FAT sector of the region, within each copy.
+    first_sector: u64,
+    /// The data sectors of the members, in member order (the bulk's first part).
+    data: u64,
+    /// The region's FAT sectors per copy.
+    fat_sectors: u64,
+    dirs: Vec<Composed>,
+    set_dir: String,
+    cb: u64,
+}
+
+impl SetWrite {
+    /// Reads the volume and the directories, plans the members, and composes every sector the
+    /// install will write. Refusals come here, before any write.
+    pub(crate) fn prepare<D: Sectors + ReadAt>(
+        dev: &mut D,
+        set_dir: &str,
+        record: &str,
+        region: Region,
+        subdirs_of_set: &[&str],
+        members: &[Member<'_>],
+    ) -> Result<Self, String> {
+        let v = bootfat::volume(dev).map_err(|e| e.to_string())?;
+        region.check(&v)?;
+        let plan = plan(&v, region, members)?;
+        let cb = v.spc * SECTOR as u64;
+        // The directories first, read and composed before any write: one that cannot take its entries
+        // is refused with nothing written.
+        let mut dirs: Vec<Composed> = Vec::new();
+        let mut subs: Vec<&str> = subdirs_of_set.to_vec();
+        for d in subdirs(members) {
+            if !subs.contains(&d) {
+                subs.push(d);
+            }
+        }
+        for (k, d) in subs.iter().chain(std::iter::once(&"")).enumerate() {
+            let own = k == subs.len();
+            let path = if own {
+                set_dir.to_string()
+            } else {
+                format!("{set_dir}/{d}")
+            };
+            let (chain, old) =
+                bootfat::dir_chain(dev, &path).map_err(|e| format!("{path}: {e}"))?;
+            let files: Vec<(&str, u64, u32)> = members
+                .iter()
+                .zip(&plan.members)
+                .filter(|(m, _)| split(m.path).0 == *d)
+                .map(|(m, &(first, _))| (split(m.path).1, first, m.bytes.len() as u32))
+                .collect();
+            let (bytes, at) = compose(
+                &path,
+                &old,
+                if own { Some(record) } else { None },
+                &files,
+                if own { Some(plan.reserve) } else { None },
+                cb,
+            )?;
+            dirs.push((chain, old, bytes, at));
+        }
+        let fat = fat_bytes(region, &plan);
+        let data = plan.members.iter().map(|&(_, n)| n * v.spc).sum();
+        Ok(Self {
+            v,
+            fat_sectors: fat.len() as u64 / SECTOR as u64,
+            fat,
+            first_sector: region.start * 2 / SECTOR as u64,
+            data,
+            plan,
+            dirs,
+            set_dir: set_dir.to_string(),
+            cb,
+        })
+    }
+
+    /// The bulk sectors: the data, then the FAT copies.
+    pub(crate) fn bulk_len(&self) -> u64 {
+        self.data + self.v.fats * self.fat_sectors
+    }
+
+    /// Bulk sector `i` as it lands on the medium: its LBA and its 512 bytes.
+    fn bulk_at(&self, members: &[Member<'_>], i: u64) -> (u64, [u8; SECTOR]) {
+        let mut buf = [0u8; SECTOR];
+        if i < self.data {
+            let mut left = i;
+            for (m, &(first, n)) in members.iter().zip(&self.plan.members) {
+                let sectors = n * self.v.spc;
+                if left < sectors {
+                    let from = (left as usize) * SECTOR;
+                    if from < m.bytes.len() {
+                        let to = (from + SECTOR).min(m.bytes.len());
+                        buf[..to - from].copy_from_slice(&m.bytes[from..to]);
+                    }
+                    return (self.v.cluster_lba(first) + left, buf);
+                }
+                left -= sectors;
+            }
+            unreachable!("bulk sector {i} is past the members' data");
+        }
+        let j = i - self.data;
+        let copy = self.v.fats - 1 - j / self.fat_sectors;
+        let k = (j % self.fat_sectors) as usize;
+        buf.copy_from_slice(&self.fat[k * SECTOR..(k + 1) * SECTOR]);
+        (self.v.fat_lba(copy) + self.first_sector + k as u64, buf)
+    }
+
+    /// Writes bulk sector `i`, as `durability` says.
+    pub(crate) fn put_bulk<D: Sectors>(
+        &self,
+        dev: &mut D,
+        members: &[Member<'_>],
+        i: u64,
+        durability: Durability,
+    ) -> Result<(), String> {
+        let (lba, buf) = self.bulk_at(members, i);
+        put_sector(dev, durability, lba, &buf).map_err(io)
+    }
+
+    /// Reads bulk sector `i` back and compares it with what it should hold.
+    pub(crate) fn check_bulk<D: Sectors>(
+        &self,
+        dev: &mut D,
+        members: &[Member<'_>],
+        i: u64,
+    ) -> Result<(), String> {
+        let (lba, want) = self.bulk_at(members, i);
+        let mut got = [0u8; SECTOR];
+        dev.read(lba, &mut got).map_err(io)?;
+        if got != want {
+            return Err(format!(
+                "sector {lba}: the read-back does not match what was written: nothing was committed"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Writes the directories (the subdirectories, then the set's own).
+    pub(crate) fn put_dirs<D: Sectors>(
+        &self,
+        dev: &mut D,
+        durability: Durability,
+    ) -> Result<(), String> {
+        for (chain, old, bytes, at) in &self.dirs {
+            write_dir(dev, durability, &self.v, chain, old, bytes, *at)?;
+        }
+        Ok(())
+    }
+
+    /// Each member's size as its directory entry now gives it, and the reserve's size.
+    pub(crate) fn check_files<D: ReadAt>(
+        &self,
+        dev: &mut D,
+        members: &[Member<'_>],
+    ) -> Result<(), String> {
+        for m in members {
+            let path = format!("{}/{}", self.set_dir, m.path);
+            let size = bootfat::size_of_path(dev, &path).map_err(|e| format!("{path}: {e}"))?;
+            if size != m.bytes.len() as u64 {
+                return Err(format!(
+                    "{path}: {size} bytes after the write, {} expected: nothing was committed",
+                    m.bytes.len()
+                ));
+            }
+        }
+        let path = format!("{}/{RESERVE}", self.set_dir);
+        let size = bootfat::size_of_path(dev, &path).map_err(|e| format!("{path}: {e}"))?;
+        if size != self.plan.reserve.1 * self.cb {
+            return Err(format!(
+                "{path}: {size} bytes after the write, {} expected: nothing was committed",
+                self.plan.reserve.1 * self.cb
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// [`write_set`], with the sectors' durability chosen by the caller, in one call: every sector,
+/// the directories, then the read-back. The install's steps (`bays::SetRun`) make the same writes
+/// in pieces.
 pub(crate) fn write_set_with<D: Sectors + ReadAt>(
     dev: &mut D,
     set_dir: &str,
@@ -357,96 +543,15 @@ pub(crate) fn write_set_with<D: Sectors + ReadAt>(
     members: &[Member<'_>],
     durability: Durability,
 ) -> Result<(), String> {
-    let v = bootfat::volume(dev).map_err(|e| e.to_string())?;
-    region.check(&v)?;
-    let plan = plan(&v, region, members)?;
-    let cb = v.spc * SECTOR as u64;
-    // The directories first, read and composed before any write: one that cannot take its entries
-    // is refused with nothing written.
-    let mut dirs: Vec<Composed> = Vec::new();
-    let mut subs: Vec<&str> = subdirs_of_set.to_vec();
-    for d in subdirs(members) {
-        if !subs.contains(&d) {
-            subs.push(d);
-        }
+    let w = SetWrite::prepare(dev, set_dir, record, region, subdirs_of_set, members)?;
+    for i in 0..w.bulk_len() {
+        w.put_bulk(dev, members, i, durability)?;
     }
-    for (k, d) in subs.iter().chain(std::iter::once(&"")).enumerate() {
-        let own = k == subs.len();
-        let path = if own {
-            set_dir.to_string()
-        } else {
-            format!("{set_dir}/{d}")
-        };
-        let (chain, old) = bootfat::dir_chain(dev, &path).map_err(|e| format!("{path}: {e}"))?;
-        let files: Vec<(&str, u64, u32)> = members
-            .iter()
-            .zip(&plan.members)
-            .filter(|(m, _)| split(m.path).0 == *d)
-            .map(|(m, &(first, _))| (split(m.path).1, first, m.bytes.len() as u32))
-            .collect();
-        let (bytes, at) = compose(
-            &path,
-            &old,
-            if own { Some(record) } else { None },
-            &files,
-            if own { Some(plan.reserve) } else { None },
-            cb,
-        )?;
-        dirs.push((chain, old, bytes, at));
+    w.put_dirs(dev, durability)?;
+    for i in 0..w.bulk_len() {
+        w.check_bulk(dev, members, i)?;
     }
-    // b. The data.
-    for (m, &(first, n)) in members.iter().zip(&plan.members) {
-        let sectors = n * v.spc;
-        for s in 0..sectors {
-            let mut buf = [0u8; SECTOR];
-            let from = (s as usize) * SECTOR;
-            if from < m.bytes.len() {
-                let to = (from + SECTOR).min(m.bytes.len());
-                buf[..to - from].copy_from_slice(&m.bytes[from..to]);
-            }
-            put_sector(dev, durability, v.cluster_lba(first) + s, &buf).map_err(io)?;
-        }
-    }
-    // c. The FAT sectors of the region, the last copy first.
-    let fat = fat_bytes(region, &plan);
-    let first_sector = region.start * 2 / SECTOR as u64;
-    for copy in (0..v.fats).rev() {
-        for (k, chunk) in fat.chunks(SECTOR).enumerate() {
-            let mut buf = [0u8; SECTOR];
-            buf.copy_from_slice(chunk);
-            put_sector(
-                dev,
-                durability,
-                v.fat_lba(copy) + first_sector + k as u64,
-                &buf,
-            )
-            .map_err(io)?;
-        }
-    }
-    // d. The directories: the subdirectories, then the set's own (reserve's sector last).
-    for (chain, old, bytes, at) in &dirs {
-        write_dir(dev, durability, &v, chain, old, bytes, *at)?;
-    }
-    // e. Read back through the FAT, parsed again.
-    for m in members {
-        let path = format!("{set_dir}/{}", m.path);
-        let back = bootfat::read_file(dev, &path, m.bytes.len() as u64)
-            .map_err(|e| format!("{path}: read back: {e}: nothing was committed"))?;
-        if back != m.bytes {
-            return Err(format!(
-                "{path}: the read-back does not match what was written: nothing was committed"
-            ));
-        }
-    }
-    let path = format!("{set_dir}/{RESERVE}");
-    let size = bootfat::size_of_path(dev, &path).map_err(|e| format!("{path}: {e}"))?;
-    if size != plan.reserve.1 * cb {
-        return Err(format!(
-            "{path}: {size} bytes after the write, {} expected: nothing was committed",
-            plan.reserve.1 * cb
-        ));
-    }
-    Ok(())
+    w.check_files(dev, members)
 }
 
 /// The sectors a set owns (its write set): the region's data, the region's FAT sectors in every

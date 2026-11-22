@@ -142,6 +142,10 @@ struct Unpack {
     /// Each file written, with its SHA-256.
     hashes: Vec<(String, String)>,
     failure: Option<Failure>,
+    /// The durability barriers started by the stream (every SYNC_EVERY bytes, and at each member's
+    /// end). They run on the flush worker, so no call waits on the medium; the check phase waits for
+    /// them before anything is committed.
+    flushes: Vec<lemnos_slot_store::flush::Barrier>,
 }
 
 impl Unpack {
@@ -233,6 +237,29 @@ impl Unpack {
     }
 }
 
+impl Unpack {
+    /// A durability barrier for `file` on the flush worker: `sync_all` (data and metadata) when `all`,
+    /// else `sync_data`. Started here, waited for by [`Unpack::flushed`].
+    fn barrier(all: bool, file: &File) -> io::Result<lemnos_slot_store::flush::Barrier> {
+        let dup = file.try_clone()?;
+        lemnos_slot_store::flush::Barrier::start(Box::new(move || {
+            if all { dup.sync_all() } else { dup.sync_data() }
+        }))
+    }
+
+    /// Whether every barrier the stream started has finished. A failed one is the disk going wrong.
+    fn flushed(&mut self) -> Result<bool, Failure> {
+        let mut left = Vec::with_capacity(self.flushes.len());
+        for mut barrier in self.flushes.drain(..) {
+            if !barrier.poll().map_err(disk("the work directory"))? {
+                left.push(barrier);
+            }
+        }
+        self.flushes = left;
+        Ok(self.flushes.is_empty())
+    }
+}
+
 impl Sink for Unpack {
     fn begin(&mut self, name: &str, kind: Kind, size: u64) -> Result<(), String> {
         let what = match self.order(name, kind) {
@@ -315,8 +342,9 @@ impl Sink for Unpack {
                 writing.unsynced += bytes.len() as u64;
                 if writing.unsynced >= SYNC_EVERY {
                     writing.unsynced = 0;
-                    if let Err(error) = writing.file.sync_data() {
-                        return self.fail(disk("the work directory")(error));
+                    match Self::barrier(false, &writing.file) {
+                        Ok(barrier) => self.flushes.push(barrier),
+                        Err(error) => return self.fail(disk("the work directory")(error)),
                     }
                 }
             }
@@ -350,8 +378,9 @@ impl Sink for Unpack {
                 }
             }
             Some((_, Some(writing))) => {
-                if let Err(error) = writing.file.sync_all() {
-                    return self.fail(disk("the work directory")(error));
+                match Self::barrier(true, &writing.file) {
+                    Ok(barrier) => self.flushes.push(barrier),
+                    Err(error) => return self.fail(disk("the work directory")(error)),
                 }
                 let sha = hex(&writing.hasher.finalize());
                 self.hashes.push((writing.name, sha));
@@ -502,8 +531,26 @@ struct Fin {
     /// The boot directory's copy going into the store, while its files are going in.
     put: Option<boot::Put>,
     /// Whether the payloads are in the bay and the commit has not begun: a cancel or a failure then
-    /// frees the bay, since no pointer and no image names it.
+    /// frees the bay, since no pointer and no image names it. Set when the bay's write begins.
     bay: bool,
+    /// The payload files read so far, while they are still being read (one tick's bytes at a time).
+    load: Option<Load>,
+    /// The bay's write, once the payloads are read: stepped a tick at a time.
+    run: Option<Box<dyn crate::boot::PayloadRun>>,
+}
+
+/// The payload files read into memory, in the order they go into the bay.
+#[derive(Default)]
+struct Load {
+    paths: Vec<String>,
+    /// The index of the file being read (or the next to read).
+    next: usize,
+    file: Option<File>,
+    /// The file being read so far, and its size.
+    cur: Vec<u8>,
+    size: u64,
+    /// The files read whole.
+    bytes: Vec<Vec<u8>>,
 }
 
 /// A bundle in `.incoming`, open.
@@ -638,6 +685,7 @@ impl Install {
                 signed: None,
                 current: None,
                 hashes: Vec::new(),
+                flushes: Vec::new(),
                 failure: None,
             },
             end: None,
@@ -739,6 +787,11 @@ impl Install {
         if !self.tar.finished() {
             return Err(bad("the bundle ends in the middle"));
         }
+        // The bundle's files must be on the medium before anything names them: wait for the stream's
+        // barriers (the next tick polls again).
+        if !self.unpack.flushed()? {
+            return Ok(false);
+        }
         *refused = true;
         if self.unpack.manifest.is_empty() {
             return Err(bad("not a slot bundle: no slot.json"));
@@ -797,8 +850,7 @@ impl Install {
             boot_dir,
             cmdline,
             outcome: Some(outcome),
-            put: None,
-            bay: false,
+            ..Fin::default()
         };
         Ok(true)
     }
@@ -828,30 +880,88 @@ impl Install {
     }
 
     /// The payloads go into a free bay of the boot partition: the five roles, then the firmware
-    /// overlays the boot partition declares (the admission made the bundle's set exactly these).
-    /// Refusals come first (a payload missing or larger than its bay is refused by name before any
-    /// write); no pointer moves.
+    /// overlays the boot partition declares (the admission made the bundle's set exactly these). The
+    /// files are read a tick's bytes at a time, then the bay's write is stepped a tick at a time, so
+    /// no tick waits on more than [`READ_EVERY_TICK`] bytes or [`lemnos_slot_store::bays::STEP_SECTORS`]
+    /// sectors. Refusals come first (a payload missing or larger than its bay is refused by name
+    /// before any write); no pointer moves.
     fn payloads(&mut self, board: &Finish<'_>, refused: &mut bool) -> Result<bool, Failure> {
         *refused = true;
-        let mut members: Vec<String> = lemnos_slot_store::bays::stored_files()
-            .iter()
-            .map(|p| p.to_string())
-            .collect();
-        members.extend(self.unpack.admit.firmware.iter().cloned());
-        let mut stored = Vec::with_capacity(members.len());
-        for path in &members {
-            let bytes = fs::read(self.fin.boot_dir.join(path))
-                .map_err(|_| bad(format!("the bundle has no boot/{path}")))?;
-            stored.push(bytes);
+        if self.fin.run.is_none() {
+            if !self.load_some()? {
+                return Ok(false);
+            }
+            let bytes = self
+                .fin
+                .load
+                .take()
+                .map(|load| load.bytes)
+                .unwrap_or_default();
+            let run = board
+                .record
+                .payload_begin(&self.fin.id, bytes)
+                .map_err(|error| bad(format!("slot {}'s boot files: {error}", self.fin.id)))?;
+            self.fin.run = Some(run);
+            self.fin.bay = true;
         }
-        let payloads: Vec<&[u8]> = stored.iter().map(Vec::as_slice).collect();
-        board
-            .record
-            .install(&self.fin.id, &payloads)
+        let Some(run) = self.fin.run.as_mut() else {
+            return Ok(false);
+        };
+        let done = run
+            .step()
             .map_err(|error| bad(format!("slot {}'s boot files: {error}", self.fin.id)))?;
-        self.fin.bay = true;
-        *refused = false;
-        Ok(true)
+        if done {
+            self.fin.run = None;
+            *refused = false;
+        }
+        Ok(done)
+    }
+
+    /// Reads up to [`READ_EVERY_TICK`] bytes of the payload files. `Ok(true)` once all are read.
+    fn load_some(&mut self) -> Result<bool, Failure> {
+        let io = disk("the slot's boot files");
+        let boot_dir = self.fin.boot_dir.clone();
+        let load = self.fin.load.get_or_insert_with(|| {
+            let mut paths: Vec<String> = lemnos_slot_store::bays::stored_files()
+                .iter()
+                .map(|p| p.to_string())
+                .collect();
+            paths.extend(self.unpack.admit.firmware.iter().cloned());
+            Load {
+                paths,
+                ..Load::default()
+            }
+        });
+        let mut budget = READ_EVERY_TICK as u64;
+        loop {
+            let Some(path) = load.paths.get(load.next).cloned() else {
+                return Ok(true);
+            };
+            if load.file.is_none() {
+                let file = File::open(boot_dir.join(&path))
+                    .map_err(|_| bad(format!("the bundle has no boot/{path}")))?;
+                load.size = file.metadata().map_err(&io)?.len();
+                load.cur = Vec::with_capacity(usize::try_from(load.size).unwrap_or(0));
+                load.file = Some(file);
+            }
+            let want = (load.size - load.cur.len() as u64).min(budget) as usize;
+            if want > 0 {
+                let from = load.cur.len();
+                load.cur.resize(from + want, 0);
+                let file = load.file.as_mut().expect("opened above");
+                std::io::Read::read_exact(file, &mut load.cur[from..]).map_err(&io)?;
+                budget -= want as u64;
+            }
+            if (load.cur.len() as u64) < load.size {
+                return Ok(false);
+            }
+            load.bytes.push(std::mem::take(&mut load.cur));
+            load.file = None;
+            load.next += 1;
+            if budget == 0 {
+                return Ok(false);
+            }
+        }
     }
 
     /// The slot's boot directory into the boot partition's store on the data side, one file a call.
