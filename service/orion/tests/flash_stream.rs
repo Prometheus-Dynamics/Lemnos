@@ -13,6 +13,8 @@ use lemnos_host::{Options as HostOptions, entry};
 use lemnos_orion::config::Config;
 use lemnos_orion::{Shared, calls, files, publish, source};
 
+#[path = "support/proxy.rs"]
+mod proxy;
 #[path = "support/tracked.rs"]
 mod tracked;
 use lemnos_sim::SimBoard;
@@ -208,6 +210,8 @@ fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
 /// Everything up: the node, lemnosd with the flash device, the bridge, and a dashboard that sees
 /// the files it has pushed through.
 struct Setup {
+    /// The proxies between the bridge and lemnosd, and between the bridge and the node, when the test asked.
+    proxies: Option<(proxy::Proxy, proxy::Proxy)>,
     target: PathBuf,
     dashboard: Orion,
     _bridge: Bridge,
@@ -226,6 +230,27 @@ fn setup_stalled(test: &str, target_bytes: u64, stall: Duration) -> Setup {
 }
 
 fn setup_with(test: &str, target_bytes: u64, stall: Duration, lease: Option<Duration>) -> Setup {
+    setup_full(test, target_bytes, stall, lease, false)
+}
+
+/// As [`setup`], with the bridge reaching lemnosd and the node through proxies ([`proxy::Proxy`]).
+fn setup_proxied(test: &str, target_bytes: u64) -> Setup {
+    setup_full(
+        test,
+        target_bytes,
+        lemnos_orion::files::IDLE,
+        Some(lemnos_orion::config::LEASE),
+        true,
+    )
+}
+
+fn setup_full(
+    test: &str,
+    target_bytes: u64,
+    stall: Duration,
+    lease: Option<Duration>,
+    proxied: bool,
+) -> Setup {
     let dir = dir(test);
     let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let target = dir.join("disk.img");
@@ -238,7 +263,17 @@ fn setup_with(test: &str, target_bytes: u64, stall: Duration, lease: Option<Dura
     let service = start_lemnosd(&dir, &socket, &target, true);
     let incoming = dir.join("incoming");
     std::fs::create_dir_all(&incoming).expect("incoming");
-    let bridge = start_bridge_stalled(&socket, board.socket(), &incoming, stall, lease);
+    let proxies = proxied.then(|| {
+        (
+            proxy::Proxy::start(&dir.join("lemnosd-proxy.sock"), &socket),
+            proxy::Proxy::start(&dir.join("node-proxy.sock"), board.socket()),
+        )
+    });
+    let (to_lemnosd, to_node) = proxies.as_ref().map_or_else(
+        || (socket.clone(), board.socket().to_path_buf()),
+        |(l, n)| (l.path().to_path_buf(), n.path().to_path_buf()),
+    );
+    let bridge = start_bridge_stalled(&to_lemnosd, &to_node, &incoming, stall, lease);
     let dashboard = wait_for("a dashboard session", || {
         Orion::connect_once(
             &Address::Local(board.socket().to_path_buf()),
@@ -259,6 +294,7 @@ fn setup_with(test: &str, target_bytes: u64, stall: Duration, lease: Option<Dura
             .then_some(())
     });
     Setup {
+        proxies,
         dir,
         target,
         dashboard,
@@ -911,5 +947,281 @@ fn an_image_larger_than_the_target_does_not_start_writing() {
             .expect("target")
             .iter()
             .all(|&b| b == 0)
+    );
+}
+
+/// A raw image of `size` bytes that is not all one value, and its manifest's SHA-256 in hex.
+fn raw_image(size: usize) -> (Vec<u8>, String) {
+    use sha2::{Digest, Sha256};
+    let image: Vec<u8> = (0..size).map(|i| (i * 7 + i / 4096) as u8).collect();
+    let sha = Sha256::digest(&image)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    (image, sha)
+}
+
+/// A sender session that waits for the bridge's answers as long as the node is heard from (`Reply::Alive`),
+/// as a flasher's client does for a slow device.
+fn patient_sender(socket: &Path, name: &str) -> Orion {
+    let sender = wait_for("a patient sender", || {
+        Orion::connect_once(
+            &Address::Local(socket.to_path_buf()),
+            name,
+            orion::Options::default(),
+        )
+        .ok()
+    });
+    sender.set_reply(orion::Reply::Alive {
+        ceiling: Some(Duration::from_secs(120)),
+    });
+    sender
+}
+
+/// FLASH-BRIDGE-PUMP: a device call that takes longer than a sender waits for an answer does not stop the
+/// bridge answering its other files. The stream's first lemnosd reply is held 4 s (a slow device, as the bridge
+/// sees it; held under the lemnos client's own 5 s request bound, so the call still succeeds); meanwhile a
+/// plain file pushed to the same device is committed while that reply is still held. Then the stream itself
+/// commits. Before: the bridge made the stream's calls on the thread that pumps its Orion session, so the
+/// plain file waited out the whole hold (and a hold past the sender's 5 s status bound fails its push).
+#[test]
+fn a_device_call_held_past_the_senders_bound_does_not_stop_the_bridge_answering_other_files() {
+    const SIZE: usize = 256 * 1024;
+    let s = setup_proxied("held-call", SIZE as u64 + 4096);
+    let (image, sha) = raw_image(SIZE);
+    assert_eq!(
+        s.push("image.img.json", &manifest_of(SIZE as u64, &sha))
+            .state,
+        FileState::Committed
+    );
+    let (to_lemnosd, _) = s.proxies.as_ref().expect("proxied");
+    // Under the lemnos client's own 5 s request bound, so the held call still succeeds.
+    let hold = Duration::from_secs(4);
+    to_lemnosd.hold_next(lemnos_orion::stream::STREAMS_CLIENT_NAME.as_bytes(), hold);
+    let socket = s._board.socket().to_path_buf();
+    let streaming = std::thread::spawn(move || {
+        let sender = patient_sender(&socket, "streamer");
+        sender
+            .files()
+            .push(
+                "lemnos/flash/image.img",
+                &mut Cursor::new(&image),
+                |_, _| {},
+            )
+            .map(|t| (t.state, t.detail))
+    });
+    // The stream's begin is the first thing its connection is answered: wait until it is being held.
+    std::thread::sleep(Duration::from_secs(1));
+    let asked = Instant::now();
+    let other = s.dashboard.files().push(
+        "lemnos/flash/other.json",
+        &mut Cursor::new(b"{}".to_vec()),
+        |_, _| {},
+    );
+    let took = asked.elapsed();
+    assert!(
+        matches!(&other, Ok(t) if t.state == FileState::Committed),
+        "the plain file was not committed while the stream's call was held ({took:?}): {other:?}"
+    );
+    assert!(
+        to_lemnosd.held().is_none(),
+        "the plain file was answered only after the held call was let go ({took:?}); the hold proved nothing"
+    );
+    let streamed = streaming.join().expect("the streaming sender");
+    assert!(
+        to_lemnosd.held().is_some_and(|h| h >= hold),
+        "the stream's reply was never held"
+    );
+    assert!(
+        matches!(&streamed, Ok((FileState::Committed, _))),
+        "{streamed:?}"
+    );
+    assert_eq!(
+        streamed.expect("committed").1,
+        format!("raw_bytes={SIZE} outcome=1")
+    );
+}
+
+/// Pushes `image` as `lemnos/flash/image.img` from a patient sender reaching the node at `socket`, paced (8 KiB
+/// every 20 ms), and records every `received` the push reports. With `cut_at`, once that much is taken
+/// `cut` is called (it breaks a session) and the sender is let go.
+fn paced_push(
+    socket: &Path,
+    name: &str,
+    image: &[u8],
+    cut_at: Option<(u64, &dyn Fn())>,
+) -> (Result<(FileState, String), String>, Vec<u64>) {
+    let (let_go, wait) = mpsc::channel();
+    let mut paced = Quiet {
+        limit: image.len(),
+        image: image.to_vec(),
+        at: 0,
+        read_all: false,
+        pace: Some((Duration::from_millis(20), 8 * 1024)),
+        first: None,
+        wait,
+    };
+    let progress = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    let (socket, seen, name) = (socket.to_path_buf(), Arc::clone(&progress), name.to_owned());
+    let pushing = std::thread::spawn(move || {
+        let sender = patient_sender(&socket, &name);
+        sender
+            .files()
+            .push("lemnos/flash/image.img", &mut paced, |done, _| {
+                seen.lock().unwrap().push(done);
+            })
+            .map(|t| (t.state, t.detail))
+            .map_err(|e| format!("{e:?}"))
+    });
+    if let Some((at, cut)) = cut_at {
+        wait_for("the bytes before the cut taken", || {
+            let seen = progress.lock().unwrap();
+            (seen.last().copied().unwrap_or(0) >= at || pushing.is_finished()).then_some(())
+        });
+        cut();
+    }
+    let pushed = pushing.join().expect("the sender");
+    drop(let_go);
+    let seen = progress.lock().unwrap().clone();
+    (pushed, seen)
+}
+
+/// The image `paced_push` sent again after a broken first push: resumed at the bytes the device had taken
+/// (its first report is past the first push's last, never 0), never going backwards, committed, and on the
+/// target.
+fn assert_resumed(
+    s: &Setup,
+    image: &[u8],
+    first: &[u64],
+    again: &(Result<(FileState, String), String>, Vec<u64>),
+) {
+    let (pushed, seen) = again;
+    assert!(
+        matches!(pushed, Ok((FileState::Committed, _))),
+        "the second push: {pushed:?}; progress {seen:?}; the first push's {first:?}"
+    );
+    let taken = first.last().copied().unwrap_or(0);
+    let resumed_at = seen.iter().copied().find(|&r| r > 0).unwrap_or(0);
+    assert!(
+        taken > 0 && resumed_at >= taken,
+        "the second push did not resume at the bytes taken ({taken}): {seen:?}"
+    );
+    assert!(
+        seen.windows(2).all(|w| w[1] >= w[0]),
+        "the transfer went backwards: {seen:?}"
+    );
+    assert_eq!(
+        &std::fs::read(&s.target).expect("target")[..image.len()],
+        image
+    );
+}
+
+/// FLASH-BRIDGE-PUMP: the bridge's own Orion session breaks mid-stream (the node then ends that push for the
+/// sender). The stream and its job are kept across the break: the sender's next push of the same image is
+/// answered with the bytes the device has taken and resumes from there, and the image commits. Before: the
+/// bridge built its stream state with each Orion session, so the break lost the stream with its job still
+/// open on the device, and the next push could not start one (`-19`) or started over at 0.
+#[test]
+fn a_stream_whose_bridge_session_breaks_resumes_at_the_bytes_taken_and_commits() {
+    const SIZE: usize = 1024 * 1024;
+    let s = setup_proxied("cut-bridge", SIZE as u64 + 4096);
+    let (image, sha) = raw_image(SIZE);
+    assert_eq!(
+        s.push("image.img.json", &manifest_of(SIZE as u64, &sha))
+            .state,
+        FileState::Committed
+    );
+    let socket = s._board.socket().to_path_buf();
+    let (_, to_node) = s.proxies.as_ref().expect("proxied");
+    let cut = || to_node.cut();
+    let (broken, first) = paced_push(&socket, "first", &image, Some(((SIZE / 4) as u64, &cut)));
+    assert!(
+        !matches!(broken, Ok((FileState::Committed, _))),
+        "the push across the cut committed: the cut proved nothing ({first:?})"
+    );
+    // The bridge's files session is back once a plain file is answered.
+    let _ = s.push("again.json", b"{}");
+    let again = paced_push(&socket, "again", &image, None);
+    assert_resumed(&s, &image, &first, &again);
+}
+
+/// FLASH-BRIDGE-PUMP: the sender's own session breaks mid-stream (the board's case: the PC's link to the node
+/// was lost). The sender then does what a flasher's client does on every attempt: it pushes the same manifest
+/// again (a plain file: committed again, and the open stream and its job are left alone), then the same image,
+/// which is answered with the bytes the device has taken, resumes from there, and commits. Before: the bridge's resumed begin ended the stream's job and started it over at 0,
+/// which a sender resuming within its push reads as a transfer that went backwards.
+#[test]
+fn a_stream_whose_sender_session_breaks_resumes_at_the_bytes_taken_and_commits() {
+    const SIZE: usize = 1024 * 1024;
+    let s = setup_proxied("cut-sender", SIZE as u64 + 4096);
+    let (image, sha) = raw_image(SIZE);
+    assert_eq!(
+        s.push("image.img.json", &manifest_of(SIZE as u64, &sha))
+            .state,
+        FileState::Committed
+    );
+    let through = proxy::Proxy::start(&s.dir.join("sender-proxy.sock"), s._board.socket());
+    let cut = || through.cut();
+    let (broken, first) = paced_push(
+        through.path(),
+        "first",
+        &image,
+        Some(((SIZE / 4) as u64, &cut)),
+    );
+    assert!(
+        !matches!(broken, Ok((FileState::Committed, _))),
+        "the push across the cut committed: the cut proved nothing ({first:?})"
+    );
+    let manifest = manifest_of(SIZE as u64, &sha);
+    assert_eq!(
+        s.push("image.img.json", &manifest).state,
+        FileState::Committed,
+        "the same manifest pushed again"
+    );
+    assert!(
+        device_busy(&s),
+        "the manifest pushed again ended the open stream"
+    );
+    let again = paced_push(s._board.socket(), "again", &image, None);
+    assert_resumed(&s, &image, &first, &again);
+}
+
+/// FLASH-BRIDGE-PUMP: an image whose commit was answered, pushed again (a sender that lost the answer and asks
+/// again), is answered with how it ended, `committed` and its fields, and nothing is sent or written again.
+/// Before: the bridge started the stream over, so the whole image was sent and written a second time.
+#[test]
+fn a_committed_image_pushed_again_is_answered_with_its_outcome_and_not_sent_again() {
+    const SIZE: usize = 256 * 1024;
+    let s = setup_proxied("again-committed", SIZE as u64 + 4096);
+    let (image, sha) = raw_image(SIZE);
+    assert_eq!(
+        s.push("image.img.json", &manifest_of(SIZE as u64, &sha))
+            .state,
+        FileState::Committed
+    );
+    let socket = s._board.socket().to_path_buf();
+    let (first, _) = paced_push(&socket, "first", &image, None);
+    assert!(
+        matches!(&first, Ok((FileState::Committed, _))),
+        "the first push: {first:?}"
+    );
+    // The target is changed behind the bridge: a second write of the image would put it back.
+    let mut target = std::fs::read(&s.target).expect("target");
+    target[..4].copy_from_slice(b"MARK");
+    std::fs::write(&s.target, &target).expect("mark");
+    let (again, seen) = paced_push(&socket, "again", &image, None);
+    assert_eq!(
+        again,
+        Ok((FileState::Committed, format!("raw_bytes={SIZE} outcome=1"))),
+        "progress {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|&r| r == 0 || r == SIZE as u64),
+        "chunks were sent again: {seen:?}"
+    );
+    assert_eq!(
+        &std::fs::read(&s.target).expect("target")[..4],
+        b"MARK",
+        "the image was written again"
     );
 }

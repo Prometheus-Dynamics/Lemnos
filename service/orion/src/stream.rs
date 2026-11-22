@@ -15,7 +15,9 @@
 //! This module is the job's starter: it runs on its own lemnosd connection, because only the
 //! starter may send a job's data. Each chunk is acknowledged to the sender only after the device
 //! took it, so a slow device stops the sender (Orion keeps only a few chunks in flight). Memory
-//! is one chunk. The stream's SHA-256 is checked against the transfer's digest at its commit; the
+//! is the chunks in flight, bounded ([`StreamWorker`]). The calls run on the stream's worker thread, never
+//! on the thread that pumps the Orion session, and a stream begun again (its sender's session broke) resumes
+//! at the bytes the device has taken (`docs/slots.md`, "Over Orion"). The stream's SHA-256 is checked against the transfer's digest at its commit; the
 //! job's own result (the device checks the decoded image) is the answer the sender gets: its fields,
 //! read with the contract's `read_result`, as the commit's detail (see [`committed_detail`]).
 //!
@@ -25,6 +27,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use lemnos_client::{Client, Handle};
@@ -55,6 +59,10 @@ pub struct Streamer {
     client: Option<Client>,
     /// The stream being received, if one is.
     active: Option<Active>,
+    /// The last stream that ended at its commit, and how: a begin or commit of it again is answered
+    /// with this, never by starting it over. A committed one is kept until another stream ends; a
+    /// rejected one is answered once, so the sender's next push of it starts it afresh.
+    finished: Option<(u64, Answer)>,
 }
 
 /// A stream being received: its transfer, the job it feeds, and the bytes so far.
@@ -92,6 +100,7 @@ impl Streamer {
             socket: socket.to_path_buf(),
             client: None,
             active: None,
+            finished: None,
         }
     }
 
@@ -148,8 +157,21 @@ impl Streamer {
     }
 
     /// A stream begins: its manifest goes to the device and its job starts. A stream begun while
-    /// another is received ends the other, and its job with it.
+    /// another is received ends the other, and its job with it. The stream being received begun again
+    /// (the sender's session broke and it resumes) is answered with the bytes the device has taken, and
+    /// goes on: it never goes back to 0. One that ended at its commit is answered with how it ended.
     pub fn begin(&mut self, transfer: u64, name: &str, size: u64, digest: [u8; 32]) -> Answer {
+        if let Some(active) = self.active.as_mut().filter(|a| a.transfer == transfer) {
+            active.seen = Instant::now();
+            return Answer {
+                received: active.got,
+                state: FileState::Receiving,
+                detail: String::new(),
+            };
+        }
+        if let Some(answer) = self.ended(transfer) {
+            return answer;
+        }
         self.drop_active();
         match self.start(transfer, name, size, digest) {
             Ok(active) => {
@@ -236,10 +258,24 @@ impl Streamer {
         else {
             return rejected("no stream is being received".into());
         };
-        if offset != got {
+        // A chunk the device already has (sent again on a resumed session) is answered with where the
+        // stream is; one that reaches past it gives only its new bytes; one after a gap is refused.
+        if offset > got {
             self.drop_active();
             return rejected("a chunk came out of order".into());
         }
+        let skip = usize::try_from(got - offset).unwrap_or(usize::MAX);
+        if skip >= bytes.len() {
+            if let Some(active) = self.active.as_mut() {
+                active.seen = Instant::now();
+            }
+            return Answer {
+                received: got,
+                state: FileState::Receiving,
+                detail: String::new(),
+            };
+        }
+        let (offset, bytes) = (got, &bytes[skip..]);
         let mut args = Vec::with_capacity(12 + bytes.len());
         args.extend_from_slice(&offset.to_le_bytes());
         put_bytes(&mut args, bytes);
@@ -270,11 +306,35 @@ impl Streamer {
         }
     }
 
+    /// How the stream `transfer` ended at its commit, when it is the last one that did. A rejection is
+    /// told once.
+    fn ended(&mut self, transfer: u64) -> Option<Answer> {
+        let (last, answer) = self.finished.as_ref()?;
+        if *last != transfer {
+            return None;
+        }
+        let answer = answer.clone();
+        if answer.state != FileState::Committed {
+            self.finished = None;
+        }
+        Some(answer)
+    }
+
     /// The stream is all sent: its size and digest are checked, and the job's result is the answer.
+    /// It is kept, so a commit sent again (the sender's session broke while the job was ending) is
+    /// answered the same.
     pub fn commit(&mut self, transfer: u64) -> Answer {
         if !self.owns(transfer) {
-            return rejected("no stream is being received".into());
+            return self
+                .ended(transfer)
+                .unwrap_or_else(|| rejected("no stream is being received".into()));
         }
+        let answer = self.commit_active();
+        self.finished = Some((transfer, answer.clone()));
+        answer
+    }
+
+    fn commit_active(&mut self) -> Answer {
         let Some(active) = self.active.take() else {
             return rejected("no stream is being received".into());
         };
@@ -311,6 +371,200 @@ impl Streamer {
             None => rejected("the write did not end".into()),
         }
     }
+}
+
+/// Chunks the pump may have handed the worker and not yet had answered. Orion keeps only a few chunks
+/// in flight, so a stream past this is a sender that is not paced by its answers: it is refused.
+const QUEUED_LIMIT: usize = 64;
+
+/// How long the worker waits for work before it looks for a quiet stream.
+const WORKER_LOOK: Duration = Duration::from_millis(100);
+
+/// What the pump hands the worker.
+enum Op {
+    Begin {
+        transfer: u64,
+        name: String,
+        size: u64,
+        digest: [u8; 32],
+    },
+    Chunk {
+        transfer: u64,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Commit {
+        transfer: u64,
+    },
+}
+
+/// What the pump knows of the worker without waiting for it.
+#[derive(Debug, Default)]
+struct View {
+    /// The stream whose commit the worker is waiting on, and its size.
+    committing: Option<(u64, u64)>,
+}
+
+/// A [`Streamer`] on a thread of its own, so the thread that pumps the Orion session never waits for
+/// lemnosd: a device call or a job's end may take as long as the device needs, and the session is
+/// pumped all that time. The pump hands each begin, chunk and commit over ([`StreamWorker::begin`],
+/// [`StreamWorker::chunk`], [`StreamWorker::commit`]) and sends the answers [`StreamWorker::answers`]
+/// gives back, in the order the worker made them. The worker outlives the Orion session: a stream
+/// and its job are kept across a broken session, and the sender's resumed begin is answered with the
+/// bytes the device has taken.
+pub struct StreamWorker {
+    names: Vec<String>,
+    /// The last stream begun through this worker: its chunks and commit are the worker's.
+    mine: Option<u64>,
+    ops: mpsc::Sender<Op>,
+    answers: mpsc::Receiver<(u64, Answer)>,
+    view: Arc<Mutex<View>>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl StreamWorker {
+    /// Starts the worker for `device`'s streams `names`, whose manifests are in `dir`, reaching
+    /// lemnosd at `socket`. `stall` is how long a stream may go without a chunk before it is dropped.
+    pub fn start(
+        device: &str,
+        dir: &Path,
+        names: Vec<String>,
+        socket: &Path,
+        stall: Duration,
+    ) -> Self {
+        let (ops, work) = mpsc::channel();
+        let (tell, answers) = mpsc::channel();
+        let view = Arc::new(Mutex::new(View::default()));
+        let queued = Arc::new(AtomicUsize::new(0));
+        let mut streamer = Streamer::new(device, dir, names.clone(), socket);
+        let (worker_view, worker_queued) = (Arc::clone(&view), Arc::clone(&queued));
+        // The thread ends when the pump's end of the channel goes (the service stops); a commit it is
+        // waiting on is let finish first.
+        std::thread::spawn(move || {
+            loop {
+                let op = match work.recv_timeout(WORKER_LOOK) {
+                    Ok(op) => op,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(ended) = streamer.expire(stall)
+                            && tell.send(ended).is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                };
+                let answer = match op {
+                    Op::Begin {
+                        transfer,
+                        name,
+                        size,
+                        digest,
+                    } => (transfer, streamer.begin(transfer, &name, size, digest)),
+                    Op::Chunk {
+                        transfer,
+                        offset,
+                        data,
+                    } => {
+                        worker_queued.fetch_sub(1, Ordering::Relaxed);
+                        (transfer, streamer.chunk(transfer, offset, &data))
+                    }
+                    Op::Commit { transfer } => {
+                        let size = streamer.active.as_ref().map_or(0, |a| a.size);
+                        lock(&worker_view).committing = Some((transfer, size));
+                        let answer = streamer.commit(transfer);
+                        lock(&worker_view).committing = None;
+                        (transfer, answer)
+                    }
+                };
+                if tell.send(answer).is_err() {
+                    return;
+                }
+            }
+        });
+        Self {
+            names,
+            mine: None,
+            ops,
+            answers,
+            view,
+            queued,
+        }
+    }
+
+    /// Whether the files named `name` are this worker's streams.
+    pub fn takes(&self, name: &str) -> bool {
+        self.names.iter().any(|n| n == name)
+    }
+
+    /// Whether `transfer` is the last stream begun through this worker.
+    pub fn owns(&self, transfer: u64) -> bool {
+        self.mine == Some(transfer)
+    }
+
+    /// A stream begins (or the sender resumes it). Answered at once when the worker is waiting on that
+    /// stream's commit: every byte is taken, and the commit sent again is answered with how it ended.
+    pub fn begin(
+        &mut self,
+        transfer: u64,
+        name: &str,
+        size: u64,
+        digest: [u8; 32],
+    ) -> Option<Answer> {
+        self.mine = Some(transfer);
+        if let Some((committing, size)) = lock(&self.view).committing
+            && committing == transfer
+        {
+            return Some(Answer {
+                received: size,
+                state: FileState::Receiving,
+                detail: String::new(),
+            });
+        }
+        self.hand(Op::Begin {
+            transfer,
+            name: name.to_owned(),
+            size,
+            digest,
+        })
+    }
+
+    /// A chunk of the stream: answered by the worker once the device has taken it.
+    pub fn chunk(&mut self, transfer: u64, offset: u64, data: Vec<u8>) -> Option<Answer> {
+        if self.queued.load(Ordering::Relaxed) >= QUEUED_LIMIT {
+            return Some(rejected(format!(
+                "more than {QUEUED_LIMIT} chunks were sent before the first was answered"
+            )));
+        }
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        self.hand(Op::Chunk {
+            transfer,
+            offset,
+            data,
+        })
+    }
+
+    /// The stream is all sent: answered by the worker when the device's job has ended.
+    pub fn commit(&mut self, transfer: u64) -> Option<Answer> {
+        self.hand(Op::Commit { transfer })
+    }
+
+    /// The answers the worker has made since the last look, in order.
+    pub fn answers(&self) -> impl Iterator<Item = (u64, Answer)> + '_ {
+        self.answers.try_iter()
+    }
+
+    fn hand(&self, op: Op) -> Option<Answer> {
+        self.ops
+            .send(op)
+            .err()
+            .map(|_| rejected("the bridge's stream worker has stopped".into()))
+    }
+}
+
+fn lock(view: &Mutex<View>) -> std::sync::MutexGuard<'_, View> {
+    view.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The name this streamer gives lemnosd.

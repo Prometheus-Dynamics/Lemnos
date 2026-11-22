@@ -3270,7 +3270,6 @@ signature sidecar: the record is in the manifest's `signature` field and in the 
    job on its own lemnosd connection (it is the job's starter, and only the starter may send `data`),
    and acknowledges the push as received.
 2. Each chunk goes to `data` before the bridge acknowledges it, so a slow device slows the sender.
-   The bridge holds one chunk at a time.
 3. At the commit the bridge checks the stream's SHA-256 against the sender's, then waits for the
    job: the answer is `committed` with the raw byte count and the signature outcome, or `rejected`
    with the job's status or the refusal. A committed answer's detail is fields, not a sentence:
@@ -3278,17 +3277,48 @@ signature sidecar: the record is in the manifest's `signature` field and in the 
    checked: unsigned, `2` not checked: unknown key) or `none` when the job reported none. A reader
    ignores a field it does not know; fields are only ever added after these.
 
-A push that breaks is begun again from zero; a streamed image is not resumed.
+**The pump never waits for the device.** The bridge's files thread pumps its Orion session (the
+receiver, `Sink`) and nothing else: each stream's begin, chunks and commit go to a worker thread of the
+device's (`lemnos_orion::stream::StreamWorker`), which makes the lemnosd calls and waits for the job, and
+the files thread sends the worker's answers as they come, in order. A device call or a job's end may take
+as long as it needs, and meanwhile the session is pumped and the device's other files are answered. Chunks
+handed over and not yet answered are bounded (64): a sender past that is not paced by its answers, and its
+transfer is refused. The worker lives as long as the bridge, not one Orion session: a stream and its job
+outlive a broken session, the sender's or the bridge's own.
+
+**A push that breaks resumes.** Orion names a transfer by its digest, so the same image to the same name
+is the same transfer. Begun again:
+- While its stream is open, the begin is answered with the bytes the device has taken, and the push goes
+  on from there: it never goes back to 0. A chunk the device already has (sent again on the resumed
+  session) is answered with where the stream is; a chunk after a gap is refused, and the stream ended.
+- While the bridge waits for its job to end, the begin is answered with every byte taken, and the commit
+  sent again is answered with how the job ended.
+- After its commit was answered, the begin (and a commit sent again) is answered with that answer:
+  `committed` with its fields, nothing sent or written again. A `rejected` answer is told once; the push
+  after it starts the image afresh.
+- A different image begun ends the open stream first, and its job with it (below).
+- The manifest pushed again, the same bytes or not, is a plain file: it is committed again and replaces the
+  file, and an open stream and its job are left alone. A stream resumed reads no manifest; the device checks
+  the image against the manifest its stream began with.
+
+**What a sender must do.** Wait for each answer as long as the node is heard from, not a fixed time:
+Orion's `Reply::Alive` with a ceiling. A chunk is answered once the device has taken it, so a slow store
+makes an answer late; under Orion's default (`Reply::Timeout`, 5 s, renewed only when `received` moves) a
+late chunk answer, or a commit answered more than twelve timeouts after it was sent, ends the push on the
+sender's side. The bridge's own bound on a job's end is `JOB_WAIT`, 900 s (`service/orion/src/stream.rs`):
+a ceiling past it gains nothing. After a broken push, push the same image again: it resumes. Do not assume
+a broken push wrote nothing, or that the image must be sent again whole; and do not change the image or its
+manifest between the broken push and the next, since that is a different transfer, which starts over.
 
 **The manifest after a broken push.** The manifest is a file in the device's directory, committed
 like any small file (written under a hidden name, renamed into place once its SHA-256 checks). It
 stays there until a push of the same name replaces it: a broken image push, the sender's session
 ending, the bridge's own Orion session reconnecting and the bridge restarting all leave it. So an
 image push begun again, on the same session or a new one, needs no manifest pushed first; pushing
-it again is allowed and replaces it. Each begin reads the manifest from the file and gives it to the
-device again. A begin while the broken stream is still open ends that stream first: its write job is
-cancelled, and the host ends the job in the same driver entry as the cancel, so the device takes the
-manifest again without `BUSY`. A manifest that is not the image's (an earlier image's, say) is not a
+it again is allowed and replaces it. A begin that starts a stream reads the manifest from the file and
+gives it to the device again; a begin of the stream still open resumes it (above). A begin of another
+image while a stream is open ends that stream first: its write job is cancelled, and the host ends the job
+in the same driver entry as the cancel, so the device takes the manifest again without `BUSY`. A manifest that is not the image's (an earlier image's, say) is not a
 silent risk: the device checks the stream against it and the push ends `rejected`. The directory is
 the board's (`LEMNOS_ORION_FILES`); on a flasher in RAM it goes with a reboot, and the manifest is
 then pushed again. A manifest push that itself breaks leaves the manifest that was there.

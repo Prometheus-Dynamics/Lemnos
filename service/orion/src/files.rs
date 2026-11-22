@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backoff::Backoff;
 use crate::config::Config;
-use crate::stream::Streamer;
+use crate::stream::StreamWorker;
 use crate::{Shared, log};
 
 /// The name this thread gives Orion.
@@ -304,7 +304,8 @@ struct Taker {
     prefix: String,
     sink: Sink,
     receiver: Receiver,
-    streamer: Streamer,
+    /// The device's streams: its index in the workers [`run`] keeps across Orion sessions.
+    streamer: usize,
 }
 
 /// Receives files for the devices `config.files` names, until the service stops.
@@ -314,6 +315,21 @@ pub fn run(config: &Config, shared: &Shared) {
     }
     let mut backoff = Backoff::new();
     let mut lemnosd: Option<Client> = None;
+    // One stream worker per device, for as long as the service runs: a stream and its job outlive a
+    // broken Orion session, so the sender's resumed begin finds them.
+    let mut workers: Vec<StreamWorker> = config
+        .files
+        .iter()
+        .map(|(device, dir)| {
+            let names = config
+                .streams
+                .iter()
+                .find(|(d, _)| d == device)
+                .map(|(_, names)| names.clone())
+                .unwrap_or_default();
+            StreamWorker::start(device, dir, names, &config.lemnosd_socket, config.stall)
+        })
+        .collect();
     while !shared.stopping() {
         // Orion's patience keeps trying while nobody answers, so this only sees a refusal.
         let orion = match Orion::connect_watching(
@@ -341,22 +357,16 @@ pub fn run(config: &Config, shared: &Shared) {
             }
         };
         let mut takers = Vec::new();
-        for (device, dir) in &config.files {
+        for (index, (device, dir)) in config.files.iter().enumerate() {
             let prefix = format!("{DESTINATION_PREFIX}{device}/");
             match orion.files().sink(&prefix) {
                 Ok(sink) => {
-                    let names = config
-                        .streams
-                        .iter()
-                        .find(|(d, _)| d == device)
-                        .map(|(_, names)| names.clone())
-                        .unwrap_or_default();
                     takers.push(Taker {
                         device: device.clone(),
                         prefix,
                         sink,
                         receiver: Receiver::new(dir),
-                        streamer: Streamer::new(device, dir, names, &config.lemnosd_socket),
+                        streamer: index,
                     });
                 }
                 Err(error) => log(&format!("files: Orion refused {prefix}: {error}")),
@@ -367,7 +377,7 @@ pub fn run(config: &Config, shared: &Shared) {
             continue;
         }
         backoff.reset();
-        let lost = serve(config, shared, &mut takers, &mut lemnosd);
+        let lost = serve(config, shared, &mut takers, &mut workers, &mut lemnosd);
         if let Err(error) = lost {
             log(&format!("files: Orion lost: {error}"));
         }
@@ -378,6 +388,7 @@ fn serve(
     config: &Config,
     shared: &Shared,
     takers: &mut [Taker],
+    workers: &mut [StreamWorker],
     lemnosd: &mut Option<Client>,
 ) -> Result<(), orion::ClientError> {
     let look = LOOK / u32::try_from(takers.len()).unwrap_or(1).max(1);
@@ -388,10 +399,16 @@ fn serve(
                     .sink
                     .status(transfer, answer.received, answer.state, &answer.detail)?;
             }
-            if let Some((transfer, answer)) = taker.streamer.expire(config.stall) {
+            let worker = &mut workers[taker.streamer];
+            // The stream worker's answers, as it made them: this thread never waits for lemnosd on a
+            // stream, so the session is pumped while a device call or a job's end takes its time.
+            for (transfer, answer) in worker.answers() {
                 taker
                     .sink
                     .status(transfer, answer.received, answer.state, &answer.detail)?;
+                if answer.state == FileState::Receiving {
+                    shared.transferred();
+                }
             }
             let Some(handed) = taker.sink.next(look)? else {
                 continue;
@@ -402,13 +419,13 @@ fn serve(
                     destination,
                     size,
                     digest,
-                } if taker
-                    .streamer
-                    .takes(destination.strip_prefix(&taker.prefix).unwrap_or("")) =>
-                {
-                    // A stream: its bytes go to the device's job as they arrive.
+                } if worker.takes(destination.strip_prefix(&taker.prefix).unwrap_or("")) => {
+                    // A stream: its bytes go to the device's job as they arrive, through the worker.
                     let name = destination.strip_prefix(&taker.prefix).unwrap_or("");
-                    (transfer, taker.streamer.begin(transfer, name, size, digest))
+                    match worker.begin(transfer, name, size, digest) {
+                        Some(answer) => (transfer, answer),
+                        None => continue,
+                    }
                 }
                 Handed::Begin {
                     transfer,
@@ -437,10 +454,10 @@ fn serve(
                     transfer,
                     offset,
                     data,
-                } if taker.streamer.owns(transfer) => (
-                    transfer,
-                    accepted(shared, taker.streamer.chunk(transfer, offset, &data)),
-                ),
+                } if worker.owns(transfer) => match worker.chunk(transfer, offset, data) {
+                    Some(answer) => (transfer, answer),
+                    None => continue,
+                },
                 Handed::Chunk {
                     transfer,
                     offset,
@@ -449,8 +466,11 @@ fn serve(
                     transfer,
                     accepted(shared, taker.receiver.chunk(transfer, offset, &data)),
                 ),
-                Handed::Commit { transfer } if taker.streamer.owns(transfer) => {
-                    (transfer, taker.streamer.commit(transfer))
+                Handed::Commit { transfer } if worker.owns(transfer) => {
+                    match worker.commit(transfer) {
+                        Some(answer) => (transfer, answer),
+                        None => continue,
+                    }
                 }
                 Handed::Commit { transfer } => (transfer, taker.receiver.commit(transfer)),
             };
