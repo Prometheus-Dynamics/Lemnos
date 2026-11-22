@@ -192,6 +192,24 @@ pub(crate) fn keep_baseline(
     Ok(count)
 }
 
+/// A boot whose records can't be read to say whose they are, once the daemon ran its uptime: the
+/// board came up, so the firmware's count is cleared through the mailbox, and nothing is written to
+/// the boot partition (no baseline, no episode). Without it, a board that only can't judge its records
+/// would count every ordinary restart toward the initramfs's way back (slot-init's `FLASH_AFTER`) and
+/// end in the firmware's flashing mode. The next boot reads a count below the baseline, as after a
+/// power loss, and counts from there. `Ok` and `Err` both carry the note for the state.
+pub(crate) fn clear_unjudged(mailbox: &dyn ClearCount) -> Result<String, String> {
+    match mailbox.clear_count() {
+        Ok(()) => Ok(
+            "the boot records can't be read to say whose they are; the daemon ran its uptime, so the firmware's boot count is cleared (nothing is written to the boot partition)"
+                .to_string(),
+        ),
+        Err(e) => Err(format!(
+            "{COUNT_UNCLEARED} although the daemon ran its uptime ({e}); the boot records can't be read to say whose they are; tried again in 8 s"
+        )),
+    }
+}
+
 /// The start of the reason a boot count could not be cleared (the firmware mailbox is not
 /// reachable). The restart is not refused: the boot is counted, and the state and the indicator say so.
 pub(crate) const COUNT_UNCLEARED: &str = "the boot count couldn't be cleared";

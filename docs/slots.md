@@ -1802,7 +1802,12 @@ rotation above still reads the raw count.
 
   A healthy board never reaches the limit. Each good boot keeps the count it started from as the baseline,
   so plain restarts and trials, each boot good, count at most the restarts since the last good one. A failed
-  trial and the default's good boot after it add two. Without the key, only a refusal asks for the flashing
+  trial and the default's good boot after it add two. A board whose daemon comes up but can't read its boot
+  records to say whose they are (`foreign-unknown`) judges no boot good, so the baseline doesn't move. Once
+  the daemon has run its uptime, it clears the firmware's count through the mailbox instead, and writes
+  nothing to the records or the state. The next boot reads a count below the baseline, as after a power
+  loss, so an ordinary restart of such a board never counts toward the limit. On another system's records
+  (`foreign`), nothing is touched. Without the key, only a refusal asks for the flashing
   mode, as before. Tests: `boots_that_die_after_this_program_reach_the_flashing_mode_at_the_limit_before_any_slot_starts`,
   `a_healthy_board_across_plain_restarts_and_trials_never_reaches_the_flashing_mode`,
   `below_the_limit_or_without_the_way_back_the_boot_starts_its_slot` and

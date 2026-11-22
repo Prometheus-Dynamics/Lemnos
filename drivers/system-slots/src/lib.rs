@@ -282,6 +282,12 @@ pub struct SystemSlots {
     next_check_ns: u64,
     /// The firmware's boot count and mailbox, for the `tryboot` form (see [`count`]).
     firmware: Option<count::Firmware>,
+    /// While the boot records can't be read to say whose they are: whether this boot's count has been
+    /// cleared once the daemon ran its uptime (see [`count::clear_unjudged`]).
+    unjudged_cleared: bool,
+    /// What that clear did, for `info` and `list` (beside the foreign words): never written to the
+    /// state, which is not known to be this system's.
+    unjudged_note: Option<String>,
     /// `[slots] demote_after_episodes`: the episodes that demote a default (see [`count`]).
     demote_after: u8,
     /// The free bytes the offline writer names in place of the data partition's (see [`offline`]).
@@ -604,6 +610,8 @@ impl SystemSlots {
             attempt: None,
             check: None,
             firmware: None,
+            unjudged_cleared: false,
+            unjudged_note: None,
             demote_after: lemnos_slot_store::fallback::threshold_from_board(None).unwrap_or(1),
             next_check_ns: 0,
             offline_free: None,
@@ -664,7 +672,10 @@ impl SystemSlots {
         match &self.owner {
             Ownership::Ours => String::new(),
             Ownership::NotOurs(why) => format!("{FOREIGN}: {why}"),
-            Ownership::Unknown(why) => format!("{OWNER_UNKNOWN}: {why}"),
+            Ownership::Unknown(why) => match &self.unjudged_note {
+                Some(note) => format!("{OWNER_UNKNOWN}: {why}; {note}"),
+                None => format!("{OWNER_UNKNOWN}: {why}"),
+            },
         }
     }
 
@@ -1899,8 +1910,23 @@ impl Lifecycle for SystemSlots {
             // Another system's state, or one that can't be read yet: nothing is written. An unknown
             // answer is looked at again at the failure rule's cap.
             self.indicate();
-            return matches!(self.owner, Ownership::Unknown(_))
-                .then(|| now_ns.saturating_add(OWNER_RETRY_NS));
+            if !matches!(self.owner, Ownership::Unknown(_)) {
+                return None;
+            }
+            // Records that can't be read to say whose they are: the board still came up. Once the
+            // daemon has run its uptime, the firmware's count is cleared (the mailbox only, nothing
+            // on the boot partition), so a board that only can't judge its records never counts a
+            // run of restarts toward the initramfs's way back.
+            let started = *self.started_ns.get_or_insert(now_ns);
+            if !self.unjudged_cleared
+                && Duration::from_nanos(now_ns.saturating_sub(started)) >= self.policy.uptime
+                && let Some(firmware) = self.firmware.clone()
+            {
+                let done = count::clear_unjudged(&firmware);
+                self.unjudged_cleared = done.is_ok();
+                self.unjudged_note = Some(done.unwrap_or_else(|why| why));
+            }
+            return Some(now_ns.saturating_add(OWNER_RETRY_NS));
         }
         if self.state_unwritable.is_some() && now_ns >= self.state_check_ns {
             self.state_unwritable = state_dirs_writable(&self.layout).err();

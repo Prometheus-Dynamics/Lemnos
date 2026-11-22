@@ -711,3 +711,33 @@ fn the_count_bytes_are_big_endian_and_the_little_endian_order_is_refused() {
     );
     assert_eq!(le.count_word().unwrap(), 0x0300_0000);
 }
+
+/// A boot whose records can't be judged: the clear goes through the mailbox alone, and both outcomes
+/// carry their words.
+#[test]
+fn an_unjudged_boot_clears_the_count_through_the_mailbox_only() {
+    let log = Log::default();
+    let ok = Mailbox {
+        log: &log,
+        refuse: false,
+    };
+    let note = crate::count::clear_unjudged(&ok).unwrap();
+    assert!(
+        note.contains("the firmware's boot count is cleared"),
+        "{note}"
+    );
+    assert!(
+        note.contains("nothing is written to the boot partition"),
+        "{note}"
+    );
+    assert_eq!(*log.lock().unwrap(), ["count-clear"]);
+    let refused = Mailbox {
+        log: &log,
+        refuse: true,
+    };
+    let why = crate::count::clear_unjudged(&refused).unwrap_err();
+    assert!(
+        why.contains("couldn't be cleared although the daemon ran its uptime"),
+        "{why}"
+    );
+}

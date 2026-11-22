@@ -219,3 +219,43 @@ fn our_own_disk_still_writes_at_start_and_on_confirm() {
     let list = String::from_utf8_lossy(&buf[..n]).into_owned();
     assert!(list.contains("\"foreign\":\"\""), "{list}");
 }
+
+/// Records that can't be read to say whose they are (here the boot partition's device is not there):
+/// nothing is written, on ticks or at start, but once the daemon has run its uptime the firmware's
+/// count is cleared through the mailbox, so the initramfs's way back never counts an ordinary restart
+/// of a board that only can't judge its records. The mailbox here is not there: the clear is refused,
+/// said in `info` beside the foreign words, and tried again; nothing is written still.
+#[test]
+fn records_that_cannot_be_judged_still_clear_the_count_once_up_and_write_nothing() {
+    let dir = TempDir::new("route-unknown");
+    let layout = Layout::new(dir.0.join("data"), dir.0.join("boot"));
+    fs::create_dir_all(layout.state_dir()).unwrap();
+    fs::write(layout.marker("booted"), "os-1\n").unwrap();
+    let before = tree(&layout.data);
+    let (mut slots, _, _roots) = started(&dir, &layout);
+    assert_eq!(slots.health(), Health::Degraded(crate::OWNER_UNKNOWN));
+    let mut buf = vec![0u8; 1 << 16];
+    // Before the uptime (30 s): nothing is tried.
+    run_for(&mut slots, 10);
+    let n = slots.info(&mut buf).unwrap();
+    let info = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(info.contains("foreign-unknown"), "{info}");
+    assert!(!info.contains("ran its uptime"), "{info}");
+    // Past it: the clear is tried, refused here (no mailbox), and said.
+    let mut next = Some(10_000_000_000);
+    while let Some(at) = next.filter(|at| *at <= 60_000_000_000) {
+        next = slots.tick(at);
+    }
+    assert!(next.is_some(), "an unknown answer is looked at again");
+    let n = slots.info(&mut buf).unwrap();
+    let info = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(
+        info.contains("the boot count couldn't be cleared although the daemon ran its uptime"),
+        "{info}"
+    );
+    assert_eq!(
+        tree(&layout.data),
+        before,
+        "nothing is written to the state"
+    );
+}
