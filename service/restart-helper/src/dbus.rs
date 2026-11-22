@@ -8,11 +8,17 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// How long one answer from the manager may take.
+/// How long one answer from the manager may take. It also bounds the handshake's ping loop: the sd-bus citation for why that
+/// loop exists is at `PING_FIRST`.
 const ANSWER_WAIT: Duration = Duration::from_secs(5);
 /// The first wait for the answer to a Ping sent after BEGIN, and the longest a wait grows to (the failure rule's cap).
-/// The manager answers a call only when it reads the call in a read of its own: a call sent right after BEGIN can share
-/// a read with it and then wait unread, so the handshake sends Pings until one is answered (see `Manager::ping`).
+/// Why the handshake sends Pings until one is answered (upstream systemd v259.10, commit cc6062f2): the manager copies the
+/// bytes after BEGIN into its read buffer (src/libsystemd/sd-bus/bus-socket.c:446-447, then bus_start_running). Its event
+/// loop then waits on the socket only: sd_bus_get_events asks for POLLIN by the reply queue, never by that buffer
+/// (sd-bus.c:2588), and each io wakeup runs one sd_bus_process (sd-bus.c:3651). The auth step returns without dispatching
+/// (sd-bus.c:3281, 3286), so a call that shared a read with BEGIN waits until the next bytes arrive. Each Ping is such bytes.
+/// Fedora's systemd 259.10 build may carry patches; they were not checked. No deterministic client-side alternative was
+/// found in the source (see `Manager::ping`).
 const PING_FIRST: Duration = Duration::from_millis(100);
 const PING_MAX: Duration = Duration::from_secs(8);
 const PEER: &str = "org.freedesktop.DBus.Peer";
@@ -152,9 +158,9 @@ impl Manager {
         self.string_property(MANAGER_PATH, MANAGER, "SystemState")
     }
 
-    /// Pings the manager until one of its own Pings is answered. Each Ping is a new write, so the manager reads it,
-    /// and a Ping not answered within the current wait is sent again with a new serial and a doubled wait (capped).
-    /// Replies to earlier Pings or signals are skipped. Bounded by ANSWER_WAIT.
+    /// Pings the manager until one of its own Pings is answered. Each Ping is a new write, so the manager reads it
+    /// (the mechanism is at `PING_FIRST`), and a Ping not answered within the current wait is sent again with a new serial
+    /// and a doubled wait (capped). Replies to earlier Pings or signals are skipped. Bounded by ANSWER_WAIT.
     fn ping(&mut self) -> Result<(), CallError> {
         let deadline = Instant::now() + ANSWER_WAIT;
         let mut gap = PING_FIRST;
