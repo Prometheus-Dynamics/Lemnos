@@ -191,7 +191,14 @@ fn exec(args: &[String]) -> ExitCode {
         say!("lemnos-unit-check exec: install the unit's system call filter: {error}");
         return ExitCode::FAILURE;
     }
-    let error = Command::new(prog).args(rest).exec();
+    // The exec step sets LISTEN_PID to its own id when it passes descriptors on (the service manager's
+    // contract for the main process): the program it execs is this same process.
+    let mut command = Command::new(prog);
+    command.args(rest);
+    if std::env::var_os("LISTEN_FDS").is_some() {
+        command.env("LISTEN_PID", std::process::id().to_string());
+    }
+    let error = command.exec();
     say!("lemnos-unit-check exec: exec {prog}: {error}");
     ExitCode::FAILURE
 }

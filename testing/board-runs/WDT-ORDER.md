@@ -1,28 +1,40 @@
 # WDT-ORDER: lemnosd's unit ordering, the watchdog descriptor store, and the ping on open
 
 Status: **untested on board.** Nothing here has run on a board. The QEMU checks (`testing/qemu/run-watchdog.sh`,
-modes `daemon-loop` and `daemon-loop-bind`, with the stand-in manager) and the host's own systemd user manager
-are the only evidence so far. No board was touched for this item.
+modes `daemon-loop` and `daemon-loop-bind`, with the stand-in manager) are the only evidence so far.
+No board was touched for this item.
 
-## 0. The namespace still applies under `DefaultDependencies=no` (host, not a board)
+## 0. Namespace under `DefaultDependencies=no`: QEMU guest, systemd 259.10 as PID 1
 
-Run on the host's user manager (systemd 259), not a board and not the system manager, with a transient unit:
-`systemd-run --user --wait --collect -p DefaultDependencies=no -p ProtectSystem=strict -p PrivateTmp=yes
--p ReadWritePaths=/run/user/1000/wdt-ns <probe>`. The probe writes under `/usr`, reads `/tmp` for a marker the
-host wrote, and writes into `/tmp`. Its output, verbatim:
+Run: a QEMU guest booted with the host kernel (`/boot/vmlinuz-7.3.4-201.nobara.fc44.x86_64`) and the host's systemd
+as PID 1, in a private copy of the RST guest's initramfs (`testing/qemu/systemd-restart/` pattern, the RST worktree
+not edited). The probe unit is `DefaultDependencies=no`, `ProtectSystem=strict`, `PrivateTmp=yes`,
+`ProtectHome=yes`, and writes its results to `/dev/console` (`StandardOutput=tty`, `TTYPath=/dev/console`). A
+`+`-prefixed pre-step, which runs outside the unit's sandbox, writes `/tmp/wdt-outside-marker`. Output, verbatim
+from the clean run (ANSI codes removed):
 
 ```
-inside: whoami=sozo pid=1934760
-/run/user/1000/wdt-ns/probe.sh: line 5: /usr/wdt-probe-write: Read-only file system
-inside: write under /usr: refused
-inside: /tmp sees the host marker: NO (private)
-inside: wrote /tmp/wdt-unit-tmp-probe.txt (private /tmp)
+WDT-GUEST NS unit-pid=90 user=root
+WDT-GUEST NS write-under-usr=refused
+WDT-GUEST NS tmp-sees-outside-marker=NO
+WDT-GUEST NS tmp-write=ok
+WDT-GUEST NS write-under-var=refused
+WDT-GUEST SYSTEMD systemd 259 (259.10-1.fc44)
+WDT-GUEST PROPS DefaultDependencies=no
+WDT-GUEST PROPS PrivateTmp=yes
+WDT-GUEST PROPS ProtectHome=yes
+WDT-GUEST PROPS ProtectSystem=strict
+WDT-GUEST DONE
+WDT-GUEST OUTSIDE-MARKER=present
+WDT-GUEST POWEROFF
 ```
 
-Afterwards the host has neither `/usr/wdt-probe-write` nor `/tmp/wdt-unit-tmp-probe.txt`. So the namespace applies
-(`/usr` is read-only, `/tmp` is private) under `DefaultDependencies=no`. The analyzer's score does not show it, which
-is why `scripts/check-packaging.sh` scores that unit without the line. This is evidence for the user manager only;
-the system manager on a board is still to be checked with the board run below.
+What it shows: under `DefaultDependencies=no`, a write under `/usr` and under `/var` is refused (the sandbox's
+read-only root), `/tmp` is private to the unit (the outside marker is not seen inside, and a write inside succeeds),
+and the marker is present outside. So systemd applies the namespacing to this unit. The analyzer's score does not
+credit it (`scripts/check-packaging.sh` scores around that). Caveat: a `wdt-ns-finish.service` status line
+(`status=5/NOTINSTALLED`) appears after the poweroff line in the console; the poweroff happened, and that status
+belongs to the probe's own finish helper, not to the claim above.
 
 ## 1. Checks for the board
 

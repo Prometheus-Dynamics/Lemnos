@@ -82,12 +82,16 @@ pub fn pass_on(command: &mut std::process::Command, fds: Vec<(String, OwnedFd)>)
     let names: Vec<&str> = fds.iter().map(|(name, _)| name.as_str()).collect();
     command.env("LISTEN_FDS", fds.len().to_string());
     command.env("LISTEN_FDNAMES", names.join(":"));
+    // LISTEN_PID is not set here: it names the process that execs the service, which is the one that knows its
+    // own id. The launcher (`lemnos-unit-check exec`) sets it to its own pid just before it execs lemnosd, as
+    // systemd sets it for the main process. A value set in `pre_exec` would be lost: Rust replaces the child's
+    // environment with the one built for `command.env` after `pre_exec` has run.
     let sources: Vec<RawFd> = fds
         .iter()
         .map(|(_, fd)| std::os::fd::AsRawFd::as_raw_fd(fd))
         .collect();
-    // Runs in the child between fork and exec, on the one thread that forked. `fds` stays alive in the
-    // closure until the exec, so every source it duplicates is open.
+    // Runs in the child between fork and exec. `fds` stays alive in the closure until the exec, so every source it
+    // duplicates is open. dup2 leaves the new descriptor without close-on-exec, so it survives the exec.
     let hook = move || -> io::Result<()> {
         let _keep = &fds;
         for (index, source) in sources.iter().enumerate() {
@@ -97,23 +101,17 @@ pub fn pass_on(command: &mut std::process::Command, fds: Vec<(String, OwnedFd)>)
             if unsafe { libc::dup2(*source, target) } < 0 {
                 return Err(io::Error::last_os_error());
             }
-        }
-        // SAFETY: getpid takes no argument and cannot fail.
-        let pid = unsafe { libc::getpid() } as u32;
-        let value = format!("{pid}\0");
-        let name = c"LISTEN_PID";
-        let value = std::ffi::CStr::from_bytes_with_nul(value.as_bytes())
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        // SAFETY: setenv copies both NUL-terminated strings, which live until this call returns.
-        if unsafe { libc::setenv(name.as_ptr(), value.as_ptr(), 1) } < 0 {
-            return Err(io::Error::last_os_error());
+            // dup2 does not clear close-on-exec when source and target are the same descriptor, and a descriptor
+            // opened by std is close-on-exec: clear it on the target, so it survives the exec in every case.
+            // SAFETY: F_SETFD on the target only changes its flags; fcntl is async-signal-safe.
+            if unsafe { libc::fcntl(target, libc::F_SETFD, 0) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(())
     };
-    // SAFETY: `pre_exec` is unsafe because `hook` runs in the forked child before exec. `hook` duplicates
-    // descriptors and sets one variable. It formats and calls setenv, which allocate, so it is for a test
-    // harness's spawns only: a fork taken while another thread holds the allocator's lock could block the
-    // child. The harness spawns from a thread-light stand-in, and no production path uses this function.
+    // SAFETY: `pre_exec` is unsafe because `hook` runs in the forked child before exec. `hook` only duplicates
+    // descriptors, which is async-signal-safe, so the child cannot block on a lock another thread held at fork.
     unsafe {
         command.pre_exec(hook);
     }
@@ -149,5 +147,26 @@ mod tests {
         assert_eq!(count_for(7, Some("x"), Some("1")), None);
         assert_eq!(count_for(7, Some("7"), Some("100000")), Some(MAX_FDS));
         assert_eq!(count_for(7, Some("7"), Some("0")), Some(0));
+    }
+
+    #[test]
+    fn a_passed_descriptor_is_at_three_and_its_names_are_passed() {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let fd = OwnedFd::from(file);
+        let source = fd.as_raw_fd();
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("echo fds=$LISTEN_FDS names=$LISTEN_FDNAMES; test -e /proc/self/fd/3 && echo fd3-open")
+            .stdout(std::process::Stdio::piped());
+        pass_on(&mut command, vec![("lemnos-watchdog".to_owned(), fd)]);
+        let out = command.spawn().unwrap().wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            text.contains("fds=1 names=lemnos-watchdog"),
+            "{text} (source fd {source})"
+        );
+        assert!(text.contains("fd3-open"), "{text}");
     }
 }

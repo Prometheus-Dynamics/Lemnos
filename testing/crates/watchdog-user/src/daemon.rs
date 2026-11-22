@@ -309,6 +309,7 @@ pub fn run(mode: &str, last: f64) -> ! {
     let stderr = child.stderr.take();
     let pid = i32::try_from(child.id()).unwrap_or(0);
     let stop = mode == "daemon-stop" || mode == "pid1-hang-stop";
+    let stop_label = mode.to_owned();
     thread::spawn(move || {
         let Some(stderr) = stderr else { return };
         let mut binds_before = 0u32;
@@ -348,9 +349,9 @@ pub fn run(mode: &str, last: f64) -> ! {
                 if stop && piece == "root-phase feed" {
                     // `lemnos-unit-check exec` execs lemnosd: the child is lemnosd.
                     match guest::kill(pid, libc::SIGSTOP) {
-                        Ok(()) => say(
-                            "user: daemon (daemon-stop): lemnosd stopped after its root phase's feed",
-                        ),
+                        Ok(()) => say(&format!(
+                            "user: daemon ({stop_label}): lemnosd stopped after its root phase's feed"
+                        )),
                         Err(e) => say(&format!("user: daemon: stopping lemnosd failed: {e}")),
                     }
                 }

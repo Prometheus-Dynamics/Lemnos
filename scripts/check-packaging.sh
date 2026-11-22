@@ -106,7 +106,8 @@ if [[ "$systemd_major" -ge 254 ]]; then
   # early-boot and stops crediting its namespacing (ProtectSystem=, PrivateTmp=, ProtectHome=, RootDirectory=)
   # as protection, so the shipped unit would score above its limit for a reason that is not a weaker sandbox.
   # systemd still applies the namespacing to such a unit: this is the analyzer's view, not the runtime's (the
-  # namespace was shown to apply under DefaultDependencies=no, board-runs/WDT-ORDER.md, section 0). The limit
+  # namespace under DefaultDependencies=no is to be shown in a QEMU guest under systemd: board-runs/WDT-ORDER.md,
+  # section 0, which is not yet proven). The limit
   # stays at 2.5; the shipped unit must keep the three directives below, which are asserted by name.
   for shipped in ProtectSystem=strict PrivateTmp=yes ProtectHome=yes; do
     grep -qx -- "$shipped" "$work/lemnosd.service" || {

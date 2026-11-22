@@ -43,7 +43,11 @@ fn mode() -> &'static str {
         "daemon-root",
         "daemon-hang",
         "daemon-stop",
+        "daemon-loop-bind",
         "daemon-loop",
+        "pid1-hang-stop",
+        "pid1-hang",
+        "pid1-dead",
         "daemon",
     ] {
         if line
