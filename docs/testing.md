@@ -223,8 +223,10 @@ file, records what a simulation can give, and prints the report:
 testing/bench/bench.sh --out "$TMPDIR/bench"
 ```
 
-A real run goes to the board over ssh, stops the services that hold the hardware, runs the set and
-starts them again:
+A real run goes to the board over ssh and measures the daemon that is already up. It stops, restarts
+and masks nothing, and starts no second daemon. Its one board write is a bounded scratch file under
+`/data/lemnos-bench`, refused unless half the partition stays free, removed at the end, and checked
+by listing `/data` before and after:
 
 ```sh needs:the-reference-board
 testing/bench/bench.sh --real --board USER@HOST

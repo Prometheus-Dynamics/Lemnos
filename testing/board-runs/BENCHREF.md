@@ -166,3 +166,55 @@ recorded as they were (see the rerun 4 section).
 
 Restore: lemnosd and lemnos-orion active, `systemctl --failed` 0, helios-engine active, failsafe stopped, the remote run
 directory removed.
+
+## Plan for the next board run (BENCH-DAEMON-UP, code only: 2026-11-21)
+
+The 2026-11-17 runs above stopped the lemnos* units, lemnosd included, and wrote to /var/tmp. Helios ruled on
+2026-11-21 that the daemon holds the watchdog, the fan and the thermal checks, so a run that removes it measures a
+board that is not the product, and could reset or cook the board. This plan replaces that method. No board was
+touched to write it: it is code, rehearsed on the PC (see the rehearsal record at the end of this section).
+
+Method (testing/bench/bench.sh --real):
+- Measures the lemnosd that is already up (default unit lemnosd.service). It never stops, restarts or masks any
+  lemnos* unit, and never starts a second daemon. If the unit is not active, the run is refused before anything
+  is written.
+- Records the rev being measured by the running binary: its pid and the sha256 of /proc/PID/exe, and its size
+  (size.lemnosd). lemnosd has no version text on its socket (lemnos-ctl does not print the Welcome frame, which
+  carries the ABI version and the core hash), so the binary is the identity. The build's git rev is not the
+  daemon's rev: a mismatch with the installed binary is visible only through this hash.
+- Writes exactly one scratch file on the board's data partition: /data/lemnos-bench/run.tar (--scratch-dir and
+  --data-mount change it). It holds lemnos-ctl, lemnos-bench-stamp, board-side.sh and data-check.sh, and is
+  bounded at 64 MiB. Before the write the run states its size and the partition's free space, and refuses by name
+  unless at least half of the partition stays free after the write. A scratch directory that already exists is
+  refused too.
+- The helper files are unpacked and run from /run/lemnos-bench, a tmpfs, and removed at the end. Nothing else on
+  the board is written except the usb-a-power switch's off and on (always undone by the step that makes it).
+- Lists /data before the run (names, types, sizes, mtimes, sha256 of files up to 1 MiB) and after it, removes the
+  scratch file, shows it is gone, and diffs the two listings. Any difference is a failure, and the diff is kept in
+  data-diff.txt beside the run.
+
+Rows: this run is expected to give imu.delivered, imu.misses, imu.largest_gap_ms, imu.repeats, cpu.idle_pct,
+cpu.50hz_pct, cpu.200hz_pct, threads.lemnosd, mem.pss_kb, power.readings, usb.cycle, lemnosd.devices, lemnosd.rev,
+size.lemnosd and data.isolation. The IMU, power and USB rows need the running daemon to have the devices the
+bench names (imu, power0, usb-a-power); if one is missing, its row says not measured with the reason, and is not
+filled in.
+
+Moved to a sim measurement, not done on the board (they need a daemon of their own):
+- lemnosd.check: the file check of the bench board file. The board's daemon is not started again to run it.
+- lemnosd.start: the time from start to socket. That needs a daemon start, which the board run does not do.
+Also still not in the board run (as before): alloc.steady_state (counted in a test process on the build host),
+light.frame_rate, fan.steps and the camera rows (each has its own board run record).
+
+Preconditions for the run (the coordinator schedules it; the run is not started by this item):
+- Raze #2 is free, and the run holds /run/lock/board-gpu.lock.
+- lemnosd.service is active on the board, and the stated rev is the one to measure.
+- Build on NVMe (CARGO_TARGET_DIR on NVMe, --out on NVMe); bench.sh checks both.
+- Abort: the exit trap removes the scratch file and the helper directory. If a run dies without the trap (the
+  board or the link went down), remove /data/lemnos-bench/run.tar and /run/lemnos-bench by hand, then check the
+  listing in the run's data-before.tsv against the board.
+
+Rehearsal on the PC (testing/bench/rehearse.sh, 2026-11-21): the real bench.sh against a 96 MiB tmpfs as /data (in
+a private mount namespace), the real lemnosd --sim as the daemon, a systemctl stand-in that answers for that
+daemon's pid only, and the board's commands run locally through BENCH_SSH. Each refusal is run once and must
+refuse; the failing data change must fail. Record: the rehearsal output is kept under the run's OUTROOT, and the
+result is reported in the pull request for BENCH-DAEMON-UP.

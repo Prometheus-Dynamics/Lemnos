@@ -1,29 +1,47 @@
 #!/usr/bin/env bash
 # The steps bench.sh runs against one lemnosd, in one of two modes:
-#   sim    on the build host, against lemnosd --sim (dry run): the board file check, the device
-#          list, the thread count and the memory. No timing, no hardware, no systemctl.
-#   board  on the board, under the board lock taken by bench.sh --real: the reference set's timings,
-#          the power readings and the USB port power cycle, against the real buses.
-# Prints TSV rows (key, status, value, note) on stdout. lemnosd is stopped by its PID on exit.
+#   sim    on the build host, against a lemnosd --sim that this script starts and stops (dry run):
+#          the board file check, the start, the device list, the thread count and the memory. No
+#          timing, no hardware, no systemctl.
+#   board  on the board, against the lemnosd that is already running. bench.sh --real never stops,
+#          restarts or masks it, and this script never starts a daemon or signals one. It reads that
+#          daemon's socket and PID, and sends it only the usb-a-power switch's off and on (always
+#          undone). The timings, the IMU stamps, the power readings and the USB port power cycle.
+# Prints TSV rows (key, status, value, note) on stdout.
 #
-#   board-side.sh sim|board WORKDIR
+#   board-side.sh sim WORKDIR
+#   board-side.sh board WORKDIR SOCKET PID
 #
-# WORKDIR holds lemnosd, lemnos-ctl, lemnos-bench-stamp, board.toml and board-side.sh.
+# WORKDIR holds lemnos-ctl, lemnos-bench-stamp and, for sim, lemnosd and board.toml.
+# On the board, SOCKET is the running daemon's socket and PID is its main process.
+# The rows lemnosd.check and lemnosd.start are not measured on the board: they need a daemon of
+# their own (the file check and a start), so they are measured in sim, which is their only home.
 set -u
 
 mode=${1:?sim or board}
 work=${2:?the work directory}
-srv=$work/lemnosd
 ctl=$work/lemnos-ctl
-sock=$work/lemnosd.sock
+srv=$work/lemnosd
 sim=()
 where="board"
+usb_off=0
+own=
+dpid=
+
 if [ "$mode" = sim ]; then
   sim=(--sim)
   where="sim: build host, not the board"
+  sock=$work/lemnosd.sock
+elif [ "$mode" = board ]; then
+  sock=${3:?the running daemon socket}
+  dpid=${4:?the running daemon PID}
+  case $dpid in
+    '' | *[!0-9]*) echo "board-side: PID must be a number" >&2; exit 2 ;;
+  esac
+else
+  echo "board-side: sim or board, not $mode" >&2
+  exit 2
 fi
-usb_off=0
-pid=
 
 row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"; }
 
@@ -49,44 +67,55 @@ cleanup() {
     "$ctl" --socket "$sock" on usb-a-power >/dev/null 2>&1 ||
       echo "usb-a-power may still be off: switch it on" >&2
   fi
-  if [ -n "$pid" ]; then
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+  # Only the sim daemon is ours to stop. The board's daemon is never signalled here.
+  if [ -n "$own" ]; then
+    kill "$own" 2>/dev/null
+    wait "$own" 2>/dev/null
   fi
 }
 trap cleanup EXIT
 
-if ! "$srv" "${sim[@]}" --check --board "$work/board.toml" >"$work/check.txt" 2>&1; then
-  row lemnosd.check not_measured "" "board.toml does not parse: $(tr '\n' ' ' <"$work/check.txt")"
-  exit 1
-fi
-row lemnosd.check measured ok "board.toml parses; lemnosd --check, $where"
-
-"$srv" "${sim[@]}" --board "$work/board.toml" --socket "$sock" >"$work/lemnosd.log" 2>&1 &
-pid=$!
-up=0
-for _ in $(seq 1 100); do
-  if [ -S "$sock" ]; then
-    up=1
-    break
+if [ "$mode" = sim ]; then
+  if ! "$srv" --sim --check --board "$work/board.toml" >"$work/check.txt" 2>&1; then
+    row lemnosd.check not_measured "" "board.toml does not parse: $(tr '\n' ' ' <"$work/check.txt")"
+    exit 1
   fi
-  kill -0 "$pid" 2>/dev/null || break
-  sleep 0.1
-done
-if [ "$up" != 1 ]; then
-  row lemnosd.start not_measured "" "lemnosd did not open its socket: $(tail -n 3 "$work/lemnosd.log" | tr '\n' ' ')"
-  exit 1
+  row lemnosd.check measured ok "board.toml parses; lemnosd --check, $where"
+
+  "$srv" "${sim[@]}" --board "$work/board.toml" --socket "$sock" >"$work/lemnosd.log" 2>&1 &
+  own=$!
+  up=0
+  for _ in $(seq 1 100); do
+    if [ -S "$sock" ]; then
+      up=1
+      break
+    fi
+    kill -0 "$own" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [ "$up" != 1 ]; then
+    row lemnosd.start not_measured "" "lemnosd did not open its socket: $(tail -n 3 "$work/lemnosd.log" | tr '\n' ' ')"
+    exit 1
+  fi
+  row lemnosd.start measured up "lemnosd on the bench board file, $where"
+  dpid=$own
+else
+  row lemnosd.check not_measured "" "moved to sim: the file check needs no daemon on the board, and the board's daemon is not started again to run it"
+  row lemnosd.start not_measured "" "moved to sim: the start time needs a daemon start, which the board run does not do (the daemon stays up)"
+  if [ ! -d "/proc/$dpid" ]; then
+    echo "board-side: no process $dpid: the daemon is gone" >&2
+    exit 1
+  fi
 fi
-row lemnosd.start measured up "lemnosd on the bench board file, $where"
 
 "$ctl" --socket "$sock" list >"$work/list.txt" 2>&1
 put lemnosd.devices "$(paste -sd ';' "$work/list.txt")" "lemnos-ctl list, $where"
 
-ticks() { awk '{ print $14 + $15 }' "/proc/$pid/stat" 2>/dev/null; }
+ticks() { awk '{ print $14 + $15 }' "/proc/$dpid/stat" 2>/dev/null; }
 
 # window SECONDS: lemnosd's CPU share over that many seconds, in percent, from its utime and stime.
 window() {
-  local t0 t1 s0 s1
+  local t0 t1 s0 s1 ms
   t0=$(ticks)
   s0=$(now_ms)
   sleep "$1"
@@ -124,11 +153,12 @@ settle() {
 usb_cycle() {
   local before drop back
   before=$(usb_count)
+  usb_off=1
   if ! "$ctl" --socket "$sock" off usb-a-power >"$work/usb.txt" 2>&1; then
+    usb_off=0
     row usb.cycle not_measured "" "lemnos-ctl off usb-a-power failed: $(tr '\n' ' ' <"$work/usb.txt")"
     return
   fi
-  usb_off=1
   drop=$(settle lt "$before") || drop=
   if "$ctl" --socket "$sock" on usb-a-power >"$work/usb.txt" 2>&1; then
     usb_off=0
@@ -136,7 +166,7 @@ usb_cycle() {
   back=$(settle ge "$before") || back=
   if [ -n "$drop" ] && [ -n "$back" ] && [ "$usb_off" = 0 ]; then
     row usb.cycle measured "devices $before, down after $drop ms, back after $back ms" \
-      "board, usb-a-power (the camera's port); devices counted in sysfs"
+      "$where, usb-a-power (the camera's port); devices counted in sysfs"
   else
     row usb.cycle not_measured "" \
       "cycle incomplete: devices $before, down ${drop:-no}, back ${back:-no}, switch off ${usb_off}"
@@ -172,9 +202,9 @@ if [ "$mode" = board ]; then
   usb_cycle
 fi
 
-put threads.lemnosd "$(awk '/^Threads:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)" \
+put threads.lemnosd "$(awk '/^Threads:/ { print $2 }' "/proc/$dpid/status" 2>/dev/null)" \
   "$where, lemnosd after the run"
-put mem.pss_kb "$(awk '/^Pss:/ { print $2 }' "/proc/$pid/smaps_rollup" 2>/dev/null)" \
+put mem.pss_kb "$(awk '/^Pss:/ { print $2 }' "/proc/$dpid/smaps_rollup" 2>/dev/null)" \
   "$where, lemnosd PSS in kB after the run"
 
 exit 0
