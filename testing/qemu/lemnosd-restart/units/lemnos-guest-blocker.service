@@ -1,15 +1,20 @@
-# A start that is still running for 600 s after boot (testing/qemu/lemnosd-restart/guest/cases.sh, case b). A reboot
-# queued while a drop-in orders reboot.target after it waits for this start, so the system does not start stopping and
-# the helper's bound expires. It is not ordered before anything else, so it does not hold boot.
+# A unit whose stop is slow (testing/qemu/lemnosd-restart/guest/cases.sh, case b). It is ordered after lemnosd.service, so
+# the shutdown stops it before lemnosd: its ExecStop takes 40 s (longer than the restart helper's 20 s bound), and
+# TimeoutStopSec is 45 s, above the bound. While it stops, lemnosd is up and answers state queries. It does not hold boot.
+# Default dependencies stay on: they give Conflicts=shutdown.target, so the shutdown stops this unit (with DefaultDependencies=no
+# the shutdown left it running, and its stop never ran: testing/board-runs/RESTART-UNIT.md).
 [Unit]
-Description=Restart guest: a start that is still running, so a reboot queued after it waits
-DefaultDependencies=no
+Description=Restart guest: a unit whose stop is slow, stopped before lemnosd
+After=lemnosd.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sleep 600
-TimeoutStartSec=infinity
+ExecStart=/bin/true
+ExecStop=/usr/lib/lemnos-guest/blocker-stop.sh
+TimeoutStopSec=45
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target

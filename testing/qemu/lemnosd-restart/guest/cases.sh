@@ -143,27 +143,19 @@ systemctl daemon-reload
 
 fi
 if case_on b; then
-# (b) accepted, then no stop request within the bound. lemnos-guest-blocker.service is a start still running since boot
-# (600 s); a drop-in orders reboot.target after it, so the reboot job queues behind that start and the system does not start
-# stopping. The helper's bound expires, the daemon disarms the trial and says why. The queued job is cancelled after
-# the answer, so the reboot does not follow the blocker's end.
-mkdir -p /run/systemd/system/reboot.target.d
-printf '[Unit]\nAfter=lemnos-guest-blocker.service\n' > /run/systemd/system/reboot.target.d/blocker.conf
-systemctl daemon-reload
-say "b0 the blocker is $(systemctl is-active lemnos-guest-blocker.service); the helper's check before the trial: $(as $LEMNOS $LEMNOS $PROBE check 2>&1) reboot.target $(systemctl show -P LoadState reboot.target) $(systemctl show -P ActiveState reboot.target)"
+# (b) accepted, then the system stops, and a unit stops slowly. lemnos-guest-blocker.service is ordered after lemnosd, so
+# systemd stops it before lemnosd, and its stop takes 40 s (testing/qemu/lemnosd-restart/guest/blocker-stop.sh), past the
+# helper's 20 s bound. The helper's bound is for the system not starting to stop: if the stop starts within the bound, the
+# helper answers stopping. The blocker's stop prints lemnosd's state every second while lemnosd is still up.
+say "b0 the blocker is $(systemctl is-active lemnos-guest-blocker.service); the helper's check before the trial: $(as $LEMNOS $LEMNOS $PROBE check 2>&1)"
 out=$("$CHECK" trial "$SOCK" "$SLOT" force 2>&1)
-say "b1 trial with the reboot queued behind the blocker: $out"
+say "b1 trial, the reboot with a slow blocker stop: $out"
 if wait_for_reason "did not start stopping within" 60; then
 	say "b2 $(list_line | grep -o '"state":"restart-failed","error":"[^"]*"')"
 	say "PASS b accepted, no stop within the bound: trial disarmed, state restart-failed with the reason"
 else
 	say "FAIL b the state did not become restart-failed within 60 s: $(state | tr '\n' ' ')"
 fi
-systemctl cancel
-rm -f /run/systemd/system/reboot.target.d/blocker.conf
-rmdir /run/systemd/system/reboot.target.d 2>/dev/null
-systemctl daemon-reload
-
 fi
 if case_on a; then
 # (a) accepted, then SIGTERM: the reboot is happening, so the trial stays armed. The slow unit stops for 5 s on the way
