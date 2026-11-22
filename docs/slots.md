@@ -2783,6 +2783,51 @@ refusal of the board's own facts (no source stated, the source not listed, no di
 under its controller) restarts the board into rescue with nothing demoted and no slot record
 changed. The reason goes to the kernel log, since the boot partition is the disk the refusal is about.
 
+### Waiting for the boot disk
+
+A storage controller's driver adds its disk to sysfs some time after `/init` starts (an eMMC is
+initialised in the background, a USB disk after its settle time), so slot-init looks for the disk
+again every 100 ms for up to `BOOT_DISK_WAIT`, 10 s, feeding the watchdog as it waits. The bound is
+ten times the slowest step a healthy disk takes, the same margin as the data partition's 10 s: an
+eMMC answers CMD1 within 1 s (JEDEC), an SD card's ACMD41 loop within 1 s, the kernel retries a slow
+card at lower clocks, and usb-storage waits 1 s (`delay_use`) before it scans. The kernel lists a
+whole disk a moment before it has read its partition table, so the same wait also covers partition 1
+of that disk; a disk with no partition 1 at the bound goes on as it is (a blank disk). Only the
+missing disk is waited for: a source the table does not list, or two disks under the controller, is
+refused at once, since no wait changes it.
+
+The first miss is logged (`waiting up to 10 s for the boot disk: ...`), and so is the end of the
+wait (`the boot disk mmcblk0 showed up after 2900 ms`). At the bound the refusal names the
+controller the table expected and every whole disk the kernel listed, each with the controller it
+sits under. With no block device at all after the wait, the reason says both readings: the kernel
+lacks the storage driver, or the disk is slower than `BOOT_DISK_WAIT`.
+
+Checked in QEMU (an arm64 `virt` guest whose device tree carries the firmware's `boot-mode = <1>`,
+with the boot disk a USB stick under `/pcie@10000000` held back by `usb-storage.delay_use`): with a
+3 s delay the single look refused the board and went to the rescue, and the wait finds the disk
+after about 3 s and goes on to the data partition; with a 12 s delay the wait ends at 10 s with the
+refusal above. **Untested on board.**
+
+### A refusal without a console
+
+Every slot-init line goes to the kernel log through `/dev/kmsg`, prefixed `slot-init: `; the lines
+that end the boot (the rescue's `no slot can start: ...`, a foreign disk's refusal) are written at
+`KERN_ERR`, the rest at the default level. A refusal before the data partition is mounted can't be
+kept on the disk (the disk is what is missing), so on a board with no serial console the kernel log
+is the only record. Three ways to read it, cheapest first:
+
+- **pstore (ramoops).** A kernel with `CONFIG_PSTORE`, `CONFIG_PSTORE_RAM` and
+  `CONFIG_PSTORE_CONSOLE`, and a `ramoops` reserved-memory node in the device tree (or `ramoops.mem_address`
+  and `ramoops.mem_size` on the command line), keeps the console in RAM across the rescue's restart.
+  The next boot that reaches a root (a RAM boot over USB, or the board once it is fixed) reads it from
+  `/sys/fs/pstore/console-ramoops-0`. Nothing in Lemnos is needed for this: slot-init's lines are
+  already in the kernel log. It works only where the RAM keeps its contents across a warm restart;
+  that is the firmware's and the board's to say, and is untested on board.
+- **The kernel log of a RAM boot.** A host-side RAM boot of the same kernel reads nothing of the
+  failed boot unless pstore held it; it does show whether the disk appears and how late.
+- **The data partition.** Once the boot disk is found and the data partition is writable, a refusal is
+  kept in `board/slots/last-failure.log` ("When the slot can't come up").
+
 The boot's command line carries the table as `<boot_args>.src.<source>=<kernel path>` words, one per
 entry, so the slot's initramfs finds the same disk. The install refuses a bundle whose command line
 does not carry each of them, by name.

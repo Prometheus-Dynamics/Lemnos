@@ -112,17 +112,28 @@ pub fn mount_options(opts: &str) -> (MountFlags, String) {
     (flags, data.join(","))
 }
 
-impl Ops for System {
-    fn log(&self, line: &str) {
+impl System {
+    /// One write of `text` to the kernel log (a feed first), or to stderr when /dev/kmsg can't be opened.
+    fn kmsg(&self, text: &str) {
         self.feed();
-        let text = format!("{line}\n");
         let written = fs::OpenOptions::new()
             .append(true)
             .open(self.dev.join("kmsg"))
             .and_then(|mut kmsg| kmsg.write_all(text.as_bytes()));
         if written.is_err() {
-            let _ = io::stderr().write_all(text.as_bytes());
+            let _ = io::stderr().write_all(text.trim_start_matches("<3>").as_bytes());
         }
+    }
+}
+
+impl Ops for System {
+    fn log(&self, line: &str) {
+        self.kmsg(&format!("{line}\n"));
+    }
+
+    fn alert(&self, line: &str) {
+        // `<3>` is the kernel's error level (KERN_ERR) for a /dev/kmsg write.
+        self.kmsg(&format!("<3>{line}\n"));
     }
 
     fn mount(&self, fstype: &str, opts: &str, source: &Path, target: &Path) -> Result<(), String> {

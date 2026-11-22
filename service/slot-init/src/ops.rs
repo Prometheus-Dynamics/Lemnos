@@ -13,6 +13,12 @@ use lemnos_slot_store::ubi::Ubi;
 pub trait Ops {
     /// One line for the kernel log, where a console and the saved log show it.
     fn log(&self, line: &str);
+    /// A line that says why the boot stops (the rescue's reason): the kernel log at error level, so
+    /// a console kept at a quiet level and a ramoops console (`docs/slots.md`, "A refusal without a
+    /// console") still carry it. The same line as [`Ops::log`] otherwise.
+    fn alert(&self, line: &str) {
+        self.log(line);
+    }
     /// `mount -t <fstype> -o <opts> <source> <target>`. `ro` and `noatime` in `opts` are
     /// mount flags; the rest goes to the filesystem.
     fn mount(&self, fstype: &str, opts: &str, source: &Path, target: &Path) -> Result<(), String>;

@@ -90,6 +90,17 @@ pub const LOADER_FILES_REASON: &str = "the boot loader could not load the defaul
 /// waits until it is flashed or power-cycled: RPIBOOT has no timeout.
 pub const FLASH_AFTER: u32 = 8;
 
+/// How long `/init` waits for the boot disk to show up under the controller the boot chain names.
+/// The controller's driver registers the disk some time after `/init` starts, and nothing tells
+/// `/init` when: an eMMC or SD card is initialised first (JEDEC lets an eMMC take up to 1 s to
+/// report ready after its first CMD1, an SD card up to 1 s for ACMD41, and the kernel retries a
+/// failed initialisation at lower clocks); a USB disk is enumerated and then held for
+/// usb-storage's `delay_use` (1 s by default); a controller whose clock or regulator comes from the
+/// firmware can be probed late. 10 s is ten times the slowest of those spec figures and the same as
+/// the data partition's wait; past it the board's disk is not coming, and the rescue names what was
+/// seen. The wait feeds the watchdog (every wait does, see `sys::System::sleep`).
+pub const BOOT_DISK_WAIT: Duration = Duration::from_secs(10);
+
 /// Why the data partition was not found.
 enum DataRefusal {
     /// The disk has partitions and none is labelled `lemnos-data`: a foreign disk.
@@ -106,6 +117,8 @@ pub struct Env {
     pub dev: PathBuf,
     /// How long to wait for the data partition to show up.
     pub wait: Duration,
+    /// How long to wait for the boot disk to show up under its controller (see [`BOOT_DISK_WAIT`]).
+    pub disk_wait: Duration,
     /// How long the reason stays on the console before a restart when no slot can start.
     pub rescue_wait: Duration,
 }
@@ -118,6 +131,7 @@ impl Env {
             sys: PathBuf::from("/sys"),
             dev: PathBuf::from("/dev"),
             wait: Duration::from_secs(10),
+            disk_wait: BOOT_DISK_WAIT,
             rescue_wait: Duration::from_secs(30),
         }
     }
@@ -238,6 +252,11 @@ impl Boot<'_> {
         self.ops.log(&format!("slot-init: {message}"));
     }
 
+    /// A line that says why the boot stops, at the kernel log's error level (see [`Ops::alert`]).
+    fn alert(&self, message: &str) {
+        self.ops.alert(&format!("slot-init: {message}"));
+    }
+
     /// The boot partition and its filesystem: partition 1 of the boot disk, or on raw NAND the
     /// UBIFS volume `boot`.
     fn boot_dev(&self) -> Option<(&'static str, PathBuf)> {
@@ -255,11 +274,67 @@ impl Boot<'_> {
     /// through the board's `boot_sources` table on the command line. Every refusal here is a fact
     /// of the board (its chain states no source, the table does not list it, no disk or several
     /// sit under its controller), so the boot stops without any slot record changing.
-    fn boot_disk(&self, args: &Args) -> Result<String, String> {
-        let source = disk::boot_source(&self.env.at("proc/device-tree/chosen"))?;
+    ///
+    /// Only "no disk under the controller yet" is waited on, for up to `disk_wait` (see
+    /// [`BOOT_DISK_WAIT`]): a board's controller registers its disk some time after `/init` starts. A
+    /// chain that states no source, a source the table does not list and two disks are refused at once.
+    fn boot_disk(&self, args: &Args) -> Result<String, (String, bool)> {
+        let source = disk::boot_source(&self.env.at("proc/device-tree/chosen"))
+            .map_err(|why| (why, false))?;
         let words: Vec<&str> = args.sources.iter().map(String::as_str).collect();
-        let table = Table::parse(&words)?;
-        disk::boot_disk(&self.env.sys, &table, &source)
+        let table = Table::parse(&words).map_err(|why| (why, false))?;
+        let step = Duration::from_millis(100);
+        let tries = (self.env.disk_wait.as_millis() / step.as_millis()).max(1);
+        let mut waited = 0u128;
+        let mut seen: Option<String> = None;
+        loop {
+            match disk::find_boot_disk(&self.env.sys, &table, &source) {
+                // The kernel lists a disk before it has read the disk's partition table: the
+                // partitions come a moment later, so the boot partition is waited for too, within
+                // the same bound. A disk that still has no partition 1 at the bound goes on as it
+                // is (a blank disk; the steps after it name what it lacks).
+                disk::BootDisk::One(found)
+                    if disk::partition_of(&self.env.sys, &found, 1).is_none() && waited < tries =>
+                {
+                    if seen.as_deref() != Some(found.as_str()) {
+                        self.log(&format!(
+                            "the boot disk {found} is listed after {} ms; waiting for its partitions",
+                            waited * step.as_millis()
+                        ));
+                        seen = Some(found);
+                    }
+                }
+                disk::BootDisk::One(found) => {
+                    if waited > 0 {
+                        self.log(&format!(
+                            "the boot disk {found} showed up after {} ms",
+                            waited * step.as_millis()
+                        ));
+                    }
+                    return Ok(found);
+                }
+                disk::BootDisk::Refused(why) => return Err((why, false)),
+                disk::BootDisk::NoneYet(why) if waited >= tries => {
+                    return Err((
+                        format!(
+                            "{why} (waited {} s for it; the bound is BOOT_DISK_WAIT)",
+                            self.env.disk_wait.as_secs()
+                        ),
+                        true,
+                    ));
+                }
+                disk::BootDisk::NoneYet(why) => {
+                    if waited == 0 {
+                        self.log(&format!(
+                            "waiting up to {} s for the boot disk: {why}",
+                            self.env.disk_wait.as_secs()
+                        ));
+                    }
+                }
+            }
+            self.ops.sleep(step);
+            waited += 1;
+        }
     }
 
     /// Mounts the boot partition at `boot`, read-write or not.
@@ -592,7 +667,7 @@ impl Boot<'_> {
     /// [`Boot::flash_mode`]). Any other refusal restarts into the board's own boot order, after the
     /// rescue wait, as [`Boot::refuse_foreign`] does.
     fn rescue(&self, why: &str) -> String {
-        self.log(&format!("no slot can start: {why}"));
+        self.alert(&format!("no slot can start: {why}"));
         self.save_log();
         if self.lemnos_disk() {
             if self.flash_mode(why) {
@@ -618,7 +693,7 @@ impl Boot<'_> {
         let why = format!(
             "no partition labelled {DATA_LABEL} on {disk}: this is not a Lemnos disk; nothing written; restarting to the board's own boot order"
         );
-        self.log(&why);
+        self.alert(&why);
         self.ops.sleep(self.env.rescue_wait);
         self.restart(None);
         why
@@ -1445,10 +1520,18 @@ impl Boot<'_> {
             }
             let disk = match disk {
                 Ok(disk) => disk,
-                Err(why) => {
+                Err((why, waited)) => {
                     self.log(&why);
-                    // No block device at all is the kernel's gap, named as one.
+                    // No block device at all is the kernel's gap, named as one; after the wait it
+                    // may as well be a disk slower than the bound, and the line says both.
                     if !self.storage_present() {
+                        if waited {
+                            return self.rescue(&format!(
+                                "no block device came up in {} s: the kernel lacks CONFIG_MMC_BLOCK \
+                                 (or CONFIG_BLK_DEV_NVME), or the disk is slower than BOOT_DISK_WAIT",
+                                self.env.disk_wait.as_secs()
+                            ));
+                        }
                         return self.rescue(&kernel::storage_message());
                     }
                     return self.rescue(&format!("the boot disk: {why}"));

@@ -138,7 +138,16 @@ struct Fake {
     dm: Option<Vec<String>>,
     /// The next U-Boot environment write keeps this many bytes and fails, as a power cut does.
     cut: Cell<Option<usize>>,
+    /// A boot disk that registers late, in stages: after a stage's count of waits, its links are
+    /// made (target, link), as a controller's driver adds its disk to sysfs some time after
+    /// `/init` starts, and the kernel its partitions once it has read the partition table.
+    late_disk: RefCell<Vec<(u32, Links)>>,
+    /// Every wait asked for, however short.
+    naps: Cell<u32>,
 }
+
+/// Symlinks to make, as (target, link).
+type Links = Vec<(PathBuf, PathBuf)>;
 
 /// A U-Boot environment device on a file: the first write is cut after the bytes `cut` allows.
 struct CutEnv {
@@ -274,6 +283,18 @@ impl Ops for Fake {
     }
 
     fn sleep(&self, time: Duration) {
+        self.naps.set(self.naps.get() + 1);
+        let mut late = self.late_disk.borrow_mut();
+        for (left, links) in late.iter_mut() {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                for (target, link) in links.drain(..) {
+                    std::os::unix::fs::symlink(target, link).unwrap();
+                }
+            }
+        }
+        late.retain(|(left, _)| *left > 0);
+        drop(late);
         if time >= Duration::from_secs(1) {
             let _ = self.call(format!("sleep {}", time.as_secs()));
         }
@@ -526,6 +547,7 @@ impl Board {
             sys: root.join("sys"),
             dev: root.join("dev"),
             wait: Duration::from_millis(100),
+            disk_wait: Duration::from_secs(1),
             rescue_wait: Duration::from_secs(30),
         };
         let board = Self {
@@ -674,6 +696,47 @@ impl Board {
 
     /// As [`Board::boot`], with the U-Boot environment's first write cut after `cut` bytes.
     fn boot_cut(&self, refuse: &[&'static str], cut: Option<usize>) -> (Fake, String) {
+        self.boot_late(refuse, cut, None)
+    }
+
+    /// As [`Board::boot_cut`], with the boot disk (`mmcblk0` and its partitions) registered only
+    /// after `late` waits, or never when `late` is `Some(0)`.
+    fn boot_late(
+        &self,
+        refuse: &[&'static str],
+        cut: Option<usize>,
+        late: Option<u32>,
+    ) -> (Fake, String) {
+        self.boot_staged(refuse, cut, late.map(|after| (after, after)))
+    }
+
+    /// As [`Board::boot_late`], with the whole disk listed after `disk` waits and its partitions
+    /// after `parts` waits (the kernel's order: the disk first, its partitions once it has read
+    /// the partition table). A count of 0 is never.
+    fn boot_staged(
+        &self,
+        refuse: &[&'static str],
+        cut: Option<usize>,
+        late: Option<(u32, u32)>,
+    ) -> (Fake, String) {
+        let late_disk = late.map_or_else(Vec::new, |(disk, parts)| {
+            let block = self.env.root.join("sys/class/block");
+            let link = |rel: &str| {
+                let name = rel.rsplit('/').next().unwrap();
+                let link = block.join(name);
+                let target = PathBuf::from(format!("../../devices/sd-host/{rel}"));
+                fs::remove_file(&link).unwrap();
+                (target, link)
+            };
+            let after = |n: u32| if n == 0 { u32::MAX } else { n };
+            let disk_links = vec![link("mmcblk0")];
+            let part_links = vec![link("mmcblk0/mmcblk0p1"), link("mmcblk0/mmcblk0p2")];
+            if disk == parts {
+                vec![(after(disk), [disk_links, part_links].concat())]
+            } else {
+                vec![(after(disk), disk_links), (after(parts), part_links)]
+            }
+        });
         let fake = Fake {
             root: self.env.root.clone(),
             calls: RefCell::new(Vec::new()),
@@ -685,6 +748,8 @@ impl Board {
             }),
             dm: self.dm_targets.clone(),
             cut: Cell::new(cut),
+            late_disk: RefCell::new(late_disk),
+            naps: Cell::new(0),
         };
         let why = boot(&fake, &self.env);
         (fake, why)
@@ -956,6 +1021,100 @@ fn assert_no_flash_mode_past_the_limit(board: &Board, expect: &str) {
             .borrow()
             .iter()
             .any(|l| l.contains("not a Lemnos disk: no flashing mode is asked")),
+        "{:?}",
+        fake.logs.borrow()
+    );
+}
+
+/// A board's controller registers its disk some time after `/init` starts (an eMMC's
+/// initialisation): the boot waits for it, then boots as it would have (BOOT-DISK-WAIT). Fail
+/// before: one look found no disk, and the board went to the rescue and restarted, every boot.
+#[test]
+fn a_boot_disk_that_shows_up_late_is_waited_for_and_the_boot_goes_on() {
+    let board = Board::new();
+    let (fake, why) = board.boot_late(&[], None, Some(5));
+    assert!(fake.called("switch_root"), "{why}: {:?}", fake.calls());
+    assert!(!why.contains("no slot can start"), "{why}");
+    let logs = fake.logs.borrow();
+    assert!(
+        logs.iter().any(|l| l.starts_with(
+            "slot-init: waiting up to 1 s for the boot disk: no whole disk sits under /soc/mmc@7e202000"
+        )),
+        "{logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|l| l == "slot-init: the boot disk mmcblk0 showed up after 500 ms"),
+        "{logs:?}"
+    );
+}
+
+/// A disk that never shows up is refused once the wait is over, naming the controller the table
+/// expected and every disk seen; the wait is the bound's, and the rescue follows as before.
+#[test]
+fn a_boot_disk_that_never_shows_up_is_refused_after_the_wait_with_what_was_seen() {
+    let board = Board::new();
+    let (fake, why) = board.boot_late(&[], None, Some(0));
+    // No block device at all after the wait is the kernel's gap, named as one; the line before it
+    // names the controller the table expected and what was seen.
+    assert!(
+        why.starts_with(
+            "no slot can start: no block device came up in 1 s: the kernel lacks CONFIG_MMC_BLOCK \
+             (or CONFIG_BLK_DEV_NVME), or the disk is slower than BOOT_DISK_WAIT"
+        ),
+        "{why}"
+    );
+    assert!(
+        fake.logs.borrow().iter().any(|l| l == "slot-init: no whole disk sits under /soc/mmc@7e202000 (boot source /soc/mmc@7e202000); disks seen: none (waited 1 s for it; the bound is BOOT_DISK_WAIT)"),
+        "{:?}",
+        fake.logs.borrow()
+    );
+    // Ten waits of 100 ms (the test's 1 s bound), then the rescue's 30 s and the restart.
+    assert!(fake.naps.get() >= 10, "{}", fake.naps.get());
+    assert!(fake.called("sleep 30"), "{:?}", fake.calls());
+    assert_eq!(fake.last(), "restart");
+}
+
+/// The kernel lists a disk before it has read its partition table: a boot disk that is listed
+/// before its partitions is waited for until partition 1 is there, so the boot partition's
+/// records are read, not missed.
+#[test]
+fn a_boot_disk_listed_before_its_partitions_is_waited_for_until_they_are_there() {
+    let board = Board::new();
+    let (fake, why) = board.boot_staged(&[], None, Some((2, 6)));
+    assert!(fake.called("switch_root"), "{why}: {:?}", fake.calls());
+    let logs = fake.logs.borrow();
+    assert!(
+        logs.iter().any(|l| l
+            == "slot-init: the boot disk mmcblk0 is listed after 200 ms; waiting for its partitions"),
+        "{logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|l| l == "slot-init: the boot disk mmcblk0 showed up after 600 ms"),
+        "{logs:?}"
+    );
+    assert!(
+        !logs
+            .iter()
+            .any(|l| l.contains("trial records can't be read")),
+        "{logs:?}"
+    );
+}
+
+/// A source the table does not list is refused at once: no wait can change it.
+#[test]
+fn a_boot_source_the_table_does_not_list_is_refused_without_waiting() {
+    let board = Board::new();
+    board.write("proc/device-tree/chosen/lemnos,boot-source", b"/usb@1\0");
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains("boot_sources does not list"), "{why}");
+    assert!(
+        !fake
+            .logs
+            .borrow()
+            .iter()
+            .any(|l| l.starts_with("waiting up to")),
         "{:?}",
         fake.logs.borrow()
     );
@@ -1726,7 +1885,9 @@ fn a_kernel_without_a_storage_driver_names_it_when_no_data_partition_answers() {
     fs::create_dir_all(board.env.sys.join("class/block")).unwrap();
     let (fake, why) = board.boot(&[]);
     assert!(
-        why.starts_with("no slot can start: the kernel lacks CONFIG_MMC_BLOCK"),
+        why.starts_with(
+            "no slot can start: no block device came up in 1 s: the kernel lacks CONFIG_MMC_BLOCK"
+        ),
         "{why}"
     );
     assert!(
@@ -3289,6 +3450,8 @@ mod grow_state {
             nand: None,
             dm: board.dm_targets.clone(),
             cut: Cell::new(None),
+            late_disk: RefCell::new(Vec::new()),
+            naps: Cell::new(0),
         }
     }
 

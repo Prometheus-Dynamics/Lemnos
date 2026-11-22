@@ -168,17 +168,41 @@ pub fn boot_source(chosen: &Path) -> Result<String, String> {
     Err("the boot chain states no boot source (chosen/lemnos,boot-source and chosen/bootloader/boot-mode are both missing): refusing to guess".into())
 }
 
+/// What a look for the boot disk found (see [`find_boot_disk`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootDisk {
+    /// The one whole disk under the source's controller.
+    One(String),
+    /// No whole disk sits under the controller yet: the sentence names the controller and every
+    /// disk seen with its controller. A controller registers its disk some time after it probes
+    /// (an eMMC's or SD card's initialisation, a USB disk's enumeration), so this one is worth a wait.
+    NoneYet(String),
+    /// A refusal no wait changes: the table does not list the source, or two disks sit under it.
+    Refused(String),
+}
+
 /// The boot disk for `source` on this board: the one whole disk under the controller the table
 /// gives it. None or several are refused by name, with what was seen.
 pub fn boot_disk(sys: &Path, table: &Table, source: &str) -> Result<String, String> {
-    let controller = table.controller(source)?;
+    match find_boot_disk(sys, table, source) {
+        BootDisk::One(disk) => Ok(disk),
+        BootDisk::NoneYet(why) | BootDisk::Refused(why) => Err(why),
+    }
+}
+
+/// One look for the boot disk for `source`, telling "none yet" (worth a wait) apart from a refusal.
+pub fn find_boot_disk(sys: &Path, table: &Table, source: &str) -> BootDisk {
+    let controller = match table.controller(source) {
+        Ok(controller) => controller,
+        Err(why) => return BootDisk::Refused(why),
+    };
     let disks = whole_disks(sys);
     let hits: Vec<&String> = disks
         .iter()
         .filter(|disk| controllers_of(sys, disk).iter().any(|c| c == controller))
         .collect();
     match hits.len() {
-        1 => Ok(hits[0].clone()),
+        1 => BootDisk::One(hits[0].clone()),
         0 => {
             let seen: Vec<String> = disks
                 .iter()
@@ -192,7 +216,7 @@ pub fn boot_disk(sys: &Path, table: &Table, source: &str) -> Result<String, Stri
                     )
                 })
                 .collect();
-            Err(format!(
+            BootDisk::NoneYet(format!(
                 "no whole disk sits under {controller} (boot source {source}); disks seen: {}",
                 if seen.is_empty() {
                     "none".into()
@@ -203,7 +227,7 @@ pub fn boot_disk(sys: &Path, table: &Table, source: &str) -> Result<String, Stri
         }
         n => {
             let names: Vec<&str> = hits.iter().map(|d| d.as_str()).collect();
-            Err(format!(
+            BootDisk::Refused(format!(
                 "{n} whole disks sit under {controller} ({}): refusing to guess",
                 names.join(", ")
             ))
