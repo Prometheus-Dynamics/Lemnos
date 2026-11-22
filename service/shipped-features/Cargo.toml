@@ -34,7 +34,7 @@ thiserror = { workspace = true, features = ["std"] }
 typenum = { version = "1.20", default-features = false, features = ["const-generics"] }
 subtle = { version = "2.6", default-features = false, features = ["const-generics"] }
 # Orion's client: lemnos-orion needs these features, and lemnosd (orion-precheck) uses the same crate.
-orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "927f704a40d008d4702d478974fcbf4ef89f747c", default-features = false, features = ["actions", "files", "provider", "records", "topics"], optional = true }
+orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "172054f4fd88e98e096c0134b17a5c27ccb3abb3", default-features = false, features = ["actions", "files", "provider", "records", "topics"], optional = true }
 
 [features]
 # Every shipped program turns this on (lemnosd through orion-precheck, the others directly), so a

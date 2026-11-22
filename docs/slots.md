@@ -611,7 +611,7 @@ precondition. On needs:
 - a trust root: the board's `[security] keys` list has a valid line (one list, seen by each stakeholder
   and by the switch);
 - on slots, the default slot and the running slot `verified` under that list;
-- Orion's answer, when `orion = true`. The precheck is at Orion's pinned revision (`927f704a`, where
+- Orion's answer, when `orion = true`. The precheck is at Orion's pinned revision (`172054f4`, where
   `security_precheck` is interface level 5, the level `drivers/orion-precheck` asks for; "The Orion precheck").
   A change to on is refused by name when Orion says no, is below level 5, does not answer, or no `orion`
   device is bound.

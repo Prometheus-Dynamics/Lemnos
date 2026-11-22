@@ -126,6 +126,9 @@ pub enum Message {
     Cancel { call: u64, reason: u8 },
     /// The Orion session with token `token` ended: its callers' holds are released.
     CallerGone { token: u64 },
+    /// A run kept across its session's loss was given back: its deadline is now `deadline_ms` from
+    /// here (zero for none), as Orion gives the time left. The run is run `call`.
+    Deadline { call: u64, deadline_ms: u64 },
 }
 
 /// How far a run that is a long job has got.
@@ -363,6 +366,12 @@ pub fn run(socket: &Path, messages: &Receiver<Message>, shared: &Shared, lease: 
             }
             Some(Message::Cancel { call, reason }) => {
                 cancel(&mut clients, &mut running, &mut ended, call, reason, shared);
+            }
+            Some(Message::Deadline { call, deadline_ms }) => {
+                if let Some(r) = running.iter_mut().find(|r| r.call == call && !r.cancelling) {
+                    r.due = (deadline_ms != 0)
+                        .then(|| Instant::now() + Duration::from_millis(deadline_ms));
+                }
             }
             None if !running.is_empty() => follow(&mut clients, &mut running, &mut ended, shared),
             None => {}

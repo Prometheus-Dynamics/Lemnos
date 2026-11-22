@@ -10,7 +10,7 @@
 //! ## The offer
 //!
 //! Orion serves a prefix through its offer API: `Files::offer(prefix)` (`crates/client/files/src/offer.rs`
-//! at the pinned rev 927f704a) gives an [`Offer`](orion::files::Offer) whose `next` gives each file asked
+//! at the pinned rev 172054f4) gives an [`Offer`](orion::files::Offer) whose `next` gives each file asked
 //! for, as an [`Asked`](orion::files::Asked). That file is answered with `refuse(why)`, or given with
 //! `give_known` and stepped to its end with `finish`. [`run`] is the loop that connects the offer to these
 //! snapshots. It runs on its own thread with its own Orion session, and it runs only when
@@ -312,7 +312,7 @@ pub enum Ended {
     /// Given, and the client answered: taken or not, and why.
     Gave(Giving),
     /// The gift began and then broke. A read of the node that fails during the gift is the source's
-    /// error: at the pinned revision (927f704a, I43) Orion tells the client at once that the file
+    /// error: at the pinned revision (172054f4; 927f704a at I43) Orion tells the client at once that the file
     /// `Aborted`, with this reason, so the client does not wait out its silence limit. A broken
     /// connection cannot be told, and the client's own silence limit ends that transfer.
     Broke(String),

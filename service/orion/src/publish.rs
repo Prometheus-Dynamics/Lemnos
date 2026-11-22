@@ -43,6 +43,7 @@ use orion::topics::{
 };
 use orion::types::Error as Refusal;
 use orion::{ClientError, Error, Options, Orion, Roles};
+use orion_connect::Feature;
 use orion_msg_session::RejectReason;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
@@ -63,6 +64,14 @@ const POLICY: Policy = Policy::new(Admits::LOCAL.and(Admits::OPERATOR));
 /// whichever devices are published, and a run for a device that has gone is answered.
 const ANCHOR: &str = "lemnos-orion.requests";
 const ANCHOR_POLICY: Policy = Policy::new(Admits::NOBODY);
+/// How long node logic keeps a detached run of ours for us while our session is lost, for a kept
+/// action (`action_kept`). The old session's names are held for its idle time and a heartbeat (6 s
+/// and 2 s by default), and this bridge's retries of those names come at most every idle/4 (1.5 s),
+/// so 30 s is that with room to spare. Node logic caps a window at a minute.
+const KEPT: Duration = Duration::from_secs(30);
+/// Slack past `KEPT` before the bridge lets go of a run node logic has not given back. The bridge's
+/// window is never shorter than node logic's, so a run it still holds is one node logic may return.
+const KEPT_SLACK: Duration = Duration::from_secs(10);
 /// Samples of each field a topic keeps.
 const LATEST: u32 = 2;
 /// The longest status text published. A longer reason is cut at a character boundary.
@@ -276,6 +285,8 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
     let mut number = 0u64;
     let mut changes = Changes::default();
     let mut done = Vec::new();
+    // Detached runs whose session was lost while they were under way: see [`Kept`].
+    let mut kept_runs = Kept::default();
     // What the lost session still holds on the comm core, until it is gone: see [`Held`].
     let mut held: Option<Held> = None;
     let mut said = Said::default();
@@ -288,6 +299,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             // Nothing to publish, so no session: wait for lemnosd's devices.
             wait_bell(shared, IDLE);
             shared.take_done(&mut done);
+            kept_runs.take_ended(&mut done);
             done.clear();
             shared.take_progress(&mut Vec::new());
             continue;
@@ -329,10 +341,12 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
         ));
         backoff.reset();
         shared.with(|mirror| mirror.mark_all());
-        match session.serve(shared, jobs, &mut changes, &mut done) {
+        match session.serve(shared, jobs, &mut changes, &mut done, &mut kept_runs) {
             End::Stopped => session.withdraw("lemnos-orion stopped"),
             End::Lost(message) => {
                 log(&message);
+                // The detached runs under way are held for node logic to give back (see [`Kept`]).
+                kept_runs.hold(&session);
                 // Dropped first: the next session says the same names, which the old one holds
                 // until it is gone. [`Held`] keeps those names and until when.
                 held = Some(Held::of(&session));
@@ -399,6 +413,77 @@ impl Held {
     }
 }
 
+/// The detached runs of kept actions whose session was lost while they were under way.
+///
+/// Node logic holds each one for this program, and gives it back when a session of the same identity
+/// registers the action again: a `Request::Run` with `kept`, the same call number. The job goes on
+/// on the call thread meanwhile, and its answer waits here until the run is given back, or until
+/// node logic has let the run go (`until`). Keyed by the call number, which node logic issues for the
+/// life of the node.
+#[derive(Default)]
+struct Kept {
+    runs: HashMap<u64, KeptRun>,
+}
+
+struct KeptRun {
+    /// The session the job was handed out on: the tag its answers carry until it is given back.
+    session: u64,
+    /// When the bridge lets the run go, if node logic has not given it back by then.
+    until: Instant,
+    /// How the job ended, if it ended while the session was lost.
+    ended: Option<Done>,
+}
+
+impl Kept {
+    /// Holds the detached runs `session` had under way, when its node keeps kept actions at all.
+    fn hold(&mut self, session: &Session) {
+        if !session.keep {
+            return;
+        }
+        let until = Instant::now() + KEPT + KEPT_SLACK;
+        for (&call, flight) in &session.pending {
+            if flight.detached {
+                self.runs.insert(
+                    call,
+                    KeptRun {
+                        session: flight.session,
+                        until,
+                        ended: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Takes the answers of held runs out of `done`: each is kept until its run is given back.
+    fn take_ended(&mut self, done: &mut Vec<Done>) {
+        let mut at = 0;
+        while at < done.len() {
+            let held = self
+                .runs
+                .get_mut(&done[at].call)
+                .filter(|run| run.session == done[at].session && run.ended.is_none());
+            match held {
+                Some(run) => run.ended = Some(done.remove(at)),
+                None => at += 1,
+            }
+        }
+    }
+
+    /// Lets go of each held run node logic has not given back by its time, and logs it.
+    fn expire(&mut self, now: Instant) {
+        self.runs.retain(|call, run| {
+            if run.until > now {
+                return true;
+            }
+            log(&format!(
+                "run {call}: not given back in time, so its end is not known here; it is let go"
+            ));
+            false
+        });
+    }
+}
+
 /// Why a session could not be opened. A name the lost session still holds is retried on the
 /// short interval, not a failure: see [`Held`].
 enum Opening {
@@ -440,19 +525,30 @@ struct Session {
     node: String,
     /// Where runs of every action of this session arrive. See [`ANCHOR`].
     anchor: Registration,
+    /// Whether this node keeps a kept action's detached runs (level 6): device actions are then
+    /// registered with `action_kept`, and their runs held on a loss (see [`Kept`]).
+    keep: bool,
     number: u64,
     /// By the mirror's slot. Only devices Orion took are here.
     devices: HashMap<u64, Published>,
     /// Full action name to the device's slot and what the action does.
     actions: HashMap<String, (u64, Verb)>,
-    /// Runs handed to the call thread and not yet answered.
-    pending: HashSet<u64>,
+    /// Runs handed to the call thread and not yet answered, by call number: the session each was
+    /// handed out on (its answers carry it) and whether it is detached.
+    pending: HashMap<u64, Flight>,
     /// When a refused resource state is written again.
     retry_at: Option<Instant>,
     /// The board's `hello.*` topics.
     facts: Vec<Fact>,
     /// `lemnos.devices`: the device set's generation.
     device_set: Publisher,
+}
+
+/// A run handed to the call thread that has not been answered.
+#[derive(Clone, Copy, Debug)]
+struct Flight {
+    session: u64,
+    detached: bool,
 }
 
 /// Why a device or fact could not be described.
@@ -530,6 +626,9 @@ impl Session {
         })?;
         let node = orion.welcomed().node.as_str().to_owned();
         check_node(&node, config.node_id.as_deref()).map_err(Opening::Failed)?;
+        // A node below the level that knows kept runs refuses `action_kept` (nothing sent), so its
+        // device actions are registered without a window and its runs are not held.
+        let keep = orion.welcomed().needs(Feature::KeptRuns).is_ok();
         // Said with each refusal: what was asked, of which node, over which carrier.
         let at = format!("node {node} on {}", config.orion);
         let anchor = orion
@@ -576,10 +675,11 @@ impl Session {
             orion,
             node,
             anchor,
+            keep,
             number,
             devices: HashMap::new(),
             actions: HashMap::new(),
-            pending: HashSet::new(),
+            pending: HashMap::new(),
             retry_at: None,
             facts: Vec::new(),
             device_set,
@@ -629,7 +729,7 @@ impl Session {
     /// back as it is, for the caller to decide: a session that is opening may retry a name the
     /// lost session holds (see [`Held`]), and otherwise the device is logged and left out.
     fn adopt(&mut self, slot: u64, spec: &DeviceSpec) -> Result<(), Refused> {
-        let (published, verbs) = describe(&self.orion.provider(), spec)?;
+        let (published, verbs) = describe(&self.orion.provider(), spec, self.keep)?;
         for verb in verbs {
             self.actions.insert(
                 format!("{}.{}", published.resource.name().as_str(), verb.name()),
@@ -647,6 +747,7 @@ impl Session {
         jobs: &Sender<Message>,
         changes: &mut Changes,
         done: &mut Vec<Done>,
+        kept_runs: &mut Kept,
     ) -> End {
         let mut progress = Vec::new();
         loop {
@@ -656,7 +757,7 @@ impl Session {
             shared.take_done(done);
             shared.take_progress(&mut progress);
             let turned = self
-                .runs(jobs, done, &mut progress)
+                .runs(jobs, done, &mut progress, kept_runs)
                 .and_then(|()| {
                     shared.with(|mirror| mirror.take(changes));
                     self.publish(changes)
@@ -680,10 +781,17 @@ impl Session {
         jobs: &Sender<Message>,
         done: &mut Vec<Done>,
         progress: &mut Vec<Progress>,
+        kept_runs: &mut Kept,
     ) -> Result<(), Error> {
         self.orion.client().drain()?;
+        kept_runs.take_ended(done);
+        kept_runs.expire(Instant::now());
         for p in progress.drain(..) {
-            if p.session != self.number || !self.pending.contains(&p.call) {
+            if self
+                .pending
+                .get(&p.call)
+                .is_none_or(|flight| flight.session != p.session)
+            {
                 continue;
             }
             if let Some(requests) = self.requests() {
@@ -696,9 +804,15 @@ impl Session {
             }
         }
         for finished in done.drain(..) {
-            if finished.session != self.number || !self.pending.remove(&finished.call) {
+            // A run is answered on the session it was handed out on: a kept run keeps its first one.
+            if self
+                .pending
+                .get(&finished.call)
+                .is_none_or(|flight| flight.session != finished.session)
+            {
                 continue;
             }
+            self.pending.remove(&finished.call);
             if let Some(requests) = self.requests() {
                 finish_run(
                     requests,
@@ -716,6 +830,16 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
+            if let Request::Run {
+                kept: true,
+                call,
+                deadline_ms,
+                ..
+            } = request
+            {
+                self.give_back(call, deadline_ms, kept_runs, jobs)?;
+                continue;
+            }
             let (call, name, target, args, caller, token, detached, deadline_ms) = match request {
                 Request::Run {
                     call,
@@ -748,7 +872,7 @@ impl Session {
                 // The cancel's reason is passed on to calls.rs, which logs it. It releases nothing: a
                 // session's end comes as `CallerGone`.
                 Request::Cancel { call, reason } => {
-                    if self.pending.contains(&call) {
+                    if self.pending.contains_key(&call) {
                         let _ = jobs.send(Message::Cancel {
                             call,
                             reason: reason.code(),
@@ -765,8 +889,12 @@ impl Session {
             });
             match job {
                 Ok(job) => {
+                    let flight = Flight {
+                        session: self.number,
+                        detached,
+                    };
                     if jobs.send(Message::Run(job)).is_ok() {
-                        self.pending.insert(call);
+                        self.pending.insert(call, flight);
                     } else if let Some(requests) = self.requests() {
                         finish_run(
                             requests,
@@ -782,6 +910,62 @@ impl Session {
                         finish_run(requests, call, Ending::REJECTED, &[], &why)?;
                     }
                 }
+            }
+        }
+    }
+
+    /// A kept run node logic gives back to this session, by its call number: answered at once if it
+    /// ended while the session was lost, else carried on with the time left it is given. A run this
+    /// bridge does not hold (it was restarted since) is ended indeterminate, never as failed.
+    fn give_back(
+        &mut self,
+        call: u64,
+        deadline_ms: u64,
+        kept_runs: &mut Kept,
+        jobs: &Sender<Message>,
+    ) -> Result<(), Error> {
+        let Some(run) = kept_runs.runs.remove(&call) else {
+            log(&format!(
+                "run {call}: given back, but not held by this bridge: its end is not known"
+            ));
+            return finish_run(
+                &mut self.anchor,
+                call,
+                Ending::INDETERMINATE,
+                &[],
+                "the bridge that held the run is gone, so how it ended is not known",
+            )
+            .map_err(Error::from);
+        };
+        match run.ended {
+            Some(done) => {
+                log(&format!(
+                    "run {call}: given back, and it had ended: answered"
+                ));
+                finish_run(
+                    &mut self.anchor,
+                    call,
+                    done.ending,
+                    done.output.as_bytes(),
+                    &done.detail,
+                )
+                .map_err(Error::from)
+            }
+            None => {
+                log(&format!(
+                    "run {call}: given back, and still going: carried on"
+                ));
+                self.pending.insert(
+                    call,
+                    Flight {
+                        session: run.session,
+                        detached: true,
+                    },
+                );
+                // A send to a call thread that has gone fails; the run then never ends here, and
+                // node logic ends it at its window. Nothing is sent to node logic for it.
+                let _ = jobs.send(Message::Deadline { call, deadline_ms });
+                Ok(())
             }
         }
     }
@@ -1123,7 +1307,11 @@ fn class_topic<'a>(class: &Class, fields: &'a [Field<'a>], max_payload: u32) -> 
 
 /// Describes one device to Orion: its topics and actions, then its resource, which is published
 /// last so that it is never listed before its actions are there (see the module's notes).
-fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Verb>), Refused> {
+fn describe(
+    provider: &Provider,
+    spec: &DeviceSpec,
+    keep: bool,
+) -> Result<(Published, Vec<Verb>), Refused> {
     let name = format!("{RESOURCE_PREFIX}{}", spec.name);
     let mut describing = provider
         .resource(&name, RESOURCE_KIND)
@@ -1168,9 +1356,14 @@ fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Ve
         .filter(|verb| *verb != Verb::Set || !spec.controls.is_empty())
         .collect();
     for verb in &verbs {
-        describing
-            .action(verb.name(), verb.description(), POLICY)
-            .map_err(client_refused)?;
+        // A device's verb may be a long job: on a node that keeps kept runs, its detached runs are
+        // kept for us while our session is lost (see [`Kept`]).
+        if keep {
+            describing.action_kept(verb.name(), verb.description(), POLICY, KEPT)
+        } else {
+            describing.action(verb.name(), verb.description(), POLICY)
+        }
+        .map_err(client_refused)?;
     }
     let state = resource_state(&spec.status);
     let resource = describing.publish(state).map_err(client_refused)?;

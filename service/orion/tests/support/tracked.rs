@@ -29,7 +29,13 @@ pub trait Tracked {
     fn finish_when_cancelled(&mut self) -> Result<JobId>;
     #[method(7, job, stall = 60)]
     fn ignore_cancel(&mut self) -> Result<JobId>;
+    /// A job that finishes on its own, as done, after about six seconds of ticks (not cancelled).
+    #[method(8, job, stall = 60)]
+    fn finish_after_ticks(&mut self) -> Result<JobId>;
 }
+
+/// The ticks `finish_after_ticks` runs for: a tick is a tenth of a second.
+const TIMED_TICKS: u64 = 60;
 
 #[driver("tracked", provides = [Tracked])]
 pub struct TrackedDevice {
@@ -40,6 +46,9 @@ pub struct TrackedDevice {
     count: u64,
     finishing: Option<(JobId, bool)>,
     stubborn: Option<JobId>,
+    /// `finish_after_ticks`: the job, whether it was cancelled, and its ticks so far.
+    timed: Option<(JobId, bool)>,
+    timed_ticks: u64,
     next: u64,
 }
 
@@ -59,6 +68,8 @@ impl Lifecycle for TrackedDevice {
             count: 0,
             finishing: None,
             stubborn: None,
+            timed: None,
+            timed_ticks: 0,
             next: 0,
         })
     }
@@ -68,7 +79,7 @@ impl Lifecycle for TrackedDevice {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
-        self.counting.is_some().then_some(now_ns + 100_000_000)
+        (self.counting.is_some() || self.timed.is_some()).then_some(now_ns + 100_000_000)
     }
 
     fn caller_gone(&mut self, caller: CallerId) {
@@ -92,6 +103,23 @@ impl Lifecycle for TrackedDevice {
                 return JobState::Finished(DriverStatus::OK);
             }
             return JobState::Running { done: 0, total: 0 };
+        }
+        if let Some((id, cancelled)) = self.timed
+            && id == job
+        {
+            if cancelled {
+                self.timed = None;
+                return JobState::Finished(DriverStatus::CANCELLED);
+            }
+            self.timed_ticks += 1;
+            if self.timed_ticks >= TIMED_TICKS {
+                self.timed = None;
+                return JobState::Finished(DriverStatus::OK);
+            }
+            return JobState::Running {
+                done: self.timed_ticks,
+                total: TIMED_TICKS,
+            };
         }
         if let Some((id, cancelled)) = self.counting
             && id == job
@@ -129,6 +157,11 @@ impl Lifecycle for TrackedDevice {
             *cancelled = true;
         }
         if let Some((id, cancelled)) = &mut self.counting
+            && *id == job
+        {
+            *cancelled = true;
+        }
+        if let Some((id, cancelled)) = &mut self.timed
             && *id == job
         {
             *cancelled = true;
@@ -188,6 +221,17 @@ impl Tracked for TrackedDevice {
         self.next += 1;
         let id = JobId(self.next);
         self.finishing = Some((id, false));
+        Ok(id)
+    }
+
+    fn finish_after_ticks(&mut self) -> Result<JobId> {
+        if self.job.is_some() || self.counting.is_some() || self.timed.is_some() {
+            return Err(DriverStatus::BUSY);
+        }
+        self.next += 1;
+        let id = JobId(self.next);
+        self.timed = Some((id, false));
+        self.timed_ticks = 0;
         Ok(id)
     }
 
