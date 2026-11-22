@@ -1444,8 +1444,7 @@ fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
     )
     .unwrap();
     // The restart helper, through its real protocol: its service manager writes down what it was asked.
-    let (_, stand) =
-        crate::boot::test_restart::helper(&dir.0, lemnos_restart::stand_in::Manager::Stops);
+    let (_, stand) = crate::boot::test_restart::helper(lemnos_restart::stand_in::Manager::Stops);
     let text = format!(
         r#"
 format = "lemnos.board"
@@ -4258,7 +4257,7 @@ fn use_tryboot(board: &mut Board) -> PathBuf {
     board.slots.record = Box::new(crate::boot::Tryboot {
         boot: board.layout().boot.clone(),
         node: Ok(node.clone()),
-        restarter: crate::boot::test_restart::stops(&board.dir.0),
+        restarter: crate::boot::test_restart::stops(),
     });
     node
 }
@@ -4299,7 +4298,7 @@ fn use_uboot(board: &mut Board) -> PathBuf {
         disk: Err("the device is named, the disk is not needed".into()),
         place: lemnos_slot_store::uboot_env::Place::device(node.to_str().unwrap(), 1024, 0, 4096)
             .unwrap(),
-        restarter: crate::boot::test_restart::stops(&board.dir.0),
+        restarter: crate::boot::test_restart::stops(),
         boot_node: Ok(boot_node.clone()),
         partitions: Some(env_partitions(&board.dir.0)),
     });
@@ -4310,16 +4309,15 @@ fn use_uboot(board: &mut Board) -> PathBuf {
 fn use_file_record(board: &mut Board) {
     board.slots.record = Box::new(crate::boot::FileRecord {
         boot: board.layout().boot.clone(),
-        restarter: crate::boot::test_restart::stops(&board.dir.0),
+        restarter: crate::boot::test_restart::stops(),
     });
 }
 
 /// The file form over a helper whose service manager answers as `manager`, with a reboot that never
 /// stops failed after `bound`. The record and the slots share one restarter, as `start` builds them.
 fn use_helper(board: &mut Board, manager: Manager, bound: Duration) -> StandIn {
-    let place = board.dir.0.join("helper");
-    fs::create_dir_all(&place).unwrap();
-    let stand = StandIn::start(&place, manager, bound).unwrap();
+    let place = lemnos_socket_dir::scratch_dir().unwrap();
+    let stand = StandIn::start_owned(place, manager, bound).unwrap();
     let restarter = crate::boot::Restarter::helper(&stand.socket);
     board.slots.record = Box::new(crate::boot::FileRecord {
         boot: board.layout().boot.clone(),
@@ -4683,7 +4681,7 @@ fn real_record(board: &mut Board, family: lemnos_slot_store::bootimage::Family) 
         board.slots.record = Box::new(crate::boot::Tryboot {
             boot: boot.clone(),
             node: Ok(node.clone()),
-            restarter: crate::boot::test_restart::stops(&board.dir.0),
+            restarter: crate::boot::test_restart::stops(),
         });
     } else {
         fs::write(&node, crate::bay_fixture::uboot_image("os-1")).unwrap();
@@ -4710,7 +4708,7 @@ fn real_record(board: &mut Board, family: lemnos_slot_store::bootimage::Family) 
                 4096,
             )
             .unwrap(),
-            restarter: crate::boot::test_restart::stops(&board.dir.0),
+            restarter: crate::boot::test_restart::stops(),
             boot_node: Ok(node.clone()),
             partitions: Some(env_partitions(&board.dir.0)),
         });
@@ -5945,7 +5943,7 @@ fn uboot_gpt_board() -> (Board, PathBuf, PathBuf) {
     board.slots.record = Box::new(crate::uboot::UbootEnv {
         disk: Ok(disk.clone()),
         place: lemnos_slot_store::uboot_env::Place::gpt(1024).unwrap(),
-        restarter: crate::boot::test_restart::stops(&board.dir.0),
+        restarter: crate::boot::test_restart::stops(),
         boot_node: Ok(boot_node.clone()),
         partitions: None,
     });
@@ -6084,7 +6082,7 @@ fn a_gpt_environment_whose_disk_is_not_known_refuses_a_trial() {
     board.slots.record = Box::new(crate::uboot::UbootEnv {
         disk: Err("no boot disk in this test".into()),
         place: lemnos_slot_store::uboot_env::Place::gpt(1024).unwrap(),
-        restarter: crate::boot::test_restart::stops(&board.dir.0),
+        restarter: crate::boot::test_restart::stops(),
         boot_node: Ok(board.dir.0.join("boot.img")),
         partitions: None,
     });
@@ -6293,7 +6291,7 @@ fn a_config_txt_without_the_select_lines_leaves_the_driver_running_degraded_and_
     let record = Box::new(crate::boot::Tryboot {
         boot: board.layout().boot.clone(),
         node: Ok(node.clone()),
-        restarter: crate::boot::test_restart::stops(&board.dir.0),
+        restarter: crate::boot::test_restart::stops(),
     });
     let mut slots = SystemSlots::with_volumes(board.layout().clone(), record, Vec::new(), None);
     let lemnos_core::Health::Degraded(why) = slots.health() else {

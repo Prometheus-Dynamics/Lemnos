@@ -235,9 +235,8 @@ fn a_refused_check_stops_the_restart_before_the_helper_is_asked() {
         seen.store(true, Ordering::SeqCst);
         Err("the default doesn't match".to_string())
     }));
-    let dir = crate::tests::TempDir::new("refused-check");
     let (mut restarter, stand) =
-        crate::boot::test_restart::helper(&dir.0, lemnos_restart::stand_in::Manager::Stops);
+        crate::boot::test_restart::helper(lemnos_restart::stand_in::Manager::Stops);
     restarter.check = Some(check);
     let err = restarter.run().unwrap_err();
     assert!(

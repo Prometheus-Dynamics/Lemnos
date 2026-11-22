@@ -421,7 +421,8 @@ fn driver(dir: &Path, data: &Path, image: &str) -> (SystemSlots, Layout) {
         restarter: Restarter::helper(
             StandIn::start(&read, Manager::Stops, Duration::from_secs(1))
                 .unwrap()
-                .socket,
+                .socket
+                .clone(),
         ),
     };
     let keys = parse_keys(&format!("{PUBKEY7} pubkey")).unwrap();

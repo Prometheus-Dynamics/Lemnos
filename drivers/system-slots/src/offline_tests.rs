@@ -66,7 +66,7 @@ fn live(dir: &Path, bundle: &[u8], image: &[u8], time: &str) -> (Status, String)
     let tryboot = Tryboot {
         boot: dir.join("boot-mount"),
         node: Ok(node),
-        restarter: crate::boot::test_restart::stops(dir),
+        restarter: crate::boot::test_restart::stops(),
     };
     let mut slots = SystemSlots::new(layout.clone(), Box::new(tryboot), trusted());
     slots.partuuid = "1234abcd-02".into();
@@ -188,7 +188,7 @@ fn the_offline_tree_equals_a_live_install_trial_and_confirm_and_reads_as_default
     let tryboot = Tryboot {
         boot: read_dir.join("boot-mount"),
         node: Ok(node),
-        restarter: crate::boot::test_restart::stops(&read_dir),
+        restarter: crate::boot::test_restart::stops(),
     };
     let slots = SystemSlots::new(layout.clone(), Box::new(tryboot), trusted());
     let state = State::load(&layout);

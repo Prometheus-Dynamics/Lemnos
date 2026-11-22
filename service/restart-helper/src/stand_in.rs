@@ -64,12 +64,31 @@ impl Pid1 for Chosen {
 pub struct StandIn {
     pub socket: PathBuf,
     pub requests: Arc<Mutex<Vec<&'static str>>>,
+    /// The directory the stand-in made its own, removed when it is dropped (see [`StandIn::start_owned`]).
+    owned: Option<PathBuf>,
 }
 
 impl StandIn {
     /// Starts serving: every connection is admitted as root, and a reboot that never stops is
     /// failed after `bound`.
     pub fn start(dir: &Path, manager: Manager, bound: Duration) -> std::io::Result<Self> {
+        Self::serve_in(dir, manager, bound, None)
+    }
+
+    /// Starts serving in `dir`, which the stand-in owns: it is removed when the stand-in is dropped, so
+    /// a test's socket directory never outlives the test. `dir` should be a short path (a Unix socket's
+    /// path is at most 107 bytes).
+    pub fn start_owned(dir: PathBuf, manager: Manager, bound: Duration) -> std::io::Result<Self> {
+        let owned = Some(dir.clone());
+        Self::serve_in(&dir, manager, bound, owned)
+    }
+
+    fn serve_in(
+        dir: &Path,
+        manager: Manager,
+        bound: Duration,
+        owned: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
         let socket = dir.join("restart.sock");
         let listener = UnixListener::bind(&socket)?;
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -102,7 +121,11 @@ impl StandIn {
                 );
             }
         });
-        Ok(Self { socket, requests })
+        Ok(Self {
+            socket,
+            requests,
+            owned,
+        })
     }
 
     /// What the service manager was asked, in order.
@@ -140,5 +163,13 @@ impl std::io::Write for Duplex {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
+    }
+}
+
+impl Drop for StandIn {
+    fn drop(&mut self) {
+        if let Some(dir) = self.owned.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

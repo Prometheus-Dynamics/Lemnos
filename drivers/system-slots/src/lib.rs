@@ -414,6 +414,8 @@ fn restarter(cfg: &Config<'_>, check: Option<Check>) -> Restarter {
         ),
         check,
         watch: boot::Watch::default(),
+        #[cfg(test)]
+        keep: None,
     }
 }
 

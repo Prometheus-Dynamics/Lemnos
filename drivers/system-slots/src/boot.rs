@@ -287,6 +287,9 @@ pub struct Restarter {
     pub check: Option<Check>,
     /// The outcome of an accepted restart, when it came after the call.
     pub watch: Watch,
+    /// A test's stand-in, kept with the restarter: a stand-in removes its own socket directory when it drops.
+    #[cfg(test)]
+    pub(crate) keep: Option<test_restart::Keep>,
 }
 
 impl Restarter {
@@ -296,6 +299,8 @@ impl Restarter {
             socket: socket.into(),
             check: None,
             watch: Watch::default(),
+            #[cfg(test)]
+            keep: None,
         }
     }
 
@@ -340,27 +345,39 @@ impl Restarter {
 pub(crate) mod test_restart {
     use super::{Restarter, Watch};
     use lemnos_restart::stand_in::{Manager, StandIn};
-    use std::path::Path;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
-    /// A helper in its own directory under `dir` whose service manager answers as `manager`.
-    pub(crate) fn helper(dir: &Path, manager: Manager) -> (Restarter, StandIn) {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let place = dir.join(format!("helper-{}", N.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(&place).unwrap();
-        let stand = StandIn::start(&place, manager, Duration::from_millis(200)).unwrap();
+    /// A stand-in that a restarter keeps alive. The stand-in removes its socket directory when it drops, so a
+    /// restarter that outlives its helper's owner would find no socket.
+    #[derive(Clone)]
+    pub(crate) struct Keep(#[allow(dead_code)] Arc<StandIn>);
+
+    impl std::fmt::Debug for Keep {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Keep(..)")
+        }
+    }
+
+    /// A helper in its own short scratch directory (removed when the stand-in drops) whose service
+    /// manager answers as `manager`.
+    pub(crate) fn helper(manager: Manager) -> (Restarter, StandIn) {
+        let place = lemnos_socket_dir::scratch_dir().unwrap();
+        let stand = StandIn::start_owned(place, manager, Duration::from_millis(200)).unwrap();
         let restarter = Restarter {
             socket: stand.socket.clone(),
             check: None,
             watch: Watch::default(),
+            keep: None,
         };
         (restarter, stand)
     }
 
-    /// A restarter whose restart is under way at once.
-    pub(crate) fn stops(dir: &Path) -> Restarter {
-        helper(dir, Manager::Stops).0
+    /// A restarter whose restart is under way at once. Its helper lives as long as the restarter does.
+    pub(crate) fn stops() -> Restarter {
+        let (mut restarter, stand) = helper(Manager::Stops);
+        restarter.keep = Some(Keep(Arc::new(stand)));
+        restarter
     }
 
     /// A restarter with no helper behind it: the socket is not there.
