@@ -86,6 +86,25 @@ impl AsFd for SignalFd {
     }
 }
 
+/// Stops the calling process with `SIGSTOP`: every thread of it, until something continues or kills it.
+/// Only this process is signalled. Its pid is the calling process's own (`std::process::id`), never 0,
+/// a negative value or a group, so no other process can be named by the call.
+///
+/// # Errors
+///
+/// The pid does not fit a `pid_t`, or `kill(2)` fails.
+pub fn stop_self() -> io::Result<()> {
+    let pid = libc::pid_t::try_from(std::process::id())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: `kill` reads no memory; `pid` is this process's own positive pid and SIGSTOP is a
+    // signal the process cannot catch or ignore, so the call only stops this process.
+    let rc = unsafe { libc::kill(pid, libc::SIGSTOP) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Installs a handler for `signum` that does nothing, without `SA_RESTART`: a
 /// blocking call on this process (`poll`, `read`) returns `EINTR` when the
 /// signal is delivered to its thread. For the tests of the waits that retry on

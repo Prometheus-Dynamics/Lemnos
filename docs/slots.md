@@ -2250,6 +2250,13 @@ board, switch_root through systemd to the exec, is the image's: no test here run
 <event>` for its exec, the root phase's feed, the end of the root phase, each bind as it begins and ends, and each
 device's first tick.
 
+The QEMU check reads the start trace of a lemnosd it has stopped at a known point, so the check never races
+lemnosd: `LEMNOSD_STOP_AFTER=root-phase` makes lemnosd stop itself (SIGSTOP to its own process) right after the
+trace line `root phase done`, before any device is bound, and `LEMNOSD_STOP_AFTER=bind:<device id>` does the same
+right after that device's `bind <id> ok` or `bind <id> failed` line. The check waits for the stop, then reads the
+stopped process's stderr: every line up to the stop point, and nothing after it (a line after the stop point fails
+the check). It is honoured only with `LEMNOSD_START_TRACE` set, and is a test seam: no unit sets it.
+
 **Window 5.** A keep-alive device is not ticked while the daemon is not healthy (`engine/host/src/host.rs`,
 `may_tick`). Healthy means the daemon's main loop turns and its socket answers; neither starts before the host has
 made or cut every bind of the board. So the first tick comes at the first healthy turn after the start, and the

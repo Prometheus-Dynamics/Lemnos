@@ -23,6 +23,7 @@ lemnosd [--sim] [--board PATH] [--socket PATH] [--check]
 | `--package-mode` | `LEMNOSD_PACKAGE_MODE` | `signed` | `signed`, or `open` to run any package |
 | `--user USER` | `LEMNOSD_USER` | none | Start as root, run the privileged start, then drop to this user (a name or a number). See [the root phase](#the-root-phase) |
 | `--group GROUP` | `LEMNOSD_GROUP` | the user's own | The group to drop to, with `--user` (a name or a number) |
+| | `LEMNOSD_STOP_AFTER` | none | A test seam for the QEMU watchdog check: `root-phase` stops this start itself at the end of its root phase, `bind:<device id>` at the end of that device's bind (healthy or not). Honoured only with `LEMNOSD_START_TRACE`; see [the watchdog chain](slots.md#the-watchdog-chain) |
 
 A flag wins over its environment variable. Packages are described in
 [Writing a driver](writing-a-driver.md#the-package-form).

@@ -48,7 +48,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -420,7 +420,9 @@ impl Drop for Service {
 static TRACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// One line of the start trace, when it is on: seconds on CLOCK_MONOTONIC (the clock the boot path's own stamps
-/// use), then the event.
+/// use), then the event. When the start was given a stop point (see [`StopAfter`]) and this line ends the stage
+/// it names, the process stops itself right after the line: nothing after the stop point runs until something
+/// continues it.
 pub fn start_trace_line(event: &str) {
     if !TRACING.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -430,6 +432,57 @@ pub fn start_trace_line(event: &str) {
         &mut io::stderr(),
         format_args!("lemnosd: start trace: {now:.6} {event}\n"),
     );
+    // The line is written (stderr is unbuffered) before the stop, so a reader sees it whatever it does next.
+    let stopping = STOP_AFTER.get().is_some_and(|stop| stop.ends(event));
+    if stopping && let Err(error) = lemnos_linux_sys::signal::stop_self() {
+        let _ = io::Write::write_fmt(
+            &mut io::stderr(),
+            format_args!("lemnosd: stopping after {event} failed: {error}\n"),
+        );
+    }
+}
+
+/// Where a start stops itself, for the QEMU watchdog check (`LEMNOSD_STOP_AFTER`, honoured only with the start
+/// trace on). The stop lands right after the start-trace line that ends the stage, so a checker that reads the
+/// stopped process's stderr sees every line up to the stop point and nothing after it, with no race against the
+/// process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopAfter {
+    /// The root phase's end (`root phase done`): before any device is bound.
+    RootPhase,
+    /// The end of one device's bind, healthy or not (`bind <id> ok` or `bind <id> failed`), named by the device's id.
+    Bind(String),
+}
+
+impl StopAfter {
+    /// Reads `LEMNOSD_STOP_AFTER`: `root-phase`, or `bind:<device id>`. `None` for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        if text == "root-phase" {
+            return Some(Self::RootPhase);
+        }
+        match text.strip_prefix("bind:") {
+            Some(id) if !id.is_empty() => Some(Self::Bind(id.to_owned())),
+            _ => None,
+        }
+    }
+
+    /// Whether the start-trace `event` ends the stage this names.
+    fn ends(&self, event: &str) -> bool {
+        match self {
+            Self::RootPhase => event.starts_with("root phase done"),
+            Self::Bind(id) => {
+                event == format!("bind {id} ok") || event == format!("bind {id} failed")
+            }
+        }
+    }
+}
+
+/// The stop point of this start, set once by the daemon when `LEMNOSD_STOP_AFTER` asks (see [`StopAfter`]).
+static STOP_AFTER: OnceLock<StopAfter> = OnceLock::new();
+
+/// Gives this start its stop point. A second call is ignored.
+pub fn stop_after_on(point: StopAfter) {
+    let _ = STOP_AFTER.set(point);
 }
 
 /// Turns the start trace on (`LEMNOSD_START_TRACE`).

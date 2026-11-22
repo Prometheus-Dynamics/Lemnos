@@ -541,6 +541,52 @@ pub fn try_wait(pid: libc::pid_t) -> io::Result<Option<ChildEnd>> {
     }))
 }
 
+/// What [`wait_stop`] saw of a child: it is stopped, or it has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waited {
+    /// It is stopped (a `SIGSTOP`, or another stop): it runs no more until continued or killed.
+    Stopped,
+    /// It has exited or was killed. Its status is not taken: the child stays a zombie until it is
+    /// waited for, so its pid cannot be reused while the caller still holds it.
+    Ended,
+}
+
+/// Blocks until child `pid` is stopped or has ended, without reaping it (`waitid` with `WNOWAIT`).
+/// A stopped child is left stopped; the caller kills it or continues it, then reaps it as usual.
+///
+/// # Errors
+///
+/// `waitid(2)` fails other than by interruption (for instance `ECHILD`, when `pid` is not a child).
+pub fn wait_stop(pid: libc::pid_t) -> io::Result<Waited> {
+    loop {
+        // SAFETY: an all-zero `siginfo_t` is a valid out-value: its fields are plain integers.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live, writable `siginfo_t` for the call; P_PID names one child by its pid, and
+        // WNOWAIT leaves the child waitable, so nothing is reaped and no other process is named.
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &raw mut info,
+                libc::WSTOPPED | libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if rc != 0 {
+            let err = last_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        let code = info.si_code;
+        return Ok(if code == libc::CLD_STOPPED || code == libc::CLD_TRAPPED {
+            Waited::Stopped
+        } else {
+            Waited::Ended
+        });
+    }
+}
+
 /// Ends the calling process with `code` at once, without running its exit handlers: what a
 /// forked child does instead of returning into the parent's code.
 pub fn exit_now(code: i32) -> ! {

@@ -158,10 +158,28 @@ fn main() -> ExitCode {
     // The start trace (`LEMNOSD_START_TRACE=1`): the start's steps and each device's bind and first
     // tick, stamped, for the watchdog hand-over's gap to be measured in its pieces.
     let tracing = std::env::var_os("LEMNOSD_START_TRACE").is_some_and(|v| !v.is_empty());
+    // The stop point (`LEMNOSD_STOP_AFTER=root-phase` or `bind:<device id>`): this start stops itself right after
+    // the trace line that ends that stage, for the QEMU watchdog check. It is honoured only with the trace on.
+    let stop_after = std::env::var("LEMNOSD_STOP_AFTER")
+        .ok()
+        .filter(|v| !v.is_empty());
     if tracing {
         lemnosd::start_trace_on();
         lemnos_host::set_start_trace(lemnosd::start_trace_line);
+        if let Some(text) = stop_after {
+            let Some(point) = lemnosd::StopAfter::parse(&text) else {
+                return complain(&format!(
+                    "LEMNOSD_STOP_AFTER is not root-phase or bind:<device id>: {text}"
+                ));
+            };
+            lemnosd::stop_after_on(point);
+        }
         lemnosd::start_trace_line("exec");
+    } else if stop_after.is_some() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "lemnosd: LEMNOSD_STOP_AFTER is honoured only with LEMNOSD_START_TRACE: not stopping"
+        );
     }
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     let mut board = var("LEMNOSD_BOARD", DEFAULT_BOARD);

@@ -31,23 +31,24 @@
 #              binds the watchdog next. Passes as daemon does, with the hung bind cut ("bind identity
 #              failed") and the watchdog's bind begun within CALL_DEADLINE (+ slack) of the root phase's
 #              feed: a hung bind delays the first tick by the deadline, not by the period.
-#   daemon-stop  as daemon-root, and lemnosd is stopped (SIGSTOP) as soon as its root phase has fed: the
-#              daemon hangs before it is healthy. Passes when the guest does not stay up, nothing feeds
-#              after the root phase, and the reset comes within the period of the root phase's feed.
+#   daemon-stop  as daemon-root, and lemnosd stops itself at the end of its root phase (LEMNOSD_STOP_AFTER=root-phase),
+#              before any bind: the daemon hangs before it is healthy. Passes when the guest does not stay up, nothing
+#              feeds after the root phase, and the reset comes within the period of the root phase's feed.
 #   pid1-hang  as daemon-root, and PID 1 (this stand-in) hangs: its main thread blocks for good, reaping nothing. lemnosd
 #              is healthy and feeds on. Passes when the guest stays up 45 s with PID 1 hung, and every piece is on the console:
 #              the watchdog is fed by lemnosd, not by PID 1. (Nothing in Lemnos feeds the device on PID 1's behalf.)
-#   pid1-hang-stop  as pid1-hang, and lemnosd is stopped (SIGSTOP) as soon as its root phase has fed. Nothing feeds: the reset
+#   pid1-hang-stop  as pid1-hang, and lemnosd stops itself at the end of its root phase (LEMNOSD_STOP_AFTER=root-phase). Nothing feeds: the reset
 #              must come within the period of the root phase's feed, with PID 1 hung. Passes as daemon-stop does.
 #   pid1-dead  as daemon-root, and PID 1 exits 3 s after lemnosd starts. The kernel panics ("Attempted to kill init") and,
 #              with panic=-1, reboots at once: the guest ends within 5 s of PID 1's exit, by the panic, not by the timeout.
-#   daemon-loop  node root 0600 (only a root-phase hold can feed); lemnosd is killed at the end of its root phase on every start and
-#              started again 1 s later (Restart=always, RestartSec=1s). The stand-in manager keeps the descriptor lemnosd stores,
-#              and each restart takes it back: passes when only the first start fed, every restart said it adopted the stored
-#              descriptor and fed nothing, and the reset comes within the period of that feed.
+#   daemon-loop  node root 0600 (only a root-phase hold can feed); lemnosd stops itself at the end of its root phase on every
+#              start (LEMNOSD_STOP_AFTER=root-phase), is killed there, and is started again 1 s later (Restart=always,
+#              RestartSec=1s). The stand-in manager keeps the descriptor lemnosd stores, and each restart takes it back: passes
+#              when only the first start fed, every restart said it adopted the stored descriptor and fed nothing, and the
+#              reset comes within the period of that feed.
 #   daemon-loop-bind  node owner 999 at 0660 (a bind by name can open it, and an open of a running watchdog feeds it), and
-#              lemnosd is killed after its watchdog's bind has ended, every start, before it is healthy: the restarts reach the
-#              bind. Passes when every restart adopted the stored descriptor (its bind took it, no open by name), only the first
+#              lemnosd stops itself after its watchdog's bind has ended (LEMNOSD_STOP_AFTER=bind:watchdog), every start, before
+#              it is healthy, and is killed there: the restarts reach the bind. Passes when every restart adopted the stored descriptor (its bind took it, no open by name), only the first
 #              start fed, the stored descriptor was kept under its name, and the reset comes within the period of the first feed.
 #              This is the PING-ON-OPEN case: on a tree that opens the node by name at a restart, the restarts feed it for good.
 
@@ -176,6 +177,18 @@ run_mode() {
 # piece TEXT NAME: the seconds after the hook's last feed of the daemon's piece NAME, or empty.
 piece() { tr -d '\r' <"$1" | sed -n "s/.*user: piece: $2 at \([0-9.-]*\) s after the hook's last feed.*/\1/p" | head -1; }
 
+# end_after_feed MODE PIECE: the seconds from the feed named PIECE to the guest's end. The end and the hook's handover
+# line are host stamps; the feed's own offset from the hook's last feed is taken off the end's offset from the hook, so
+# a feed line the console prints late (a guest whose output is read late) does not move the answer. The stamp of the
+# feed's line is not used: it is when the host read the line, not when lemnosd fed.
+end_after_feed() {
+  local mode="$1" name="$2" hooked off
+  hooked="$(awk '/hook: last feed at/ {print $1; exit}' "$work/console-$mode.stamped")"
+  off="$(piece "$work/text-$mode.log" "$name")"
+  [[ -n "$hooked" && -n "$off" ]] || fail "$mode: no hook stamp or no offset for the feed: $name"
+  awk -v e="$end" -v h="$hooked" -v o="$off" 'BEGIN{printf "%.1f", (e-h)-o}'
+}
+
 # The pieces of the gap, printed for the record and checked present.
 pieces() {
   local mode="$1" text="$2" p v
@@ -190,6 +203,12 @@ passed=()
 for mode in $MODES; do
   run_mode "$mode"
   text="$work/text-$mode.log"
+  # A stop point is the end of lemnosd's stage: a line after it, or a stop without it, fails the mode whatever else
+  # the console shows (the guest names it and powers off).
+  if grep -qE 'ran past its stop point|stopped without its stop point|ended before its stop point' "$text"; then
+    grep -E 'ran past its stop point|stopped without its stop point|ended before its stop point' "$text" >&2
+    fail "$mode: lemnosd did not stop where its stop point is"
+  fi
   case "$mode" in
     slot-init)
       expect "$mode" "$text" 'slot-init: watchdog armed: 15 s'
@@ -255,8 +274,7 @@ for mode in $MODES; do
       if [[ -n "$(piece "$text" 'watchdog first feed')" ]]; then fail "daemon-stop: the watchdog was fed after the root phase with lemnosd stopped"; fi
       [[ -n "$(piece "$text" 'root-phase feed')" ]] || { markers "$text"; fail "daemon-stop: no root-phase feed"; }
       # The reset is due within the period of the root phase's feed: the stamp of its piece line.
-      fedat="$(awk '/user: piece: root-phase feed/ {print $1; exit}' "$work/console-$mode.stamped")"
-      elapsed="$(awk -v a="$fedat" -v b="$end" 'BEGIN{printf "%.1f", b-a}')"
+      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
       window=$((DOG_SECONDS + TIMING_SLACK))
       echo "qemu-watchdog: daemon-stop: the guest ended ${elapsed} s after the root phase's feed (due by ${window} s)" >&2
       awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "daemon-stop: the guest ended ${elapsed} s after the root phase's feed, past ${window} s"
@@ -268,8 +286,7 @@ for mode in $MODES; do
       if grep -qF "the guest stayed up" "$text"; then fail "daemon-loop: the guest stayed up through the restarts"; fi
       feeds="$(grep -c 'user: piece: root-phase feed' "$text" || true)"
       [[ "$feeds" == 1 ]] || fail "daemon-loop: ${feeds} starts fed the watchdog; only the boot's first may"
-      fedat="$(awk '/user: piece: root-phase feed/ {print $1; exit}' "$work/console-$mode.stamped")"
-      elapsed="$(awk -v a="$fedat" -v b="$end" 'BEGIN{printf "%.1f", b-a}')"
+      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
       window=$((DOG_SECONDS + TIMING_SLACK))
       starts="$(grep -c 'killed after its root phase' "$text" || true)"
       echo "qemu-watchdog: daemon-loop: ${starts} starts, one fed; the guest ended ${elapsed} s after that feed (due by ${window} s)" >&2
@@ -283,8 +300,7 @@ for mode in $MODES; do
       expect "$mode" "$text" 'root phase: watchdog adopted, not fed'
       feeds="$(grep -c 'user: piece: root-phase feed' "$text" || true)"
       [[ "$feeds" == 1 ]] || fail "daemon-loop-bind: ${feeds} starts fed the watchdog; only the boot's first may"
-      fedat="$(awk '/user: piece: root-phase feed/ {print $1; exit}' "$work/console-$mode.stamped")"
-      elapsed="$(awk -v a="$fedat" -v b="$end" 'BEGIN{printf "%.1f", b-a}')"
+      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
       window=$((DOG_SECONDS + TIMING_SLACK))
       starts="$(grep -c 'killed after its watchdog bind' "$text" || true)"
       echo "qemu-watchdog: daemon-loop-bind: ${starts} starts, one fed; the guest ended ${elapsed} s after that feed (due by ${window} s)" >&2
@@ -304,8 +320,7 @@ for mode in $MODES; do
       expect "$mode" "$text" "user: daemon (pid1-hang-stop): lemnosd stopped after its root phase's feed"
       if grep -qF "stayed up 45 s with PID 1 hung" "$text"; then fail "pid1-hang-stop: the guest stayed up with lemnosd stopped"; fi
       if [[ -n "$(piece "$text" 'watchdog first feed')" ]]; then fail "pid1-hang-stop: the watchdog was fed after the root phase with lemnosd stopped"; fi
-      fedat="$(awk '/user: piece: root-phase feed/ {print $1; exit}' "$work/console-$mode.stamped")"
-      elapsed="$(awk -v a="$fedat" -v b="$end" 'BEGIN{printf "%.1f", b-a}')"
+      elapsed="$(end_after_feed "$mode" 'root-phase feed')"
       window=$((DOG_SECONDS + TIMING_SLACK))
       echo "qemu-watchdog: pid1-hang-stop: PID 1 hung and lemnosd stopped: the guest ended ${elapsed} s after the root phase's feed (due by ${window} s)" >&2
       awk -v e="$elapsed" -v w="$window" 'BEGIN{exit !(e <= w)}' || fail "pid1-hang-stop: the guest ended ${elapsed} s after the root phase's feed, past ${window} s"
