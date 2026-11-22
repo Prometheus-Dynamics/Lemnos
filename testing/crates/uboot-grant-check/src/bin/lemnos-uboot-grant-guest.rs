@@ -83,10 +83,7 @@ fn record() -> Result<UbootEnv, String> {
     Ok(UbootEnv {
         disk: Ok(PathBuf::from(DISK)),
         place: Place::gpt(ENV_SIZE)?,
-        restarter: Restarter {
-            systemctl: "/nonexistent/systemctl".into(),
-            check: None,
-        },
+        restarter: Restarter::helper("/nonexistent/lemnos-restart.sock"),
         boot_node: Ok(PathBuf::from(BOOT)),
         partitions: None,
     })

@@ -92,10 +92,7 @@ impl Board {
         UbootEnv {
             disk: Ok(self.disk.clone()),
             place: Place::gpt(SIZE).unwrap(),
-            restarter: Restarter {
-                systemctl: "/nonexistent/systemctl".into(),
-                check: None,
-            },
+            restarter: Restarter::helper("/nonexistent/lemnos-restart.sock"),
             boot_node: Ok(self.boot.clone()),
             partitions: None,
         }
