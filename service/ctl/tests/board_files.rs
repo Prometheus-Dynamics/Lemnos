@@ -68,6 +68,11 @@ const TABLE: &[Row] = &[
         daemon: Daemon::Pass,
     },
     Row {
+        file: "service/devtree/tests/fixtures/late-grants.toml",
+        validate: Validate::Pass,
+        daemon: Daemon::Pass,
+    },
+    Row {
         file: "testing/bench/board.toml",
         validate: Validate::Pass,
         daemon: Daemon::Pass,

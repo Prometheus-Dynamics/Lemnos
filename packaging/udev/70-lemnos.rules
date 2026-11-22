@@ -45,13 +45,3 @@ SUBSYSTEM=="mtd", KERNEL=="mtd[0-9][0-9]", GROUP="lemnos", MODE="0660"
 # Vendor nodes a board's compiled-in drivers open, by name, are the image's to add: one line each,
 # SUBSYSTEM=="misc", KERNEL=="<name>", GROUP="lemnos", MODE="0660". Look them up in the driver's
 # source (grep for DEVICE or NODE in drivers/<name>/). Nothing here covers them.
-
-# Late attribute grants (HOTPLUG-GRANT): a hwmon fan or a PWM channel that appears after lemnosd started. The
-# root phase grants what exists at start (service/lemnosd/src/privilege.rs). These lines grant, on the add event,
-# only the attributes the daemon writes after its drop: a fan's pwm1 and pwm1_enable, an exported channel's
-# period, duty_cycle, polarity and enable. export and unexport stay root's. The rule is per kind, not per board:
-# which fan or channel the daemon uses is the board file's, and its driver binds once the grant is there (the bind
-# is tried again under the failure rule). The BusyBox counterpart is in packaging/init/mdev.conf.fragment.
-SUBSYSTEM=="hwmon", ACTION=="add", TEST=="pwm1", RUN+="/bin/chgrp lemnos $sys$devpath/pwm1", RUN+="/bin/chmod 0660 $sys$devpath/pwm1"
-SUBSYSTEM=="hwmon", ACTION=="add", TEST=="pwm1_enable", RUN+="/bin/chgrp lemnos $sys$devpath/pwm1_enable", RUN+="/bin/chmod 0660 $sys$devpath/pwm1_enable"
-ACTION=="add", DEVPATH=="*/pwmchip[0-9]*/pwm[0-9]*", RUN+="/bin/chgrp lemnos $sys$devpath/period $sys$devpath/duty_cycle $sys$devpath/polarity $sys$devpath/enable", RUN+="/bin/chmod 0660 $sys$devpath/period $sys$devpath/duty_cycle $sys$devpath/polarity $sys$devpath/enable"

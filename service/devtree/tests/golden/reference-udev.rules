@@ -13,3 +13,7 @@ SUBSYSTEM=="misc", KERNEL=="vcio", GROUP="lemnos", MODE="0660"
 
 # The dma-heaps the board's drivers allocate from: the board file's [host] dma_heaps (default linux,cma), and every dma-buf stream's heap. Each is /dev/dma_heap/<name>.
 SUBSYSTEM=="dma_heap", KERNEL=="linux,cma", GROUP="lemnos", MODE="0660"
+
+# Late grants: a hwmon fan's attributes on its add, a PWM channel's on the export of it (the chip's change).
+# Only the board's own fans and channels; the daemon's attributes only, never export or unexport.
+SUBSYSTEM=="pwm", ACTION=="change", ENV{EXPORT}=="pwm3", PROGRAM=="/bin/sh -c 'readlink -f $sys$devpath/device/of_node | grep -qx /sys/firmware/devicetree/base/axi/pcie@1000120000/rp1/pwm@9c000'", RUN+="/bin/chgrp lemnos $sys$devpath/$env{EXPORT}/period $sys$devpath/$env{EXPORT}/duty_cycle $sys$devpath/$env{EXPORT}/polarity $sys$devpath/$env{EXPORT}/enable", RUN+="/bin/chmod 0660 $sys$devpath/$env{EXPORT}/period $sys$devpath/$env{EXPORT}/duty_cycle $sys$devpath/$env{EXPORT}/polarity $sys$devpath/$env{EXPORT}/enable"

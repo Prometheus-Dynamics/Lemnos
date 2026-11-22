@@ -12,7 +12,7 @@
 //!
 //! Nothing here knows a kind of hardware beyond the daemon's own nodes.
 
-use lemnos_host::board::BoardFile;
+use lemnos_host::board::{BoardFile, Owner};
 
 /// The group the daemon runs as, and the group its device nodes are given to. It is the group of
 /// the `lemnos` user in `packaging/systemd/lemnos.conf` (`u lemnos`), so the two are one name.
@@ -129,4 +129,97 @@ fn dma_heaps(board: &BoardFile) -> Option<Section> {
                 .to_owned(),
         facts,
     })
+}
+
+/// A late grant (HOTPLUG-GRANT): the attributes the daemon writes after its drop, on one fan or one PWM channel the
+/// board names, handed to the daemon's group when the device appears (a hwmon fan) or is exported (a PWM channel).
+/// Only the board's own devices, and only enabled ones that the daemon drives (`owner` is not `host`). The packaged
+/// files hold none: a late grant is the board's, so the board's fragment is the only place it is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Late {
+    /// A hwmon fan found by its `name` attribute (the board's `hwmon-fan` config `name`).
+    HwmonName(String),
+    /// A hwmon fan by its directory (the board's `hwmon-fan` config `hwmon`), as the board names it.
+    HwmonDir(String),
+    /// A PWM channel on the controller at a device-tree node (the board's `pwm:NODE:CH`, `node` as the board
+    /// writes it, from `/`). Its chip is found by the node its parent device names (`device/of_node`), since the
+    /// kernel's chip number is probe order.
+    PwmChannel { node: String, channel: u32 },
+}
+
+/// The attributes a fan's late grant gives the daemon: its duty and the mode that makes the duty take effect.
+pub const HWMON_ATTRIBUTES: [&str; 2] = ["pwm1", "pwm1_enable"];
+/// The attributes a channel's late grant gives the daemon: the four it writes after its drop. `export` and
+/// `unexport` stay root's.
+pub const CHANNEL_ATTRIBUTES: [&str; 4] = ["period", "duty_cycle", "polarity", "enable"];
+
+impl Late {
+    /// The attributes this grant covers, in the order the renderers write them.
+    #[must_use]
+    pub fn attributes(&self) -> &'static [&'static str] {
+        match self {
+            Self::HwmonName(_) | Self::HwmonDir(_) => &HWMON_ATTRIBUTES,
+            Self::PwmChannel { .. } => &CHANNEL_ATTRIBUTES,
+        }
+    }
+}
+
+/// A name a renderer may write into a shell word or a udev value unescaped: letters, digits, `_`, `-` and `.`.
+fn plain(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// A device-tree node name as a board writes it, for a shell word and a udev value: `/`, `@`, `,`, `.`, `_`, `-`,
+/// letters and digits.
+fn node_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '/' | '@' | ',' | '.' | '_' | '-')
+}
+
+/// The late grants of a board: one per enabled, Lemnos-driven hwmon fan the board names by `name` or `hwmon`, and
+/// one per PWM channel the board names by its controller's node (`pwm:NODE:CH`) on an enabled, Lemnos-driven
+/// `pwm-channel-fan`. A name the renderers could not write into a shell word or a udev value gets none. The
+/// board's own generator refuses a `pwmchipN:CH` name, so no grant is made for it.
+#[must_use]
+pub fn late_grants(board: &BoardFile) -> Vec<Late> {
+    let mut out = Vec::new();
+    for device in &board.devices {
+        if device.disabled || device.owner == Owner::Host {
+            continue;
+        }
+        match device.driver.as_str() {
+            "hwmon-fan" => {
+                let name = device.config.get("name").and_then(|v| v.as_str());
+                let dir = device.config.get("hwmon").and_then(|v| v.as_str());
+                match (name, dir) {
+                    (Some(name), _) if plain(name) => out.push(Late::HwmonName(name.to_owned())),
+                    (None, Some(dir)) if plain(dir) => out.push(Late::HwmonDir(dir.to_owned())),
+                    _ => {}
+                }
+            }
+            "pwm-channel-fan" => {
+                let Some(name) = device.uses.get("pwm") else {
+                    continue;
+                };
+                let Some((node, channel)) =
+                    name.strip_prefix("pwm:").and_then(|r| r.rsplit_once(':'))
+                else {
+                    continue;
+                };
+                let Ok(channel) = channel.parse::<u32>() else {
+                    continue;
+                };
+                if node.starts_with('/') && node.chars().all(node_char) {
+                    out.push(Late::PwmChannel {
+                        node: node.to_owned(),
+                        channel,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }

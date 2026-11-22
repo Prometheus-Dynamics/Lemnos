@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 
 use lemnos_host::board::BoardFile;
 
-use crate::permissions::{Fact, Name, sections};
+use crate::permissions::{Fact, Late, Name, late_grants, sections};
 
 /// The regex of one fact: the node's path under `/dev`, anchored at both ends. Every character that
 /// is special in an extended regex is escaped, and a glob's `*` becomes `.*`.
@@ -104,6 +104,60 @@ pub fn fragment(board: &BoardFile) -> String {
         for fact in &section.facts {
             let _ = writeln!(out, "{}", line(fact));
         }
+    }
+    out.push_str(&late_section(board));
+    out
+}
+
+/// The mdev line of one late grant (HOTPLUG-GRANT): the same attributes as [`crate::udev::late_rules`]. The line
+/// is `-` (keep matching) so a later late grant for another device still gets its turn. A hwmon fan is matched by
+/// its device name (`hwmonN`) and its `name` attribute, read by the command. A PWM channel is matched by its chip's
+/// name, and by `EXPORT` in the hotplug environment; its command is a `*` one, since mdev runs an `@` command only
+/// on an add (mdev.c's keywords are "add" and "remove", so a change runs nothing but a `*` command).
+#[must_use]
+pub fn late_line(late: &Late) -> String {
+    let attrs = late.attributes().join(" ");
+    let chmod_loop = |loop_over: &str, dir: &str| {
+        format!(
+            "for a in {loop_over}; do /bin/chgrp {g} {dir}/$a && /bin/chmod {m} {dir}/$a; done",
+            g = crate::permissions::DAEMON_GROUP,
+            m = crate::permissions::NODE_MODE,
+        )
+    };
+    match late {
+        Late::HwmonName(name) => format!(
+            "-SUBSYSTEM=^hwmon$;^hwmon[0-9]+$ root:root 0660 @/bin/sh -c 'test \"$(cat /sys$DEVPATH/name)\" = {name} || exit 0; {}'",
+            chmod_loop(&attrs, "/sys$DEVPATH")
+        ),
+        Late::HwmonDir(dir) => {
+            let mut regex = String::new();
+            push_escaped(&mut regex, dir);
+            format!(
+                "-SUBSYSTEM=^hwmon$;^{regex}$ root:root 0660 @/bin/sh -c '{}'",
+                chmod_loop(&attrs, "/sys$DEVPATH")
+            )
+        }
+        Late::PwmChannel { node, channel } => format!(
+            "-SUBSYSTEM=^pwm$;EXPORT=^pwm{channel}$;^pwmchip[0-9]+$ root:root 0660 */bin/sh -c 'test \"$(readlink -f /sys$DEVPATH/device/of_node)\" = /sys/firmware/devicetree/base{node} && {}'",
+            chmod_loop(&attrs, "/sys$DEVPATH/$EXPORT")
+        ),
+    }
+}
+
+/// The late-grant section of a board's fragment: a heading, then one line per grant. Empty when the board names
+/// no fan or channel.
+#[must_use]
+pub fn late_section(board: &BoardFile) -> String {
+    let grants = late_grants(board);
+    if grants.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n# Late grants: a hwmon fan's attributes on its add, a PWM channel's on the export of it (the chip's change).\n\
+         # Only the board's own fans and channels; the daemon's attributes only, never export or unexport.\n",
+    );
+    for late in &grants {
+        let _ = writeln!(out, "{}", late_line(late));
     }
     out
 }

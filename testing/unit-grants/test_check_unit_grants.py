@@ -7,6 +7,7 @@ a drop-in, udev rules, files.txt and the grants table), changes one thing, and r
 The real tree is checked too. Nothing is left behind: each tree is removed when its case ends.
 """
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -43,6 +44,8 @@ BASE = {
     "packaging/udev/70-lemnos.rules": UDEV_LINE + "\n",
     "packaging/files.txt": "# header\n",
     "packaging/init/mdev.conf.fragment": "# header\n^foo0$                  root:lemnos 0660\n",
+    "service/devtree/tests/golden/late-grants-udev.rules": "# header\n",
+    "service/devtree/tests/golden/late-grants-mdev.conf": "# header\n",
     "packaging/systemd/grants.toml": """grant = [
   {path = "/run/lemnos", kind = "path", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "RuntimeDirectory:lemnos", drivers = ["service/lemnosd"], reason = "the socket directory"},
   {path = "CAP_SYS_RAWIO", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SYS_RAWIO", drivers = ["service/lemnosd"], needle = "CAP_SYS_RAWIO", reason = "the kept capability"},
@@ -275,8 +278,8 @@ class UnitGrantsTest(unittest.TestCase):
         self.assertFalse(checker.base_writable("/etc", on))
         self.assertTrue(checker.base_writable("/run/lemnos", on))
 
-    HOTPLUG_UDEV = 'SUBSYSTEM=="hwmon", ACTION=="add", TEST=="pwm1", RUN+="/bin/chgrp lemnos $sys$devpath/pwm1", RUN+="/bin/chmod 0660 $sys$devpath/pwm1"'
-    HOTPLUG_MDEV = "SUBSYSTEM=hwmon;^hwmon[0-9]+$ root:root 0660 @/bin/chgrp lemnos /sys$DEVPATH/pwm1 ; /bin/chmod 0660 /sys$DEVPATH/pwm1"
+    HOTPLUG_UDEV = 'SUBSYSTEM=="hwmon", ACTION=="add", ATTR{name}=="pwmfan", TEST=="pwm1", RUN+="/bin/chgrp lemnos $sys$devpath/pwm1", RUN+="/bin/chmod 0660 $sys$devpath/pwm1"'
+    HOTPLUG_MDEV = "-SUBSYSTEM=^hwmon$;^hwmon[0-9]+$ root:root 0660 @/bin/sh -c 'for a in pwm1; do /bin/chgrp lemnos /sys$DEVPATH/$a && /bin/chmod 0660 /sys$DEVPATH/$a; done'"
     WIRED_PRIVILEGE = ("fn steps() {\n    let _ = lemnos_driver_foo::grant_before_drop();\n"
                        "    let _ = linux.grant_pwm_before_drop(x);\n"
                        "    let _ = lemnos_driver_hwmon_fan::grant_before_drop(c);\n}\n")
@@ -285,62 +288,79 @@ class UnitGrantsTest(unittest.TestCase):
         """A root-phase grant that names its hotplug lines (as the table's late grants do)."""
         row = ('  {path = "/sys/devices/foo", kind = "path", access = "rw", how = "root-phase", site = "drivers/foo/src/lib.rs", '
                'needle = "pub fn open", wired = "%s", drivers = ["drivers/foo"], hotplug_udev = [%s], hotplug_mdev = [%s], reason = "x"},'
-               % (wired, ", ".join("'%s'" % line for line in udev), ", ".join("'%s'" % line for line in mdev)))
+               % (wired, ", ".join(json.dumps(line) for line in udev), ", ".join(json.dumps(line) for line in mdev)))
         self.add_row(tree, row)
 
-    def packaged_late_grants(self, tree):
-        tree.put("packaging/udev/70-lemnos.rules", UDEV_LINE + "\n" + self.HOTPLUG_UDEV + "\n")
-        tree.put("packaging/init/mdev.conf.fragment", "# header\n^foo0$                  root:lemnos 0660\n" + self.HOTPLUG_MDEV + "\n")
+    def generated_late_grants(self, tree, udev=None, mdev=None):
+        """The generator's golden output for a board with the late grant (the lines the rows may name)."""
+        tree.put("service/devtree/tests/golden/late-grants-udev.rules",
+                 "# header\n" + (self.HOTPLUG_UDEV if udev is None else udev) + "\n")
+        tree.put("service/devtree/tests/golden/late-grants-mdev.conf",
+                 "# header\n" + (self.HOTPLUG_MDEV if mdev is None else mdev) + "\n")
 
-    def test_a_late_grant_named_on_both_files_holds(self):
+    def test_a_late_grant_named_on_both_golden_files_holds(self):
         tree = self.tree()
-        self.packaged_late_grants(tree)
+        self.generated_late_grants(tree)
         tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
         self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV], wired="lemnos_driver_hwmon_fan::grant_before_drop")
         self.assertHolds(tree.check())
 
-    def test_a_named_udev_line_the_rules_file_lacks_fails(self):
+    def test_a_named_udev_line_the_generator_does_not_make_fails(self):
         tree = self.tree()
-        self.packaged_late_grants(tree)
+        self.generated_late_grants(tree)
         tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
         self.hotplug_row(tree, [self.HOTPLUG_UDEV.replace('TEST=="pwm1"', 'TEST=="pwm2"')], [self.HOTPLUG_MDEV], wired="lemnos_driver_hwmon_fan::grant_before_drop")
-        self.assertFails(tree.check(), "its hotplug line", "is not in packaging/udev/70-lemnos.rules")
+        self.assertFails(tree.check(), "its hotplug line", "is not in service/devtree/tests/golden/late-grants-udev.rules")
 
-    def test_a_named_mdev_line_the_fragment_lacks_fails(self):
+    def test_a_named_mdev_line_the_generator_does_not_make_fails(self):
         tree = self.tree()
-        self.packaged_late_grants(tree)
+        self.generated_late_grants(tree)
         tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
-        self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV.replace("pwm1 ;", "pwm2 ;")], wired="lemnos_driver_hwmon_fan::grant_before_drop")
-        self.assertFails(tree.check(), "is not in packaging/init/mdev.conf.fragment")
+        self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV.replace("pwm1;", "pwm2;")], wired="lemnos_driver_hwmon_fan::grant_before_drop")
+        self.assertFails(tree.check(), "is not in service/devtree/tests/golden/late-grants-mdev.conf")
 
-    def test_a_packaged_udev_hotplug_line_with_no_row_fails(self):
+    def test_a_late_grant_the_packaged_rules_file_holds_fails(self):
+        # The board's late grants are written by the generator, never by the package: a fixed hwmon or PWM grant
+        # in packaging/udev/70-lemnos.rules is refused by name.
         tree = self.tree()
-        self.packaged_late_grants(tree)
-        tree.put("packaging/udev/70-lemnos.rules", UDEV_LINE + "\n" + self.HOTPLUG_UDEV + "\n" +
-                 'ACTION=="add", SUBSYSTEM=="hwmon", TEST=="pwm2", RUN+="/bin/chgrp lemnos $sys$devpath/pwm2"\n')
-        tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
-        self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV], wired="lemnos_driver_hwmon_fan::grant_before_drop")
-        self.assertFails(tree.check(), "pwm2", "a late grant and no row declares it")
-
-    def test_a_packaged_mdev_hotplug_line_with_no_row_fails(self):
-        tree = self.tree()
-        self.packaged_late_grants(tree)
-        tree.put("packaging/init/mdev.conf.fragment", "# header\n^foo0$                  root:lemnos 0660\n" + self.HOTPLUG_MDEV + "\n" +
-                 "SUBSYSTEM=hwmon;^hwmon[0-9]+$ root:root 0660 @/bin/chgrp lemnos /sys$DEVPATH/pwm2\n")
+        self.generated_late_grants(tree)
+        tree.put("packaging/udev/70-lemnos.rules", UDEV_LINE + "\n" + self.HOTPLUG_UDEV + "\n")
         tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
         self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV], wired="lemnos_driver_hwmon_fan::grant_before_drop")
-        self.assertFails(tree.check(), "pwm2", "a late grant and no row declares it")
+        self.assertFails(tree.check(), "packaging/udev/70-lemnos.rules", "the board's generator writes it")
+
+    def test_a_late_grant_the_busybox_fragment_holds_fails(self):
+        tree = self.tree()
+        self.generated_late_grants(tree)
+        tree.put("packaging/init/mdev.conf.fragment", "# header\n^foo0$                  root:lemnos 0660\n" + self.HOTPLUG_MDEV + "\n")
+        tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
+        self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV], wired="lemnos_driver_hwmon_fan::grant_before_drop")
+        self.assertFails(tree.check(), "packaging/init/mdev.conf.fragment", "the board's generator writes it")
+
+    def test_a_generated_late_grant_with_no_row_fails(self):
+        tree = self.tree()
+        self.generated_late_grants(tree, udev=self.HOTPLUG_UDEV + "\n" + self.HOTPLUG_UDEV.replace('pwmfan', 'otherfan'))
+        tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
+        self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV], wired="lemnos_driver_hwmon_fan::grant_before_drop")
+        self.assertFails(tree.check(), "otherfan", "is a late grant and no row declares it")
+
+    def test_a_generated_mdev_late_grant_with_no_row_fails(self):
+        tree = self.tree()
+        self.generated_late_grants(tree, mdev=self.HOTPLUG_MDEV + "\n" + self.HOTPLUG_MDEV.replace("^hwmon[0-9]+$", "^hwmon9$"))
+        tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
+        self.hotplug_row(tree, [self.HOTPLUG_UDEV], [self.HOTPLUG_MDEV], wired="lemnos_driver_hwmon_fan::grant_before_drop")
+        self.assertFails(tree.check(), "hwmon9", "is a late grant and no row declares it")
 
     def test_a_pwm_or_fan_root_phase_grant_without_its_hotplug_lines_fails(self):
         tree = self.tree()
-        self.packaged_late_grants(tree)
+        self.generated_late_grants(tree)
         tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
         self.hotplug_row(tree, [], [], wired="grant_pwm_before_drop")
         self.assertFails(tree.check(), "names its hotplug lines")
 
     def test_a_late_grant_with_only_one_of_its_two_files_named_fails(self):
         tree = self.tree()
-        self.packaged_late_grants(tree)
+        self.generated_late_grants(tree)
         tree.put("service/lemnosd/src/privilege.rs", self.WIRED_PRIVILEGE)
         self.hotplug_row(tree, [self.HOTPLUG_UDEV], [], wired="lemnos_driver_hwmon_fan::grant_before_drop")
         self.assertFails(tree.check(), "names its hotplug lines")

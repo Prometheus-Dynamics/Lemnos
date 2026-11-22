@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use lemnos_host::board::BoardFile;
 
-use crate::permissions::{Fact, NODE_OWNER, Name, sections};
+use crate::permissions::{Fact, Late, NODE_OWNER, Name, late_grants, sections};
 
 /// One rule for a fact, without the trailing newline. `OWNER` is written only where the owner is not
 /// the kernel's default (root), so a rule reads as it did before the owner was a fact.
@@ -44,6 +44,69 @@ pub fn fragment(board: &BoardFile) -> String {
         }
         for fact in &section.facts {
             let _ = writeln!(out, "{}", rule(fact));
+        }
+    }
+    out.push_str(&late_section(board));
+    out
+}
+
+/// The rules of one late grant (HOTPLUG-GRANT). A hwmon fan's attributes are granted on its `add` (matched by its
+/// `name`, or by its directory). A PWM channel's attributes are granted on the `change` the kernel sends its chip
+/// when the channel is exported (`EXPORT=pwmN`): the channel's own device has no bus or class, so it sends no
+/// uevent of its own. The rules grant and never export: the export stays root's.
+#[must_use]
+pub fn late_rules(late: &Late) -> Vec<String> {
+    let attrs = late.attributes();
+    match late {
+        Late::HwmonName(_) | Late::HwmonDir(_) => {
+            let matching = match late {
+                Late::HwmonName(name) => format!(r#"ATTR{{name}}=="{name}""#),
+                Late::HwmonDir(dir) => format!(r#"KERNEL=="{dir}""#),
+                Late::PwmChannel { .. } => unreachable!(),
+            };
+            attrs
+                .iter()
+                .map(|attr| {
+                    format!(
+                        r#"SUBSYSTEM=="hwmon", ACTION=="add", {matching}, TEST=="{attr}", RUN+="/bin/chgrp {g} $sys$devpath/{attr}", RUN+="/bin/chmod {m} $sys$devpath/{attr}""#,
+                        g = crate::permissions::DAEMON_GROUP,
+                        m = crate::permissions::NODE_MODE,
+                    )
+                })
+                .collect()
+        }
+        Late::PwmChannel { node, channel } => {
+            let files: Vec<String> = attrs
+                .iter()
+                .map(|a| format!("$sys$devpath/$env{{EXPORT}}/{a}"))
+                .collect();
+            let files = files.join(" ");
+            // The chip's parent device names the controller's node (`device/of_node`, the kernel's link to the
+            // device-tree node). The program exits 0 for this channel's controller only.
+            vec![format!(
+                r#"SUBSYSTEM=="pwm", ACTION=="change", ENV{{EXPORT}}=="pwm{channel}", PROGRAM=="/bin/sh -c 'readlink -f $sys$devpath/device/of_node | grep -qx /sys/firmware/devicetree/base{node}'", RUN+="/bin/chgrp {g} {files}", RUN+="/bin/chmod {m} {files}""#,
+                g = crate::permissions::DAEMON_GROUP,
+                m = crate::permissions::NODE_MODE,
+            )]
+        }
+    }
+}
+
+/// The late-grant section of a board's fragment: a heading, then one rule set per grant. Empty when the board
+/// names no fan or channel.
+#[must_use]
+pub fn late_section(board: &BoardFile) -> String {
+    let grants = late_grants(board);
+    if grants.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n# Late grants: a hwmon fan's attributes on its add, a PWM channel's on the export of it (the chip's change).\n\
+         # Only the board's own fans and channels; the daemon's attributes only, never export or unexport.\n",
+    );
+    for late in &grants {
+        for rule in late_rules(late) {
+            let _ = writeln!(out, "{rule}");
         }
     }
     out

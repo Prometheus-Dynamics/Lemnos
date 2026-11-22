@@ -104,12 +104,34 @@ fn nodes(lines: impl Iterator<Item = String>, parse: fn(&str) -> Node) -> BTreeS
         .collect()
 }
 
+/// The late-grant lines (HOTPLUG-GRANT) are attribute grants, not node rules: a udev rule with a `RUN` or a
+/// `PROGRAM`, and an mdev line whose command is a shell. They are checked by `tests/late.rs`, not here.
+fn is_late_udev(line: &str) -> bool {
+    line.contains("RUN+=") || line.contains("PROGRAM==")
+}
+
+fn is_late_mdev(line: &str) -> bool {
+    line.contains("/bin/sh -c")
+}
+
 fn udev_nodes(board: &BoardFile) -> BTreeSet<Node> {
-    nodes(udev::fragment(board).lines().map(str::to_owned), parse_udev)
+    nodes(
+        udev::fragment(board)
+            .lines()
+            .filter(|line| !is_late_udev(line))
+            .map(str::to_owned),
+        parse_udev,
+    )
 }
 
 fn mdev_nodes(board: &BoardFile) -> BTreeSet<Node> {
-    nodes(mdev::fragment(board).lines().map(str::to_owned), parse_mdev)
+    nodes(
+        mdev::fragment(board)
+            .lines()
+            .filter(|line| !is_late_mdev(line))
+            .map(str::to_owned),
+        parse_mdev,
+    )
 }
 
 /// Every board file in the repository: the examples and the testing boards.

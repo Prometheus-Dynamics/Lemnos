@@ -77,6 +77,9 @@ HOTPLUG_WIRED = ("grant_pwm_before_drop", "lemnos_driver_hwmon_fan::grant_before
 # The text of a hotplug line that changes a group when the device is added: a udev RUN or an mdev command that chgrps
 # to the daemon's group. The lines of the packaged files that hold it are the late grants the table must name.
 HOTPLUG_GROUP = "chgrp lemnos"
+# The generator's golden output for the late-grant fixture board: the lines a root-phase row may name.
+HOTPLUG_UDEV_GOLDEN = "service/devtree/tests/golden/late-grants-udev.rules"
+HOTPLUG_MDEV_GOLDEN = "service/devtree/tests/golden/late-grants-mdev.conf"
 
 # Directives whose values are grants (the unit and drop-ins). A value's tokens are checked one by one.
 GRANT_DIRECTIVES = ("ReadWritePaths", "RuntimeDirectory", "CapabilityBoundingSet", "SystemCallFilter",
@@ -360,18 +363,30 @@ def check_schema(rows):
             fail(f"{where}: `none` is for what the base unit allows: read-only, or write under /dev or /run")
 
 
-def hotplug_lines():
-    """(udev, mdev) the packaged late-grant lines: the non-comment lines that change a group on a hotplug event."""
-    udev = {" ".join(raw.split()) for raw in read(UDEV).split("\n")
-            if raw.strip() and not raw.lstrip().startswith("#") and HOTPLUG_GROUP in raw and "RUN" in raw}
-    mdev = {line for line in mdev_lines() if HOTPLUG_GROUP in line}
-    return udev, mdev
+def hotplug_golden():
+    """(udev, mdev) the late-grant lines the board's generator makes, from its golden output for the fixture board
+    (service/devtree/tests/golden/late-grants-*: `lemnos-ctl tree` renders the same text, and a test holds them equal)."""
+    out = []
+    for path in (HOTPLUG_UDEV_GOLDEN, HOTPLUG_MDEV_GOLDEN):
+        try:
+            text = read(path)
+        except OSError as error:
+            fail(f"{path}: the generator's late-grant golden is not there: {error.strerror}")
+            text = ""
+        out.append({" ".join(raw.split()) for raw in text.split("\n") if HOTPLUG_GROUP in raw})
+    return out[0], out[1]
 
 
 def check_hotplug(rows):
-    """Each named hotplug line is in its packaged file; each packaged hotplug line is named by a row; and a
-    root-phase row that wires a hotplug grant names both of its lines."""
-    packaged_udev, packaged_mdev = hotplug_lines()
+    """The late grants are the board's: the packaged files hold none, every line the generator makes for the fixture is
+    named by a row, every named line is one the generator makes, and a root-phase grant that wires a late grant names
+    both of its lines."""
+    for path in (UDEV, MDEV):
+        for raw in read(path).split("\n"):
+            if HOTPLUG_GROUP in raw and not raw.lstrip().startswith("#"):
+                fail(f"{path}: `{' '.join(raw.split())}` is a late grant: the board's generator writes it "
+                     f"(`lemnos-ctl tree BOARD --udev/--mdev`), not the package")
+    golden_udev, golden_mdev = hotplug_golden()
     named_udev, named_mdev = set(), set()
     for row in rows:
         udev = [" ".join(line.split()) for line in row.get("hotplug_udev", [])]
@@ -380,17 +395,17 @@ def check_hotplug(rows):
         if row.get("how") == "root-phase" and row.get("wired") in HOTPLUG_WIRED and not (udev and mdev):
             fail(f"{where}: a late grant (`{row.get('wired')}`) names its hotplug lines: `hotplug_udev` and `hotplug_mdev`")
         for line in udev:
-            if line not in packaged_udev:
-                fail(f"{where}: its hotplug line {line!r} is not in {UDEV}: the late grant is not packaged")
+            if line not in golden_udev:
+                fail(f"{where}: its hotplug line {line!r} is not in {HOTPLUG_UDEV_GOLDEN}: the generator does not make it")
         for line in mdev:
-            if line not in packaged_mdev:
-                fail(f"{where}: its hotplug line {line!r} is not in {MDEV}: the late grant is not packaged")
+            if line not in golden_mdev:
+                fail(f"{where}: its hotplug line {line!r} is not in {HOTPLUG_MDEV_GOLDEN}: the generator does not make it")
         named_udev |= set(udev)
         named_mdev |= set(mdev)
-    for line in sorted(packaged_udev - named_udev):
-        fail(f"{UDEV}: `{line}` is a late grant and no row declares it (its row's `hotplug_udev`)")
-    for line in sorted(packaged_mdev - named_mdev):
-        fail(f"{MDEV}: `{line}` is a late grant and no row declares it (its row's `hotplug_mdev`)")
+    for line in sorted(golden_udev - named_udev):
+        fail(f"{HOTPLUG_UDEV_GOLDEN}: `{line}` is a late grant and no row declares it (its row's `hotplug_udev`)")
+    for line in sorted(golden_mdev - named_mdev):
+        fail(f"{HOTPLUG_MDEV_GOLDEN}: `{line}` is a late grant and no row declares it (its row's `hotplug_mdev`)")
 
 
 def check_grants(rows, when):

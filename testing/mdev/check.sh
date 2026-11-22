@@ -64,6 +64,8 @@ prepare() {
   local have_glob=0
   while IFS= read -r rule; do
     [[ "$rule" == SUBSYSTEM=* ]] || continue
+    # A late grant (HOTPLUG-GRANT) gives attributes, not a node: it has no node to check here (tests/late.rs holds it).
+    [[ "$rule" == *"RUN+="* || "$rule" == *"PROGRAM=="* ]] && continue
     subsystem="$(sed -n 's/.*SUBSYSTEM=="\([^"]*\)".*/\1/p' <<<"$rule")"
     kernel="$(sed -n 's/.*KERNEL=="\([^"]*\)".*/\1/p' <<<"$rule")"
     group="$(sed -n 's/.*GROUP="\([^"]*\)".*/\1/p' <<<"$rule")"
