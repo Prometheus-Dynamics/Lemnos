@@ -280,6 +280,14 @@ impl Ops for System {
         self.feeding.set(false);
     }
 
+    fn hold_for_reset(&self) {
+        // Nothing is fed from here: the watchdog resets the board. The wait is the reset's, not a
+        // retry, so it does not return.
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
     fn request_flash_mode(&self) -> Result<(), String> {
         // To confirm on a board: devtmpfs makes /dev/vcio when the firmware driver is built in or
         // loaded; wait for it as the UBI block node's wait does.

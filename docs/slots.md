@@ -1855,9 +1855,29 @@ gate's packaging check).
 The data partition is entry 2 of the MBR: the last entry, type `0x83`, labelled `lemnos-data`. An image
 writes it at a size its content needs, and a disk larger than that image leaves the rest unused. When the
 board file's `grow_data` on the `system-slots` device is on by default (`false` opts a board out), the
-driver grows it to the disk's end at each start until it is done. It acts only on a disk that validates as
-the Lemnos layout, so any other table is refused with words and nothing is written. The pass is in
-`drivers/system-slots/src/grow.rs`; the arithmetic is `lemnos_slot_store::mbr`.
+boot grows it to the disk's end at each start until it is done. The pass runs in slot-init, before the
+slot's state dirs are given to the daemon and before the switch into the slot: there the data partition is
+mounted writable and the boot disk's node is still root's, so the daemon's user needs neither and its
+`/data` stays read-only. The pass is `lemnos_slot_store::grow` (`run_boot` runs it on a thread, polled
+with the watchdog fed, and reports its state); the daemon only reads the state and never opens the disk
+(`drivers/system-slots/src/grow.rs`). It acts only on a disk that validates as the Lemnos layout, so any
+other table is refused with words and nothing is written. The arithmetic is `lemnos_slot_store::mbr`.
+
+The boot leaves its state in `board/slots/grow-state` on the data partition, one line: `running <started
+unix ms> <bound ms> <target bytes>` while a pass is in flight, then `not-needed`, `grown`, `refused <state>
+<words>` (named, nothing written), `unconfirmed <baseline|-> <seen> <words>` (the kernel accepted the
+resize and its view did not show it), or `failed <words>` (every try in that boot failed; the next boot
+tries again). A failed try is repeated on the capped backoff for as long as the overrun bound of the disk's
+size allows, then the boot goes on. A pass the kernel never returns from is not cut short: the daemon
+reports it running past its bound. The daemon's `grow_state` info key says what the file says. An image
+with no state file yet reports `pending`. The board file's `grow_data = false` reaches the boot on the slot's command line as `<boot_args>.grow=0`
+(`lemnos-ctl tree --cmdline-slot` writes it from the board file). The boot then records `not-needed off in
+the board file` and opens no disk, and the daemon reports that state. An attempt whose call never returns
+is written first as `attempt started <boot id> <started ms> <bound ms> <target>`. The boot feeds the
+watchdog only up to the hard bound (the overrun bound plus 15 s), then stops feeding, so the watchdog resets
+the board. The next boot finds that attempt from an earlier boot id and records `refused grow-stalled: the
+last grow did not return (boot <id>)`: it does not try again on its own. `lemnos-ctl grow-retry <data
+mount>` (run as root) removes that one refusal, so the next boot tries once more.
 
 The steps, in order. Each reads the state it finds, so the pass is the same whether it runs once, is cut, or
 runs again:

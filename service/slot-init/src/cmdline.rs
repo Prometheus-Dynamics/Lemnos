@@ -42,6 +42,9 @@ pub struct Args {
     /// The boot-source table: each `<prefix>.src.<source>=<path>` word as `<source>=<path>`, in
     /// order. Empty when the command line has none.
     pub sources: Vec<String>,
+    /// Whether the board file opted the data partition's grow out: `<prefix>.grow=0` (the image
+    /// builder writes it from `grow_data = false`). Anything else, or none, is on.
+    pub grow_off: bool,
 }
 
 impl Args {
@@ -64,6 +67,7 @@ impl Args {
                 .unwrap_or_default()
                 .to_string(),
             sources: sources(cmdline, prefix),
+            grow_off: arg(cmdline, &format!("{prefix}.grow")) == Some("0"),
         })
     }
 
@@ -138,5 +142,18 @@ mod generated_line {
     fn a_key_given_twice_takes_the_last() {
         let args = Args::parse(&format!("os.slot=os-1 os.slot=os-2 os.roothash={HASH}")).unwrap();
         assert_eq!(args.slot, "os-2");
+    }
+
+    /// `<prefix>.grow=0` is the board file's opt-out; any other value, or no word, leaves the grow on.
+    #[test]
+    fn the_grow_word_is_the_opt_out_only_when_it_says_zero() {
+        let off = Args::parse("os.slot=os-1 os.roothash=ab os.grow=0 panic=5").unwrap();
+        assert!(off.grow_off);
+        assert!(
+            !Args::parse("os.slot=os-1 os.roothash=ab panic=5")
+                .unwrap()
+                .grow_off
+        );
+        assert!(!Args::parse("os.slot=os-1 os.grow=1").unwrap().grow_off);
     }
 }

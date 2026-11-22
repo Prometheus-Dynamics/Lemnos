@@ -3179,3 +3179,191 @@ fn a_linked_state_dir_is_not_given_away() {
         "{logs}"
     );
 }
+
+/// The data partition's grow at the boot, with the disk it opens given: the board file's opt-out, the
+/// refusal of an attempt an earlier boot left, the stall of a call that never returns, and the next
+/// boot that refuses it by name. The disk here is the test's stand-in, never the real one.
+mod grow_state {
+    use super::*;
+    use lemnos_slot_store::grow::{self as grow_mod, Disk, STATE_FILE, State, decode_state};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    /// A disk whose first call (the mount's read-only check, the start of every pass) blocks until
+    /// released: a stand-in for a kernel call that never returns.
+    struct Stuck {
+        release: Arc<AtomicBool>,
+        opened: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl Disk for Stuck {
+        fn disk_sectors(&self) -> io::Result<u64> {
+            Ok(1 << 20)
+        }
+        fn read_at(&self, _: u64, _: &mut [u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn write_at(&mut self, _: u64, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn sync(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn part_start(&self) -> io::Result<u64> {
+            Ok(0)
+        }
+        fn part_sectors(&self) -> io::Result<u64> {
+            Ok(0)
+        }
+        fn resize_partition(&mut self, _: u64, _: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn resize_fs(&mut self, _: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn fs_bytes(&self) -> io::Result<u64> {
+            Ok(0)
+        }
+        fn data_read_only(&self) -> io::Result<bool> {
+            self.opened.fetch_add(1, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(false)
+        }
+        fn read_record(&self) -> io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn write_record(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn clear_record(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn args(grow_off: bool) -> crate::cmdline::Args {
+        crate::cmdline::Args {
+            prefix: "os".into(),
+            slot: "os-1".into(),
+            roothash: String::new(),
+            sources: Vec::new(),
+            grow_off,
+        }
+    }
+
+    /// The boot's state for the test: its data writable, its boot id `id`, the slots dir made.
+    fn boot_as<'a>(board: &'a Board, ops: &'a dyn Ops, id: &str) -> crate::boot::Boot<'a> {
+        board.write(
+            "proc/sys/kernel/random/boot_id",
+            format!("{id}\n").as_bytes(),
+        );
+        fs::create_dir_all(board.layout.state_dir()).unwrap();
+        crate::boot::Boot {
+            ops,
+            env: &board.env,
+            layout: Layout::new(board.env.at("data"), board.env.at("boot")),
+            slot: "os-1".into(),
+            trial: false,
+            disk: std::cell::OnceCell::new(),
+            data: None,
+            data_mounted: Cell::new(true),
+            data_writable: Cell::new(true),
+            foreign: Cell::new(false),
+            boot_mounted: Cell::new(false),
+            log_saved: Cell::new(false),
+            serial: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn state_text(board: &Board) -> String {
+        fs::read_to_string(board.layout.state_dir().join(STATE_FILE)).unwrap_or_default()
+    }
+
+    fn fake(board: &Board) -> Fake {
+        Fake {
+            root: board.env.root.clone(),
+            calls: RefCell::new(Vec::new()),
+            logs: RefCell::new(Vec::new()),
+            refuse: Vec::new(),
+            nand: None,
+            dm: board.dm_targets.clone(),
+            cut: Cell::new(None),
+        }
+    }
+
+    #[test]
+    fn a_board_file_that_opts_the_grow_out_records_it_and_opens_no_disk() {
+        let board = Board::new();
+        let ops = fake(&board);
+        let boot = boot_as(&board, &ops, "boot-a");
+        let opened = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        boot.grow_data_with(&args(true), &|| {
+            Ok(Box::new(Stuck {
+                release: Arc::new(AtomicBool::new(true)),
+                opened: opened.clone(),
+            }) as Box<dyn Disk + Send>)
+        });
+        assert_eq!(state_text(&board), "not-needed off in the board file\n");
+        assert_eq!(opened.load(Ordering::SeqCst), 0, "the disk is not opened");
+    }
+
+    #[test]
+    fn a_call_that_never_returns_leaves_its_marker_stops_feeding_and_the_next_boot_refuses_it() {
+        let board = Board::new();
+        let release = Arc::new(AtomicBool::new(false));
+        let opened = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        // Opens are counted where the boot opens the disk (not on the grow's thread, which may not have run yet).
+        let opens = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let open = || {
+            opens.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Stuck {
+                release: release.clone(),
+                opened: opened.clone(),
+            }) as Box<dyn Disk + Send>)
+        };
+
+        // Boot A: the call blocks. The marker is written first, the boot stops feeding past the hard bound.
+        let ops_a = fake(&board);
+        boot_as(&board, &ops_a, "boot-a").grow_data_with(&args(false), &open);
+        release.store(true, Ordering::SeqCst);
+        let marker = decode_state(&state_text(&board)).expect("the marker decodes");
+        assert!(
+            matches!(&marker, State::Running { boot_id, .. } if boot_id == "boot-a"),
+            "the marker names boot A: {marker:?}"
+        );
+        assert!(
+            ops_a
+                .logs
+                .borrow()
+                .iter()
+                .any(|line| line.contains("feeding stops")),
+            "{:?}",
+            ops_a.logs.borrow()
+        );
+
+        // Boot B: the earlier attempt is refused by name, and the disk is not opened again.
+        let before = opens.load(Ordering::SeqCst);
+        assert_eq!(before, 1, "boot A opened the disk once");
+        let ops_b = fake(&board);
+        boot_as(&board, &ops_b, "boot-b").grow_data_with(&args(false), &open);
+        assert_eq!(opens.load(Ordering::SeqCst), before, "no try on its own");
+        let refused = decode_state(&state_text(&board)).unwrap();
+        assert_eq!(
+            refused,
+            State::Refused {
+                state: grow_mod::STALLED.into(),
+                reason: "refused: the last grow did not return (boot boot-a)".into(),
+            }
+        );
+
+        // Boot C, still refused: nothing is tried until the explicit request clears it.
+        let ops_c = fake(&board);
+        boot_as(&board, &ops_c, "boot-c").grow_data_with(&args(false), &open);
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            before,
+            "still refused on the next boot"
+        );
+    }
+}

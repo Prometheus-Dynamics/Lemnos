@@ -6,8 +6,8 @@
 //! disk's end. A grow moves the backup to the new end, then the primary, so that at every write the
 //! disk reads as the old table or the new one (see [`super::grow`]'s write order).
 
-use lemnos_slot_store::mbr::ALIGN_SECTORS;
-use lemnos_slot_store::twocopy::crc32;
+use crate::mbr::ALIGN_SECTORS;
+use crate::twocopy::crc32;
 
 use super::Disk;
 

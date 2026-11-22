@@ -44,6 +44,7 @@ use lemnos_slot_store::boot_raw::{BootRaw, Pointer};
 use lemnos_slot_store::bootcheck;
 use lemnos_slot_store::disk::{self, Table};
 use lemnos_slot_store::firmware::{Since, since_good};
+use lemnos_slot_store::grow;
 use lemnos_slot_store::manifest::Manifest;
 use lemnos_slot_store::records::{KERNEL_GAP, MAX_ATTEMPTS, attempts, file, tryboot, uboot};
 use lemnos_slot_store::signing::{self, BOOT_UNVERIFIED};
@@ -322,6 +323,121 @@ impl Boot<'_> {
                     dir.display(),
                     root_check::USER
                 )),
+            }
+        }
+    }
+
+    /// The data partition's grow, run here and not by the daemon: the daemon's user can't write the
+    /// boot disk, and its `/data` is read-only. The pass runs with the data partition still mounted
+    /// where the boot put it, and its state is left in `board/slots/grow-state` for the daemon to
+    /// report (see `lemnos_slot_store::grow::run_boot`). Only when the state is ours to write.
+    ///
+    /// The board file's opt-out arrives as `<prefix>.grow=0` ([`Args::grow_off`]): the state is then
+    /// `not-needed off in the board file` and no disk is opened. An attempt that an earlier boot started
+    /// and did not finish is refused by name, and not tried again on its own (`grow-stalled`); a
+    /// `lemnos-ctl grow-retry` removes that refusal for one more try.
+    fn grow_data(&self, args: &Args) {
+        if !args.grow_off && self.disk.get().is_none() {
+            self.write_grow_state(&grow::State::Refused {
+                state: "no-disk".into(),
+                reason: "no-disk: the boot disk is not known, so the data partition can't be grown"
+                    .into(),
+            });
+            return;
+        }
+        self.grow_data_with(args, &|| self.real_disk());
+    }
+
+    /// The boot's disk for the grow: the real one, on the boot disk's node, with the data partition's mount.
+    fn real_disk(&self) -> Result<Box<dyn grow::Disk + Send>, String> {
+        let name = self.disk.get().ok_or("the boot disk is not known")?;
+        Ok(Box::new(grow::Real::new(
+            &self.env.dev.join(name),
+            &self.layout.data,
+        )))
+    }
+
+    /// Leaves the grow's state in `board/slots/grow-state`. A write that fails is logged, and the boot goes on.
+    fn write_grow_state(&self, state: &grow::State) {
+        let state_dir = self.layout.state_dir();
+        let path = state_dir.join(grow::STATE_FILE);
+        let tmp = state_dir.join(format!("{}.tmp", grow::STATE_FILE));
+        if let Err(error) =
+            fs::write(&tmp, grow::encode_state(state)).and_then(|()| fs::rename(&tmp, &path))
+        {
+            self.log(&format!(
+                "the grow's state can't be written to {}: {error}",
+                path.display()
+            ));
+        }
+    }
+
+    /// [`Boot::grow_data`] with the disk it opens for the pass given: the boot's own, or a test's stand-in.
+    fn grow_data_with(
+        &self,
+        args: &Args,
+        open: &dyn Fn() -> Result<Box<dyn grow::Disk + Send>, String>,
+    ) {
+        let state_dir = self.layout.state_dir();
+        if !self.state_writable() {
+            self.log("the data partition's grow is not run: the slots state is not ours to write");
+            return;
+        }
+        let path = state_dir.join(grow::STATE_FILE);
+        let report = |state: &grow::State| self.write_grow_state(state);
+        if args.grow_off {
+            report(&grow::State::NotNeeded {
+                reason: "off in the board file".into(),
+            });
+            return;
+        }
+        let boot_id = fs::read_to_string(self.env.at("proc/sys/kernel/random/boot_id"))
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        let Some(boot_id) = boot_id else {
+            report(&grow::State::Refused {
+                state: "no-boot-id".into(),
+                reason: "no-boot-id: the boot id can't be read, so the grow can't record its attempt: nothing was done".into(),
+            });
+            return;
+        };
+        match fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| grow::decode_state(&text))
+        {
+            Some(grow::State::Running {
+                boot_id: earlier, ..
+            }) if earlier != boot_id => {
+                report(&grow::State::Refused {
+                    state: grow::STALLED.into(),
+                    reason: format!("refused: the last grow did not return (boot {earlier})"),
+                });
+                self.log(&format!("the data partition's grow is refused: its last attempt (boot {earlier}) did not return"));
+                return;
+            }
+            Some(grow::State::Refused { state, .. }) if state == grow::STALLED => {
+                self.log("the data partition's grow stays refused: its last attempt did not return (lemnos-ctl grow-retry clears it)");
+                return;
+            }
+            _ => {}
+        }
+        let wait = |time: Duration| self.ops.sleep(time);
+        let now_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        };
+        match grow::run_boot(&boot_id, open, &wait, &now_ms, &report) {
+            Some(state) => self.log(&format!(
+                "the data partition's grow: {}",
+                grow::encode_state(&state).trim_end()
+            )),
+            None => {
+                // The hard bound passed with the call still out: stop feeding, so the watchdog resets the board.
+                self.ops.stop_feeding();
+                self.log("the data partition's grow did not return within its hard bound: feeding stops, the watchdog resets the board");
+                self.ops.hold_for_reset();
             }
         }
     }
@@ -1512,6 +1628,7 @@ impl Boot<'_> {
                 ));
             }
         }
+        self.grow_data(&args);
         self.give_state_dirs(&new_root);
         let moved_data = new_root.join("data");
         if let Err(error) = self.ops.move_mount(&self.layout.data, &moved_data) {

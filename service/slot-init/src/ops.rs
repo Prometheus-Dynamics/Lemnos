@@ -50,6 +50,9 @@ pub trait Ops {
     /// Stops feeding the watchdog: from here on nothing feeds it, so it resets the board unless the
     /// daemon takes it over. The default does nothing.
     fn stop_feeding(&self) {}
+    /// Holds the boot after a grow whose call did not return: feeding has stopped (the caller did that),
+    /// so the watchdog resets the board. The system's version never returns; the tests' fake returns.
+    fn hold_for_reset(&self) {}
     /// Asks the firmware for its flashing mode at the next boot (the Pi family's RPIBOOT: the board
     /// then waits for a USB host with no timeout). The caller restarts when this returns `Ok`.
     fn request_flash_mode(&self) -> Result<(), String>;

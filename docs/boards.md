@@ -267,7 +267,7 @@ These keys are optional. [Slots](slots.md#the-good-boot-deadline) says what they
 | Driver | Key | Default | Range | Meaning |
 |---|---|---|---|---|
 | `system-slots` | `good_boot_s` | `300` | integer, 30 up to 3600 | The seconds a boot has to be good (lemnosd ready and the booted marker set) before the unit restarts the board. The image's drop-in is written by `lemnos-ctl tree --good-boot-unit FILE` from this value. A value that is not an integer, or outside the range, is refused by name |
-| `system-slots` | `grow_data` | `true` | `true`, `false` | Grow the data partition (partition 2) to the end of the boot disk at each start until it is done. On by default: it acts only on a disk that validates as the Lemnos layout (partition 2 last, type `0x83`, labelled `lemnos-data`), and writes four bytes of the table. `false` opts out. [Slots](slots.md#growing-the-data-partition-at-first-start) lists the steps and what each refusal leaves |
+| `system-slots` | `grow_data` | `true` | `true`, `false` | Grow the data partition (partition 2) to the end of the boot disk at each start until it is done, by the boot (slot-init), not the daemon. On by default: it acts only on a disk that validates as the Lemnos layout (partition 2 last, type `0x83`, labelled `lemnos-data`), and writes four bytes of the table. `false` opts out in the daemon's report only; the boot's grow reads no board file yet (see slots.md). [Slots](slots.md#growing-the-data-partition-at-first-start) lists the steps and what each refusal leaves |
 
 ## The board overlay file
 

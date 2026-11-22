@@ -2408,6 +2408,10 @@ pub(crate) fn grow_info(grow: Option<&grow::Task>, out: &mut String) {
             out.push_str(",\"grow_reason\":");
             quoted(&refusal.reason, out);
         }
+        Some(grow) if grow.done().is_some() => {
+            out.push_str(",\"grow_state\":\"not-needed\",\"grow_reason\":");
+            quoted(grow.done().unwrap_or_default(), out);
+        }
         Some(grow) if grow.progress().is_some() => {
             let progress = grow.progress().unwrap_or_else(|| unreachable!());
             let state = if progress.overrun {

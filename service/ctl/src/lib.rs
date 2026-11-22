@@ -95,6 +95,10 @@ lemnos-ctl [--socket PATH] COMMAND
                                  write the data partition's tree for a board's first slot, as the
                                  daemon's install, trial and confirm leave it, with nothing written
                                  outside DIR (which must not exist), or verify one, read-only
+  grow-retry DATA
+                                 clear a data-partition grow the boot refused because its last
+                                 attempt never returned, so the next boot tries it once more
+                                 (DATA is the data partition's mount point; docs/slots.md)
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
                                  [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
@@ -117,6 +121,7 @@ pub mod bridge_env;
 #[cfg(test)]
 mod bridge_env_tests;
 mod files;
+mod grow_retry;
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -280,6 +285,9 @@ pub fn run_with_stderr(args: &[String], out: &mut dyn Write, err: &mut dyn Write
     }
     if command == "firmware-check" {
         return firmware_check::run(tail, out);
+    }
+    if command == "grow-retry" {
+        return grow_retry::run(tail, out);
     }
     if command == "bundle" {
         return bundle::run(tail, out);

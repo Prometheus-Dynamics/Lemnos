@@ -423,12 +423,35 @@ pub fn cmdline_slot(board: &BoardFile, slot: &str) -> Result<String, String> {
     for item in sources {
         words.push_str(&format!(" {prefix}.src.{item}"));
     }
+    // The board file's `grow_data = false`, as the boot reads it: the data partition's grow is off.
+    if grow_off(board)? {
+        words.push_str(&format!(" {prefix}.grow=0"));
+    }
     for word in serial {
         words.push(' ');
         words.push_str(&word);
     }
     words.push_str(" panic=5\n");
     Ok(words)
+}
+
+/// Whether the board file's system-slots device opts the data partition's grow out (`grow_data = false`).
+/// Unset is on, as the driver has it.
+pub fn grow_off(board: &BoardFile) -> Result<bool, String> {
+    let Some(device) = board
+        .devices
+        .iter()
+        .find(|device| device.driver == "system-slots")
+    else {
+        return Ok(false);
+    };
+    match device.config.get("grow_data") {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .map(|on| !on)
+            .ok_or_else(|| "system-slots: grow_data must be true or false".to_string()),
+    }
 }
 
 /// The identity device's serial settings as `<prefix>.serial.<name>=<value>` words, beside the

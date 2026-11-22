@@ -32,6 +32,7 @@ pub mod fatimage;
 pub mod firmware;
 pub mod goodboot;
 pub mod gpt;
+pub mod grow;
 pub mod json;
 pub mod layout;
 pub mod manifest;

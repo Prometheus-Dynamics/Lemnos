@@ -1866,7 +1866,7 @@ fn a_refused_install_names_the_ungrown_partition_while_the_grow_is_failing() {
     board.slots.reserve = u64::MAX / 2;
     let data = board.layout().data.clone();
     let mut task = crate::grow::Task::new(Err("the boot disk is not known".into()), data);
-    task.retry.failed(0, "the boot disk is not known");
+    task.retry.last = "the boot disk is not known".into();
     board.slots.grow = Some(task);
     assert_eq!(board.slots.accept(1 << 20), Err(crate::install::NO_SPACE));
     let error = board.state().error;

@@ -491,6 +491,28 @@ mod cmdline_slot {
         assert!(settings.source().unwrap().is_some());
     }
 
+    /// The board file's `grow_data = false` puts `<prefix>.grow=0` on the slot's command line, so the
+    /// boot leaves the data partition's grow off; the default writes no such word.
+    #[test]
+    fn grow_data_false_writes_the_grow_word_and_the_default_writes_none() {
+        let off = reference_replacing(
+            "boot_args = \"os\", reserve_mb",
+            "boot_args = \"os\", grow_data = false, reserve_mb",
+        );
+        let line = cmdline_slot(&off, "os-1").unwrap();
+        assert!(line.contains(" os.grow=0 "), "{line}");
+        let on = reference_replacing(
+            "boot_args = \"os\", reserve_mb",
+            "boot_args = \"os\", grow_data = true, reserve_mb",
+        );
+        assert!(!cmdline_slot(&on, "os-1").unwrap().contains("grow"));
+        assert!(
+            !cmdline_slot(&super::reference(), "os-1")
+                .unwrap()
+                .contains("grow")
+        );
+    }
+
     /// A board with no system-identity device writes no serial word, and slot-init then refuses the
     /// machine id by name.
     #[test]
