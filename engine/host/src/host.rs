@@ -1124,8 +1124,16 @@ struct Reading(&'static Inner);
 impl Router for Reading {
     fn call(&self, device: u32, method: MethodId, args: &[u8], reply: &mut [u8]) -> Result<usize> {
         let slot = self.0.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.0
-            .call_from(&slot, CallerId::LOCAL, true, false, method, args, reply)
+        self.0.call_from(
+            &slot,
+            CallerId::LOCAL,
+            true,
+            false,
+            method,
+            args,
+            reply,
+            None,
+        )
     }
 
     fn health(&self, device: u32) -> Health {
@@ -1198,18 +1206,67 @@ pub(crate) struct CallWork {
     method: MethodId,
     caller: CallerId,
     as_job: bool,
+    trace: Option<CallTrace>,
 }
 
 impl CallWork {
     pub(crate) fn run(self, args: &[u8], reply: &mut [u8]) -> Result<usize> {
-        self.inner.call_here(
+        let result = self.inner.call_from(
             &self.slot,
             self.caller,
+            false,
             self.as_job,
             self.method,
             args,
             reply,
-        )
+            self.trace.as_ref(),
+        );
+        if let Some(trace) = &self.trace {
+            trace.sink.finished(trace.ticket, status_of(&result));
+        }
+        result
+    }
+}
+
+/// What became of one call, as the caller's [`CallSink`] hears it.
+fn status_of(result: &Result<usize>) -> Status {
+    match result {
+        Ok(_) => Status::OK,
+        Err(status) => *status,
+    }
+}
+
+/// Reports a call the lane never ran (or never could): it is over with `status`, and it did not apply.
+fn report_refused(trace: Option<&CallTrace>, status: Status) {
+    if let Some(trace) = trace {
+        trace.sink.finished(trace.ticket, status);
+    }
+}
+
+/// Told how a traced call goes (see [`Host::call_traced`]). Both are called on the call's lane, so a
+/// sink must not wait on the caller. The host never reports a call it started and then abandoned
+/// at its deadline: the driver's method is still running, and the sink hears `finished` when it
+/// returns, which can be after the caller has its timeout.
+pub trait CallSink: Send + Sync {
+    /// The driver's method is about to run for the call `ticket` names.
+    fn started(&self, ticket: u64);
+    /// The call is over with `status`: the status the driver's method returned, or the refusal that
+    /// stopped the call before its method ran. Which of the two it was is for the sink to keep, from
+    /// whether `started` came first.
+    fn finished(&self, ticket: u64, status: Status);
+}
+
+/// A call's trace: where to report it, and the number the caller gave it.
+#[derive(Clone)]
+pub struct CallTrace {
+    sink: Arc<dyn CallSink>,
+    ticket: u64,
+}
+
+impl CallTrace {
+    /// The trace of the call `ticket` names, reported to `sink`.
+    pub fn new(sink: Arc<dyn CallSink>, ticket: u64) -> Self {
+        Self { sink, ticket }
     }
 }
 
@@ -2098,7 +2155,7 @@ impl Inner {
         args: &[u8],
         reply: &mut [u8],
     ) -> Result<usize> {
-        self.call_from(slot, caller, false, as_job, method, args, reply)
+        self.call_from(slot, caller, false, as_job, method, args, reply, None)
     }
 
     /// Runs a method here. `reads_only` is set for a caller that may change nothing: a
@@ -2115,6 +2172,7 @@ impl Inner {
         method: MethodId,
         args: &[u8],
         reply: &mut [u8],
+        trace: Option<&CallTrace>,
     ) -> Result<usize> {
         if slot.hung.load(Ordering::Acquire) {
             return Err(Status::NO_DEVICE);
@@ -2154,6 +2212,9 @@ impl Inner {
             }
             if tracks_callers {
                 instance.caller(caller);
+            }
+            if let Some(trace) = trace {
+                trace.sink.started(trace.ticket);
             }
             let mut status = instance.dispatch(method, args, &mut writer);
             self.stamp_running_ok(slot, instance.as_ref(), slot.is_running());
@@ -2357,6 +2418,7 @@ impl Inner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call(
         &'static self,
         slot: Arc<Slot>,
@@ -2365,23 +2427,40 @@ impl Inner {
         method: MethodId,
         args: &[u8],
         reply: &mut [u8],
+        trace: Option<CallTrace>,
     ) -> Result<usize> {
-        let lane = self.lane(&slot).map_err(|_| Status::NO_MEMORY)?;
+        let lane = match self.lane(&slot) {
+            Ok(lane) => lane,
+            Err(_) => {
+                report_refused(trace.as_ref(), Status::NO_MEMORY);
+                return Err(Status::NO_MEMORY);
+            }
+        };
+        // Kept here: the work takes its own copy, and a lane that never takes it must still report.
+        let refused = trace.clone();
         let work = Work::Call(CallWork {
             inner: self,
             slot: Arc::clone(&slot),
             method,
             caller,
             as_job,
+            trace,
         });
         match lane.run(args, reply, self.options.call_deadline, work) {
             Ok(result) => result,
             Err(LaneError::Deadline) => {
+                // The work may already be running on the lane: it reports its own end when it ends.
                 self.on_deadline(&slot);
                 Err(Status::TIMED_OUT)
             }
-            Err(LaneError::Busy) => Err(Status::TIMED_OUT),
-            Err(LaneError::Spawn) => Err(Status::NO_MEMORY),
+            Err(LaneError::Busy) => {
+                report_refused(refused.as_ref(), Status::TIMED_OUT);
+                Err(Status::TIMED_OUT)
+            }
+            Err(LaneError::Spawn) => {
+                report_refused(refused.as_ref(), Status::NO_MEMORY);
+                Err(Status::NO_MEMORY)
+            }
         }
     }
 
@@ -3489,7 +3568,30 @@ impl Host {
         reply: &mut [u8],
     ) -> Result<usize> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.inner.call(slot, caller, false, method, args, reply)
+        self.inner
+            .call(slot, caller, false, method, args, reply, None)
+    }
+
+    /// As [`Host::call_as`], and `trace` hears how the call goes: `started` when the driver's method
+    /// is about to run, and `finished` with the status it ends with. A call that the caller gave up
+    /// on (its [`Status::TIMED_OUT`] here) may still run on its lane; `finished` says so when it ends,
+    /// so the caller can learn what happened after its timeout. A device that is not there is
+    /// `finished` at once, with [`Status::NOT_FOUND`].
+    pub fn call_traced(
+        &self,
+        caller: CallerId,
+        device: u32,
+        method: MethodId,
+        args: &[u8],
+        reply: &mut [u8],
+        trace: CallTrace,
+    ) -> Result<usize> {
+        let Some(slot) = self.inner.slot(device) else {
+            report_refused(Some(&trace), Status::NOT_FOUND);
+            return Err(Status::NOT_FOUND);
+        };
+        self.inner
+            .call(slot, caller, false, method, args, reply, Some(trace))
     }
 
     /// Borrows the two bulk endpoints of a device's function for `caller`, as `[OUT, IN]`
@@ -3555,7 +3657,7 @@ impl Host {
         let mut reply = [0u8; 8];
         let n = self
             .inner
-            .call(slot, caller, true, method, args, &mut reply)?;
+            .call(slot, caller, true, method, args, &mut reply, None)?;
         u64::decode(&mut Reader::new(&reply[..n]))
     }
 

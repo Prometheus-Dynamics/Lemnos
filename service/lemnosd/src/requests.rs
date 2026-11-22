@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use lemnos_core::{HostClock, MethodId, Status};
-use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
+use lemnos_host::{CallSink, CallTrace, DeviceInfo};
 use lemnos_wire::ring::fds;
 use lemnos_wire::{
     CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
@@ -19,6 +19,7 @@ use lemnos_wire::{
 use crate::Core;
 use crate::conn::Conn;
 use crate::events::{wire_refusal, wire_state};
+use crate::outcomes::Answer;
 use crate::packages::PackageMode;
 use crate::readers::Point;
 
@@ -31,6 +32,8 @@ type Keep = bool;
 pub(crate) struct Client {
     core: Arc<Core>,
     conn: Arc<Conn>,
+    /// The name the client gave in Hello: its identity for the outcomes of its calls.
+    name: String,
     greeted: bool,
     reply: Vec<u8>,
     buf: Vec<u8>,
@@ -43,6 +46,7 @@ impl Client {
         Self {
             core,
             conn,
+            name: String::new(),
             greeted: false,
             reply: vec![0; REPLY_START],
             buf: vec![0; BUFFER_START],
@@ -122,12 +126,13 @@ impl Client {
     fn handle(&mut self, frame: Frame<'_>) -> Keep {
         if let Frame::Hello {
             version,
-            name: _,
+            name,
             events,
             parts,
             ..
         } = frame
         {
+            self.name = name.to_string();
             return self.hello(version, events, parts.0);
         }
         if !self.greeted {
@@ -138,6 +143,16 @@ impl Client {
             Frame::Packages { id } => self.packages(id),
             Frame::Open { id, device, tag } => self.open(id, device, tag),
             Frame::Describe { id, device } => self.describe(id, device),
+            Frame::CallToken {
+                id,
+                device,
+                contract,
+                method,
+                reply_capacity,
+                token,
+                args,
+            } => self.call_token(id, device, contract, method, reply_capacity, token, args),
+            Frame::CallOutcome { id, token } => self.outcome(id, token),
             Frame::Call {
                 id,
                 device,
@@ -225,7 +240,10 @@ impl Client {
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
             // END belongs to the endpoints part: a client that refuses that part gets neither bit.
-            features: (feature::EVERY | lemnos_wire::ENDPOINTS_END | lemnos_wire::BOARD_ID)
+            features: (feature::EVERY
+                | lemnos_wire::ENDPOINTS_END
+                | lemnos_wire::BOARD_ID
+                | lemnos_wire::CALL_OUTCOME)
                 & !theirs.refused
                 & if theirs.refused & feature::ENDPOINTS != 0 {
                     !lemnos_wire::ENDPOINTS_END
@@ -420,6 +438,78 @@ impl Client {
         reply_capacity: u32,
         args: &[u8],
     ) -> Keep {
+        self.run_call(
+            id,
+            device,
+            MethodId { contract, method },
+            reply_capacity,
+            args,
+            None,
+        )
+    }
+
+    /// A call made with a token: its outcome is kept under this client's name and the token, so
+    /// [`outcome`](Self::outcome) can answer for it after a timeout or a reconnect. A call with a
+    /// token still running is refused, and is not started.
+    #[allow(clippy::too_many_arguments)]
+    fn call_token(
+        &mut self,
+        id: u32,
+        device: u32,
+        contract: u8,
+        method: u16,
+        reply_capacity: u32,
+        token: u64,
+        args: &[u8],
+    ) -> Keep {
+        let Some(ticket) = self.core.outcomes.begin(&self.name, token) else {
+            return self.refuse(id, Status::BUSY, "a call with this token is still running");
+        };
+        let sink: Arc<dyn CallSink> = self.core.outcomes.clone();
+        // A method the contract does not have is refused here, before any driver runs it: the call
+        // was not applied. (The host would refuse it inside the driver's dispatch, after its start.)
+        if let Some(manifest) = self.core.host.manifest(device) {
+            let known = manifest
+                .provides
+                .get(usize::from(contract))
+                .is_some_and(|info| info.methods.iter().any(|m| m.id == method));
+            if !known {
+                sink.finished(ticket, Status::NOT_SUPPORTED);
+                let text = call_refusal(Some(&manifest), contract, method, Status::NOT_SUPPORTED);
+                return self.refuse(id, Status::NOT_SUPPORTED, &text);
+            }
+        }
+        self.run_call(
+            id,
+            device,
+            MethodId { contract, method },
+            reply_capacity,
+            args,
+            Some(CallTrace::new(sink, ticket)),
+        )
+    }
+
+    /// What became of the call this client made with `token`.
+    fn outcome(&self, id: u32, token: u64) -> Keep {
+        let (state, status) = match self.core.outcomes.query(&self.name, token) {
+            Answer::Unknown => (lemnos_wire::outcome::UNKNOWN, 0),
+            Answer::Pending => (lemnos_wire::outcome::PENDING, 0),
+            Answer::Applied(status) => (lemnos_wire::outcome::APPLIED, status),
+            Answer::NotApplied(status) => (lemnos_wire::outcome::NOT_APPLIED, status),
+        };
+        self.conn.answer(&Frame::OutcomeIs { id, state, status });
+        true
+    }
+
+    fn run_call(
+        &mut self,
+        id: u32,
+        device: u32,
+        method: MethodId,
+        reply_capacity: u32,
+        args: &[u8],
+        trace: Option<CallTrace>,
+    ) -> Keep {
         let capacity = reply_capacity as usize;
         if capacity > MAX_FRAME - REPLY_OVERHEAD {
             return self.refuse(id, Status::INVALID_ARGUMENT, "reply capacity too large");
@@ -427,13 +517,19 @@ impl Client {
         if self.reply.len() < capacity {
             self.reply.resize(capacity, 0);
         }
-        let method = MethodId { contract, method };
         let reply = &mut self.reply[..capacity];
-        match self
-            .core
-            .host
-            .call_as(self.conn.id, device, method, args, reply)
-        {
+        let done = match trace {
+            None => self
+                .core
+                .host
+                .call_as(self.conn.id, device, method, args, reply),
+            Some(trace) => {
+                self.core
+                    .host
+                    .call_traced(self.conn.id, device, method, args, reply, trace)
+            }
+        };
+        match done {
             Ok(n) => self.conn.answer(&Frame::Reply {
                 id,
                 bytes: &reply[..n],
@@ -441,7 +537,7 @@ impl Client {
             Err(status) => {
                 let text = call_refusal(
                     self.core.host.manifest(device).as_ref(),
-                    contract,
+                    method.contract,
                     method.method,
                     status,
                 );

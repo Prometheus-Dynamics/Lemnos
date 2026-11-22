@@ -14,6 +14,7 @@ pub mod gadget;
 pub mod helper;
 mod liveness;
 mod notify;
+mod outcomes;
 pub mod packages;
 pub mod privilege;
 mod readers;
@@ -145,6 +146,8 @@ pub(crate) struct Core {
     pub(crate) liveness: Arc<DaemonLiveness>,
     pub(crate) clock: Arc<MonotonicClock>,
     pub(crate) readers: Readers,
+    /// The outcomes of calls made with a token, for a client that asks after a timeout.
+    pub(crate) outcomes: Arc<outcomes::Outcomes>,
     pub(crate) clients: Mutex<Vec<Arc<Conn>>>,
     pub(crate) waker: Arc<Waker>,
     stop: AtomicBool,
@@ -289,6 +292,7 @@ impl Service {
             liveness: Arc::clone(&liveness),
             clock,
             readers: Readers::new(),
+            outcomes: Arc::new(outcomes::Outcomes::new()),
             clients: Mutex::new(Vec::new()),
             waker: Arc::new(Waker::new(wake_tx)),
             stop: AtomicBool::new(false),

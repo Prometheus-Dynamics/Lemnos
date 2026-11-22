@@ -251,6 +251,17 @@ time one sleep takes over it. A zero bound is `connect`: it makes one try and fa
 A call answers `BUSY` when the device's driver is in another call or a tick right then. The host
 never waits on a driver, because a driver may be stuck. Ask again.
 
+A call that times out does not say whether it applied: the service may still run it after the client
+has given up, and the reply is lost. `Client::call_token(handle, method, args, reply, token)` makes
+the same call with a `token` the caller chooses (any `u64`, unique to the caller's calls). The service
+keeps the call's outcome under the connection's name and the token, so `Client::outcome(token)` can
+answer after the timeout, after a reconnect, or from a new process of the same name. It answers
+`Applied(status)` (the driver's method ran and returned `status`), `NotApplied(status)` (refused before
+the driver's method ran), `Pending` (still running), or `Unknown` (never seen, aged out after ten
+minutes, or evicted: the service keeps the last 256 calls). A service from before outcomes is called
+without the token, and its outcome reads `Unknown`. `lemnos-ctl call` uses a token and, when the answer
+does not come back, prints the outcome in its error.
+
 Steady-state calls, values and frames allocate nothing in the client.
 
 ## The C API

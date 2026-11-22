@@ -142,6 +142,20 @@ pub fn follow<'a>(devices: &'a [DeviceEntry], from: &str) -> Vec<&'a DeviceEntry
     chain
 }
 
+/// What the service knows of a call made with a token ([`Session::outcome`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The driver's method ran and returned this status.
+    Applied(lemnos_core::Status),
+    /// The call was refused before the driver's method ran, with this status.
+    NotApplied(lemnos_core::Status),
+    /// The call started and has not finished yet.
+    Pending,
+    /// The service has no record of the call: it never saw the token, the outcome aged out or was
+    /// evicted, or the service keeps no outcomes at all (a service from before them).
+    Unknown,
+}
+
 /// Which driver packages the service runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageMode {
@@ -673,6 +687,7 @@ const fn answers(frame: &Frame<'_>) -> Option<u32> {
         | Frame::Package { id, .. }
         | Frame::PackagesDone { id, .. }
         | Frame::JobStarted { id, .. }
+        | Frame::OutcomeIs { id, .. }
         | Frame::Refusal { id, .. } => Some(id),
         _ => None,
     }
@@ -1411,6 +1426,34 @@ impl Session {
         }))
     }
 
+    /// As [`Session::op_call`], with a token the service keeps the call's outcome under.
+    pub(crate) fn op_call_token<'r>(
+        &mut self,
+        handle: &Handle,
+        method: u16,
+        args: &[u8],
+        reply: &'r mut [u8],
+        token: u64,
+    ) -> Result<(u32, impl Pick<usize> + use<'r>), Error> {
+        if handle.generation != self.generation {
+            return Err(Error::Stale);
+        }
+        let id = self.shared.id();
+        self.queue(&Frame::CallToken {
+            id,
+            device: handle.device,
+            contract: handle.contract,
+            method,
+            reply_capacity: reply.len() as u32,
+            token,
+            args,
+        })?;
+        Ok((id, move |frame: Frame<'_>| match frame {
+            Frame::Reply { bytes, .. } => Some(copy(bytes, reply)),
+            _ => None,
+        }))
+    }
+
     pub(crate) fn op_call<'r>(
         &mut self,
         handle: &Handle,
@@ -1716,6 +1759,56 @@ impl Session {
         }
         let (id, pick) = self.op_call(handle, method, args, reply)?;
         self.wait(id, pick)
+    }
+
+    /// Calls a method, keeping its outcome under `token` at the service (see [`Session::outcome`]).
+    /// A timeout or a lost connection does not say whether the call applied: ask with the same
+    /// token, and the service answers. A service from before outcomes is called without the token,
+    /// and its outcome reads [`Outcome::Unknown`].
+    pub fn call_token(
+        &mut self,
+        handle: &mut Handle,
+        method: u16,
+        args: &[u8],
+        reply: &mut [u8],
+        token: u64,
+    ) -> Result<usize, Error> {
+        if !self.shared.ready {
+            self.settle()?;
+        }
+        if handle.generation != self.generation {
+            *handle = self.open(&handle.name.clone(), &handle.tag.clone())?;
+        }
+        if self.shared.features & lemnos_wire::CALL_OUTCOME == 0 {
+            let (id, pick) = self.op_call(handle, method, args, reply)?;
+            return self.wait(id, pick);
+        }
+        let (id, pick) = self.op_call_token(handle, method, args, reply, token)?;
+        self.wait(id, pick)
+    }
+
+    /// What became of the call this session's name made with `token`, as the service last heard.
+    /// Works on any connection of the same name, so it answers after a reconnect too.
+    pub fn outcome(&mut self, token: u64) -> Result<Outcome, Error> {
+        if !self.shared.ready {
+            self.settle()?;
+        }
+        if self.shared.features & lemnos_wire::CALL_OUTCOME == 0 {
+            return Ok(Outcome::Unknown);
+        }
+        let id = self.shared.id();
+        self.queue(&Frame::CallOutcome { id, token })?;
+        self.wait(id, move |frame: Frame<'_>| match frame {
+            Frame::OutcomeIs { state, status, .. } => Some(Ok(match state {
+                lemnos_wire::outcome::APPLIED => Outcome::Applied(lemnos_core::Status(status)),
+                lemnos_wire::outcome::NOT_APPLIED => {
+                    Outcome::NotApplied(lemnos_core::Status(status))
+                }
+                lemnos_wire::outcome::PENDING => Outcome::Pending,
+                _ => Outcome::Unknown,
+            })),
+            _ => None,
+        })
     }
 
     /// Asks for a method's result every `period_us`. The subscription is

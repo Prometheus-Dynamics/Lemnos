@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use common::{FakeHost, temp_dir};
 use lemnos_client::{
-    Client, DeviceEntry, DeviceHealth, DeviceState, Error, Incoming, PackageEntry, PackageMode,
-    Session, SubscriptionState, follow,
+    Client, DeviceEntry, DeviceHealth, DeviceState, Error, Incoming, Outcome, PackageEntry,
+    PackageMode, Session, SubscriptionState, follow,
 };
 use lemnos_core::{
     Contract, ContractInfo, Decode, Encode, MethodInfo, Param, Result, Shape, Status, Tag, contract,
@@ -37,6 +37,28 @@ fn the_board_id_is_the_board_the_service_says_it_serves() {
         .store(lemnos_wire::BOARD_ID, Ordering::SeqCst);
     let client = Client::connect(&host.path, "the-tool").unwrap();
     assert_eq!(client.board_id().unwrap(), "fake");
+}
+
+/// A service from before outcomes (no CALL_OUTCOME bit) takes a call with a token as a plain call,
+/// and its outcome reads unknown: nothing is sent that it cannot read.
+#[test]
+fn a_service_from_before_outcomes_takes_a_plain_call_and_reads_unknown() {
+    let host = FakeHost::start();
+    host.control
+        .features
+        .store(lemnos_wire::BOARD_ID, Ordering::SeqCst);
+    let client = Client::connect(&host.path, "the-tool").unwrap();
+    let mut handle = client.open_tag("one", TAG).unwrap();
+    let mut reply = [0u8; 8];
+    let n = client
+        .call_token(&mut handle, 1, &[7, 0, 0, 0], &mut reply, 5)
+        .unwrap();
+    assert_eq!(
+        &reply[..n],
+        &[7, 0, 0, 0],
+        "the call was answered as a plain call"
+    );
+    assert_eq!(client.outcome(5).unwrap(), Outcome::Unknown);
 }
 
 /// A service from before BOARD_ID names itself, and the client does not take that name for a

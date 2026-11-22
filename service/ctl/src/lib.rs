@@ -2,7 +2,8 @@
 //! description, so it works on devices nobody has written tooling for.
 
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, PackageMode, follow};
 use lemnos_core::{ItemKind, Status};
@@ -155,6 +156,22 @@ fn text(error: Error) -> String {
 
 /// A call's error as the tool prints it. A reply that did not fit the out buffer says how to ask
 /// for more ([`too_small`]).
+/// Whether a call's error leaves open if it applied: the answer never came back.
+fn reply_lost(error: &Error) -> bool {
+    matches!(error, Error::TimedOut | Error::Disconnected)
+        || matches!(error, Error::Refused { status, .. } if *status == Status::TIMED_OUT)
+}
+
+/// A token for one call: unique to this process and moment, and never 0.
+fn call_token() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(0));
+    let pid = u64::from(std::process::id());
+    (nanos ^ (pid << 40) ^ NEXT.fetch_add(1, Ordering::Relaxed)) | 1
+}
+
 fn refusal(error: Error, call: &Call) -> String {
     match &error {
         Error::Refused { status, .. } if *status == Status::BUFFER_TOO_SMALL => {
@@ -977,6 +994,20 @@ impl Tool<'_> {
     /// A refused call's text. On a device that is not running, the sentence read and watch print
     /// (its state and reason) replaces the host's refusal, which says only that the call failed.
     /// Only the refusal path looks the device up again: a call that runs costs nothing extra.
+    /// The outcome of a call whose answer never came, as the service last heard of it.
+    fn asked(&self, device: &str, token: u64, error: &Error) -> String {
+        let outcome = match self.client.outcome(token) {
+            Ok(lemnos_client::Outcome::Applied(status)) => format!("applied (status {})", status.0),
+            Ok(lemnos_client::Outcome::NotApplied(status)) => {
+                format!("not applied (status {})", status.0)
+            }
+            Ok(lemnos_client::Outcome::Pending) => "still running".to_string(),
+            Ok(lemnos_client::Outcome::Unknown) => "unknown".to_string(),
+            Err(why) => format!("unknown ({why})"),
+        };
+        format!("{device}: {error}; outcome: {outcome}")
+    }
+
     fn refused(&self, device: &str, text: String) -> String {
         match self.device(device) {
             Ok(entry) => not_running(device, &entry).unwrap_or(text),
@@ -1151,10 +1182,16 @@ impl Tool<'_> {
         let tag = &description.contracts[contract].tag;
         let mut handle = self.client.open_tag(device, tag).map_err(text)?;
         let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
-        let n = self
+        let token = call_token();
+        let n = match self
             .client
-            .call(&mut handle, method.id, &call.args, &mut reply)
-            .map_err(|error| self.refused(device, refusal(error, call)))?;
+            .call_token(&mut handle, method.id, &call.args, &mut reply, token)
+        {
+            Ok(n) => n,
+            // No answer came back, so the call may still have applied: the service keeps the outcome.
+            Err(error) if reply_lost(&error) => return Err(self.asked(device, token, &error)),
+            Err(error) => return Err(self.refused(device, refusal(error, call))),
+        };
         reply.truncate(n);
         Ok(reply)
     }

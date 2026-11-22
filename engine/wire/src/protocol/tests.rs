@@ -284,6 +284,33 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             "endpoints-close",
             Frame::EndpointsClose { id: 18, device: 3 },
         ),
+        (
+            "call-token",
+            Frame::CallToken {
+                id: 21,
+                device: 3,
+                contract: 1,
+                method: 2,
+                reply_capacity: 8,
+                token: 0x0102_0304_0506_0708,
+                args: &[9, 10],
+            },
+        ),
+        (
+            "call-outcome",
+            Frame::CallOutcome {
+                id: 22,
+                token: 0x0102_0304_0506_0708,
+            },
+        ),
+        (
+            "outcome-is",
+            Frame::OutcomeIs {
+                id: 22,
+                state: outcome::APPLIED,
+                status: 0,
+            },
+        ),
     ])
 }
 
@@ -1351,6 +1378,25 @@ mod layout {
         assert_eq!(BOARD_ID, 128);
         assert!(!PART_BITS.contains(&BOARD_ID));
         assert_eq!(BOARD_ID & feature::EVERY, 0);
+    }
+
+    /// CALL_OUTCOME is a feature bit of the Welcome, not a part, and its frames are added kinds of the
+    /// core: the bit is not a part's, and it moves no hash.
+    #[test]
+    fn the_call_outcome_bit_is_a_feature_bit_and_no_part() {
+        assert_eq!(CALL_OUTCOME, 256);
+        assert!(!PART_BITS.contains(&CALL_OUTCOME));
+        assert_eq!(CALL_OUTCOME & feature::EVERY, 0);
+        assert_eq!(CALL_OUTCOME & (BOARD_ID | ENDPOINTS_END), 0);
+        assert_eq!(
+            (
+                outcome::UNKNOWN,
+                outcome::APPLIED,
+                outcome::NOT_APPLIED,
+                outcome::PENDING
+            ),
+            (0, 1, 2, 3)
+        );
     }
 
     #[test]

@@ -63,6 +63,23 @@ pub const ENDPOINTS_END: u64 = 64;
 /// refuses to report a board id from it. It is not a part: it has no hash of its own and adds no
 /// frame, so it moves no hash.
 pub const BOARD_ID: u64 = 128;
+/// The feature bit that says the service keeps the outcome of each call made with a token (see
+/// [`CallToken`] and [`CallOutcome`]). Not a part: it has no hash of its own, and its frames are
+/// `added` kinds of the core, which moves no hash. A host without it refuses those kinds by name
+/// (`UnknownKind`), and a client sends them only to a host that set it.
+pub const CALL_OUTCOME: u64 = 256;
+
+/// What the service knows of a call made with a token (see [`OutcomeIs`]).
+pub mod outcome {
+    /// The service has no record of the token: it never saw it, it aged out, or it was evicted.
+    pub const UNKNOWN: u8 = 0;
+    /// The driver's method ran and finished: `status` is what it returned.
+    pub const APPLIED: u8 = 1;
+    /// The call was refused before the driver's method ran: `status` says why.
+    pub const NOT_APPLIED: u8 = 2;
+    /// The call started and has not finished yet. `status` is 0.
+    pub const PENDING: u8 = 3;
+}
 
 const HEADER: usize = LENGTH_BYTES + 2;
 
@@ -557,6 +574,24 @@ frames! {
         20 Refusal { id: u32, status: i32, text: &'a str }
         /// Answered with an empty Reply.
         21 StreamClose { id: u32, device: u32, name: &'a str }
+        /// Call, with a `token` the client chose for it: the service keeps the call's outcome under the
+        /// client's name and this token, for [`CallOutcome`]. Answered as Call is. Sent only to a host
+        /// whose Welcome set [`CALL_OUTCOME`].
+        added 43 CallToken {
+            id: u32,
+            device: u32,
+            contract: u8,
+            method: u16,
+            reply_capacity: u32,
+            token: u64,
+            args: &'a [u8],
+        }
+        /// Asks what became of the call this client (its Hello name) made with `token`. Answered with
+        /// OutcomeIs. Sent only to a host whose Welcome set [`CALL_OUTCOME`].
+        added 44 CallOutcome { id: u32, token: u64 }
+        /// The answer to CallOutcome: `state` is one of [`outcome`]; `status` is the call's status
+        /// when it applied or was not applied, and 0 otherwise.
+        added 45 OutcomeIs { id: u32, state: u8, status: i32 }
     }
     // The stream-handles part: a stream whose buffers are one descriptor each. Its constants are
     // in [`handles`].

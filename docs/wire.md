@@ -72,6 +72,9 @@ closes the connection on a larger length, without reading it.
 | 40 | EndpointsOpenEnd | id u32, device u32 | to host |
 | 42 | StreamOpenHeld | id u32, device u32, name str, hold u32, handles bool | to host |
 | 41 | EndpointsEnd | id u32, with three descriptors | to client |
+| 43 | CallToken | id u32, device u32, contract u8, method u16, reply_capacity u32, token u64, args bytes | to host |
+| 44 | CallOutcome | id u32, token u64 | to host |
+| 45 | OutcomeIs | id u32, state u8, status i32 | to client |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
@@ -86,6 +89,8 @@ appended to Device (rule 8): a host from before it sends Device without it, whic
 `refusal` in Device, and in Event, is why a device waits to retry: `0` none (running, or switched on), `1` absent (no such device here), `2` failed (present and not working). It is appended after `jobs`, so a host from before it sends none and a reader takes `0`; it moves no hash.
 
 `stall`, `stall_since`, `stall_ended` and `stall_reason` in Device are the device's last stall: the last time its streams read their producer retrying, kept after the device recovers, since its `reason` is cleared then. `stall` is `0` none (never stalled), `1` standing, `2` ended. `stall_since` is when it began on the host's clock, the same number a stream that stalled for it reports as its producer's `since_ns`, so a reader matches the two exactly; a stall a linked device caused is that device's. `stall_ended` is when it ended (`0` unless it did), and `stall_reason` is why: the driver's failed health, or why the host waits to bind it again. A stall that stands keeps its start and its reason until it ends. The four are appended after `refusal`, so a host from before them sends none and a reader takes `0`, `0`, `0` and empty; they move no hash.
+
+`CALL_OUTCOME` (256) in `features` says the service keeps the outcome of each call made with a token. It is not a part: it has no hash, and its three frames are `added` kinds of the core (43 to 45), so they move no hash either. A client sends CallToken and CallOutcome only to a host that set the bit, and a host without it refuses those kinds by name. `CallToken` is Call with a `token` the client chose, a `u64`, that the service keeps with the call's outcome under the client's Hello `name` (the first 32 bytes of it), so the outcome outlives the connection that made the call. `CallOutcome` asks about one token, and `OutcomeIs` answers with `state`: `0` unknown (never seen, aged out or evicted), `1` applied (the driver's method ran and returned `status`), `2` not applied (refused before the driver's method ran; `status` says why), `3` pending (started, not finished; `status` is 0). A call the host refused without dispatching (no device, a bad method, the lane never ran it) is `2`. A call whose driver is still running at the client's deadline is `3` until it finishes, and then `1`.
 
 `host` in Welcome is the service's name. When bit 7 (`BOARD_ID`, value 128) is set in `features`, it is instead the board file's `[board] id`, the board the service serves. Without the bit a client does not read a board id from `host` and reports `NOT_SUPPORTED` for it. The bit is not a part: it has no hash, and it adds no frame, so it moves no hash. It was added to version 1 after its first form, so a host from before it sends none, and a client from before it ignores it.
 
@@ -1105,4 +1110,31 @@ reader takes that as `refusal` `0` (none).
 <!-- vector: refusal -->
 ```hex
 10 00 00 00 14 00 0c 00 00 00 fe ff ff ff 02 00 00 00 6e 6f
+```
+
+### call-token
+
+`CallToken { id: 21, device: 3, contract: 1, method: 2, reply_capacity: 8, token: 0x0102030405060708, args: [09, 0a] }`
+
+<!-- vector: call-token -->
+```hex
+1f 00 00 00 2b 00 15 00 00 00 03 00 00 00 01 02 00 08 00 00 00 08 07 06 05 04 03 02 01 02 00 00 00 09 0a
+```
+
+### call-outcome
+
+`CallOutcome { id: 22, token: 0x0102030405060708 }`
+
+<!-- vector: call-outcome -->
+```hex
+0e 00 00 00 2c 00 16 00 00 00 08 07 06 05 04 03 02 01
+```
+
+### outcome-is
+
+`OutcomeIs { id: 22, state: 1 (applied), status: 0 }`
+
+<!-- vector: outcome-is -->
+```hex
+0b 00 00 00 2d 00 16 00 00 00 01 00 00 00 00
 ```

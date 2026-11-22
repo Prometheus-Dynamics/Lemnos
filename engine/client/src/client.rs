@@ -8,7 +8,7 @@ use lemnos_core::{Bound, Caller, Contract, JobId, Status};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{
-    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Stall, Subscription,
+    DeviceEntry, Event, Handle, JobEvent, Outcome, PackageList, Session, Stall, Subscription,
     SubscriptionState, UsbEndpoints, UsbEndpointsEnd, ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
@@ -107,6 +107,23 @@ impl Client {
         reply: &mut [u8],
     ) -> Result<usize, Error> {
         self.lock().call(handle, method, args, reply)
+    }
+
+    /// See [`Session::call_token`].
+    pub fn call_token(
+        &self,
+        handle: &mut Handle,
+        method: u16,
+        args: &[u8],
+        reply: &mut [u8],
+        token: u64,
+    ) -> Result<usize, Error> {
+        self.lock().call_token(handle, method, args, reply, token)
+    }
+
+    /// See [`Session::outcome`].
+    pub fn outcome(&self, token: u64) -> Result<Outcome, Error> {
+        self.lock().outcome(token)
     }
 
     /// See [`Session::start_job`].
