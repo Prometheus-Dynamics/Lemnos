@@ -150,7 +150,13 @@ impl Settings {
     /// The node this block is at, as a person reads it.
     #[must_use]
     pub fn label(&self) -> String {
-        format!("receiver node /dev/lemnos-rp1-csi2-{}", self.device)
+        format!("receiver node {}", self.node_path(DEV))
+    }
+
+    /// The block's node under `dev`: `/dev/lemnos-rp1-csi2-<device>` on a board.
+    #[must_use]
+    pub fn node_path(&self, dev: &str) -> String {
+        format!("{dev}/lemnos-rp1-csi2-{}", self.device)
     }
 
     /// The platform device name of the block, as the board file gives it.
@@ -239,23 +245,34 @@ struct Running {
 /// failed call rather than a failed bind.
 pub struct LinuxHardware {
     settings: Settings,
+    /// The directory the node is in: `/dev`, or a test's own.
+    dev: &'static str,
     running: Option<Running>,
     hw_version: u32,
 }
+
+/// Where the module's nodes are.
+const DEV: &str = "/dev";
 
 impl LinuxHardware {
     /// Nothing is opened until a start.
     #[must_use]
     pub fn new(settings: Settings) -> Self {
+        Self::under(settings, DEV)
+    }
+
+    /// The same, with the node looked for under `dev`.
+    fn under(settings: Settings, dev: &'static str) -> Self {
         Self {
             settings,
+            dev,
             running: None,
             hw_version: 0,
         }
     }
 
     fn open(&mut self, plan: &Plan) -> io::Result<Placed> {
-        let node = Node::open(format!("/dev/lemnos-rp1-csi2-{}", self.settings.device))?;
+        let node = Node::open(self.settings.node_path(self.dev))?;
         // The front end's part: its calls drive only what it claims. A claim another file holds
         // is EBUSY, so a second front end on this block is refused, by the module.
         node.claim()?;
@@ -296,7 +313,7 @@ impl LinuxHardware {
 impl Hardware for LinuxHardware {
     fn present(&mut self) -> Result<()> {
         // The node opened to see it answers: nothing is claimed and nothing is changed.
-        let node = Node::open(self.settings.label()).map_err(|e| missing(&e))?;
+        let node = Node::open(self.settings.node_path(self.dev)).map_err(|e| missing(&e))?;
         node.info().map_err(|e| missing(&e))?;
         Ok(())
     }
@@ -447,5 +464,38 @@ mod present_tests {
         let settings = Settings::new("lemnos-test-absent-node", "linux,cma").unwrap();
         let mut hw = LinuxHardware::new(settings);
         assert_eq!(hw.present(), Err(Status::NO_DEVICE));
+    }
+
+    #[test]
+    fn a_front_end_whose_node_is_there_is_opened_at_the_node_not_its_label() {
+        // A file at the node's path that is not the module's: it opens and refuses the module's
+        // ioctl (ENOTTY), so the block is there and does not answer. Not "absent": the node is
+        // found by its path, as on the board where /dev/lemnos-rp1-csi2-<device> exists.
+        let dir = std::env::temp_dir().join(format!("pisp-fe-present-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = Settings::new("1f00110000.csi", "linux,cma").unwrap();
+        let node = settings.node_path(dir.to_str().unwrap());
+        std::fs::write(&node, b"").unwrap();
+        let dev: &'static str = Box::leak(dir.to_str().unwrap().to_owned().into_boxed_str());
+        let mut hw = LinuxHardware::under(settings, dev);
+        let found = hw.present();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            matches!(found, Err(status) if status != Status::NO_DEVICE),
+            "the node at its path is there, so it is not absent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn the_label_names_the_node_the_block_is_opened_at() {
+        let settings = Settings::new("1f00110000.csi", "linux,cma").unwrap();
+        assert_eq!(
+            settings.node_path(DEV),
+            "/dev/lemnos-rp1-csi2-1f00110000.csi"
+        );
+        assert_eq!(
+            settings.label(),
+            "receiver node /dev/lemnos-rp1-csi2-1f00110000.csi"
+        );
     }
 }
