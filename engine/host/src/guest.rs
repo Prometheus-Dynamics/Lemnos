@@ -27,6 +27,7 @@
 //! - A serial port: sending, and changing its speed.
 //! - Registers: any write. Interrupts: masking and unmasking; waiting for one passes.
 //! - Clocks and resets: everything but reading a rate.
+//! - A PIO output: everything. Loading a program and running it both drive the pin.
 //! - DMA memory: allocating, releasing, writing, and handing it to the device.
 //! - USB, as a host: reset, detaching the kernel's driver, claiming, releasing, alternates, and
 //!   every transfer out. USB, as a function: everything but reading its events.
@@ -39,7 +40,7 @@
 use core::time::Duration;
 
 use lemnos_core::{
-    ClocksHandle, DmaHandle, I2c, InterruptHandle, Line, Pwm, RawSpiBus, RegistersHandle,
+    ClocksHandle, DmaHandle, I2c, InterruptHandle, Line, Pio, Pwm, RawSpiBus, RegistersHandle,
     ResetHandle, Spi, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
 };
 use lemnos_hal::blocks::{
@@ -47,6 +48,7 @@ use lemnos_hal::blocks::{
     UartFormat, UsbFunctionEvent,
 };
 use lemnos_hal::i2c::{self, I2c as HalI2c};
+use lemnos_hal::pio::{PioJob, PioMachine, PioOperation};
 use lemnos_hal::raw::{
     Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, RawWatchdog, SpiSegment,
 };
@@ -115,6 +117,11 @@ pub(crate) fn pwm(pwm: Pwm) -> Pwm {
 /// A watchdog of a host-owned device: its timeout is read, and never set or fed.
 pub(crate) fn watchdog(watchdog: Watchdog) -> Watchdog {
     lemnos_core::Held::boxed(Box::new(ReadOnly(watchdog)))
+}
+
+/// A PIO output of a host-owned device: nothing is loaded or run.
+pub(crate) fn pio(pio: Pio) -> Pio {
+    lemnos_core::Held::boxed(Box::new(ReadOnly(pio)))
 }
 
 pub(crate) fn uart(uart: Uart) -> Uart {
@@ -245,6 +252,16 @@ impl RawWatchdog for ReadOnly<Watchdog> {
 
     fn time_left(&mut self) -> Option<u32> {
         self.0.time_left()
+    }
+}
+
+impl PioMachine for ReadOnly<Pio> {
+    fn load(&mut self, _: &PioJob<'_>) -> Refusable<()> {
+        Err(REFUSED)
+    }
+
+    fn transaction(&mut self, _: &mut [PioOperation<'_>]) -> Refusable<()> {
+        Err(REFUSED)
     }
 }
 

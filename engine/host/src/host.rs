@@ -12,9 +12,10 @@ use lemnos_core::{
     AddressWidth, BoardDevice, BoardView, BusKind, CallerId, ClocksHandle, Config, ConfigError,
     ConfigValue, Decode, Description, DmaHandle, Driver, Encode, Figures, Health, Hint, HostClock,
     HostOwned, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line, LocalCaller, Manifest,
-    MethodId, NeedKind, Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind, RefusalSink,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry, Router, Shape,
-    Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle, Watchdog,
+    MethodId, NeedKind, Origin, Pio, Polled, Provider, Pwm, RawSpiBus, Reader, RefusalKind,
+    RefusalSink, RegistersHandle, Reply, ResetHandle, Resources, Result, ResumeRecord, Retry,
+    Router, Shape, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    Watchdog,
 };
 
 use crate::board::{
@@ -3283,6 +3284,7 @@ impl Provider for Binding<'_> {
         clocks -> ClocksHandle, "clock";
         reset -> ResetHandle, "reset line";
         watchdog -> Watchdog, "watchdog";
+        pio -> Pio, "PIO output";
     }
 
     fn lend(&mut self, _need: &str) -> Result<lemnos_core::LendHandle> {

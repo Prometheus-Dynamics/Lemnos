@@ -16,6 +16,7 @@ lemnos-contract-pixels = { path = "../../contracts/pixels" }
 [dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-host = { path = "../../engine/host" }
 
 [features]
 default = []
