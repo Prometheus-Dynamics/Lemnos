@@ -305,7 +305,7 @@ pub trait UsbFunction {
     /// holds at least [`MAX_STREAM_NAME`] bytes. `NOT_SUPPORTED` when the board gives the
     /// device no data stream: it is on the bus, and nobody can serve it.
     #[method(3)]
-    fn data_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn data_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     #[method(4)]
     fn state(&mut self) -> Result<State>;
     /// Answers the pending control request, one whose data goes to the host, with `data` as
@@ -322,7 +322,7 @@ pub trait UsbFunction {
     /// bytes; a request with a `length` of 0 is accepted with nothing taken. Returns how many
     /// bytes came. Errors are as for [`control_in`](Self::control_in).
     #[method(6)]
-    fn control_out(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn control_out(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// Refuses the pending control request with a stall. `INVALID_ARGUMENT` when none is
     /// pending.
     #[method(7)]
@@ -345,7 +345,7 @@ pub trait UsbFunction {
     /// text: the name the kernel gave it once the gadget is up. `NOT_FOUND` while the gadget is not
     /// up or has no NCM function. `into` holds [`MAX_IFNAME_TEXT`] bytes.
     #[method(11, reading = text)]
-    fn ifname(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn ifname(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Whether the bulk endpoint pair is lent to a caller now (see the wire's Endpoints section):
     /// `true` from the lend until the caller releases it, goes, or the device is switched off.
     /// It says nothing of the bus: a pair can be lent while the gadget is down, and a gadget can

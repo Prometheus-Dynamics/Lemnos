@@ -188,17 +188,17 @@ pub trait CameraIsp {
     /// three stream methods below write UTF-8 into `into` and return its length; `into` holds at
     /// least [`MAX_STREAM_NAME`] bytes.
     #[method(6)]
-    fn config_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn config_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The stream of statistics buffers.
     #[method(7)]
-    fn statistics_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn statistics_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The stream of raw frames the caller gives this ISP. `NOT_SUPPORTED` when frames come
     /// straight from the receiver.
     #[method(8)]
-    fn input_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn input_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The stream of one output's images. `NOT_FOUND` past the last output.
     #[method(9)]
-    fn output_stream(&mut self, output: u8, #[out] into: &mut [u8]) -> Result<usize>;
+    fn output_stream(&mut self, output: u8, #[out(text)] into: &mut [u8]) -> Result<usize>;
     #[method(10)]
     fn start(&mut self) -> Result<()>;
     #[method(11)]

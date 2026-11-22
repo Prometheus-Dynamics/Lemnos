@@ -216,11 +216,11 @@ pub trait CodecBlock {
     /// The block's name, as UTF-8 into `into`, returning its length: what says which slots
     /// and item tags its work is made of. `into` holds at least [`MAX_BLOCK_NAME`] bytes.
     #[method(2)]
-    fn block(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn block(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The name to open the job stream by, as UTF-8 into `into`, returning its length. `into`
     /// holds at least [`MAX_STREAM_NAME`] bytes.
     #[method(3)]
-    fn job_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn job_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     #[method(4)]
     fn counters(&mut self) -> Result<Counters>;
 }

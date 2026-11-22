@@ -69,7 +69,7 @@ pub trait Example {
         kind: u8,
         step: u8,
         data: &[u8],
-        #[out] into: &mut [u8],
+        #[out(bytes)] into: &mut [u8],
     ) -> Result<usize>;
 }
 

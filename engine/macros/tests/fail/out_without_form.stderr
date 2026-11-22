@@ -1,0 +1,5 @@
+error: an #[out] buffer declares the form of what it holds: #[out(text)] or #[out(bytes)]
+ --> tests/fail/out_without_form.rs:2:44
+  |
+2 | pub trait T { #[method(1)] fn a(&mut self, #[out] into: &mut [u8]) -> lemnos_core::Result<usize>; }
+  |                                            ^

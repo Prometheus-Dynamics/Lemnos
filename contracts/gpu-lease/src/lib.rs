@@ -87,5 +87,5 @@ pub trait GpuLease {
     /// The detail of the last hang into `into`, returning its length. Empty if none was reported.
     /// At most 128 bytes (the driver's `DETAIL_MAX`); `into` holds that.
     #[method(6)]
-    fn last_hang(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn last_hang(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
 }

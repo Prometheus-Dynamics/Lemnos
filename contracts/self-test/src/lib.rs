@@ -522,7 +522,7 @@ pub fn write_last(entries: &[(&str, Record)], out: &mut [u8]) -> Result<usize> {
 pub trait SelfTest {
     /// Writes the device's tests, [`write_tests`] form. `BUFFER_TOO_SMALL` when it doesn't fit.
     #[method(1)]
-    fn tests(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn tests(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// Starts test `name` as a long job. Progress is milliseconds of the test's `expect_ms`; its
     /// result is a [`Record`], written with [`Record::write`]. `INVALID_ARGUMENT` for a name the
     /// device does not list. `BUSY` while another test runs, or for an intrusive test while
@@ -531,7 +531,7 @@ pub trait SelfTest {
     fn run(&mut self, name: &str, confirmed: bool) -> Result<JobId>;
     /// Writes the last result of each test that has one, [`write_last`] form.
     #[method(3)]
-    fn last(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn last(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
 }
 
 /// The test's own steps, which a driver writes. [`Runner`] calls them from the driver's tick.

@@ -22,7 +22,7 @@ pub trait NamedFiles {
     /// The index: every name the node serves now, with its bound and whether it may hold user
     /// data. Returns its length; `BUFFER_TOO_SMALL` when it doesn't fit.
     #[method(1)]
-    fn index(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn index(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Takes a snapshot of the named file for a transfer, and returns its handle. `NOT_FOUND`
     /// when the node serves no such name (or the file is absent now); `BUSY` at [`MAX_OPEN`]
     /// snapshots; `INVALID_ARGUMENT` when the file is over its bound.
@@ -34,7 +34,7 @@ pub trait NamedFiles {
     /// Fills `into` from `from` in the snapshot: at most `into.len()` bytes, zero at the end.
     /// `NOT_FOUND` for a handle that is not open.
     #[method(4)]
-    fn read(&mut self, handle: u64, from: u64, #[out] into: &mut [u8]) -> Result<usize>;
+    fn read(&mut self, handle: u64, from: u64, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// Frees the snapshot `handle`. Closing a handle that is not open is `NOT_FOUND`.
     #[method(5)]
     fn close(&mut self, handle: u64) -> Result<()>;

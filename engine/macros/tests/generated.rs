@@ -21,7 +21,7 @@ pub trait Thing {
     #[method(9)]
     fn name_len(&mut self, name: &str, payload: &[u8]) -> Result<u32>;
     #[method(4)]
-    fn dump(&mut self, seed: u8, #[out] into: &mut [u8]) -> Result<usize>;
+    fn dump(&mut self, seed: u8, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
 }
 
 #[contract("example.other", version = 1)]

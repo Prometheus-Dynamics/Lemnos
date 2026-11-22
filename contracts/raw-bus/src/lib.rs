@@ -31,7 +31,7 @@ pub trait RawBus {
         address: u16,
         write: &[u8],
         read_len: u32,
-        #[out] into: &mut [u8],
+        #[out(bytes)] into: &mut [u8],
     ) -> Result<usize>;
     /// A full-duplex SPI transfer in one chip-select assertion: `write` is sent while `read_len`
     /// bytes are read into `into`, which must hold `read_len`. The number read is returned. An empty
@@ -41,7 +41,7 @@ pub trait RawBus {
         &mut self,
         write: &[u8],
         read_len: u32,
-        #[out] into: &mut [u8],
+        #[out(bytes)] into: &mut [u8],
     ) -> Result<usize>;
     /// The logical value of the GPIO line.
     #[method(3)]
@@ -63,8 +63,12 @@ pub trait RawBus {
     /// A `max_len` of 0 is `INVALID_ARGUMENT`.
     #[added]
     #[method(7)]
-    fn uart_read(&mut self, max_len: u32, timeout_ms: u32, #[out] into: &mut [u8])
-    -> Result<usize>;
+    fn uart_read(
+        &mut self,
+        max_len: u32,
+        timeout_ms: u32,
+        #[out(bytes)] into: &mut [u8],
+    ) -> Result<usize>;
     /// One I2C transaction of several segments to the 7-bit `address`: the ops in `ops`, in order,
     /// with a repeated start between them and one stop at the end. Each op is a write of its bytes or
     /// a read of its length (see [`I2cOp`] and [`encode_i2c_ops`]). The bytes read go into `into` one
@@ -78,7 +82,7 @@ pub trait RawBus {
         &mut self,
         address: u16,
         ops: &[u8],
-        #[out] into: &mut [u8],
+        #[out(bytes)] into: &mut [u8],
     ) -> Result<usize>;
     /// A list of SPI transfers, each on its own settings: mode, clock, word size, whether it ends with
     /// a chip-select change, and a delay after it (see [`SpiTransfer`] and [`encode_spi_transfers`]).
@@ -88,7 +92,7 @@ pub trait RawBus {
     /// Marked `#[added]`, as [`RawBus::i2c_transactions`] is.
     #[method(9)]
     #[added]
-    fn spi_transfers(&mut self, transfers: &[u8], #[out] into: &mut [u8]) -> Result<usize>;
+    fn spi_transfers(&mut self, transfers: &[u8], #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// Takes the device for the calling client alone. While it holds the claim, every other caller's
     /// call that drives or uses the device is `BUSY`; reading the line (`line_get`) and its edges
     /// (`read_edges`) stay open to everyone. A claim ends with [`RawBus::release`] or when its
@@ -130,7 +134,7 @@ pub trait RawBus {
     /// takes as many whole edges as fit, the newest ones. Subscribe to it to be told of new edges.
     #[method(13, reading = events)]
     #[added]
-    fn read_edges(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn read_edges(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
 }
 
 /// `line_configure` directions.

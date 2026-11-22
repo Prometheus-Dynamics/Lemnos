@@ -82,11 +82,11 @@ pub trait Gyroscope {
     /// docs). Returns the bytes written: 0 when there is no new sample. Samples that do not fit
     /// wait for the next batch. Without the FIFO there are no batches: `NOT_SUPPORTED`.
     #[method(2)]
-    fn read_batch(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn read_batch(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// The same samples as `read_batch`, as [`STAMPED_RECORD_LEN`]-byte records of [`Stamped`],
     /// oldest first: each record's mode, then its batch record. It takes from the same queue as
     /// `read_batch`, so a batch is read with one of the two. Returns the bytes written.
     #[method(3)]
     #[added]
-    fn read_batch_stamped(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn read_batch_stamped(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
 }

@@ -1,8 +1,8 @@
 error: #[out] takes &mut [u8]
- --> tests/fail/bad_out.rs:3:54
+ --> tests/fail/bad_out.rs:3:61
   |
-3 | pub trait T { #[method(1)] fn a(&mut self, #[out] x: u8) -> Result<usize>; }
-  |                                                      ^^
+3 | pub trait T { #[method(1)] fn a(&mut self, #[out(bytes)] x: u8) -> Result<usize>; }
+  |                                                             ^^
 
 warning: unused import: `Result`
  --> tests/fail/bad_out.rs:1:29

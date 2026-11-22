@@ -80,7 +80,7 @@ pub trait Slots {
     /// The installed slots, the pointers and the free space, as JSON (see the crate's
     /// documentation). Returns its length; `BUFFER_TOO_SMALL` when it doesn't fit.
     #[method(1)]
-    fn list(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn list(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Starts installing a bundle of `size` bytes, which [`Slots::write`] then delivers in
     /// order. The job's progress is the bytes taken of `size`, then one unit for each of the five
     /// finish steps (total `size + 5`), and its result the new slot's id (UTF-8). The finish runs
@@ -133,17 +133,17 @@ pub trait Slots {
     /// oldest first; see `lemnos-slot-store`'s `boots`). Returns its length; `BUFFER_TOO_SMALL`
     /// when it doesn't fit.
     #[method(12)]
-    fn boots(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn boots(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// One page of `list`, for a board whose slots don't fit one reply. `after` is `-` for the
     /// first page, and then the `next` of the page before (`<seq>:<id>`). The page is the slots
     /// that come after the cursor, newest first, as many as fit the buffer; `more` says whether
     /// another page follows, and `next` is the cursor for it. Returns the length, as `list` does.
     /// `INVALID_ARGUMENT` for a cursor that is not one; `BUFFER_TOO_SMALL` when a slot does not fit.
     #[method(13)]
-    fn list_page(&mut self, after: &str, #[out] into: &mut [u8]) -> Result<usize>;
+    fn list_page(&mut self, after: &str, #[out(text)] into: &mut [u8]) -> Result<usize>;
 
     /// The signature policy and the last install's signature result, as JSON (see the crate's
     /// documentation). Returns its length; `BUFFER_TOO_SMALL` when it doesn't fit.
     #[method(14)]
-    fn info(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn info(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
 }

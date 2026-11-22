@@ -54,7 +54,7 @@ pub trait CameraFrames {
     /// The name to open the frame stream by, as UTF-8 into `into`, returning its length. `into`
     /// holds at least [`MAX_STREAM_NAME`] bytes.
     #[method(5)]
-    fn frame_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn frame_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// `INVALID_ARGUMENT` before a format is selected.
     #[method(6)]
     fn start(&mut self) -> Result<()>;

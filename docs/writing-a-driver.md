@@ -374,6 +374,11 @@ A note reports what was done. Health says what is wrong now; a note says what ha
 
 ### Long jobs
 
+A method that fills the caller's buffer takes it last as `#[out(text)] into: &mut [u8]` or
+`#[out(bytes)] into: &mut [u8]`, and returns `Result<usize>`, the length written. The form says how every
+reader shows the reply (text as it is, bytes as hex); a bare `#[out]` does not build. Choose `text` for
+names, JSON and lines, and `bytes` for a layout the contract defines and its crate reads.
+
 A method that runs longer than a call is marked `#[method(N, job, stall = SECS, result = text|bytes)]` in its
 contract and returns `Result<JobId>`. `result` is the form of what the job finishes with: `text` (UTF-8, the whole
 result) or `bytes`. Readers show it in that form and never guess (`docs/wire.md`, "A job's result form"); a job

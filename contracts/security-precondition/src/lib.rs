@@ -18,7 +18,7 @@ pub const TEXT_MAX: usize = 1024;
 pub trait SecurityPrecondition {
     /// What stops the switch changing to `on` (`true`) or to off (`false`), one line each.
     #[method(1)]
-    fn precondition(&mut self, on: bool, #[out] into: &mut [u8]) -> Result<usize>;
+    fn precondition(&mut self, on: bool, #[out(text)] into: &mut [u8]) -> Result<usize>;
 
     /// Makes this stakeholder's own boot-side mark match `on`, durable when it returns (the slots'
     /// marker, which the boot side reads). The switch calls it as part of a change: before its

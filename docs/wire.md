@@ -252,6 +252,11 @@ sends this connection, and no other:
   a job whose driver was lost (a panic, a rebind, the device switched off) with `EINTR` (-4).
   JobDone is never dropped.
 
+**An out buffer's form.** An `#[out]` buffer declares its form the same way: `#[out(text)]` for
+UTF-8 text, `#[out(bytes)]` for bytes, and a bare `#[out]` does not build. The description carries
+the form as the method's result shape (`str` or `bytes`), which is in the method hash. Readers show
+the reply in that form, as they show a job's result.
+
 **A job's result form.** A job method declares its result's form in the contract:
 `#[method(N, job, stall = SECS, result = text)]` for UTF-8 text, `result = bytes` for bytes. A job
 method without one does not build. The description carries it as the method's result shape: `str`
@@ -708,6 +713,40 @@ before it for one of these is refused at bind (`ContractMismatch`); every other 
 | `self-test/1` | `run`: bytes (its `Record`) | `0xf5a21f9763c8595b` | `0x6aff59ade5c0bef1` |
 | `system.flash/1` | `write`, `verify`: text (fields) | `0x2198953afeadaf6c` | `0xde1c693ee11cc0bf` |
 | `system.slots/1` | `install`, `install_file`: text (the slot id) | `0x46f18ccbb6ee837d` | `0xbc090a29d4cfc4a8` |
+
+### The base hashes after OUT-FORM
+
+An out buffer's form (above, "An out buffer's form") is in the method hash, so every contract with a
+base method that has an `#[out(text)]` buffer moved its base hash. Seventeen contracts moved. A
+contract whose out buffers are all bytes, or that has none, kept its hash. `service/ctl/tests/contract_hashes.rs`
+pins the new ones. A typed client built before this for one of these is refused at bind (`ContractMismatch`).
+
+| Contract | Base hash before | Base hash after |
+|---|---|---|
+| `camera.frames/1` | `0x4ec103655d57e1b6` | `0x84f3fa025a0951e7` |
+| `camera.isp/1` | `0x6d0fcd2916131dca` | `0x5a7921cba5b34a20` |
+| `camera.receiver/1` | `0x462ed22eba9c5a9d` | `0x95aaa7c9d0ce1d60` |
+| `codec.block/1` | `0x7c1ff4f41c048c36` | `0xd2f2f17fc8dbe36a` |
+| `gpu-lease/1` | `0xa3b5a2e7c697adaf` | `0xa91d6e77e9cd9ccd` |
+| `image.blend/1` | `0x765e6bda04750120` | `0x7cf5511c981abeaa` |
+| `image.convert/1` | `0x8530d616c9b440f1` | `0x9dc144130a06746f` |
+| `image.scaler/1` | `0xe312a3b1af910972` | `0x35e2e7c622ee88d4` |
+| `indicator/1` | `0x5cbf7ddd287da0f4` | `0x78978222dd970f79` |
+| `lemnos.files/1` | `0x4925fdd5bdb57ce8` | `0x2481101dc43449a6` |
+| `npu/1` | `0x3a868e40c20599e8` | `0x9db6798c8169083f` |
+| `system.flash/1` | `0xde1c693ee11cc0bf` | `0xcab60ed5d1098774` |
+| `system.identity/1` | `0xfca8957d8d3e73b3` | `0xbdb6627ca69d645f` |
+| `system.security-precondition/1` | `0x97a0a781dd7267f4` | `0x436bdf18d866e921` |
+| `system.security/1` | `0xabc23d89ae95cd6e` | `0xe060a86af2d91c75` |
+| `system.slots/1` | `0xbc090a29d4cfc4a8` | `0xab19a1e7d0b755c6` |
+| `usb.function/1` | `0x3ab7a81bc836a499` | `0x16930250d8e9aeaf` |
+
+Four added methods with a text buffer keep their contract's base hash but change their own method
+hash, which a typed client checks too: `camera.receiver/1` `embedded_stream` and `source`,
+`camera.sensor/1` `identity`, and `system.identity/1` `machine_id`. Unchanged contracts:
+`accelerometer`, `camera.sensor` (base), `fan-control`, `fan`, `gyroscope`, `isp.isp600`, `isp.pisp`,
+`lens`, `light`, `magnetometer`, `orientation`, `pixels`, `power-monitor`, `power-switch`, `raw-bus`,
+`self-test`, `system.reboot`, `temperature`.
 
 A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 i32, 9 i64, 10 f32,
 11 f64, 12 str, 13 bytes, 14 option (followed by its shape), 15 array (a u32 length, then its shape),

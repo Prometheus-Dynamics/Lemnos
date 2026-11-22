@@ -400,7 +400,8 @@ fn the_out_buffer_methods_the_simulator_hosts_answer_through_the_bridge() {
     // after a command, and a UART read of four bytes.
     assert_eq!(said(call("bus", "i2c_transfer 80 10 2")), "aabb");
     assert_eq!(said(call("bus", "spi_transfer 9f000000 4")), "ef401800");
-    assert_eq!(said(call("bus", "uart_read 4 10")), "OK\r\n");
+    // The UART's bytes are bytes (`#[out(bytes)]`): hex, even when they happen to be text.
+    assert_eq!(said(call("bus", "uart_read 4 10")), "4f4b0d0a");
 
     // usb-function: the data stream's name. control_out has no request pending, so it is refused.
     assert_eq!(said(call("gadget", "data_stream")), "data");

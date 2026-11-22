@@ -8,8 +8,9 @@
 //!
 //! A method with an `#[out]` buffer (`has_out_buffer`) takes one more word after its arguments:
 //! the buffer's size in bytes. The device reads it before it writes, so it is sent always. When
-//! the words leave it out, it is [`OUT_LIMIT`], the most a frame carries. Its reply is printed as
-//! text when the bytes are valid UTF-8, and as hex otherwise. See [`encode_call`] and
+//! the words leave it out, it is [`OUT_LIMIT`], the most a frame carries. Its reply is printed in
+//! the form the method declares (`returns`: `Str` for `#[out(text)]`, as the text it is; `Bytes`
+//! for `#[out(bytes)]`, as hex), never by what the bytes look like. See [`encode_call`] and
 //! [`render_reply`], which every client of the text path uses.
 
 use core::fmt::Write;
@@ -279,16 +280,17 @@ pub fn encode_call_within<S: AsRef<str>>(
     })
 }
 
-/// An out buffer's bytes as text: as they are when they are valid UTF-8, else as hex.
-fn out_text(bytes: &[u8]) -> String {
-    match core::str::from_utf8(bytes) {
-        Ok(text) => text.to_string(),
-        Err(_) => {
-            let mut hex = String::new();
-            push_hex(bytes, &mut hex);
-            hex
-        }
+/// An out buffer's bytes as text, in the form its method declares (`returns`): `Str` as the text
+/// it is, anything else as hex. Nothing is guessed from the bytes.
+fn out_text(shape: &OwnedShape, bytes: &[u8]) -> Result<String, String> {
+    if *shape == OwnedShape::Str {
+        return core::str::from_utf8(bytes)
+            .map(str::to_string)
+            .map_err(|_| "the reply is not the UTF-8 text its method declares".to_string());
     }
+    let mut hex = String::new();
+    push_hex(bytes, &mut hex);
+    Ok(hex)
 }
 
 /// What a caller says when a call's reply did not fit its out buffer (`BUFFER_TOO_SMALL`): how
@@ -455,7 +457,7 @@ pub fn render(
     item: &OwnedItem,
 ) -> Result<String, String> {
     if has_out_buffer {
-        return Ok(out_text(reply));
+        return out_text(shape, reply);
     }
     let mut text = String::new();
     let mut from = Cursor(reply);
@@ -682,19 +684,20 @@ mod tests {
     }
 
     #[test]
-    fn an_out_buffer_prints_as_text_when_it_is_utf8_and_as_hex_otherwise() {
+    fn an_out_buffer_prints_in_its_declared_form_never_guessed() {
+        let bare = item("", 0, None);
         assert_eq!(
-            render(
-                &OwnedShape::Bytes,
-                true,
-                b"{\"slots\":[]}",
-                &item("", 0, None)
-            )
-            .unwrap(),
+            render(&OwnedShape::Str, true, b"{\"slots\":[]}", &bare).unwrap(),
             "{\"slots\":[]}"
         );
+        assert!(render(&OwnedShape::Str, true, &[0xff], &bare).is_err());
+        // Bytes that happen to be UTF-8 are bytes: hex, like any other.
         assert_eq!(
-            render(&OwnedShape::Bytes, true, &[1, 0xab], &item("", 0, None)).unwrap(),
+            render(&OwnedShape::Bytes, true, b"{}", &bare).unwrap(),
+            "7b7d"
+        );
+        assert_eq!(
+            render(&OwnedShape::Bytes, true, &[1, 0xab], &bare).unwrap(),
             "01ab"
         );
     }

@@ -69,7 +69,8 @@ struct Method {
     job: bool,
     /// A job's stall bound, in seconds: required for a job, zero for a method that is not one.
     stall_secs: u32,
-    /// A job's result form: `true` for text (UTF-8, whole), `false` for bytes. Required for a job.
+    /// A job's result form, or an #[out] buffer's: `true` for text (UTF-8, whole), `false` for
+    /// bytes. Required for both.
     result_text: bool,
     reading: Option<Ident>,
     /// An addition after the base shape: `#[added]`, unless `#[breaking]`.
@@ -285,6 +286,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
     }
     let mut params = Vec::new();
     let mut out = None;
+    let mut out_text = false;
     for input in inputs {
         let FnArg::Typed(arg) = input else {
             return Err(Error::new(input.span(), "unexpected receiver"));
@@ -294,7 +296,20 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
         };
         let ident = pat.ident.clone();
         if let Some(position) = arg.attrs.iter().position(|a| a.path().is_ident("out")) {
-            arg.attrs.remove(position);
+            let attr = arg.attrs.remove(position);
+            let form: Ident = attr.parse_args().map_err(|_| {
+                Error::new(
+                    attr.span(),
+                    "an #[out] buffer declares the form of what it holds: #[out(text)] or #[out(bytes)]",
+                )
+            })?;
+            if form != "text" && form != "bytes" {
+                return Err(Error::new(
+                    form.span(),
+                    "an #[out] buffer holds `text` (UTF-8) or `bytes`",
+                ));
+            }
+            out_text = form == "text";
             if out.is_some() {
                 return Err(Error::new(ident.span(), "only one #[out] buffer"));
             }
@@ -344,7 +359,7 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
         id,
         job,
         stall_secs,
-        result_text,
+        result_text: result_text || out_text,
         reading,
         added,
 
@@ -434,16 +449,15 @@ fn method_info(method: &Method) -> TokenStream {
     };
     let added = method.added;
 
-    // The reply to an #[out] method is the bytes themselves. A job's is its result, read whole as
-    // an out buffer is: text (`Str`) or bytes; the JobId its start returns is implied by `job`.
-    let returns = if job {
+    // An #[out] method's reply is its buffer, and a job's is its result: both are read whole, in
+    // the form the contract declares, text (`Str`) or bytes. A job's start returns a JobId, which
+    // `job` implies.
+    let returns = if job || has_out {
         if method.result_text {
             quote! { ::lemnos_core::Shape::Str }
         } else {
             quote! { ::lemnos_core::Shape::Bytes }
         }
-    } else if has_out {
-        quote! { ::lemnos_core::Shape::Bytes }
     } else {
         quote! { <#returned as ::lemnos_core::Encode>::SHAPE }
     };

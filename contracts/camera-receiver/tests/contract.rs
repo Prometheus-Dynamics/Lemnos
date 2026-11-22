@@ -123,6 +123,7 @@ fn the_tag_and_numbers_are_stable() {
         ]
     );
     assert!(INFO.methods[12].has_out_buffer);
+    // inputs: records, so bytes; the stream and feed names are text.
     assert_eq!(INFO.methods[12].returns, Shape::Bytes);
     assert!(!INFO.methods[13].has_out_buffer);
     assert!(!INFO.methods[11].has_out_buffer);
@@ -130,12 +131,12 @@ fn the_tag_and_numbers_are_stable() {
     assert!(INFO.methods[3].has_out_buffer);
     assert_eq!(INFO.methods[1].params[0].name, "link");
     assert_eq!(INFO.methods[1].params[1].shape, Shape::U8);
-    assert_eq!(INFO.methods[3].returns, Shape::Bytes);
+    assert_eq!(INFO.methods[3].returns, Shape::Str);
     assert!(INFO.methods[7].has_out_buffer);
-    assert_eq!(INFO.methods[7].returns, Shape::Bytes);
+    assert_eq!(INFO.methods[7].returns, Shape::Str);
     assert!(INFO.methods[8].has_out_buffer);
     assert!(INFO.methods[9].has_out_buffer);
-    assert_eq!(INFO.methods[9].returns, Shape::Bytes);
+    assert_eq!(INFO.methods[9].returns, Shape::Str);
     assert!(matches!(INFO.methods[10].returns, Shape::Option(_)));
 }
 

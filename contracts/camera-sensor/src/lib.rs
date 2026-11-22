@@ -421,7 +421,7 @@ pub trait CameraSensor {
     /// names this sensor, which is unknown and never matches.
     #[added]
     #[method(12)]
-    fn identity(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn identity(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Posts values as [`CameraSensor::post_values`] does, and answers where they land: the frame
     /// each posted control first shows on, by the landing rule in the module docs. Refused before
     /// anything is written: `NOT_SUPPORTED` with no link to a receiver that counts frame starts,

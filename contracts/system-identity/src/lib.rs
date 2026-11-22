@@ -20,16 +20,16 @@ pub const MAX_FACTS_TEXT: usize = 2048;
 pub trait SystemIdentity {
     /// The board's serial, in the normalised format (lowercase hex, 8 to 32 digits).
     #[method(1, reading = text)]
-    fn serial(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn serial(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The board's family: its `[board] id`.
     #[method(2, reading = text)]
-    fn family(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn family(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The board's display name, with its revision after it.
     #[method(3, reading = text)]
-    fn model(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn model(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Every fact the driver knows, as `name=value` lines. `into` holds [`MAX_FACTS_TEXT`] bytes.
     #[method(4)]
-    fn facts(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn facts(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The board's machine id: 32 lowercase hex digits and a newline. slot-init derives it at boot from
     /// the serial and binds it over `/etc/machine-id` (`docs/slots.md`, "The machine id"). `into` holds
     /// [`MAX_MACHINE_ID`] bytes. `NOT_FOUND` when the node holds none: slot-init refused it (its kernel
@@ -37,5 +37,5 @@ pub trait SystemIdentity {
     /// programs and operators only (the bridge's `call` policy), never in `facts`.
     #[added]
     #[method(5, reading = text)]
-    fn machine_id(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn machine_id(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
 }

@@ -230,7 +230,7 @@ pub trait CameraReceiver {
     /// The name to open the frame stream by, as UTF-8 into `into`, returning its length.
     /// `into` holds at least [`MAX_STREAM_NAME`] bytes.
     #[method(4)]
-    fn frame_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn frame_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Starts taking frames. The sensor's own start follows this.
     #[method(5)]
     fn start(&mut self) -> Result<()>;
@@ -249,7 +249,7 @@ pub trait CameraReceiver {
     /// passes them on. A receiver that can't read its wiring at the moment answers the error
     /// that stopped it.
     #[method(8)]
-    fn feeds(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn feeds(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The name of the stream the receiver publishes each frame's embedded data on, as UTF-8 into
     /// `into`, returning its length. `into` holds at least [`MAX_EMBEDDED_STREAM_NAME`] bytes.
     ///
@@ -259,7 +259,7 @@ pub trait CameraReceiver {
     /// lines answers 0 and publishes nothing.
     #[added]
     #[method(9)]
-    fn embedded_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn embedded_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
 
     /// The sensor whose frames arrive on this receiver's input, as the kernel names it: the name
     /// the sensor's own `identity` answers, as UTF-8 into `into`, returning its length. `into`
@@ -273,7 +273,7 @@ pub trait CameraReceiver {
     /// (`camera.sensor/1` `check_link`). Any other error is a read that failed now.
     #[added]
     #[method(10)]
-    fn source(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn source(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// The layout `configure` set, or `None` before one is set: the same `FrameLayout`. Its `size`
     /// is the most bytes one frame takes in a buffer of the `frames` stream, so a consumer checks
     /// it against the stream's buffer length (`FrameStream::buffer_len` in the client) before or
@@ -302,7 +302,7 @@ pub trait CameraReceiver {
     /// [`MAX_INPUTS`] inputs. Any other error is a read that failed now.
     #[added]
     #[method(13)]
-    fn inputs(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn inputs(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// The index of the input the node has selected now (`VIDIOC_G_INPUT`), the one
     /// [`inputs`](Self::inputs) names. `NOT_SUPPORTED` when the node has no input support.
     #[added]

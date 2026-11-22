@@ -35,7 +35,7 @@ pub trait Flash {
     /// The target, as JSON: its size, whether it holds anything, whether a write may start, and
     /// the last manifest's facts. Returns its length; `BUFFER_TOO_SMALL` when it doesn't fit.
     #[method(1)]
-    fn info(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn info(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Accepts the manifest the image will be checked against, and its signature record: empty, or
     /// the 108-byte record (`LMNSSIG1`, algorithm 1, the key id, the Ed25519 signature over the
     /// board's signed message). Nothing is written. The signature policy and its outcome are the

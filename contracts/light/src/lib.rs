@@ -61,5 +61,5 @@ pub trait Light {
     /// (the daemon's cap for a colour array). Marked `#[added]`.
     #[method(7, reading = colour_array)]
     #[added]
-    fn current(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn current(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
 }

@@ -37,5 +37,5 @@ pub trait Indicator {
     /// The states this device accepts, as text: their names, comma-separated, in [`STATES`]'s order.
     /// Returns its length; `BUFFER_TOO_SMALL` when it doesn't fit.
     #[method(2)]
-    fn states(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn states(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
 }

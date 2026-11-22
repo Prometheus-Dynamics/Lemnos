@@ -93,7 +93,7 @@ pub trait ImageConvert {
     /// The name to open the job stream by, as UTF-8 into `into`, returning its length. `into`
     /// holds at least [`MAX_STREAM_NAME`] bytes.
     #[method(4)]
-    fn job_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn job_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     #[method(5)]
     fn counters(&mut self) -> Result<Counters>;
 }

@@ -1,0 +1,5 @@
+error: an #[out] buffer holds `text` (UTF-8) or `bytes`
+ --> tests/fail/out_bad_form.rs:2:50
+  |
+2 | pub trait T { #[method(1)] fn a(&mut self, #[out(json)] into: &mut [u8]) -> lemnos_core::Result<usize>; }
+  |                                                  ^^^^

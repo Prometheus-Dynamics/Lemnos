@@ -562,9 +562,11 @@ with arguments, or with an out buffer and no reading, is refused by name before 
 takes arguments or an out buffer, so call it instead. A colour array is read at most once per 20 ms
 (`FRAME_PERIOD_US`): a faster period is granted as 20 ms.
 
- A reply is printed as text when its bytes are valid UTF-8 (JSON, as `system.slots` writes
-it, prints as JSON), and as hex otherwise. The rule is the same for `lemnos-ctl` and the Orion
-bridge's `.call` action, and is implemented once, in `lemnos_wire::text`.
+ An out buffer's reply is printed in the form its contract declares: `#[out(text)]` as the text
+it is (JSON, as `system.slots` writes it, prints as JSON), `#[out(bytes)]` as hex, even when the
+bytes happen to be text. Nothing is guessed from the bytes, and a text reply that is not UTF-8 is an
+error that says so. The rule is the same for `lemnos-ctl` and the Orion bridge's `.call` action,
+and is implemented once, in `lemnos_wire::text`.
 
 ### off DEVICE, on DEVICE
 

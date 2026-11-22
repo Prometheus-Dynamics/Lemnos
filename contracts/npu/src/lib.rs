@@ -118,7 +118,7 @@ pub trait Npu {
     /// The name to open the job stream by, as UTF-8 into `into`, returning its length. `into`
     /// holds at least [`MAX_STREAM_NAME`] bytes.
     #[method(2)]
-    fn job_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn job_stream(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
     /// Loads the program in the first `bytes` of `buffer` on the job stream, and returns its
     /// number. The buffer is the caller's again when this returns. `INVALID_ARGUMENT` for a
     /// program too large, or one the chip refuses. `BUSY` when no program slot is free.

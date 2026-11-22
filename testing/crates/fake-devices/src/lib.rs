@@ -39,7 +39,7 @@ pub trait Counter {
     #[method(5)]
     fn fail(&mut self) -> Result<()>;
     #[method(6)]
-    fn dump(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn dump(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
 }
 
 fn vector(cfg: &Config<'_>, scale: f32) -> Vector3 {

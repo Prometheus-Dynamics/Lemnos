@@ -1,8 +1,8 @@
 error: a method with an #[out] buffer returns Result<usize>
- --> tests/fail/out_wrong_return.rs:3:65
+ --> tests/fail/out_wrong_return.rs:3:72
   |
-3 | pub trait T { #[method(1)] fn a(&mut self, #[out] x: &mut [u8]) -> Result<u8>; }
-  |                                                                 ^
+3 | pub trait T { #[method(1)] fn a(&mut self, #[out(bytes)] x: &mut [u8]) -> Result<u8>; }
+  |                                                                        ^
 
 warning: unused import: `Result`
  --> tests/fail/out_wrong_return.rs:1:29

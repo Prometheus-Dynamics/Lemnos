@@ -25,12 +25,12 @@ pub const TEXT_MAX: usize = 1024;
 pub trait Security {
     /// The switch as it stands, and what the last precheck said.
     #[method(1)]
-    fn state(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn state(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
 
     /// Whether the switch may change to `on`, as the text above. `false` asks only about
     /// work in progress (a flip is never allowed under an install or a trial).
     #[method(2)]
-    fn precheck(&mut self, on: bool, #[out] into: &mut [u8]) -> Result<usize>;
+    fn precheck(&mut self, on: bool, #[out(text)] into: &mut [u8]) -> Result<usize>;
 
     /// Changes the switch: the precheck, Orion's answer when Orion is on the board, the record
     /// written, the view rendered. Refused by name when a fact stops it.
@@ -42,11 +42,16 @@ pub trait Security {
     /// argument list of `system.security/1` version 1, which is not yet released: it takes the
     /// reply's buffer, for the `note:` lines above (breaking for a caller of the earlier form).
     #[method(3)]
-    fn set(&mut self, on: bool, authorization: &[u8], #[out] into: &mut [u8]) -> Result<usize>;
+    fn set(
+        &mut self,
+        on: bool,
+        authorization: &[u8],
+        #[out(text)] into: &mut [u8],
+    ) -> Result<usize>;
 
     /// What an authorization to turn the switch off must sign, from the board: the target, the
     /// generation, the board's serial, the message in hex, and the keys the board holds. One fact
     /// per line; the message is the only thing the signer signs.
     #[method(4)]
-    fn request_off(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    fn request_off(&mut self, #[out(text)] into: &mut [u8]) -> Result<usize>;
 }

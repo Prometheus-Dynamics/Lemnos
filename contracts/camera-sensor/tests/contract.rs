@@ -125,7 +125,8 @@ fn the_tag_and_numbers_are_stable() {
     assert_eq!(INFO.methods[9].returns, Shape::U8);
     assert!(INFO.methods[..11].iter().all(|m| !m.has_out_buffer));
     assert!(INFO.methods[11].has_out_buffer);
-    assert_eq!(INFO.methods[11].returns, Shape::Bytes);
+    // identity: the kernel's name for the sensor, text.
+    assert_eq!(INFO.methods[11].returns, Shape::Str);
 }
 
 #[test]

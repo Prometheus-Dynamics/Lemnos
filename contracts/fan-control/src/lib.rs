@@ -82,7 +82,7 @@ pub trait FanControl {
     fn set_settings(&mut self, settings: Settings) -> Result<()>;
     /// Writes one input's curve into `into`, in the form [`Point::read_all`] reads.
     #[method(4)]
-    fn curve(&mut self, input: u8, #[out] into: &mut [u8]) -> Result<usize>;
+    fn curve(&mut self, input: u8, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// Replaces one input's curve until the driver restarts. `points` comes from
     /// [`Point::write_all`].
     #[method(5)]
