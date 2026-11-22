@@ -60,6 +60,19 @@ pub fn claim(
             stock.unwrap_or("none")
         ));
     }
+    if let Some(other) = &current {
+        // A driver built with suppress_bind_attrs has no unbind file: the kernel never lets it go
+        // at run time, so the node can be the module's only with that driver a module or off.
+        // Said before the override is written, so nothing is left half done.
+        let unbind = platform.join("drivers").join(other).join("unbind");
+        if !unbind.exists() {
+            return Err(format!(
+                "{device} is bound to {other}, which the kernel does not let go at run time (no {}: \
+                 the driver is built with suppress_bind_attrs); build {other} as a module or leave it out",
+                unbind.display()
+            ));
+        }
+    }
     put(&node.join("driver_override"), driver)?;
     if let Some(other) = &current {
         put(&platform.join("drivers").join(other).join("unbind"), device)?;
@@ -210,6 +223,24 @@ mod tests {
         assert_eq!(
             bus.read("devices/1000880000.pisp_be/driver_override"),
             "lemnos"
+        );
+    }
+
+    #[test]
+    fn a_stock_driver_the_kernel_never_lets_go_is_said_and_nothing_is_written() {
+        // A driver built with suppress_bind_attrs: its directory has no bind or unbind file.
+        let bus = Bus::new("suppressed");
+        fs::remove_file(bus.0.join("drivers/pispbe/unbind")).unwrap();
+        fs::remove_file(bus.0.join("drivers/pispbe/bind")).unwrap();
+        let why = claim(&bus.0, "1000880000.pisp_be", "lemnos", Some("pispbe")).unwrap_err();
+        assert!(
+            why.contains("suppress_bind_attrs") && why.contains("build pispbe as a module"),
+            "{why}"
+        );
+        assert_eq!(
+            bus.read("devices/1000880000.pisp_be/driver_override"),
+            "(null)\n",
+            "no override is left behind"
         );
     }
 

@@ -220,7 +220,7 @@ echo lemnos > /sys/bus/platform/devices/$DEVICE/driver_override
 echo $DEVICE > /sys/bus/platform/drivers/lemnos/bind
 ```
 
-`owned` is a list of `vendor,name` pairs separated by commas. On a board, lemnosd's root phase does this for every node the board file gives to the module, unbinding the stock driver the SoC map names first (`docs/device-tree.md`, "Whether the stock driver binds"). If a stock driver holds the device,
+`owned` is a list of `vendor,name` pairs separated by commas. On a board, lemnosd's root phase does this for every node the board file gives to the module, unbinding the stock driver the SoC map names first (`docs/device-tree.md`, "Whether the stock driver binds"). The image contract: a stock driver for a node the module owns may be built in or a module, but it must not be built with `suppress_bind_attrs` (no `unbind` file), which the kernel never lets go at run time; the root phase refuses such a node by name, before it writes anything. If a stock driver holds the device,
 unbind it from that driver first. An override stays set after an unbind, so clear it before
 loading the module again, or the device binds as soon as the module loads.
 
