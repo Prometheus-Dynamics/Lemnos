@@ -43,6 +43,7 @@ fn a_stale_frame_start_fails_the_chain_proof_on_its_age_check() {
     *lemnos_camera_sim::WORLD.lock().unwrap() = Some(new_world(true, Model::B1));
     // The chain's clock is the sim's: frames move it, and the proof reads it from this file.
     let clock_dir = scratch();
+    let _remove_clock = RemoveOnDrop(clock_dir.clone());
     let clock = clock_dir.join("sim-clock");
     lemnos_camera_sim::time::install_file(&clock).unwrap();
     let board = chain_board(REFERENCE_BOARD).unwrap();
