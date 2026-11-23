@@ -23,7 +23,7 @@
 
 use std::io;
 
-use lemnos_hal::usb_descriptors::{GadgetFunction, UsbDescriptors};
+use lemnos_hal::usb_descriptors::{GadgetFunction, IfName, UsbDescriptors};
 use lemnos_linux_sys::confined::{CONFIGFS_MAGIC, Dir, Kind};
 
 use super::{
@@ -66,6 +66,15 @@ pub struct Trees {
     held: std::sync::Arc<std::sync::Mutex<Vec<(String, std::time::Instant)>>>,
     /// [`HELD_LIMIT`], shorter in tests.
     held_limit: std::time::Duration,
+    /// Each controller's functions, in the board file's order, as its last setup was asked for:
+    /// what [`Trees::bind`] makes a fresh network function and links again from.
+    functions: Vec<(String, Vec<GadgetFunction>)>,
+    /// Each controller whose kernel refused the network device on a fresh function: its gadget
+    /// is bound without the network function from then on (see [`Trees::bind`]).
+    network_refused: Vec<String>,
+    /// A test's kernel: a `UDC` write it refuses (with `EBUSY`), from the tree as it is then.
+    #[cfg(test)]
+    pub(super) refuses: Option<fn(&Dir) -> bool>,
 }
 
 /// The three roots, owned: the system's constants, or a test's stand-in directories.
@@ -112,6 +121,10 @@ impl Trees {
             udc_class: None,
             held: std::sync::Arc::default(),
             held_limit: HELD_LIMIT,
+            functions: Vec::new(),
+            network_refused: Vec::new(),
+            #[cfg(test)]
+            refuses: None,
         }
     }
 
@@ -209,6 +222,12 @@ impl Trees {
     ) -> io::Result<Outcome> {
         let plan =
             Plan::of(&UsbDescriptors::parse(descriptors).map_err(invalid)?).map_err(invalid)?;
+        match self.functions.iter_mut().find(|(name, _)| name == udc_name) {
+            Some((_, kept)) => functions.clone_into(kept),
+            None => self
+                .functions
+                .push((udc_name.to_string(), functions.to_vec())),
+        }
         // Taken before the gadget, which borrows the trees for the call.
         let held_list = std::sync::Arc::clone(&self.held);
         let limit = self.held_limit;
@@ -338,13 +357,90 @@ impl Trees {
 
     /// Writes the controller's name to the gadget's `UDC`.
     ///
+    /// **No network function is bound twice.** The kernel's NCM function registers its network
+    /// device on its first bind, and a registration that fails leaves that device in a state the
+    /// kernel's `register_netdevice` takes for a fatal error the next time
+    /// (`BUG_ON(dev->reg_state != NETREG_UNINITIALIZED)`, a panic): a second bind of the same
+    /// function instance takes the board down. So when a bind fails and the tree has an NCM
+    /// function, that function is removed at once and a fresh one made in its place, linked in
+    /// the board file's order, and the bind is tried again on it, all here: the FunctionFS
+    /// function and its session are not touched, so a holder of the endpoints keeps them.
+    ///
+    /// On 7.3 a controller device that went away and came back after an NCM device was registered
+    /// under it makes every NCM registration fail for the rest of the boot (`docs/hardware-status.md`,
+    /// "NCM after the controller came back"). A bind that fails on the fresh function too, and
+    /// works without it, is taken for that state: the controller's gadget is bound without its
+    /// network function, then and at every bind after (the function a setup makes again is
+    /// removed before the write, never bound), so its other functions still reach the host. The
+    /// caller tells it from the tree: the network function is gone after a bind that worked
+    /// ([`super::NETWORK_REFUSED`]). A bind that fails without it as well leaves a fresh network
+    /// function in the tree, never bound, and returns the first error.
+    ///
     /// # Errors
     ///
     /// The name is not a controller's, or the write fails (`ENOENT` when the gadget is not made).
     pub fn bind(&mut self, udc_name: &str) -> io::Result<()> {
+        let functions = self
+            .functions
+            .iter()
+            .find(|(name, _)| name == udc_name)
+            .map(|(_, functions)| functions.clone());
+        let was_refused = self.network_refused.iter().any(|name| name == udc_name);
+        #[cfg(test)]
+        let refuses = self.refuses;
         let g = self.gadget(udc_name)?;
         let dir = g.gadgets.open_dir(&g.dir_name())?;
-        attribute(&dir, "UDC", &g.name)
+        let controller = g.name.clone();
+        let order = function_dirs(&controller, functions.as_deref().unwrap_or(&[]));
+        let network = functions
+            .iter()
+            .flatten()
+            .find_map(|function| match function {
+                GadgetFunction::Ncm { .. } => Some(*function),
+                _ => None,
+            });
+        let write = || {
+            #[cfg(test)]
+            if refuses.is_some_and(|refuses| refuses(&dir)) {
+                return Err(io::Error::from_raw_os_error(libc::EBUSY));
+            }
+            attribute(&dir, "UDC", &controller)
+        };
+        if was_refused {
+            if has_network(&dir) {
+                remove_function(&dir, NCM_DIR);
+            }
+            return write();
+        }
+        let Err(error) = write() else {
+            return Ok(());
+        };
+        if !has_network(&dir) {
+            return Err(error);
+        }
+        let _ = dir.write("UDC", b"\n");
+        // Nothing to make a fresh one from (a tree no setup of these trees made): the function
+        // goes, and the next setup makes it again.
+        let Some(network) = network else {
+            remove_function(&dir, NCM_DIR);
+            return Err(error);
+        };
+        if renew_network(&dir, &network, &order).is_err() || write().is_ok() {
+            return if has_network(&dir) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let _ = dir.write("UDC", b"\n");
+        relink_without_network(&dir, &order);
+        if write().is_ok() {
+            self.network_refused.push(udc_name.to_string());
+            return Ok(());
+        }
+        let _ = dir.write("UDC", b"\n");
+        let _ = renew_network(&dir, &network, &order);
+        Err(error)
     }
 
     /// Writes an empty line to the gadget's `UDC`. A gadget that is not there, or not bound, is
@@ -629,6 +725,67 @@ fn directories(parent: &Dir, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether the gadget's tree has its network function.
+fn has_network(gadget: &Dir) -> bool {
+    gadget
+        .open_dir("functions")
+        .is_ok_and(|functions| functions.kind(NCM_DIR).is_ok_and(|kind| kind == Kind::Dir))
+}
+
+/// The network function removed, a fresh one made from `network`, and every configuration's
+/// links made again in `order` (the board file's): the unbound gadget's tree as a setup makes it,
+/// with a network function no bind has seen.
+fn renew_network(gadget: &Dir, network: &GadgetFunction, order: &[String]) -> io::Result<()> {
+    remove_function(gadget, NCM_DIR);
+    let functions = gadget.open_dir("functions")?;
+    let GadgetFunction::Ncm {
+        host,
+        device,
+        ifname,
+    } = network
+    else {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    };
+    make_network(&functions, host, device, ifname.as_ref())?;
+    relink(gadget, order, true)
+}
+
+/// Every configuration's links made again in `order`, the network function left out.
+fn relink_without_network(gadget: &Dir, order: &[String]) {
+    remove_function(gadget, NCM_DIR);
+    let _ = relink(gadget, order, false);
+}
+
+fn relink(gadget: &Dir, order: &[String], network: bool) -> io::Result<()> {
+    let functions = gadget.open_dir("functions")?;
+    let functions_path = functions.proc_path();
+    let configs = gadget.open_dir("configs")?;
+    for configuration in directories(gadget, "configs") {
+        let configuration = configs.open_dir(&configuration)?;
+        remove_links(&configuration);
+        for name in order {
+            if (network || name != NCM_DIR) && functions.kind(name).is_ok_and(|k| k == Kind::Dir) {
+                configuration.symlink(&format!("{}/{name}", functions_path.display()), name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Unlinks function `name` from every configuration and removes its directory.
+fn remove_function(gadget: &Dir, name: &str) {
+    if let Ok(configs) = gadget.open_dir("configs") {
+        for configuration in directories(gadget, "configs") {
+            if let Ok(configuration) = configs.open_dir(&configuration) {
+                let _ = configuration.remove_file(name);
+            }
+        }
+    }
+    if let Ok(functions) = gadget.open_dir("functions") {
+        remove_dir_of(&functions, name);
+    }
+}
+
 /// Removes every link of `dir`.
 fn remove_links(dir: &Dir) {
     for entry in dir.names().unwrap_or_default() {
@@ -694,6 +851,34 @@ fn mount_ffs(g: &Gadget<'_>, owner: Owner, system: &mut dyn Mounts) -> io::Resul
 }
 
 /// Makes the tree, in the order of the module docs of the gadget.
+/// The network function, made in `functions` with its addresses, OS descriptor and name.
+fn make_network(
+    functions: &Dir,
+    host: &[u8; 6],
+    device: &[u8; 6],
+    ifname: Option<&IfName>,
+) -> io::Result<()> {
+    functions.make_dir(NCM_DIR, 0o755)?;
+    let dir = functions.open_dir(NCM_DIR)?;
+    attribute(&dir, "host_addr", &mac_text(host))?;
+    attribute(&dir, "dev_addr", &mac_text(device))?;
+    // The NCM interface's OS descriptor, a group configfs makes for the function. Written raw:
+    // the store takes up to 8 bytes and would keep a newline. Best effort: the link does not
+    // depend on it, and the harness checks it is there.
+    let _ = (|| -> io::Result<()> {
+        dir.ensure_dir("os_desc", 0o755)?;
+        let os = dir.open_dir("os_desc")?;
+        os.ensure_dir("interface.ncm", 0o755)?;
+        os.open_dir("interface.ncm")?
+            .write("compatible_id", id_text(&ms_os::NCM_COMPATIBLE_ID))
+    })();
+    if let Some(name) = ifname {
+        // Only taken while the function is unbound, which it is here.
+        attribute(&dir, "ifname", name.as_str()).map_err(ifname_refused)?;
+    }
+    Ok(())
+}
+
 fn make(
     g: &Gadget<'_>,
     plan: &Plan,
@@ -778,24 +963,7 @@ fn make(
                 device,
                 ifname,
             } => {
-                functions_dir.make_dir(NCM_DIR, 0o755)?;
-                let dir = functions_dir.open_dir(NCM_DIR)?;
-                attribute(&dir, "host_addr", &mac_text(host))?;
-                attribute(&dir, "dev_addr", &mac_text(device))?;
-                // The NCM interface's OS descriptor, a group configfs makes for the function.
-                // Written raw: the store takes up to 8 bytes and would keep a newline. Best
-                // effort: the link does not depend on it, and the harness checks it is there.
-                let _ = (|| -> io::Result<()> {
-                    dir.ensure_dir("os_desc", 0o755)?;
-                    let os = dir.open_dir("os_desc")?;
-                    os.ensure_dir("interface.ncm", 0o755)?;
-                    os.open_dir("interface.ncm")?
-                        .write("compatible_id", id_text(&ms_os::NCM_COMPATIBLE_ID))
-                })();
-                if let Some(name) = ifname {
-                    // Only taken while the function is unbound, which it is here.
-                    attribute(&dir, "ifname", name.as_str()).map_err(ifname_refused)?;
-                }
+                make_network(&functions_dir, host, device, ifname.as_ref())?;
                 links.push(NCM_DIR.to_string());
             }
             GadgetFunction::Acm => {

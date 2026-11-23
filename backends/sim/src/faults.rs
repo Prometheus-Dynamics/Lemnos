@@ -314,6 +314,9 @@ impl<T: UsbFunction<Error = ErrorKind>> UsbFunction for Faulty<T> {
     fn endpoint_handles(&self) -> Result<[lemnos_hal::blocks::BufferHandle<'_>; 2], ErrorKind> {
         self.inner.endpoint_handles()
     }
+    fn enable_note(&self) -> Option<&'static str> {
+        self.inner.enable_note()
+    }
     forward! {
         enable(descriptors: &[u8]) -> ();
         disable() -> ();

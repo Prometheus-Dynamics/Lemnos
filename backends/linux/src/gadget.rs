@@ -497,6 +497,14 @@ const NCM_DIR: &str = "ncm.usb0";
 pub const NCM_IFNAME_REFUSED: &str = "this kernel's NCM function can't be given an interface \
      name: its ifname attribute is missing or read-only (Linux 5.12 or later is needed)";
 const ACM_DIR: &str = "acm.GS0";
+/// What the gadget lacks in this boot: a bind failed, failed again on a network function made
+/// fresh for it, and worked without one (see `Trees::bind`). The kernel's NCM function then cannot
+/// register its network device until the board restarts (on 7.3, after the USB controller's
+/// device went away and came back with such a device once registered under it), so the gadget is
+/// bound without it. Lemnos does not restart the board.
+pub const NETWORK_REFUSED: &str = "the kernel refuses to register the gadget's network device \
+     again in this boot (a bind failed twice, the second time on a fresh NCM function): the \
+     gadget is bound without its USB network function until the board restarts";
 
 fn invalid(kind: ErrorKind) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, format!("{kind:?}"))
@@ -1183,6 +1191,8 @@ pub struct FunctionFsGadget {
     helper: Option<(SharedHelper, u32)>,
     /// What the last successful setup left: whether the tree has a serial string.
     serial: Option<bool>,
+    /// What the gadget the last enable bound lacks: [`NETWORK_REFUSED`].
+    note: Option<&'static str>,
 }
 
 /// The `/sys/class/udc` entry a `udc:` name stands for. A name that is an entry of that directory is
@@ -1228,6 +1238,7 @@ impl FunctionFsGadget {
             _claim: None,
             helper: None,
             serial: None,
+            note: None,
         })
     }
 
@@ -1352,14 +1363,27 @@ impl UsbFunction for FunctionFsGadget {
         if !self.paths.ready(&plan.configuration) {
             return Err(ErrorKind::NotFound);
         }
+        self.note = None;
+        // A bind that worked without the tree's network function: the kernel refused it for the
+        // boot (`Trees::bind`), and the rest of the gadget is up.
+        let network = self.paths.gadget.join("functions").join(NCM_DIR);
+        let had_network = network.is_dir();
+        let refused = |gadget: &mut Self| {
+            if had_network && !network.is_dir() {
+                gadget.note = Some(NETWORK_REFUSED);
+            }
+        };
         if released {
             // The controller let go and the session kept ep0 open (see `disable`). The descriptors
             // are still the kernel's, and a fresh ep0 could not describe them again while a holder
             // keeps the endpoints open, so only the attribute is written.
+            // A failed bind keeps the session for the holder, as a let-go does: the helper's bind
+            // never leaves a network function that failed for the next one (`Trees::bind`).
             self.bind_now().map_err(|e| setup_kind(&e))?;
             if let Some(session) = self.session.as_mut() {
                 session.released = false;
             }
+            refused(self);
             return Ok(());
         }
         self.unbind_now();
@@ -1381,6 +1405,7 @@ impl UsbFunction for FunctionFsGadget {
                 let mut session = Session::new(wire, plan.endpoints);
                 session.lend = plan.lend;
                 self.session = Some(session);
+                refused(self);
                 Ok(())
             }
             Err(error) => {
@@ -1423,6 +1448,10 @@ impl UsbFunction for FunctionFsGadget {
 
     fn control_end(&mut self, data: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
         self.session()?.control_end(data)
+    }
+
+    fn enable_note(&self) -> Option<&'static str> {
+        self.note
     }
 
     fn control_stall(&mut self) -> Result<(), ErrorKind> {

@@ -1621,6 +1621,9 @@ struct Helped {
     mounts: PathBuf,
     udc: PathBuf,
     failing: u32,
+    /// The errno each `bind` fails with, while set.
+    bind_errno: Option<i32>,
+    binds_without_network: bool,
     calls: Vec<&'static str>,
 }
 
@@ -1660,6 +1663,16 @@ impl GadgetHelper for Helped {
     fn bind(&mut self, index: u32) -> io::Result<()> {
         assert_eq!(index, 0);
         self.calls.push("bind");
+        if let Some(errno) = self.bind_errno {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
+        if self.binds_without_network {
+            // As `Trees::bind` does once the kernel refused the network device for the boot.
+            let _ = fs::remove_dir(
+                self.configfs
+                    .join("usb_gadget/lemnos-udc0/functions/ncm.usb0"),
+            );
+        }
         bind(&self.roots(), UDC)
     }
 
@@ -1677,6 +1690,8 @@ fn helped(tree: &Tree, failing: u32) -> Arc<Mutex<Helped>> {
         mounts: tree.mounts_root.clone(),
         udc: tree.udc_root.clone(),
         failing,
+        bind_errno: None,
+        binds_without_network: false,
         calls: Vec::new(),
     }))
 }
@@ -2064,4 +2079,178 @@ fn a_functionfs_instance_held_past_the_limit_is_taken_over() {
         "a fresh instance mounted: {:?}",
         held.mounts
     );
+}
+
+/// A test kernel that refuses every bind while the tree has a network function: the state after
+/// the controller's device came back.
+fn refuses_network(gadget: &Dir) -> bool {
+    gadget
+        .open_dir("functions")
+        .is_ok_and(|functions| functions.exists("ncm.usb0"))
+}
+
+/// A test kernel that refuses every bind.
+fn refuses_all(_: &Dir) -> bool {
+    true
+}
+
+static REFUSED_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A test kernel that refuses the first bind only.
+fn refuses_once(_: &Dir) -> bool {
+    !REFUSED_ONCE.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The network function marked, so a fresh one is told from it (a fresh one has no mark).
+fn mark_network(tree: &Tree) {
+    fs::write(tree.gadget_dir().join("functions/ncm.usb0/seen"), "").unwrap();
+}
+
+fn network_marked(tree: &Tree) -> bool {
+    tree.gadget_dir().join("functions/ncm.usb0/seen").exists()
+}
+
+/// Every function of the tree is linked in its configuration: the network one too when `network`.
+fn linked(tree: &Tree, network: bool) -> bool {
+    let config = tree.gadget_dir().join("configs/c.1");
+    let link = |name: &str| fs::symlink_metadata(config.join(name)).is_ok();
+    link(&format!("ffs.{UDC}")) && link("acm.GS0") && link("ncm.usb0") == network
+}
+
+fn network_setup(trees: &mut Trees, recorder: &mut Recorder) -> io::Result<Outcome> {
+    let functions = [GadgetFunction::Ffs, ncm(), GadgetFunction::Acm];
+    trees.setup_for_helper(UDC, own(), &set(), &functions, recorder)
+}
+
+#[test]
+fn a_bind_the_kernel_refuses_with_a_network_function_is_tried_on_a_fresh_one_then_without() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    network_setup(&mut trees, &mut recorder).unwrap();
+    mark_network(&tree);
+    assert!(linked(&tree, true));
+    trees.refuses = Some(refuses_network);
+    // Refused with the function, and refused again on a fresh one: the gadget is bound without
+    // it, the rest linked as before.
+    trees.bind(UDC).unwrap();
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    assert!(!tree.gadget_dir().join("functions/ncm.usb0").exists());
+    assert!(linked(&tree, false));
+    trees.unbind(UDC).unwrap();
+    // The setup after makes the network function again, as the board file has it, and every
+    // bind after takes it out before the write: the kernel never sees it.
+    assert_eq!(
+        network_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Remade
+    );
+    assert!(linked(&tree, true));
+    trees.refuses = Some(refuses_all);
+    trees.bind(UDC).unwrap_err();
+    assert!(!tree.gadget_dir().join("functions/ncm.usb0").exists());
+    trees.refuses = None;
+    network_setup(&mut trees, &mut recorder).unwrap();
+    trees.bind(UDC).unwrap();
+    assert!(linked(&tree, false));
+}
+
+#[test]
+fn a_bind_refused_once_works_on_a_fresh_network_function() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    network_setup(&mut trees, &mut recorder).unwrap();
+    mark_network(&tree);
+    trees.refuses = Some(refuses_once);
+    trees.bind(UDC).unwrap();
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    assert!(tree.gadget_dir().join("functions/ncm.usb0").is_dir());
+    assert!(!network_marked(&tree), "a fresh function, never bound");
+    assert!(linked(&tree, true));
+    // The tree is the board file's: adopted.
+    trees.unbind(UDC).unwrap();
+    trees.refuses = None;
+    assert_eq!(
+        network_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Adopted
+    );
+}
+
+#[test]
+fn a_bind_refused_with_and_without_the_network_function_leaves_a_fresh_one_unbound() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    network_setup(&mut trees, &mut recorder).unwrap();
+    mark_network(&tree);
+    trees.refuses = Some(refuses_all);
+    assert_eq!(errno_of(&trees.bind(UDC).unwrap_err()), Some(libc::EBUSY));
+    assert_ne!(tree.attribute("UDC"), "udc0\n");
+    assert!(tree.gadget_dir().join("functions/ncm.usb0").is_dir());
+    assert!(!network_marked(&tree));
+    assert!(linked(&tree, true));
+    // Not the network function's doing: the next bind that works has it.
+    mark_network(&tree);
+    trees.refuses = Some(refuses_all);
+    trees.bind(UDC).unwrap_err();
+    assert!(
+        !network_marked(&tree),
+        "the function a bind failed on is never bound again"
+    );
+    trees.refuses = None;
+    trees.bind(UDC).unwrap();
+    assert!(linked(&tree, true));
+}
+
+#[test]
+fn a_failed_bind_of_a_gadget_with_no_network_function_leaves_its_tree_as_it_is() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    helper_setup(&mut trees, &mut recorder).unwrap();
+    let before = tree.entries("functions");
+    trees.refuses = Some(refuses_all);
+    trees.bind(UDC).unwrap_err();
+    trees.bind(UDC).unwrap_err();
+    assert_eq!(tree.entries("functions"), before);
+    trees.refuses = None;
+    assert_eq!(
+        helper_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Adopted
+    );
+}
+
+#[test]
+fn a_gadget_bound_without_its_network_function_says_so_and_keeps_its_session_through_a_let_go() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let mut gadget = with_helper(&tree, &helper);
+    // A refused bind is its kind, with no note.
+    helper.lock().unwrap().bind_errno = Some(libc::EBUSY);
+    assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+    assert_eq!(gadget.enable_note(), None);
+    helper.lock().unwrap().bind_errno = None;
+    gadget.enable(&set()).unwrap();
+    assert_eq!(gadget.enable_note(), None);
+
+    // The controller let go; the helper's bind works without the network function: the note
+    // says so, and the session the holder has stays.
+    fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
+    gadget.session.as_mut().unwrap().released = true;
+    gadget.disable().unwrap();
+    let network = tree.gadget_dir().join("functions/ncm.usb0");
+    fs::create_dir(&network).unwrap();
+    helper.lock().unwrap().binds_without_network = true;
+    helper.lock().unwrap().calls.clear();
+    gadget.enable(&set()).unwrap();
+    assert_eq!(helper.lock().unwrap().calls, ["bind"]);
+    assert_eq!(gadget.enable_note(), Some(NETWORK_REFUSED));
+    assert!(gadget.session.as_ref().is_some_and(|s| !s.released));
+    // A failed bind on a let-go keeps the session too.
+    fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
+    gadget.session.as_mut().unwrap().released = true;
+    gadget.disable().unwrap();
+    helper.lock().unwrap().bind_errno = Some(libc::EBUSY);
+    assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+    assert!(gadget.session.is_some());
 }

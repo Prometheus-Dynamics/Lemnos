@@ -526,6 +526,41 @@ fn each_way_an_enable_fails_has_its_reason() {
     }
 }
 
+/// A backend that knows more than the error kind says it, and that is the reason: here a system
+/// state no retry clears. The gadget keeps retrying under the failure rule all the same.
+#[test]
+fn an_enable_the_backend_names_has_the_backends_words_as_its_reason_and_is_still_retried() {
+    const STATE: &str = "the system refuses this until it restarts";
+    let mut rig = Rig::new();
+    rig.host.refuse_enable(Some(ErrorKind::Failed));
+    rig.host.set_enable_note(Some(STATE));
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        waits.push(rig.step() / SECOND);
+        assert_eq!(rig.health(), Health::Failed(STATE));
+    }
+    assert_eq!(waits, [1, 2, 4, 8, 8, 8]);
+    rig.host.refuse_enable(None);
+    rig.host.set_enable_note(None);
+    rig.step();
+    assert_eq!(rig.health(), Health::Ok);
+}
+
+#[test]
+fn a_gadget_enabled_without_part_of_it_runs_degraded_with_the_backends_words() {
+    const LACKS: &str = "bound without a part the system refused";
+    let mut rig = Rig::new();
+    rig.host.set_enable_note(Some(LACKS));
+    assert_eq!(rig.step(), POLL_NS);
+    assert_eq!(rig.health(), Health::Degraded(LACKS));
+    // Taken down and enabled again with nothing lacking: the words go.
+    rig.host.release();
+    rig.step();
+    rig.host.set_enable_note(None);
+    rig.step();
+    assert_eq!(rig.health(), Health::Ok);
+}
+
 #[test]
 fn a_function_left_enabled_is_taken_down_and_enabled_afresh() {
     let mut rig = Rig::new();

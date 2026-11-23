@@ -94,6 +94,7 @@ macro_rules! say {
 
 mod contract;
 mod host;
+mod poison;
 mod stage;
 
 fn main() -> ExitCode {
@@ -106,6 +107,13 @@ fn main() -> ExitCode {
         }
         Some("host") => {
             return if host::host_side() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        Some("poison") => {
+            return if poison::run() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE

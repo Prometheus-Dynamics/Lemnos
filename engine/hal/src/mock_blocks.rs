@@ -1200,6 +1200,8 @@ struct UsbFunctionState {
     /// The controller let go: `next_event` fails until the function is enabled again.
     released: bool,
     refuse_enable: Option<ErrorKind>,
+    /// What [`UsbFunction::enable_note`] says.
+    enable_note: Option<&'static str>,
     /// The NCM interface's name the function reports once enabled.
     interface: Option<Vec<u8>>,
     serial_string: Option<bool>,
@@ -1358,6 +1360,11 @@ impl MockUsbFunction {
         with(&self.state, |s| s.refuse_enable = kind);
     }
 
+    /// What [`UsbFunction::enable_note`] says from now on, for an `enable` refused or done.
+    pub fn set_enable_note(&self, note: Option<&'static str>) {
+        with(&self.state, |s| s.enable_note = note);
+    }
+
     /// The controller lets go of the function: `next_event` fails with `Unavailable` until it
     /// is disabled and enabled again.
     pub fn release(&self) {
@@ -1456,6 +1463,10 @@ impl UsbFunction for MockUsbFunction {
                 .copy_from_slice(name);
             Ok(Some(name.len()))
         })
+    }
+
+    fn enable_note(&self) -> Option<&'static str> {
+        with(&self.state, |s| s.enable_note)
     }
 
     fn serial_string_set(&mut self) -> Result<Option<bool>, ErrorKind> {

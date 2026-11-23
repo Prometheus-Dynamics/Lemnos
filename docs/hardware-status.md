@@ -221,6 +221,39 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`R1f.md`](../testing/board-runs/R1f.md) | What a holder of the lent gadget pair sees on a real controller: the errno of a read in flight at each host or daemon event, and whether the same descriptors work again. QEMU (dummy_hcd, through lemnosd, R1g): cases 1 to 6 and the control request run with END asserted; untested on board |
 | [`V1g.md`](../testing/board-runs/V1g.md) | The USB gadget set up by the privileged helper: a controller that appears late, host role then device role, configfs not mounted at start, the two processes and their capabilities, the helper dying and being forked again, a serial that is not readable yet, and stop taking the gadget down |
 
+### NCM after the controller came back
+
+A kernel fault, not a Lemnos one, found in the QEMU guest on 7.3.5 (the same `f_ncm.c` and
+`net/core/dev.c` as the board kernel's 7.3.y tree), with no upstream fix found. When the USB
+controller's device goes away and comes back (`echo dummy_udc.0 > .../drivers/dummy_udc/unbind`,
+then `bind`) after a gadget's NCM network device was registered under it, every NCM registration
+for the rest of the boot fails: the UDC write returns `EBUSY` and the log has
+`kobject_add_internal failed for <ifname> (error: -2 parent: net)`. A failed registration leaves the
+function's one `net_device` in `NETREG_UNREGISTERED` (`dev.c`, the error path of
+`register_netdevice`), and binding that same function again hits the `BUG_ON` on `reg_state` at the
+top of `register_netdevice`: a panic. Stopping and starting the gadget, or `lemnosd`, without the
+controller's device going away does not meet it.
+
+Reproduce: a gadget with `ncm.usb0` bound to `dummy_udc.0`; unbind and bind the `dummy_udc`
+platform device. The kernel's own bind on the controller's return fails (`failed to start ...: -2`)
+and the gadget stays pending on the controller, so a `UDC` write answers `EBUSY`; clear `UDC`, then
+write it again with a new `ncm.usb0` (fails, the kobject line); a write with a function whose
+registration failed is the panic.
+
+What Lemnos does (the privileged helper's bind): when a bind fails and the tree has an NCM
+function, that function is removed and a fresh one is made and linked in the board file's order,
+and the bind is tried on it at once. When that fails too and a bind without the network function
+works, the gadget runs without it, degraded, its reason saying the kernel refuses the network device
+for the rest of the boot and that the USB network is gone until the board restarts; every later
+bind on that controller takes the network function out before the write. No function a bind
+failed on is ever bound again, and the FunctionFS function and the session a holder has are not
+touched. In that state the host still has the link's interface and the ACM console; Ethernet
+reaches the board once a peer listens there. Lemnos never restarts the board. QEMU: the
+`ncm-after-controller` stanza, the last one, on the link check's daemon: the kernel's refusal is
+in the log, the gadget is bound with the FunctionFS and ACM functions, the host has the device
+configured with three interfaces, the reason names the state, and the kernel stays up. Untested on
+board: no production path on the board is known to take the controller's device away.
+
 ## Cameras
 
 | Check | What a board has to show |

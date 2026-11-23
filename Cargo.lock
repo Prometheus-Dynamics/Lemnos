@@ -2555,6 +2555,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-usb-echo",
  "lemnosd",
+ "libc",
  "toml",
 ]
 

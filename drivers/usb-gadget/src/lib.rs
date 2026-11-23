@@ -266,6 +266,9 @@ pub struct UsbGadget {
     ifname: Option<InterfaceName>,
     /// Why the gadget is up but missing something: its health while up.
     note: Option<&'static str>,
+    /// What the backend said the gadget it enabled lacks ([`UsbFunction::enable_note`]): its
+    /// health while up, before [`note`](Self::note).
+    enabled_without: Option<&'static str>,
     /// The note the settings gave at start (the daemon's own read of the serial), kept as the
     /// reason for a gadget whose setup reports it has no serial string.
     start_note: Option<&'static str>,
@@ -347,6 +350,7 @@ impl UsbGadget {
         match self.function.enable(self.set.bytes()) {
             Ok(()) => {
                 self.up = true;
+                self.enabled_without = self.function.enable_note();
                 self.read_serial_note();
                 self.ifname = self.read_interface_name();
                 self.up_since_ns = now_ns;
@@ -356,8 +360,12 @@ impl UsbGadget {
             Err(kind) => {
                 // After a failed enable nothing is left, but a function that says it is
                 // already enabled is: take it down so the next attempt starts clean.
+                let reason = self
+                    .function
+                    .enable_note()
+                    .unwrap_or_else(|| enable_fault(kind));
                 let _ = self.function.disable();
-                self.backoff(enable_fault(kind), now_ns)
+                self.backoff(reason, now_ns)
             }
         }
     }
@@ -795,6 +803,7 @@ impl Lifecycle for UsbGadget {
             up: false,
             ifname: None,
             note,
+            enabled_without: None,
             start_note: note,
             configured: false,
             suspended: false,
@@ -821,7 +830,10 @@ impl Lifecycle for UsbGadget {
 
     fn health(&self) -> Health {
         match (self.up, self.fault) {
-            (true, _) => self.note.map_or(Health::Ok, Health::Degraded),
+            (true, _) => self
+                .enabled_without
+                .or(self.note)
+                .map_or(Health::Ok, Health::Degraded),
             (false, STARTING) => Health::Degraded(STARTING),
             (false, fault) => Health::Failed(fault),
         }

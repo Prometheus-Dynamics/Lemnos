@@ -1225,6 +1225,17 @@ fn orion_link(c: &mut Checks) {
     );
 }
 
+/// The USB controller's device goes and comes back under the link's daemon, whose gadget has an NCM
+/// function: the kernel then refuses the network device for the rest of the boot, and the gadget
+/// must retry with the reason named, never bind a function whose registration failed again (a
+/// panic). Last of all, because the boot keeps that kernel state.
+fn ncm_after_controller(c: &mut Checks) {
+    c.check(
+        run(&["/lemnos-gadget-check", "poison"]) == 0,
+        "lemnos_gadget_check_poison",
+    );
+}
+
 /// The test block module's parameters while the receiver and front end stanzas run: the fake
 /// receiver's registers sit in the memory the kernel command line reserves.
 const BLOCK_WITH_RECEIVER: &str = "csi2_phys=0x20000000";
@@ -1445,6 +1456,12 @@ const STANZAS: &[Stanza] = &[
         block: None,
         needs: &["wedge"],
         run: orion_link,
+    },
+    Stanza {
+        name: "ncm-after-controller",
+        block: None,
+        needs: &["wedge", "orion-link"],
+        run: ncm_after_controller,
     },
 ];
 

@@ -829,6 +829,13 @@ pub trait UsbFunction {
     fn serial_string_set(&mut self) -> Result<Option<bool>, Self::Error> {
         Ok(None)
     }
+    /// What the last [`enable`](Self::enable) met, in words: why it failed, when its error kind
+    /// does not say it, or what the function it enabled lacks (a part of it the system refused,
+    /// the rest up): a state of the system the function runs on that no retry clears (the
+    /// backend's own text). `None` by default, and after an enable that met nothing.
+    fn enable_note(&self) -> Option<&'static str> {
+        None
+    }
     /// What happened since the last call, oldest first, or `None`. Never waits.
     ///
     /// A control request still pending when this is called is stalled by it: a function that

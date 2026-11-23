@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 toml = { workspace = true }
+libc = { workspace = true }
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-daemon-ready = { path = "../daemon-ready" }
