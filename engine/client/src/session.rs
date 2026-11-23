@@ -253,8 +253,9 @@ pub struct Event {
 pub enum JobEvent {
     /// `done` of `total` (0 when not known), in the unit the contract says.
     Progress { job: u64, done: u64, total: u64 },
-    /// The job is over. `result` is what the contract says it finishes with, when `status` is
-    /// success, and empty otherwise. `CANCELLED` for a job that was cancelled; `INTERRUPTED`
+    /// The job is over. `result` is what the contract says it finishes with when `status` is
+    /// success. When it is not, `result` is never the contract's result: it is the failure's
+    /// cause in words (UTF-8, see [`JobEvent::words`]), or empty. `CANCELLED` for a job that was cancelled; `INTERRUPTED`
     /// for one whose driver was lost, or whose connection ended: the service keeps nothing of a
     /// job across a restart, so a job the connection was lost under is over.
     Done {
@@ -269,6 +270,17 @@ impl JobEvent {
     pub const fn job(&self) -> u64 {
         match self {
             Self::Progress { job, .. } | Self::Done { job, .. } => *job,
+        }
+    }
+
+    /// Why a job that ended in failure failed, in the driver's or the service's words: `None`
+    /// for progress, for a job that succeeded, and for a failure that came with no words.
+    pub fn words(&self) -> Option<&str> {
+        match self {
+            Self::Done { status, result, .. } if !status.is_ok() => core::str::from_utf8(result)
+                .ok()
+                .filter(|words| !words.is_empty()),
+            _ => None,
         }
     }
 }
@@ -2043,7 +2055,8 @@ impl Session {
     }
 
     /// Waits until job `job` is over, giving its progress to `progress` as it comes, and
-    /// returns how it ended and its result. `None` after `timeout`, with the job still running.
+    /// returns how it ended and its result: on a failed status, its words, not a result (see
+    /// [`JobEvent::Done`]). `None` after `timeout`, with the job still running.
     pub fn wait_job(
         &mut self,
         job: u64,

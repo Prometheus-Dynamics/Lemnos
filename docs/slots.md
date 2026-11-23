@@ -1009,6 +1009,35 @@ copy that is never written back. `--verify DIR --layout-of BOARD` reads the tree
 | `reboot` (`system.reboot/1`) | Restarts the board |
 | `reboot_to(target)` (`system.reboot/1`, added) | Restarts the board into its way back, when the board declares one (see [The way back on request](#the-way-back-on-request)) |
 
+### Why a call was refused
+
+A refusal says its cause in its own words, the Refusal's text (see [Wire](wire.md), rule 2), and
+over Orion after the status: `refused (<status>): <words>`. A failed install job's words are the
+end of its `job_done` detail (`... failed: <words>`). The statuses are as they were; only the words
+are new, so a client tells apart the causes that share a status. The texts are in
+`drivers/system-slots/src/words.rs`:
+
+| Call | Status | Words |
+| --- | --- | --- |
+| `set_default` | `NOT_PERMITTED` | `the slot failed a trial (force overrides this)`, or `the slot has never booted good (force does not override this)` |
+| `trial` | `NOT_PERMITTED` | the slot failed a trial, as for `set_default`; or `the board can't start a trial now`, and why |
+| `trial` | `BUSY` | the slot is the one running |
+| `trial` | `IO` | `the restart the trial needs is refused`, and why |
+| `remove` | `BUSY` | the slot is running, or the default, or on trial, or the only one that boots |
+| `remove` | `NOT_PERMITTED` | the slot is pinned |
+| `install_file` | `BUSY` | an install is running |
+| `install_file` | `INVALID_ARGUMENT` | the name is not a file name in `.incoming`, or it is not a regular file, or it is a link |
+| `install_file` | `NOT_FOUND` | no such file in `.incoming` |
+| a write | `FAILED_PRECONDITION` | the record is not ours (the foreign record's sentence), or the state directories can't be written, and why |
+
+Tests: `service/orion/tests/files.rs` takes each through the bridge to a client
+(`set_default_says_whether_the_slot_failed_a_trial_or_never_booted_good`,
+`trial_says_whether_the_slot_failed_a_trial_or_is_the_one_running`,
+`remove_says_which_of_its_causes_refused_it`, `install_file_says_why_it_takes_no_file`,
+`a_write_while_the_state_cannot_be_written_says_why`, `a_failed_install_job_ends_with_its_words`).
+The not-ours words need a foreign boot record, so they are tested at the driver
+(`route_a_tests.rs`), and the host's keeping of words in `engine/host/tests/refusal_words.rs`.
+
 Housekeeping runs on `confirm` and keeps `keep` slots. It never removes the running, default,
 trial or staged slot, and those count toward `keep`. After them it keeps the previous slot, then
 the newest. A slot that has failed is kept only while there is room left under `keep`. Pinned
@@ -3321,8 +3350,9 @@ signature sidecar: the record is in the manifest's `signature` field and in the 
    with the job's status or the refusal. A committed answer's detail is fields, not a sentence:
    `raw_bytes=<n> outcome=<code>`, one space between them, the code the job's (`0` verified, `1` not
    checked: unsigned, `2` not checked: unknown key) or `none` when the job reported none. A reader
-   ignores a field it does not know; fields are only ever added after these. A failed job carries no
-   result, so a `rejected` answer for one is `the write ended with status <n>: <the device's info error>`,
+   ignores a field it does not know; fields are only ever added after these. A failed job's bytes
+   are its words, so a `rejected` answer for one is `the write ended with status <n>: <the job's words>`
+   (the device's `info` error when the job gave none),
    for example `the write ended with status -22: the image's SHA-256 is not the manifest's`, or, for a
    write that failed part-way, the sentence naming the byte and the partial image. A chunk refused because
    the write had already failed carries the same sentence after `the device refused the data: ...`.

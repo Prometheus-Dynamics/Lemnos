@@ -1122,7 +1122,11 @@ impl Lifecycle for SystemFlash {
                     Err(status) => status,
                 })
             }
-            Some(Err((status, _))) => JobState::Finished(*status),
+            // The failure's cause in words.
+            Some(Err((status, words))) => {
+                lemnos_core::say(result, words);
+                JobState::Finished(*status)
+            }
         };
         self.job = None;
         state

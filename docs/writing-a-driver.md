@@ -334,6 +334,32 @@ backend cannot open is reported by the host itself (`no I2C bus i2c-1`), and a d
 that is not running is `device <id> is not running`, so a driver needs its own reason only for what
 it checks itself. A refusal with no reason falls back on the status name in words (`no such device`).
 
+### Saying why a call is refused
+
+A method's status says what kind of refusal it is. When one status has more than one cause, say
+which in words. The host asks the driver right after a method or a job start fails, through
+`Lifecycle::refusal(status, words)`, inside the same panic boundary; what the driver writes there
+with `lemnos_core::say` (UTF-8, cut at a character to the 256 bytes the host keeps) becomes the
+Refusal's text for that caller. The words are that call's only: the host keeps them for the caller
+until they are sent and forgets them at its next call. Keep the cause in a field while refusing and
+take it in the hook:
+
+```rust
+fn refuse(&mut self, status: Status, words: impl Into<String>) -> Status {
+    self.why = Some(words.into());
+    status
+}
+
+fn refusal(&mut self, _status: Status, words: &mut Reply<'_>) {
+    if let Some(why) = self.why.take() {
+        lemnos_core::say(words, &why);
+    }
+}
+```
+
+A failed job says its cause the same way: write the words into `result` with `say` and return
+`JobState::Finished(status)`. A failed job's bytes are never the contract's result.
+
 A driver that talks to hardware checks that the hardware is there at bind, with one read that changes
 nothing (a chip ID, a node's `info`). A device that is not there is refused, and the bind is retried
 until it is: a supply that comes up later binds on a later retry. Binding does not start the device, so

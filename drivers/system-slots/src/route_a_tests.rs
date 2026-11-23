@@ -150,6 +150,15 @@ fn route_a_writes_nothing_at_start_on_ticks_or_by_any_call() {
     assert_eq!(slots.install_file("part", false, false).map(drop), refused);
     assert_eq!(slots.write(0, b"bytes"), refused);
     assert_eq!(slots.set_default(FOREIGN_SLOT, true), refused);
+    // The refusal says why in words: the records are another system's, and whose.
+    let mut said = [0u8; 256];
+    let mut words = lemnos_core::Reply::new(&mut said);
+    lemnos_core::Lifecycle::refusal(&mut slots, Status::FAILED_PRECONDITION, &mut words);
+    let text = core::str::from_utf8(words.written()).unwrap().to_string();
+    assert!(
+        text.starts_with(&format!("{FOREIGN}: default.txt")),
+        "{text:?}"
+    );
     assert_eq!(slots.trial(FOREIGN_SLOT, false, false, true), refused);
     assert_eq!(slots.confirm(), refused);
     assert_eq!(slots.remove(FOREIGN_SLOT), refused);

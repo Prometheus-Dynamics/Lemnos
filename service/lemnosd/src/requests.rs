@@ -536,12 +536,19 @@ impl Client {
                 bytes: &reply[..n],
             }),
             Err(status) => {
-                let text = call_refusal(
-                    self.core.host.manifest(device).as_ref(),
-                    method.contract,
-                    method.method,
-                    status,
-                );
+                // The driver's own words for the cause, when it gave them.
+                let text = self
+                    .core
+                    .host
+                    .take_refusal(device, self.conn.id)
+                    .unwrap_or_else(|| {
+                        call_refusal(
+                            self.core.host.manifest(device).as_ref(),
+                            method.contract,
+                            method.method,
+                            status,
+                        )
+                    });
                 return self.refuse(id, status, &text);
             }
         }
@@ -552,7 +559,14 @@ impl Client {
         let method = MethodId { contract, method };
         match self.core.host.start_job(self.conn.id, device, method, args) {
             Ok(job) => self.conn.answer(&Frame::JobStarted { id, job }),
-            Err(status) => return self.refuse(id, status, "the job could not be started"),
+            Err(status) => {
+                let text = self
+                    .core
+                    .host
+                    .take_refusal(device, self.conn.id)
+                    .unwrap_or_else(|| "the job could not be started".to_string());
+                return self.refuse(id, status, &text);
+            }
         }
         // What the job has already done goes out after this answer.
         self.core.wake();

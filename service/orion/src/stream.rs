@@ -374,14 +374,16 @@ impl Streamer {
                     String::from_utf8_lossy(&result)
                 )),
             },
-            // A failed job carries no result: the device's `info` says why (the byte a failed write
-            // stopped at, and that the target holds a partial image).
-            Some((status, _)) => rejected(with_reason(
-                format!("the write ended with status {}", status.0),
-                client,
-                &mut active.handle,
-                active.info,
-            )),
+            // A failed job's bytes are its words: why it failed (the byte a failed write stopped
+            // at, and that the target holds a partial image). A driver that gave none is asked
+            // through its `info`.
+            Some((status, words)) => {
+                let detail = format!("the write ended with status {}", status.0);
+                match std::str::from_utf8(&words) {
+                    Ok(words) if !words.is_empty() => rejected(format!("{detail}: {words}")),
+                    _ => rejected(with_reason(detail, client, &mut active.handle, active.info)),
+                }
+            }
             None => rejected("the write did not end".into()),
         }
     }

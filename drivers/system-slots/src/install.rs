@@ -1,6 +1,7 @@
 //! An install: a bundle streamed in, unpacked into a work directory as it comes, checked against
 //! its signed manifest, and moved into place.
 
+use crate::words;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -578,10 +579,10 @@ pub fn valid_incoming(name: &str) -> bool {
 }
 
 /// Opens `name` in `incoming` for an install: never through a link, and only a regular file.
-pub fn open_incoming(incoming: &Path, name: &str) -> Result<(Source, u64), Status> {
+pub fn open_incoming(incoming: &Path, name: &str) -> Result<(Source, u64), (Status, String)> {
     use std::os::unix::fs::OpenOptionsExt;
     if !valid_incoming(name) {
-        return Err(Status::INVALID_ARGUMENT);
+        return Err((Status::INVALID_ARGUMENT, words::BAD_NAME.to_string()));
     }
     let path = incoming.join(name);
     let file = fs::OpenOptions::new()
@@ -589,14 +590,22 @@ pub fn open_incoming(incoming: &Path, name: &str) -> Result<(Source, u64), Statu
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&path)
         .map_err(|error| match error.raw_os_error() {
-            Some(libc::ENOENT) => Status::NOT_FOUND,
+            Some(libc::ENOENT) => (Status::NOT_FOUND, words::NOT_IN_INCOMING.to_string()),
             // ELOOP: the name is a link.
-            Some(libc::ELOOP) => Status::INVALID_ARGUMENT,
-            _ => Status::from_io_error(&error),
+            Some(libc::ELOOP) => (Status::INVALID_ARGUMENT, words::A_LINK.to_string()),
+            _ => (
+                Status::from_io_error(&error),
+                format!("the bundle can't be opened: {error}"),
+            ),
         })?;
-    let meta = file.metadata().map_err(|e| Status::from_io_error(&e))?;
+    let meta = file.metadata().map_err(|error| {
+        (
+            Status::from_io_error(&error),
+            format!("the bundle can't be read: {error}"),
+        )
+    })?;
     if !meta.is_file() {
-        return Err(Status::INVALID_ARGUMENT);
+        return Err((Status::INVALID_ARGUMENT, words::NOT_A_FILE.to_string()));
     }
     Ok((Source { file, path }, meta.len()))
 }

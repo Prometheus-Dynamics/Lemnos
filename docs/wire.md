@@ -210,7 +210,11 @@ Each of these closes a way the earlier protocol could go wrong.
 1. **The version is checked.** The first frame is Hello. A host answers a different version with
    Refusal and closes. A client refuses a different version in Welcome. The core is checked
    before the version, then the parts: see The handshake.
-2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Unsubscribe,
+2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. A Refusal's
+   `text` for a Call or a CallJob the driver refused is the driver's own words for its cause when it
+   gave any (`the slot has never booted good (force does not override this)`), and otherwise the
+   host's sentence for the status. Two refusals with one status and different causes are told
+   apart by their words; the status does not change. Unsubscribe,
    SetPower, StreamClose and JobCancel have no reply of their own and are answered with an empty Reply. Nothing is ignored in
    silence. `id` 0 is allowed and is not special.
 3. **A malformed frame closes the connection** on either side, because the stream can no longer be
@@ -247,8 +251,13 @@ sends this connection, and no other:
   says (bytes, steps), `total` 0 while not known. Only the newest matters, and a host may drop one
   a client hasn't read yet, as it drops values (rule 5).
 - JobDone, once, when the job is over. `status` 0 is success and `bytes` is then the result the
-  contract defines, whole, in the form the contract declares for it (below); otherwise `bytes` is
-  empty. A cancelled job ends with `ECANCELED` (-125), and
+  contract defines, whole, in the form the contract declares for it (below). A failed job's `bytes`
+  are never that result: they are words, UTF-8, saying why it failed, at most 256 bytes, or empty
+  when nobody said. The driver gives them (a write that failed part-way names the byte it stopped
+  at), and the host gives them for a job it ended itself (`the driver panicked`). The host passes on
+  what the driver wrote only when it is UTF-8, cut at a character to 256 bytes, and drops it
+  otherwise. A client shows them as the failure's cause and never decodes them as the contract's
+  result. A cancelled job ends with `ECANCELED` (-125), and
   a job whose driver was lost (a panic, a rebind, the device switched off) with `EINTR` (-4).
   JobDone is never dropped.
 

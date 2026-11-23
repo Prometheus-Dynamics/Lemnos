@@ -187,7 +187,7 @@ impl Drop for Logic {
 }
 
 /// lemnosd serving the slot driver over `dir`'s data and boot directories.
-fn start_lemnosd(dir: &Path, socket: &Path, reserve_mb: u64) -> Service {
+fn start_lemnosd(dir: &Path, socket: &Path, reserve_mb: u64, running: &str) -> Service {
     let (data, boot) = (dir.join("data"), dir.join("boot"));
     std::fs::create_dir_all(data.join("slots")).expect("data");
     std::fs::create_dir_all(boot.join("slots")).expect("boot");
@@ -195,7 +195,7 @@ fn start_lemnosd(dir: &Path, socket: &Path, reserve_mb: u64) -> Service {
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [host]\ncall_deadline_ms = 30000\n\
          [[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\n\
-         config = {{ data = \"{}\", boot = \"{}\", record = \"file\", partuuid = \"abcd-02\", boot_sources = [\"rpi-boot-mode-1=/soc/mmc@7e202000\"], boot_args = \"os\", reserve_mb = {reserve_mb}, running = \"\" }}\n",
+         config = {{ data = \"{}\", boot = \"{}\", record = \"file\", partuuid = \"abcd-02\", boot_sources = [\"rpi-boot-mode-1=/soc/mmc@7e202000\"], boot_args = \"os\", reserve_mb = {reserve_mb}, running = \"{running}\" }}\n",
         data.display(),
         boot.display()
     );
@@ -276,18 +276,24 @@ fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
 struct Setup {
     dashboard: Orion,
     _bridge: Bridge,
-    _service: Service,
+    service: Option<Service>,
+    socket: PathBuf,
     _logic: Logic,
     _board: Board,
     dir: Scratch,
 }
 
 fn setup(test: &str, reserve_mb: u64) -> Setup {
+    setup_running(test, reserve_mb, "")
+}
+
+/// As [`setup`], with the slot driver told slot `running` is the one running.
+fn setup_running(test: &str, reserve_mb: u64, running: &str) -> Setup {
     let dir = dir(test);
     let socket = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
     let board = Board::start_for_node(&dir);
     let logic = Logic::start(&dir);
-    let service = start_lemnosd(&dir, &socket, reserve_mb);
+    let service = start_lemnosd(&dir, &socket, reserve_mb, running);
     let incoming = dir.join("data/slots/.incoming");
     let bridge = start_bridge(&socket, board.socket(), &incoming);
     let dashboard = wait_for("a dashboard session", || {
@@ -306,13 +312,26 @@ fn setup(test: &str, reserve_mb: u64) -> Setup {
         dir,
         dashboard,
         _bridge: bridge,
-        _service: service,
+        service: Some(service),
+        socket,
         _logic: logic,
         _board: board,
     }
 }
 
 impl Setup {
+    /// Stops lemnosd and starts it again on the same directories, its slot driver told slot
+    /// `running` is the one running; returns once the bridge reaches it again.
+    fn restart_lemnosd(&mut self, running: &str) {
+        self.service = None;
+        self.service = Some(start_lemnosd(&self.dir, &self.socket, 0, running));
+        wait_for("the bridge at the new lemnosd", || {
+            let mut run = self.start("boots");
+            let finished = run.finish(WAIT).ok()?;
+            (finished.outcome == Outcome::Succeeded).then_some(())
+        });
+    }
+
     fn incoming(&self) -> PathBuf {
         self.dir.join("data/slots/.incoming")
     }
@@ -512,4 +531,231 @@ fn a_name_the_bridge_refuses_makes_no_file_and_a_missing_file_fails_the_run() {
     let finished = run.finish(WAIT).expect("finished");
     assert_eq!(finished.outcome, Outcome::Rejected, "{}", finished.detail);
     assert_eq!(finished.code, 2, "{finished:?}");
+}
+
+// ---- Refusal words: each cause a status can't tell apart reaches the client in words ----
+
+use lemnos_core::Status;
+use lemnos_driver_system_slots::words;
+
+/// Pushes a bundle for slot `id` and installs it through the action; the run must succeed.
+fn install(s: &Setup, id: &str) {
+    let name = format!("{id}.tar");
+    let sent = s.push(&name, &bundle(id, 16));
+    assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
+    let mut run = s.start(&format!("install_file {name} false false"));
+    let finished = run.finish(WAIT).expect("finished");
+    assert_eq!(finished.outcome, Outcome::Succeeded, "{}", finished.detail);
+}
+
+/// Sets `key` in slot `id`'s meta file, as the boot side would have.
+fn set_meta(s: &Setup, id: &str, key: &str, value: &str) {
+    let path = s.dir.join(format!("data/board/slots/{id}.meta"));
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut kept: Vec<String> = text
+        .lines()
+        .filter(|line| !line.starts_with(&format!("{key}=")))
+        .map(str::to_owned)
+        .collect();
+    kept.push(format!("{key}={value}"));
+    std::fs::write(&path, kept.join("\n") + "\n").expect("meta");
+}
+
+/// Sets `key` in the slots state, as a trial the boot side armed would have.
+fn set_state(s: &Setup, key: &str, value: &str) {
+    let path = s.dir.join("data/board/slots/state.env");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut kept: Vec<String> = text
+        .lines()
+        .filter(|line| !line.starts_with(&format!("{key}=")))
+        .map(str::to_owned)
+        .collect();
+    kept.push(format!("{key}='{value}'"));
+    std::fs::write(&path, kept.join("\n") + "\n").expect("state");
+}
+
+/// Whether the run ended with lemnosd's `status`: as its code (a run refused before it ran), or
+/// named in its detail (a run that failed).
+fn ended_with(finished: &orion::actions::Finished, status: Status) -> bool {
+    finished.code == status.0.unsigned_abs()
+        || finished.detail.contains(&format!("refused ({})", status.0))
+}
+
+/// Runs `args` and asserts it is refused with `status`, its detail carrying `words`.
+fn refused_with(s: &Setup, args: &str, status: Status, words: &str) {
+    let mut run = s.start(args);
+    let finished = run.finish(WAIT).expect("finished");
+    assert_ne!(finished.outcome, Outcome::Succeeded, "{args}");
+    assert!(ended_with(&finished, status), "{args}: {finished:?}");
+    assert!(
+        finished.detail.contains(words),
+        "{args}: the words {words:?} are not in {:?}",
+        finished.detail
+    );
+}
+
+#[test]
+fn set_default_says_whether_the_slot_failed_a_trial_or_never_booted_good() {
+    let s = setup("words-default", 0);
+    install(&s, "os-2");
+    refused_with(
+        &s,
+        "set_default os-2 false",
+        Status::NOT_PERMITTED,
+        words::NEVER_GOOD,
+    );
+    // Force does not override a slot that never booted good.
+    refused_with(
+        &s,
+        "set_default os-2 true",
+        Status::NOT_PERMITTED,
+        words::NEVER_GOOD,
+    );
+    set_meta(&s, "os-2", "FAILED", "yes");
+    refused_with(
+        &s,
+        "set_default os-2 false",
+        Status::NOT_PERMITTED,
+        words::FAILED_TRIAL,
+    );
+}
+
+#[test]
+fn remove_says_which_of_its_causes_refused_it() {
+    let s = setup("words-remove", 0);
+    install(&s, "os-2");
+    refused_with(&s, "remove os-2", Status::BUSY, words::REMOVE_ONLY);
+    install(&s, "os-3");
+    let mut pin = s.start("pin os-3 true");
+    assert_eq!(
+        pin.finish(WAIT).expect("finished").outcome,
+        Outcome::Succeeded
+    );
+    refused_with(
+        &s,
+        "remove os-3",
+        Status::NOT_PERMITTED,
+        words::REMOVE_PINNED,
+    );
+    set_meta(&s, "os-3", "GOOD", "yes");
+    let mut default = s.start("set_default os-3 false");
+    let set = default.finish(WAIT).expect("finished");
+    assert_eq!(set.outcome, Outcome::Succeeded, "{}", set.detail);
+    refused_with(&s, "remove os-3", Status::BUSY, words::REMOVE_DEFAULT);
+    set_state(&s, "TRIAL", "os-2");
+    refused_with(&s, "remove os-2", Status::BUSY, words::REMOVE_TRIAL);
+}
+
+#[test]
+fn install_file_says_why_it_takes_no_file() {
+    let s = setup("words-install", 0);
+    refused_with(
+        &s,
+        "install_file nothing.tar false false",
+        Status::NOT_FOUND,
+        words::NOT_IN_INCOMING,
+    );
+    refused_with(
+        &s,
+        "install_file a~b false false",
+        Status::INVALID_ARGUMENT,
+        words::BAD_NAME,
+    );
+    std::fs::create_dir_all(s.incoming().join("dir.tar")).expect("dir");
+    refused_with(
+        &s,
+        "install_file dir.tar false false",
+        Status::INVALID_ARGUMENT,
+        words::NOT_A_FILE,
+    );
+    std::fs::write(s.dir.join("elsewhere.tar"), b"x").expect("target");
+    std::os::unix::fs::symlink(s.dir.join("elsewhere.tar"), s.incoming().join("link.tar"))
+        .expect("link");
+    refused_with(
+        &s,
+        "install_file link.tar false false",
+        Status::INVALID_ARGUMENT,
+        words::A_LINK,
+    );
+    // Another install runs: a second one is refused, by that cause.
+    let big = bundle("os-9", 16 * 1024);
+    let sent = s.push("big.tar", &big);
+    assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
+    let sent = s.push("small.tar", &bundle("os-8", 16));
+    assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
+    let mut first = s.start("install_file big.tar false false");
+    wait_for("the first install under way", || {
+        matches!(first.wait(WAIT).expect("news"), Some(Update::Doing(_))).then_some(())
+    });
+    refused_with(
+        &s,
+        "install_file small.tar false false",
+        Status::BUSY,
+        words::INSTALL_RUNNING,
+    );
+    let _ = first.finish(WAIT);
+}
+
+#[test]
+fn a_write_while_the_state_cannot_be_written_says_why() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut s = setup("words-state", 0);
+    install(&s, "os-2");
+    // The daemon finds its state dir unwritable when it starts (a grant it never got).
+    let state = s.dir.join("data/board/slots");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    s.restart_lemnosd("");
+    let mut run = s.start("pin os-2 true");
+    let finished = run.finish(WAIT).expect("finished");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
+    assert!(
+        ended_with(&finished, Status::FAILED_PRECONDITION),
+        "{finished:?}"
+    );
+    assert!(
+        finished.detail.contains(words::STATE_UNWRITABLE),
+        "{:?}",
+        finished.detail
+    );
+}
+
+/// A failed install job ends with its cause in words: the run's detail carries them after the
+/// status, not a result.
+#[test]
+fn a_failed_install_job_ends_with_its_words() {
+    let s = setup("words-job", 0);
+    // Not a bundle: the install starts, and fails on what it reads.
+    let sent = s.push("junk.tar", &[0x55u8; 8192]);
+    assert_eq!(sent.state, FileState::Committed, "{}", sent.detail);
+    let mut run = s.start("install_file junk.tar false false");
+    let finished = run.finish(WAIT).expect("finished");
+    assert_eq!(finished.outcome, Outcome::Failed, "{}", finished.detail);
+    let (_, words) = finished
+        .detail
+        .split_once(": ")
+        .unwrap_or_else(|| panic!("no words after the status: {:?}", finished.detail));
+    assert!(!words.is_empty(), "{:?}", finished.detail);
+    assert!(finished.output.is_empty(), "a failed job has no result");
+}
+
+#[test]
+fn trial_says_whether_the_slot_failed_a_trial_or_is_the_one_running() {
+    let mut s = setup("words-trial", 0);
+    install(&s, "os-2");
+    install(&s, "os-3");
+    s.restart_lemnosd("os-3");
+    set_meta(&s, "os-2", "FAILED", "yes");
+    refused_with(
+        &s,
+        "trial os-2 false false false",
+        Status::NOT_PERMITTED,
+        words::FAILED_TRIAL,
+    );
+    refused_with(
+        &s,
+        "trial os-3 false false false",
+        Status::BUSY,
+        words::TRIAL_RUNNING,
+    );
+    refused_with(&s, "remove os-3", Status::BUSY, words::REMOVE_RUNNING);
 }

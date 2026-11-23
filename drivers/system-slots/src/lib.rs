@@ -154,6 +154,7 @@ pub use lemnos_slot_store::{json, manifest, store};
 pub mod crash;
 pub mod trial;
 pub mod uboot;
+pub mod words;
 
 #[cfg(test)]
 mod offline_tests;
@@ -223,6 +224,9 @@ pub struct SystemSlots {
     /// Why the state dir or the image dir can't be written, on a board whose records are ours
     /// (see [`state_dirs_writable`]): `None` when both can. Looked at again every 8 s while set.
     state_unwritable: Option<String>,
+    /// The words for the refusal the method being run is about to return, taken by
+    /// [`Lifecycle::refusal`] right after it.
+    why: Option<String>,
     /// When the state dirs are next looked at while they can't be written (monotonic ns).
     state_check_ns: u64,
     /// When the record's trial updates are next looked at (monotonic ns), while the board has a record
@@ -711,6 +715,7 @@ impl SystemSlots {
             config_refusal,
             owner,
             state_unwritable: None,
+            why: None,
             state_check_ns: 0,
             trial_watch_ns: 0,
         };
@@ -745,15 +750,24 @@ impl SystemSlots {
     /// unwritable dir is looked at again first, so a grant given since is taken at once.
     fn writable(&mut self) -> Result<()> {
         if !self.ours() {
-            return Err(Status::FAILED_PRECONDITION);
+            let words = self.foreign_text();
+            return Err(self.refuse(Status::FAILED_PRECONDITION, words));
         }
         if self.state_unwritable.is_some() {
             self.state_unwritable = state_dirs_writable(&self.layout).err();
         }
-        if self.state_unwritable.is_some() {
-            return Err(Status::FAILED_PRECONDITION);
+        if let Some(why) = &self.state_unwritable {
+            let words = format!("{}: {why}", words::STATE_UNWRITABLE);
+            return Err(self.refuse(Status::FAILED_PRECONDITION, words));
         }
         Ok(())
+    }
+
+    /// `status`, with `words` for the caller ([`Lifecycle::refusal`]): the cause the status
+    /// alone can't tell apart from another.
+    fn refuse(&mut self, status: Status, words: impl Into<String>) -> Status {
+        self.why = Some(words.into());
+        status
     }
 
     /// Why the slots state is not written, `""` when the boot records are ours: `list` and `info`
@@ -1998,6 +2012,12 @@ fn find_partuuid(data: &Path) -> Option<String> {
 
 impl Lifecycle for SystemSlots {
     type Needs = SystemSlotsNeeds;
+
+    fn refusal(&mut self, _status: Status, words: &mut Reply<'_>) {
+        if let Some(why) = self.why.take() {
+            lemnos_core::say(words, &why);
+        }
+    }
     const TRACKS_CALLERS: bool = true;
     const JOBS: bool = true;
     const TICKS: bool = true;
@@ -2337,7 +2357,11 @@ impl Lifecycle for SystemSlots {
                 Ok(()) => Status::OK,
                 Err(status) => status,
             }),
-            Some(Err((status, _))) => JobState::Finished(*status),
+            // The failure's cause in words: the same reason `info`'s last attempt keeps.
+            Some(Err((status, words))) => {
+                lemnos_core::say(result, words);
+                JobState::Finished(*status)
+            }
         };
         self.install = None;
         state
@@ -2456,10 +2480,11 @@ impl Slots for SystemSlots {
     fn install_file(&mut self, name: &str, pin: bool, keep_old: bool) -> Result<JobId> {
         self.writable()?;
         if self.install.is_some() {
-            return Err(Status::BUSY);
+            return Err(self.refuse(Status::BUSY, words::INSTALL_RUNNING));
         }
         let incoming = self.layout.images().join(INCOMING);
-        let (source, size) = install::open_incoming(&incoming, name)?;
+        let (source, size) = install::open_incoming(&incoming, name)
+            .map_err(|(status, words)| self.refuse(status, words))?;
         // A file that can't be installed is the driver's to delete too.
         let job = self.begin(size, pin, keep_old, Some(source));
         if job.is_err() {
@@ -2491,10 +2516,10 @@ impl Slots for SystemSlots {
         self.fits_signature(id)?;
         let meta = Meta::load(&self.layout, id);
         if meta.failed() && !force {
-            return Err(Status::NOT_PERMITTED);
+            return Err(self.refuse(Status::NOT_PERMITTED, words::FAILED_TRIAL));
         }
         if meta.get("GOOD") != "yes" {
-            return Err(Status::NOT_PERMITTED);
+            return Err(self.refuse(Status::NOT_PERMITTED, words::NEVER_GOOD));
         }
         let mut state = self.state();
         // A switch the boot loader can't act on is refused before anything is written.
@@ -2521,18 +2546,20 @@ impl Slots for SystemSlots {
         self.fits_signature(id)?;
         // Before anything is written: a board whose loader can't start a trial refuses it, by its reason.
         if let TrialUpdates::Unavailable(why) = self.look_at_trial_updates() {
-            self.note(why.reason.sentence().to_string());
-            return Err(Status::NOT_PERMITTED);
+            let sentence = why.reason.sentence().to_string();
+            self.note(sentence.clone());
+            let words = format!("{}: {sentence}", words::NO_TRIALS);
+            return Err(self.refuse(Status::NOT_PERMITTED, words));
         }
         if id == self.running() {
-            return Err(Status::BUSY);
+            return Err(self.refuse(Status::BUSY, words::TRIAL_RUNNING));
+        }
+        let mut meta = Meta::load(&self.layout, id);
+        if meta.failed() && !force {
+            return Err(self.refuse(Status::NOT_PERMITTED, words::FAILED_TRIAL));
         }
         // Before anything is written: a trial is not armed when the restart it needs is refused.
         self.restart_check()?;
-        let mut meta = Meta::load(&self.layout, id);
-        if meta.failed() && !force {
-            return Err(Status::NOT_PERMITTED);
-        }
         let mut state = self.state();
         // Room for its boot files first: only the resident slots' stay.
         self.mark_keep_old(id, keep_old)?;
@@ -2578,15 +2605,24 @@ impl Slots for SystemSlots {
         }
         self.installed(id)?;
         let mut state = self.state();
-        if id == self.running() || id == state.default || id == state.trial {
-            return Err(Status::BUSY);
+        let busy = if id == self.running() {
+            Some(words::REMOVE_RUNNING)
+        } else if id == state.default {
+            Some(words::REMOVE_DEFAULT)
+        } else if id == state.trial {
+            Some(words::REMOVE_TRIAL)
+        } else {
+            None
+        };
+        if let Some(words) = busy {
+            return Err(self.refuse(Status::BUSY, words));
         }
         if Meta::load(&self.layout, id).pinned() {
-            return Err(Status::NOT_PERMITTED);
+            return Err(self.refuse(Status::NOT_PERMITTED, words::REMOVE_PINNED));
         }
         // Never the only slot that can boot.
         if !self.layout.slots().iter().any(|other| other != id) {
-            return Err(Status::BUSY);
+            return Err(self.refuse(Status::BUSY, words::REMOVE_ONLY));
         }
         self.remove_slot(&mut state, id)
     }
@@ -2917,20 +2953,26 @@ impl SystemSlots {
 
     /// Refuses a restart whose boot files don't match (see [`boot_guard`]); the reason is the
     /// state's error.
-    fn restart_check(&self) -> Result<()> {
-        if let Some(check) = &self.check {
-            (check.0)(true).map(drop).map_err(|why| {
-                self.note(why);
-                Status::IO
-            })?;
+    fn restart_check(&mut self) -> Result<()> {
+        let mut refused = None;
+        if let Some(check) = &self.check
+            && let Err(why) = (check.0)(true)
+        {
+            refused = Some(why);
         }
-        if let Some(restarter) = &self.restarter {
-            restarter.ready().map_err(|why| {
-                self.note(why);
-                Status::IO
-            })?;
+        if refused.is_none()
+            && let Some(restarter) = &self.restarter
+            && let Err(why) = restarter.ready()
+        {
+            refused = Some(why);
         }
-        Ok(())
+        match refused {
+            None => Ok(()),
+            Some(why) => {
+                self.note(why.clone());
+                Err(self.refuse(Status::IO, format!("{}: {why}", words::RESTART_REFUSED)))
+            }
+        }
     }
 
     /// A trial's restart that failed: the trial is disarmed, so the next restart, whoever makes

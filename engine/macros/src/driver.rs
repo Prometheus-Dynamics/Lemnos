@@ -221,6 +221,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::took_up_link(self)
             }
 
+            fn refusal(
+                &mut self,
+                __status: ::lemnos_core::Status,
+                __words: &mut ::lemnos_core::Reply<'_>,
+            ) {
+                <Self as ::lemnos_core::Lifecycle>::refusal(self, __status, __words)
+            }
+
             fn resume(&mut self, __record: &::lemnos_core::ResumeRecord) -> bool {
                 <Self as ::lemnos_core::Lifecycle>::resume(self, __record)
             }

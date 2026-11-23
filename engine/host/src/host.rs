@@ -62,6 +62,8 @@ pub trait Instance: Send {
     fn took_up_link(&self) -> core::result::Result<(), &'static str> {
         Err(lemnos_core::NOT_TAKEN_UP)
     }
+    /// See [`Driver::refusal`].
+    fn refusal(&mut self, _status: Status, _words: &mut Reply<'_>) {}
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
     /// See [`Driver::board`]. Asked only of a driver whose entry says it watches the board.
@@ -135,6 +137,10 @@ impl<D: Driver + Send> Instance for D {
 
     fn took_up_link(&self) -> core::result::Result<(), &'static str> {
         Driver::took_up_link(self)
+    }
+
+    fn refusal(&mut self, status: Status, words: &mut Reply<'_>) {
+        Driver::refusal(self, status, words);
     }
 
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status {
@@ -669,6 +675,11 @@ struct Slot {
     /// ([`Driver::rebinding`]): kept until the new instance's first tick has run, then dropped and
     /// the holder's pair lent to the new one. Never ticked or called while kept.
     kept: Mutex<Option<Kept>>,
+    /// The words of each caller's last refused call into this device ([`Driver::refusal`]),
+    /// newest last, at most [`MAX_REFUSALS`]. Taken by [`Host::take_refusal`].
+    refusals: Mutex<Vec<(CallerId, String)>>,
+    /// `refusals` has an entry: a call clears its caller's words only then.
+    refused: AtomicBool,
     /// The callers that have called this device and have not gone, for [`Router::others_use`]. A
     /// full set holds at least `MAX_USERS - 1` callers, so a caller that does not fit is not kept:
     /// the answer for any asker is the same.
@@ -687,6 +698,10 @@ struct EndHold {
 
 /// How long a switch-off waits for the holder of an END hold to give it up once END is closed.
 const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// The most bytes of words a refusal carries ([`Driver::refusal`]).
+pub const REFUSAL_WORDS: usize = 256;
+/// The most callers whose last refusal's words a device keeps.
+const MAX_REFUSALS: usize = 8;
 
 /// An instance kept across a rebind, and the holder whose hold it kept.
 struct Kept {
@@ -935,6 +950,8 @@ impl Slot {
             lent_to: Mutex::new(None),
             released: Condvar::new(),
             kept: Mutex::new(None),
+            refusals: Mutex::new(Vec::new()),
+            refused: AtomicBool::new(false),
             errors: AtomicU32::new(0),
             missing: Mutex::new(Vec::new()),
             link_refusal: Mutex::new(None),
@@ -1032,6 +1049,26 @@ impl Slot {
         });
         self.end_close();
         drop(catch_unwind(AssertUnwindSafe(move || drop(kept))));
+    }
+
+    /// Forgets `caller`'s refusal words: a new call of its is under way.
+    fn clear_refusal(&self, caller: CallerId) {
+        if self.refused.load(Ordering::Acquire) {
+            let mut refusals = lock(&self.refusals);
+            refusals.retain(|(who, _)| *who != caller);
+            self.refused.store(!refusals.is_empty(), Ordering::Release);
+        }
+    }
+
+    /// Keeps `words` as `caller`'s last refusal's.
+    fn keep_refusal(&self, caller: CallerId, words: String) {
+        let mut refusals = lock(&self.refusals);
+        refusals.retain(|(who, _)| *who != caller);
+        if refusals.len() >= MAX_REFUSALS {
+            refusals.remove(0);
+        }
+        refusals.push((caller, words));
+        self.refused.store(true, Ordering::Release);
     }
 
     /// Ends whatever hold has an END descriptor, whoever has it.
@@ -1162,7 +1199,8 @@ pub enum JobEvent {
     /// `done` of `total` (0 when not known), in the contract's unit.
     Progress { done: u64, total: u64 },
     /// The job is over. `result` is what the contract says it finishes with, when `status` is
-    /// success; empty otherwise. A job its driver lost (a panic, a rebind, the device switched
+    /// success; otherwise the failure's words, UTF-8 at most [`REFUSAL_WORDS`] bytes, or empty
+    /// when the driver gave none. A job its driver lost (a panic, a rebind, the device switched
     /// off) finishes with [`Status::INTERRUPTED`].
     Finished { status: Status, result: Vec<u8> },
 }
@@ -1537,6 +1575,19 @@ pub fn set_warning_sink(sink: fn(&str)) {
     let _ = WARNING_SINK.set(sink);
 }
 
+/// The words a failed job ends with: the driver's bytes when they are UTF-8, cut to
+/// [`REFUSAL_WORDS`] at a character boundary; nothing otherwise.
+fn failed_job_words(written: &[u8]) -> Vec<u8> {
+    let Ok(text) = core::str::from_utf8(written) else {
+        return Vec::new();
+    };
+    let mut end = text.len().min(REFUSAL_WORDS);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.as_bytes()[..end].to_vec()
+}
+
 /// One warning, made only when a sink is set.
 fn warn(event: impl FnOnce() -> String) {
     if let Some(sink) = WARNING_SINK.get() {
@@ -1877,10 +1928,12 @@ impl Inner {
                     // In order: another lane may be going through its own jobs by position.
                     let job = jobs.open.remove(at);
                     slot.open_jobs.fetch_sub(1, Ordering::AcqRel);
+                    // A failed job's bytes are its words: UTF-8 the driver wrote on the failed
+                    // Finished, bounded; anything else it left is not passed on.
                     let result = if status.is_ok() {
                         writer.written().to_vec()
                     } else {
-                        Vec::new()
+                        failed_job_words(writer.written())
                     };
                     jobs.push(JobUpdate {
                         job: id,
@@ -2454,6 +2507,7 @@ impl Inner {
         reply: &mut [u8],
         trace: Option<&CallTrace>,
     ) -> Result<usize> {
+        slot.clear_refusal(caller);
         if slot.hung.load(Ordering::Acquire) {
             return Err(Status::NO_DEVICE);
         }
@@ -2501,6 +2555,16 @@ impl Inner {
             }
             slot.in_tick.store(false, Ordering::Release);
             let mut status = instance.dispatch(method, args, &mut writer);
+            if !status.is_ok() {
+                let mut words = [0u8; REFUSAL_WORDS];
+                let mut said = Reply::new(&mut words);
+                instance.refusal(status, &mut said);
+                if let Ok(text) = core::str::from_utf8(said.written())
+                    && !text.is_empty()
+                {
+                    slot.keep_refusal(caller, text.to_string());
+                }
+            }
             self.stamp_running_ok(slot, instance.as_ref(), slot.is_running());
             if as_job && status.is_ok() {
                 status = match JobId::decode(&mut Reader::new(writer.written())) {
@@ -4001,6 +4065,21 @@ impl Host {
         };
         self.inner
             .call(slot, caller, false, method, args, reply, Some(trace))
+    }
+
+    /// The words the driver gave for `caller`'s last refused call or job start into `device`
+    /// ([`Driver::refusal`]), taken: asked once, right after the refusal. `None` when it said none,
+    /// or when another call of `caller`'s into the device has begun since.
+    pub fn take_refusal(&self, device: u32, caller: CallerId) -> Option<String> {
+        let slot = self.inner.slot(device)?;
+        if !slot.refused.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut refusals = lock(&slot.refusals);
+        let at = refusals.iter().position(|(who, _)| *who == caller)?;
+        let (_, words) = refusals.remove(at);
+        slot.refused.store(!refusals.is_empty(), Ordering::Release);
+        Some(words)
     }
 
     /// Borrows the two bulk endpoints of a device's function for `caller`, as `[OUT, IN]`

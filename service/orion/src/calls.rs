@@ -845,6 +845,11 @@ fn job_done(run: &Running, status: Status, result: &[u8]) -> Done {
         } else {
             format!("the job ended with status {}", status.0)
         };
+        // A failed job's bytes are the driver's words for its cause, not the contract's result.
+        let detail = match core::str::from_utf8(result) {
+            Ok(words) if !words.is_empty() => format!("{detail}: {words}"),
+            _ => detail,
+        };
         (ending, String::new(), detail)
     };
     Done {

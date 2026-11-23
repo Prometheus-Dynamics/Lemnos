@@ -265,6 +265,8 @@ pub trait Driver: Sized {
     fn took_up_link(&self) -> core::result::Result<(), &'static str> {
         Err(NOT_TAKEN_UP)
     }
+    /// See [`Lifecycle::refusal`].
+    fn refusal(&mut self, _status: Status, _words: &mut Reply<'_>) {}
     /// See [`Lifecycle::resume`].
     fn resume(&mut self, _record: &ResumeRecord) -> bool {
         false
@@ -325,6 +327,17 @@ pub trait Driver: Sized {
     }
     /// See [`Lifecycle::job_cancel`].
     fn job_cancel(&mut self, _job: JobId) {}
+}
+
+/// Writes as much of `text` as fits in `into`, cut at a character boundary: refusal words
+/// ([`Lifecycle::refusal`]) and a failed job's words are bounded by their buffer, never refused for
+/// their length.
+pub fn say(into: &mut Reply<'_>, text: &str) {
+    let mut end = text.len().min(into.remaining());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let _ = into.write(&text.as_bytes()[..end]);
 }
 
 /// What [`Lifecycle::took_up_link`] answers for a driver that does not say.
@@ -400,6 +413,14 @@ pub trait Lifecycle: Sized {
     fn took_up_link(&self) -> core::result::Result<(), &'static str> {
         Err(NOT_TAKEN_UP)
     }
+    /// Asked by the host right after a method or a job's start of this instance returned
+    /// `status`, a failure: the refusal's cause in words, for the caller to read with the status.
+    /// Write UTF-8 into `words` with [`say`]; nothing written leaves the status alone. The words
+    /// are for a cause the status cannot tell apart from another ("the slot failed a trial", not
+    /// "not permitted"). Keep them for the call that failed only: a driver that notes them where it
+    /// refuses takes them here, so a later failure never says an earlier one's words. Inside the
+    /// panic boundary; it must not block. Says nothing by default.
+    fn refusal(&mut self, _status: Status, _words: &mut Reply<'_>) {}
     /// Restores what [`Lifecycle::resume_record`] kept, on the new instance the host bound in place
     /// of the old one. The host calls it once, after the bind and before the first tick, on the
     /// driver's lane. Returns `true` only if the instance is now as the old one was: its state is
@@ -522,7 +543,9 @@ pub trait Lifecycle: Sized {
     /// How job `job` stands. The host asks after every method, tick and cancel on this driver,
     /// for each job still open, and passes what changed to the job's starter. Answer
     /// [`JobState::Finished`] once, with the job's result written to `result`; the host forgets
-    /// the job then. A number the driver doesn't know is finished with `NOT_FOUND`. Runs on the
+    /// the job then. A job that failed may write its cause in words instead (UTF-8, with [`say`]):
+    /// the host passes them on with the failed status, cut to its bound, and drops anything that
+    /// is not UTF-8. A number the driver doesn't know is finished with `NOT_FOUND`. Runs on the
     /// driver's lane and must not block.
     fn job(&mut self, _job: JobId, _result: &mut Reply<'_>) -> JobState {
         JobState::Finished(Status::NOT_FOUND)
