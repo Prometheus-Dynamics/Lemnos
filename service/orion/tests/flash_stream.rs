@@ -197,6 +197,31 @@ impl Drop for Bridge {
     }
 }
 
+/// Waits until the bridge is the receiver of `lemnos/flash/`: a probe file pushed there lands in its
+/// directory. A push before the bridge's sink is Orion's reaches no sink, and the node keeps it in its
+/// own store and answers it committed, so the bridge never sees it (a manifest sent then is missing
+/// when its image comes). The status topic's `pushes` would say so too, but a proxied bridge's topics
+/// don't reach the dashboard, so the probe is what proves it here. The probe is removed.
+fn wait_taken(dashboard: &Orion, incoming: &Path) {
+    let mut n = 0u32;
+    wait_for("the bridge receiving lemnos/flash/", || {
+        n += 1;
+        let name = format!("probe-{n}.json");
+        let sent = dashboard
+            .files()
+            .push(
+                &format!("lemnos/flash/{name}"),
+                &mut Cursor::new(b"{}".to_vec()),
+                |_, _| {},
+            )
+            .ok()?;
+        let landed = incoming.join(&name);
+        (sent.state == FileState::Committed && landed.exists()).then(|| {
+            std::fs::remove_file(&landed).expect("the probe removed");
+        })
+    });
+}
+
 fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + WAIT;
     loop {
@@ -294,6 +319,7 @@ fn setup_full(
             .any(|f| f.name == "lemnos.tracked")
             .then_some(())
     });
+    wait_taken(&dashboard, &incoming);
     Setup {
         proxies,
         dir,
@@ -311,7 +337,8 @@ impl Setup {
         self.dir.join("incoming")
     }
 
-    /// Pushes `bytes` to `lemnos/flash/<name>`, trying again until the bridge is the receiver.
+    /// Pushes `bytes` to `lemnos/flash/<name>`, trying again on a session error. The setup waited
+    /// until the bridge takes pushes, so the bridge is the receiver.
     fn push(&self, name: &str, bytes: &[u8]) -> orion::files::Transfer {
         let destination = format!("lemnos/flash/{name}");
         wait_for("a push the bridge answers", || {

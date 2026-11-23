@@ -392,8 +392,12 @@ fn a_tick_that_overruns_keeps_the_holders_pair_and_the_gadget_on_the_bus() {
     let device = device_index(&mut holder);
     let lent = take_end(&mut holder, device).unwrap();
     host.function.event(UsbFunctionEvent::Configured);
-    let (mut seen, _) = watch(&running.socket);
-    until(&mut seen, |state| state[1]);
+    // The subscription gives changes only: when the driver's tick took the host's `Configured`
+    // before the subscription began, its first value already says so and no other comes.
+    let (mut seen, first) = watch(&running.socket);
+    if !first[1] {
+        until(&mut seen, |state| state[1]);
+    }
     assert_eq!(host.function.enables(), 1);
 
     // The driver's tick is stuck past the call deadline: the host abandons it, and binds the
@@ -411,13 +415,16 @@ fn a_tick_that_overruns_keeps_the_holders_pair_and_the_gadget_on_the_bus() {
                     ..
                 })
             );
-        if refused_busy {
+        // The new instance took the function up as the host left it: configured again once its
+        // tick has had the replayed `Configured`, which may come after the refusal above.
+        if refused_busy && host.function.is_configured() {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "no rebind that kept the hold: parks {:?}",
-            host.function.parks()
+            "no rebind that kept the hold and the configuration: parks {:?}, configured {}",
+            host.function.parks(),
+            host.function.is_configured()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -426,7 +433,6 @@ fn a_tick_that_overruns_keeps_the_holders_pair_and_the_gadget_on_the_bus() {
         1,
         "never enabled again: never off the bus"
     );
-    assert!(host.function.is_configured());
 
     // The holder's copies carry bytes both ways, as before.
     let (mut out, mut input) = (UnixStream::from(lent.out), UnixStream::from(lent.input));

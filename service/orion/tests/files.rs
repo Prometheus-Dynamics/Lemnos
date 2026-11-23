@@ -16,6 +16,7 @@ use lemnos_sim::SimBoard;
 use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Outcome, Run, Target, Update};
 use orion::files::FileState;
+use orion::topics::{FieldId, Subscriber};
 use orion::{Address, Orion};
 use orion_node_app::{Node, NodeSettings};
 use orion_stubs::Board;
@@ -262,6 +263,23 @@ impl Drop for Bridge {
     }
 }
 
+/// Waits until the bridge takes pushes for `device`: its status topic says `accepted` in `pushes`,
+/// which the bridge says only once its file sink is Orion's. A push before that reaches no sink,
+/// and the node keeps it in its own store and answers it committed, so the bridge never sees it.
+fn wait_accepted(dashboard: &Orion, device: &str) {
+    let topic = format!("lemnos.{device}.status");
+    let mut subscriber: Subscriber =
+        wait_for("the status topic", || dashboard.subscribe(&topic).ok());
+    wait_for("the bridge taking pushes", || {
+        let _ = subscriber.wait(Duration::from_millis(50));
+        let bytes = subscriber.latest(FieldId(PUSHES))?.payload.to_vec();
+        (bytes == lemnos_orion::pushes::ACCEPTED.as_bytes()).then_some(())
+    });
+}
+
+/// The status topic's `pushes` field: the fifth, after `state`, `health`, `reason`, `refusal`.
+const PUSHES: u16 = 4;
+
 fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + WAIT;
     loop {
@@ -309,6 +327,7 @@ fn setup_running(test: &str, reserve_mb: u64, running: &str) -> Setup {
         let found = dashboard.resources("lemnos.slots").ok()?;
         found.iter().any(|f| f.name == "lemnos.slots").then_some(())
     });
+    wait_accepted(&dashboard, "slots");
     Setup {
         dir,
         dashboard,
@@ -337,7 +356,8 @@ impl Setup {
         self.dir.join("data/slots/.incoming")
     }
 
-    /// Pushes `bytes` to `lemnos/slots/<name>`, trying again until the bridge is the receiver.
+    /// Pushes `bytes` to `lemnos/slots/<name>`, trying again on a session error. The setup waited
+    /// until the bridge takes pushes, so the bridge is the receiver.
     fn push(&self, name: &str, bytes: &[u8]) -> orion::files::Transfer {
         let destination = format!("lemnos/slots/{name}");
         // Retried until the bridge answers. The last error is in the message if it never does.
