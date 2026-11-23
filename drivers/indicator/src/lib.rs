@@ -2,6 +2,28 @@
 //! shown on LEDs, as `indicator/1`. A caller sets the state; the board says what each state looks
 //! like.
 //!
+//! # One writer, in layers
+//!
+//! The indicator is the only writer of its LEDs, and what it shows is the top one of these, lowest
+//! first:
+//!
+//! 1. `idle`: the board's idle pattern (off unless the board sets one).
+//! 2. The application's frames. The driver also serves `pixels/1`: an application drives the
+//!    *indicator* as it would a strip (`pixel_count`, `set`, `show`) and never the strip itself.
+//!    The first caller to `set` or `show` owns the layer; another caller is refused `BUSY` until
+//!    the owner goes, and then the layer is gone and what is under it shows. A frame is taken
+//!    whole at `show`, so a frame sent in several `set` calls is never shown half way.
+//! 3. A state set through `indicator/1`: `receiving`, `writing`, `verifying`, `failed`, and `done`
+//!    for `done_ms` after it is set, when it drops to `idle`. `failed` stays until another state
+//!    is set.
+//! 4. The `lamp` self-test, for its two seconds.
+//! 5. Locate (`indicator/1` `locate`), for the seconds asked, ending by itself.
+//!
+//! Every layer keeps taking what it is given while another is on top: an application's frames
+//! land in its buffer and a state set under a locate is kept. When the top layer ends, the one
+//! under it shows at once, the application's latest frame included. Nothing here makes a look:
+//! an application computes its own frames, and each state's pattern is the board's.
+//!
 //! # Wiring
 //!
 //! - `pixels` (required): a `pixels/1` device the LEDs are on: the LED strip driver, or a GPIO LED
@@ -21,6 +43,8 @@
 //! |---|---|---|
 //! | `state.<name>` | the built-in pattern | The pattern for that state: see [`pattern`]. |
 //! | `brightness` | 255 | Scales every pattern that sets no brightness of its own. |
+//! | `locate` | `blink #ffffff period=250` | The pattern locate shows. |
+//! | `done_ms` | 5000 | How long `done` shows before it drops to `idle`: 0 to 60000. |
 //!
 //! The built-in patterns are `idle` off, `receiving` a blue blink, `writing` a green bar over a dim
 //! green, `verifying` a yellow chase, `done` solid green and `failed` a fast red blink.
@@ -40,11 +64,15 @@
 //!
 //! # State
 //!
-//! Nothing is kept across a restart: the driver starts `idle` and the caller sets the state again.
+//! Nothing is kept across a restart: the driver starts `idle` with no application frame, and the
+//! callers set theirs again.
 //!
 //! # Allocation
 //!
-//! The frame (4 bytes per LED) is allocated when the driver starts; steady state allocates nothing.
+//! The frame and the application's two buffers (4 bytes per LED each) are allocated when the
+//! driver starts; steady state allocates nothing. An application's frame costs two copies of
+//! 4 bytes per LED here (into its buffer at `set`, and to the shown frame at `show`), then the
+//! same `set` and `show` to the strip that driving the strip itself would have made.
 
 #![no_std]
 
@@ -62,7 +90,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use lemnos_contract_indicator::{
-    FULL_PROGRESS, Indicator as IndicatorContract, NO_PROGRESS, STATES,
+    FULL_PROGRESS, Indicator as IndicatorContract, MAX_LOCATE_SECONDS, NO_PROGRESS, STATES,
 };
 use lemnos_contract_pixels::{MAX_LOCAL_LEDS, Pixels};
 use lemnos_contract_self_test::{
@@ -88,8 +116,32 @@ const SPECS: &[Spec] = &[Spec {
     fixture: "an operator watching the indicator",
     expect_ms: 2000,
 }];
+/// `indicator/1`'s `locating`, the reading that says locate is showing.
+const LOCATING: MethodId = MethodId {
+    contract: 0,
+    method: 4,
+};
 /// The state the `lamp` test shows.
 const LAMP_STATE: &str = "receiving";
+/// `idle` and `done` in [`STATES`].
+const IDLE: usize = 0;
+const DONE: usize = 4;
+/// What locate shows unless the board says.
+const LOCATE_DEFAULT: &str = "blink #ffffff period=250";
+/// How long `done` shows unless the board says, and the most it may say, in milliseconds.
+const DONE_MS_DEFAULT: i64 = 5_000;
+const DONE_MS_MAX: i64 = 60_000;
+const NS_PER_S: u64 = 1_000_000_000;
+
+/// The layer on top: what the LEDs show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Top {
+    Idle,
+    App,
+    State(usize),
+    Lamp,
+    Locate,
+}
 /// How long the `lamp` test holds its state.
 const LAMP_NS: u64 = 2_000 * NS_PER_MS;
 
@@ -99,18 +151,42 @@ const BACKOFF_FIRST_NS: u64 = 100 * NS_PER_MS;
 const BACKOFF_MAX_NS: u64 = 8_000 * NS_PER_MS;
 
 /// An indicator on a `pixels/1` device.
-#[driver("indicator", provides = [IndicatorContract, SelfTest])]
+#[driver("indicator", provides = [IndicatorContract, SelfTest, Pixels])]
 pub struct Indicator {
     #[needs]
     pixels: Dev<dyn Pixels>,
     count: usize,
     /// One pattern per state, in [`STATES`]'s order.
     patterns: Vec<Pattern>,
+    /// What locate shows.
+    locate_pattern: Pattern,
+    /// How long `done` shows.
+    done_ns: u64,
+    /// The state set through `indicator/1` ([`IDLE`] when none shows).
     state: usize,
     progress: u16,
-    /// A method changed the state since the last tick.
+    /// A method set the state since the last tick.
     changed: bool,
-    /// When the current state began, in nanoseconds of the host's clock.
+    /// When the state was set.
+    state_at_ns: u64,
+    /// The application's frame as its `set` calls leave it, and as its last `show` took it.
+    app: Vec<u8>,
+    app_shown: Vec<u8>,
+    /// Who drives the application layer, once someone has.
+    app_owner: Option<CallerId>,
+    /// The owner has shown a frame: the layer is there.
+    app_live: bool,
+    /// A frame was shown since the last tick.
+    app_dirty: bool,
+    /// The `lamp` test is showing its state.
+    lamp: bool,
+    /// A `locate` asked since the last tick, in seconds (0 ends it), and who asked.
+    locate_asked: Option<u16>,
+    locate_owner: CallerId,
+    /// When the locate that is showing ends.
+    locate_until: Option<u64>,
+    /// The layer the frame was last drawn for, and when it came on top.
+    top: Top,
     since_ns: u64,
     /// The frame for the current state, 4 bytes per LED.
     frame: Vec<u8>,
@@ -154,6 +230,8 @@ fn key(state: &str) -> String {
 /// The settings this driver reads from its board file config.
 const KEYS: &[Key] = &[
     Key::optional("brightness", Kind::Int),
+    Key::optional("locate", Kind::Str),
+    Key::optional("done_ms", Kind::Int),
     Key::optional("state.idle", Kind::Str),
     Key::optional("state.receiving", Kind::Str),
     Key::optional("state.writing", Kind::Str),
@@ -178,6 +256,16 @@ impl Lifecycle for Indicator {
             && u8::try_from(level).is_err()
         {
             return Err(ConfigError::new("brightness", "must be 0 to 255"));
+        }
+        if let Some(ms) = cfg.int("done_ms")
+            && !(0..=DONE_MS_MAX).contains(&ms)
+        {
+            return Err(ConfigError::new("done_ms", "must be 0 to 60000"));
+        }
+        if let Some(text) = cfg.str("locate")
+            && let Err(refused) = pattern::parse(text, 255)
+        {
+            return Err(ConfigError::new("locate", refused.0));
         }
         // Each state's pattern text must parse. The brightness it falls back to does not change
         // whether it parses, so any value will do here.
@@ -207,17 +295,37 @@ impl Lifecycle for Indicator {
             let parsed = pattern::parse(text, brightness).map_err(|_| Status::INVALID_ARGUMENT)?;
             patterns.push(parsed);
         }
+        let locate_pattern =
+            pattern::parse(cfg.str("locate").unwrap_or(LOCATE_DEFAULT), brightness)
+                .map_err(|_| Status::INVALID_ARGUMENT)?;
+        // The range is checked by check_config.
+        let done_ms = u64::try_from(cfg.int("done_ms").unwrap_or(DONE_MS_DEFAULT))
+            .map_err(|_| Status::INVALID_ARGUMENT)?;
         Ok(Self {
             pixels: needs.pixels,
             count,
             patterns,
-            state: 0,
+            locate_pattern,
+            done_ns: done_ms * NS_PER_MS,
+            state: IDLE,
             progress: NO_PROGRESS,
             // The first tick draws idle, so the strip is never left as it was found.
             changed: true,
+            state_at_ns: 0,
+            app: alloc::vec![0; count * 4],
+            app_shown: alloc::vec![0; count * 4],
+            app_owner: None,
+            app_live: false,
+            app_dirty: false,
+            lamp: false,
+            locate_asked: None,
+            locate_owner: CallerId::LOCAL,
+            locate_until: None,
+            top: Top::Idle,
             since_ns: 0,
             frame: alloc::vec![0; count * 4],
-            render_at: None,
+            // Drawn at the first tick, whatever is on top then.
+            render_at: Some(0),
             unsent: false,
             retry_at: 0,
             backoff: 0,
@@ -229,6 +337,7 @@ impl Lifecycle for Indicator {
 
     fn describe(&self, out: &mut Description) {
         out.add(Item::action("self_test", RUN));
+        out.add(Item::value("locating", LOCATING).dimensionless());
     }
 
     fn health(&self) -> Health {
@@ -245,9 +354,7 @@ impl Lifecycle for Indicator {
         // The test's steps first, so the frame they set is drawn in this same tick.
         let test = {
             let mut bench = Lamp {
-                state: &mut self.state,
-                progress: &mut self.progress,
-                changed: &mut self.changed,
+                lamp: &mut self.lamp,
             };
             self.runner.tick(now_ns, &mut bench)
         };
@@ -265,6 +372,19 @@ impl Lifecycle for Indicator {
 
     fn caller_gone(&mut self, caller: CallerId) {
         self.runner.caller_gone(caller);
+        // The application's layer goes with its owner, and what is under it shows.
+        if self.app_owner == Some(caller) {
+            self.app_owner = None;
+            self.app_live = false;
+            self.app.fill(0);
+            self.app_shown.fill(0);
+        }
+        // So does a locate with the caller that asked for it.
+        if self.locate_owner == caller
+            && (self.locate_until.is_some() || self.locate_asked.is_some())
+        {
+            self.locate_asked = Some(0);
+        }
     }
 
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
@@ -273,9 +393,7 @@ impl Lifecycle for Indicator {
 
     fn job_cancel(&mut self, job: JobId) {
         let mut bench = Lamp {
-            state: &mut self.state,
-            progress: &mut self.progress,
-            changed: &mut self.changed,
+            lamp: &mut self.lamp,
         };
         self.runner.cancel(job, &mut bench);
     }
@@ -295,26 +413,17 @@ impl SelfTest for Indicator {
     }
 }
 
-/// The `lamp` test's steps: it shows [`LAMP_STATE`] for [`LAMP_NS`], and puts back the state it
-/// found, so the frame returns to what the driver had set.
+/// The `lamp` test's steps: it shows [`LAMP_STATE`] for [`LAMP_NS`] as a layer of its own, over the
+/// state and the application, and then is gone: what was under it shows again as it now stands.
 struct Lamp<'a> {
-    state: &'a mut usize,
-    progress: &'a mut u16,
-    changed: &'a mut bool,
+    lamp: &'a mut bool,
 }
 
 impl Bench for Lamp<'_> {
     fn step(&mut self, _test: usize, now_ns: u64, scratch: &mut Scratch) -> Flow {
         if scratch.step == 0 {
-            scratch.saved = [*self.state as i64, i64::from(*self.progress), 0, 1];
             scratch.step = 1;
-            let lamp = STATES
-                .iter()
-                .position(|name| *name == LAMP_STATE)
-                .unwrap_or(0);
-            *self.state = lamp;
-            *self.progress = NO_PROGRESS;
-            *self.changed = true;
+            *self.lamp = true;
             return Flow::Wait(now_ns + LAMP_NS);
         }
         Flow::Done(
@@ -324,37 +433,100 @@ impl Bench for Lamp<'_> {
         )
     }
 
-    fn restore(&mut self, scratch: &mut Scratch) -> core::result::Result<(), Status> {
-        if scratch.saved[3] == 0 {
-            return Ok(());
-        }
-        *self.state = scratch.saved[0] as usize;
-        *self.progress = scratch.saved[1] as u16;
-        *self.changed = true;
-        scratch.saved[3] = 0;
+    fn restore(&mut self, _scratch: &mut Scratch) -> core::result::Result<(), Status> {
+        *self.lamp = false;
         Ok(())
     }
 }
 
 impl Indicator {
-    /// Draws the current state's frame when it is due, and sends it.
+    /// The layer on top as things stand.
+    fn top(&self) -> Top {
+        if self.locate_until.is_some() {
+            Top::Locate
+        } else if self.lamp {
+            Top::Lamp
+        } else if self.state != IDLE {
+            Top::State(self.state)
+        } else if self.app_live {
+            Top::App
+        } else {
+            Top::Idle
+        }
+    }
+
+    /// The pattern a layer draws, and its progress. `None` for the application's layer, whose
+    /// frame is its own.
+    fn pattern_of(&self, top: Top) -> Option<(Pattern, Option<u16>)> {
+        let lamp = || {
+            STATES
+                .iter()
+                .position(|name| *name == LAMP_STATE)
+                .unwrap_or(IDLE)
+        };
+        match top {
+            Top::App => None,
+            Top::Idle => Some((self.patterns[IDLE], None)),
+            Top::State(state) => Some((
+                self.patterns[state],
+                (self.progress != NO_PROGRESS).then_some(self.progress),
+            )),
+            Top::Lamp => Some((self.patterns[lamp()], None)),
+            Top::Locate => Some((self.locate_pattern, None)),
+        }
+    }
+
+    /// Takes what the methods asked since the last tick, ends what has run its time, draws the top
+    /// layer's frame when it is due, and sends it.
     fn tick_frame(&mut self, now_ns: u64) -> Option<u64> {
-        if self.changed {
-            self.changed = false;
+        let set = core::mem::take(&mut self.changed);
+        if set {
+            self.state_at_ns = now_ns;
+        }
+        // `done` is not a lasting layer: after its time whatever is under it shows.
+        let done_at = (self.state == DONE).then(|| self.state_at_ns.saturating_add(self.done_ns));
+        if done_at.is_some_and(|at| now_ns >= at) {
+            self.state = IDLE;
+            self.progress = NO_PROGRESS;
+        }
+        let done_at = done_at.filter(|_| self.state == DONE);
+        if let Some(seconds) = self.locate_asked.take() {
+            self.locate_until =
+                (seconds != 0).then(|| now_ns.saturating_add(u64::from(seconds) * NS_PER_S));
+        }
+        if self.locate_until.is_some_and(|until| now_ns >= until) {
+            self.locate_until = None;
+        }
+        let shown = core::mem::take(&mut self.app_dirty);
+
+        let top = self.top();
+        // A layer that came on top starts its pattern from the beginning. So does a state set
+        // again while it is on top, and an application's new frame is drawn when it is on top.
+        // What happens under the top layer changes nothing that is shown.
+        if top != self.top || (set && matches!(top, Top::State(_))) {
+            self.top = top;
             self.since_ns = now_ns;
+            self.render_at = Some(now_ns);
+        } else if shown && top == Top::App {
             self.render_at = Some(now_ns);
         }
         if let Some(at) = self.render_at
             && now_ns >= at
         {
-            let elapsed_ms = (now_ns - self.since_ns) / NS_PER_MS;
-            let pattern = self.patterns[self.state];
-            let progress = (self.progress != NO_PROGRESS).then_some(self.progress);
-            draw(&pattern, self.count, progress, elapsed_ms, &mut self.frame);
+            match self.pattern_of(top) {
+                Some((pattern, progress)) => {
+                    let elapsed_ms = (now_ns - self.since_ns) / NS_PER_MS;
+                    draw(&pattern, self.count, progress, elapsed_ms, &mut self.frame);
+                    self.render_at = next_change(&pattern, self.count, elapsed_ms)
+                        .map(|ms| self.since_ns + ms * NS_PER_MS);
+                }
+                None => {
+                    self.frame.copy_from_slice(&self.app_shown);
+                    self.render_at = None;
+                }
+            }
             self.unsent = true;
             self.retry_at = now_ns;
-            self.render_at = next_change(&pattern, self.count, elapsed_ms)
-                .map(|ms| self.since_ns + ms * NS_PER_MS);
         }
         if self.unsent && now_ns >= self.retry_at {
             match self.write() {
@@ -374,11 +546,57 @@ impl Indicator {
                 }
             }
         }
-        let retry = self.unsent.then_some(self.retry_at);
-        match (self.render_at, retry) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        // The next thing with a time: a frame change, a retry, `done` dropping, locate ending.
+        [
+            self.render_at,
+            self.unsent.then_some(self.retry_at),
+            done_at,
+            self.locate_until,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Whether the method being run may drive the application's layer: its owner, or the first
+    /// caller to try while it has none.
+    fn app_caller(&mut self) -> Result<()> {
+        match self.app_owner {
+            Some(owner) if owner != self.calling => Err(Status::BUSY),
+            Some(_) => Ok(()),
+            None => {
+                self.app_owner = Some(self.calling);
+                Ok(())
+            }
         }
+    }
+}
+
+/// The application's layer: the indicator as a strip. See the crate notes.
+impl Pixels for Indicator {
+    fn pixel_count(&mut self) -> Result<u16> {
+        u16::try_from(self.count).map_err(|_| Status::IO)
+    }
+
+    fn set(&mut self, offset: u16, pixels: &[u8]) -> Result<()> {
+        self.app_caller()?;
+        let at = usize::from(offset) * 4;
+        // LEDs past the end are ignored, and a partial LED at the end is dropped, as a strip does.
+        let room = self.app.len().saturating_sub(at);
+        let len = (pixels.len() / 4 * 4).min(room);
+        if len > 0 {
+            self.app[at..at + len].copy_from_slice(&pixels[..len]);
+        }
+        Ok(())
+    }
+
+    fn show(&mut self) -> Result<()> {
+        self.app_caller()?;
+        // The frame is taken whole here: what is shown never has half of a later one in it.
+        self.app_shown.copy_from_slice(&self.app);
+        self.app_live = true;
+        self.app_dirty = true;
+        Ok(())
     }
 }
 
@@ -391,14 +609,31 @@ impl IndicatorContract for Indicator {
         if progress != NO_PROGRESS && progress > FULL_PROGRESS {
             return Err(Status::INVALID_ARGUMENT);
         }
-        // A self-test is showing its own state, and puts this one back when it ends.
-        if self.runner.busy() {
-            return Err(Status::BUSY);
-        }
+        // Taken whatever is on top: under a locate or the lamp test it shows when they end.
         self.state = index;
         self.progress = progress;
         self.changed = true;
         Ok(())
+    }
+
+    fn locate(&mut self, seconds: u16) -> Result<()> {
+        if seconds > MAX_LOCATE_SECONDS {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        // The lamp test is an operator watching the LEDs for what it shows.
+        if seconds != 0 && self.runner.busy() {
+            return Err(Status::BUSY);
+        }
+        self.locate_asked = Some(seconds);
+        self.locate_owner = self.calling;
+        Ok(())
+    }
+
+    fn locating(&mut self) -> Result<bool> {
+        Ok(match self.locate_asked {
+            Some(seconds) => seconds != 0,
+            None => self.locate_until.is_some(),
+        })
     }
 
     fn states(&mut self, into: &mut [u8]) -> Result<usize> {

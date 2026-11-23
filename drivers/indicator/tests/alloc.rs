@@ -48,3 +48,37 @@ fn steady_state_allocates_nothing() {
     });
     assert_eq!(count, 0, "allocations in steady state");
 }
+
+/// The application's frames, a locate over them and its end allocate nothing either.
+#[test]
+fn an_application_animating_under_a_locate_allocates_nothing() {
+    use lemnos_contract_pixels::Pixels;
+    use lemnos_core::{CallerId, Lifecycle};
+    let fake = FakePixels::leak(16);
+    let mut indicator = driver(fake, &[]);
+    let frame = [0x20u8; 16 * 4];
+    // Warm up: the first frame, and one locate from start to end.
+    Lifecycle::caller(&mut indicator, CallerId(7));
+    Pixels::set(&mut indicator, 0, &frame[..14 * 4]).unwrap();
+    Pixels::set(&mut indicator, 14, &frame[14 * 4..]).unwrap();
+    Pixels::show(&mut indicator).unwrap();
+    tick(&mut indicator, 0);
+    indicator.locate(1).unwrap();
+    settle(&mut indicator, 1, 2_000);
+    let ((), count) = allocations(|| {
+        indicator.locate(2).unwrap();
+        for step in 0..3_000u64 {
+            Lifecycle::caller(&mut indicator, CallerId(7));
+            Pixels::set(&mut indicator, 0, &frame[..14 * 4]).unwrap();
+            Pixels::set(&mut indicator, 14, &frame[14 * 4..]).unwrap();
+            Pixels::show(&mut indicator).unwrap();
+            tick(&mut indicator, 3_000 + step);
+        }
+    });
+    assert_eq!(count, 0, "allocations with an application and a locate");
+    assert_eq!(
+        fake.last(),
+        vec![[0x20; 4]; 16],
+        "the application's frame is back"
+    );
+}

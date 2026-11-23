@@ -27,8 +27,8 @@ fn idle_is_drawn_from_the_start_and_is_dark_by_default() {
 #[test]
 fn a_solid_state_draws_once_and_asks_for_no_more_ticks() {
     let fake = FakePixels::leak(4);
-    let mut indicator = driver(fake, &[("state.done", ConfigValue::Str("solid #00ff00"))]);
-    indicator.set("done", NO_PROGRESS).unwrap();
+    let mut indicator = driver(fake, &[("state.failed", ConfigValue::Str("solid #00ff00"))]);
+    indicator.set("failed", NO_PROGRESS).unwrap();
     assert_eq!(tick(&mut indicator, 0), None);
     assert_eq!(fake.last(), all(4, led(0, 255, 0)));
     assert_eq!(

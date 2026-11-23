@@ -133,6 +133,8 @@ config = { count = 16, wire = "rgb", brightness = 255 }
 
 # `uses` names an `indicator`'s pixels: the indicator shows named states (`receiving`, `failed`, ...)
 # on the strip, each drawn with the pattern the board gives it. `brightness` scales every pattern.
+# The indicator is the strip's only writer: an application that animates the LEDs sends its frames
+# to the indicator (`pixels/1` on this device), never to the strip, and `locate` shows over them.
 [[devices]]
 id = "status-indicator"
 driver = "indicator"

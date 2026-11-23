@@ -13,9 +13,10 @@ use support::{FakePixels, driver, settle, tick};
 
 const GREEN: [u8; 4] = [0, 255, 0, 0];
 
-/// A strip of two LEDs whose `done` state is solid green, so the state it puts back is visible.
+/// A strip of two LEDs whose `failed` state is solid green, so the state under the test is visible
+/// (`failed` lasts; `done` drops by itself).
 fn green_done(fake: &'static FakePixels) -> Indicator {
-    driver(fake, &[("state.done", ConfigValue::Str("solid #00ff00"))])
+    driver(fake, &[("state.failed", ConfigValue::Str("solid #00ff00"))])
 }
 
 /// Ticks `indicator` at `now_ms`, which is when the test's steps run.
@@ -59,7 +60,7 @@ fn the_lamp_test_is_listed_and_needs_an_operator() {
 fn an_unconfirmed_lamp_test_touches_no_led() {
     let fake = FakePixels::leak(2);
     let mut indicator = green_done(fake);
-    indicator.set("done", NO_PROGRESS).unwrap();
+    indicator.set("failed", NO_PROGRESS).unwrap();
     settle(&mut indicator, 0, 1_000);
     let shows = fake.shows();
     let job = SelfTest::run(&mut indicator, "lamp", false).unwrap();
@@ -73,7 +74,7 @@ fn an_unconfirmed_lamp_test_touches_no_led() {
 fn a_confirmed_lamp_shows_the_state_for_two_seconds_then_puts_back_the_one_it_found() {
     let fake = FakePixels::leak(2);
     let mut indicator = green_done(fake);
-    indicator.set("done", NO_PROGRESS).unwrap();
+    indicator.set("failed", NO_PROGRESS).unwrap();
     settle(&mut indicator, 0, 1_000);
     let job = SelfTest::run(&mut indicator, "lamp", true).unwrap();
     let next = at(&mut indicator, 0).expect("the test asks to be ticked again");
@@ -95,32 +96,48 @@ fn a_confirmed_lamp_shows_the_state_for_two_seconds_then_puts_back_the_one_it_fo
     assert_eq!(record.outcome, Outcome::Pass);
     assert_eq!(record.reason, reason::OPERATOR_CONFIRMED);
     settle(&mut indicator, 2_000, 3_000);
-    assert_eq!(fake.last(), vec![GREEN; 2], "the done state is back");
+    assert_eq!(
+        fake.last(),
+        vec![GREEN; 2],
+        "the state under the test is back"
+    );
 }
 
 #[test]
-fn a_state_set_while_the_lamp_test_runs_is_refused() {
+fn a_state_set_while_the_lamp_test_runs_is_kept_and_shows_when_the_test_ends() {
     let fake = FakePixels::leak(2);
     let mut indicator = green_done(fake);
     let job = SelfTest::run(&mut indicator, "lamp", true).unwrap();
     at(&mut indicator, 0);
-    assert_eq!(indicator.set("failed", NO_PROGRESS), Err(Status::BUSY));
+    // The test's layer is on top: the state is taken, and the LEDs keep showing the test.
+    assert_eq!(indicator.set("failed", NO_PROGRESS), Ok(()));
+    at(&mut indicator, 1_000);
+    assert_ne!(fake.last(), vec![GREEN; 2], "the test is still on the LEDs");
     at(&mut indicator, 2_000);
     answer(&mut indicator, job);
-    assert!(indicator.set("failed", NO_PROGRESS).is_ok());
+    settle(&mut indicator, 2_000, 3_000);
+    assert_eq!(
+        fake.last(),
+        vec![GREEN; 2],
+        "the state set under the test shows"
+    );
 }
 
 #[test]
 fn cancelling_the_lamp_test_puts_the_state_back_at_once() {
     let fake = FakePixels::leak(2);
     let mut indicator = green_done(fake);
-    indicator.set("done", NO_PROGRESS).unwrap();
+    indicator.set("failed", NO_PROGRESS).unwrap();
     settle(&mut indicator, 0, 1_000);
     let job = SelfTest::run(&mut indicator, "lamp", true).unwrap();
     at(&mut indicator, 0);
     Lifecycle::job_cancel(&mut indicator, job);
     settle(&mut indicator, 0, 1_000);
-    assert_eq!(fake.last(), vec![GREEN; 2], "back on the done state");
+    assert_eq!(
+        fake.last(),
+        vec![GREEN; 2],
+        "back on the state under the test"
+    );
     assert_eq!(
         answer(&mut indicator, job).0,
         JobState::Finished(Status::CANCELLED)
