@@ -312,6 +312,11 @@ impl Hardware for Hw {
         }))
     }
 
+    fn dma(&mut self) -> Result<Option<lemnos_driver_rp1_csi2::sys::Dma>> {
+        // This board's DMA always stops: its stop takes every buffer back at once.
+        Ok(Some(lemnos_driver_rp1_csi2::sys::Dma::default()))
+    }
+
     fn stop(&mut self) -> Result<()> {
         self.with(|b| {
             b.going = false;

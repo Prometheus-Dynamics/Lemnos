@@ -65,6 +65,53 @@ pub struct Info {
     pub errors: u64,
 }
 
+/// `LEMNOS_RP1_CSI2_DMA_IDLE`: the part's DMA holds no buffer.
+pub const DMA_IDLE: u32 = 0;
+/// `LEMNOS_RP1_CSI2_DMA_STREAMING`: the part is streaming into its streams' buffers.
+pub const DMA_STREAMING: u32 = 1;
+/// `LEMNOS_RP1_CSI2_DMA_WEDGED`: a stop wasn't confirmed; its buffers stay pinned, START is refused.
+pub const DMA_WEDGED: u32 = 2;
+/// `LEMNOS_RP1_CSI2_STOP_NONE`: the part hasn't stopped since it was made.
+pub const STOP_NONE: u32 = 0;
+/// `LEMNOS_RP1_CSI2_STOP_ACKED`: the frame end after FORCE came within the bound.
+pub const STOP_ACKED: u32 = 1;
+/// `LEMNOS_RP1_CSI2_STOP_IDLE`: between frames at FORCE, and no frame started within the bound.
+pub const STOP_IDLE: u32 = 2;
+/// `LEMNOS_RP1_CSI2_STOP_UNCONFIRMED`: a frame was in flight and no frame end came: wedged.
+pub const STOP_UNCONFIRMED: u32 = 3;
+/// `LEMNOS_RP1_CSI2_STOP_LATE`: a wedge whose frame end came later: buffers released.
+pub const STOP_LATE: u32 = 4;
+
+/// `struct lemnos_rp1_csi2_dma_part`: one part's DMA and its last stop.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DmaPart {
+    /// `DMA_*`.
+    pub state: u32,
+    /// `STOP_*`.
+    pub stop: u32,
+    /// How long the last stop took or waited, in us (`STOP_LATE`: from the stop to the late end).
+    pub stop_us: u32,
+    /// The last stop's bound, in us.
+    pub bound_us: u32,
+    /// Dma-bufs the part's DMA can write: its streams', or the ones a wedge keeps.
+    pub pinned: u32,
+    /// Zero.
+    pub reserved: u32,
+    /// Their bytes.
+    pub pinned_bytes: u64,
+}
+
+/// `struct lemnos_rp1_csi2_dma`: the receiver's part and the front end's.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dma {
+    /// The receiver's DMA.
+    pub csi2: DmaPart,
+    /// The front end's DMA, all zero when the block has none.
+    pub fe: DmaPart,
+}
+
 /// `struct lemnos_rp1_csi2_embedded`: the embedded stream for the next START.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -195,6 +242,7 @@ const IOC_EMBEDDED: u32 = iow::<Embedded>(b'L', 0xc5);
 const IOC_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xc3, 0);
 const IOC_FRAME_STARTS: u32 = ior::<FrameStarts>(b'L', 0xc4);
 const IOC_CLAIM: u32 = iow::<Claim>(b'L', 0xc6);
+const IOC_DMA: u32 = ior::<Dma>(b'L', 0xc7);
 const IOC_STREAM_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
 const IOC_STREAM_BUFFER: u32 = iowr::<StreamBuffer>(b'L', 0x86);
 /// `sizeof(struct lemnos_stream_job)`: a job's fixed size.
@@ -259,6 +307,14 @@ impl Node {
         let mut info = Info::default();
         self.ioctl(IOC_INFO, &raw mut info)?;
         Ok(info)
+    }
+
+    /// What each part's DMA holds and how its last stop ended (`LEMNOS_RP1_CSI2_IOC_DMA`). A module
+    /// without the call answers `ENOTTY`.
+    pub fn dma(&self) -> io::Result<Dma> {
+        let mut dma = Dma::default();
+        self.ioctl(IOC_DMA, &raw mut dma)?;
+        Ok(dma)
     }
 
     /// The frame-start count since START (`LEMNOS_RP1_CSI2_IOC_FRAME_STARTS`). An ioctl the module
@@ -481,5 +537,10 @@ mod tests {
         assert_eq!(offset_of!(FrameStarts, valid), 16);
         assert_eq!(offset_of!(FrameStarts, reserved), 20);
         assert_eq!(IOC_FRAME_STARTS, 0x8018_4cc4);
+        assert_eq!(size_of::<DmaPart>(), 32);
+        assert_eq!(offset_of!(DmaPart, pinned_bytes), 24);
+        assert_eq!(size_of::<Dma>(), 64);
+        assert_eq!(offset_of!(Dma, fe), 32);
+        assert_eq!(IOC_DMA, 0x8040_4cc7);
     }
 }

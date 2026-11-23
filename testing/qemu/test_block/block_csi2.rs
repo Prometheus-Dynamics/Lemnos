@@ -74,7 +74,9 @@ const TCSI_IOC_BUSY_LEFT: u32 = _IOR::<u32>(TCSI_TYPE, 13);
 /// Freezes the line counter for that many lines of the busy window: the DMA is still busy, the counter
 /// is not moving.
 const TCSI_IOC_BLANK: u32 = _IOW::<u32>(TCSI_TYPE, 14);
-/// Arms one late FE_ACK: delivered when a wedged window (busy forever) is released with FORCE still set.
+/// Arms one late FE_ACK: raised when a wedged window (busy forever) is released with FORCE still set. With
+/// the MIPI config's DMA interrupt enabled it is delivered; with it off (as after every stop) it is
+/// latched in the status, where the driver reads it.
 const TCSI_IOC_LATE_ACK: u32 = _IOW::<u32>(TCSI_TYPE, 15);
 /// The embedded channel's registers, read as the image channel's.
 const TCSI_IOC_PEEK_EMB: u32 = _IOR::<TcsiRegs>(TCSI_TYPE, 11);
@@ -111,7 +113,6 @@ const R_DEBUG: usize = 0x038;
 const R_ADDR1: usize = 0x03c;
 const R_FRAME_SIZE: usize = 0x040;
 const R_FORCE: u32 = 1 << 3;
-const R_INT_DMA: u32 = 1 << 0;
 const R_INT_FE: u32 = 1 << 4;
 /// The embedded channel's registers sit one channel stride (0x40) above the image's.
 const fn r_emb(r: usize) -> usize {
@@ -132,6 +133,12 @@ const FE_R_RESET: u32 = 1 << 2;
 const TCSI_IRQ_EN_FE_ACK: u32 = 1 << 15;
 /// MIPI cfg INTS: the DMA's interrupt, which the driver reads.
 const TCSI_R_INT_CSI_DMA: u32 = 1 << 0;
+/// MIPI cfg INTE: the interrupts the config raises.
+const R_INTE: usize = 0x02c;
+/// The status word as the fake keeps it: what is latched, with this bit set. The driver never writes
+/// it (its bits are the channels' low ones), so a status read without it is a driver's write-back, which
+/// the tick takes as a write-1-to-clear. FAKE-ONLY: the hardware's status is write-1-to-clear itself.
+const TCSI_STATUS_MARK: u32 = 1 << 31;
 
 /// The four windows: the receiver's, the embedded channel's, the MIPI config and the front end's.
 static TCSI_REGS: [AtomicPtr<u8>; 4] = [const { AtomicPtr::new(ptr::null_mut()) }; 4];
@@ -163,6 +170,20 @@ static TCSI_LAST_CTRL: AtomicU32 = AtomicU32::new(0);
 static TCSI_LINES: AtomicU32 = AtomicU32::new(0);
 /// TCSI_IOC_LATE_ACK: one FE_ACK when a wedged DMA stops.
 static TCSI_LATE: AtomicU32 = AtomicU32::new(0);
+/// Status bits raised while the MIPI config's interrupt was off: they stay until written back.
+static TCSI_LATCHED: AtomicU32 = AtomicU32::new(0);
+/// Deliveries under way: the status word is theirs until each puts the latched word back. Changed
+/// under `TCSI_LOCK`.
+static TCSI_DELIVERING: AtomicU32 = AtomicU32::new(0);
+/// A frame in flight on each channel: a frame start fired with no frame end after it. A FORCE then
+/// has something to end; a FORCE with none in flight gets no frame end, as the board showed
+/// (testing/board-runs/CZ-MOD-FE-ACK.md, the sensor-first stops).
+static TCSI_IN_FRAME: AtomicBool = AtomicBool::new(false);
+static TCSI_EMB_IN_FRAME: AtomicBool = AtomicBool::new(false);
+/// Whether the current FORCE found a frame in flight (or a busy window), taken when the tick first
+/// sees it.
+static TCSI_FORCE_LIVE: AtomicBool = AtomicBool::new(false);
+static TCSI_EMB_FORCE_LIVE: AtomicBool = AtomicBool::new(false);
 static TCSI_EMB_ADDR: AtomicU64 = AtomicU64::new(0);
 static TCSI_EMB_LEN: AtomicU32 = AtomicU32::new(0);
 /// The next embedded frame end's lines; 0: no line.
@@ -363,42 +384,66 @@ unsafe fn forward_now(t: *mut bindings::hrtimer) -> u64 {
 ///
 /// FAKE-ONLY ASSUMPTION (CZ-MOD FE_ACK): the bits go into status and the DMA's interrupt into the MIPI
 /// cfg, the driver's handler (devm_request_irq, a hard handler) runs to completion here, and then the fake
-/// clears what it set, plus every frame bit the driver left behind. On hardware the driver's
-/// write-1-to-clear does that; this fake's status is ordinary memory, so the clear is the fake's. A status
-/// bit therefore exists only while the handler runs: no stale bit outlives it, and the stop can't count an
-/// old one.
+/// puts back only what is latched (bits raised while the DMA interrupt was off), marked as its own. On
+/// hardware the driver's write-1-to-clear does that; this fake's status is ordinary memory, so the clear
+/// is the fake's. A delivered bit therefore exists only while the handler runs: no stale bit outlives it,
+/// and the stop can't count an old one.
 ///
 /// # Safety
 ///
-/// The receiver is set up (its windows are mapped).
+/// The receiver is set up (its windows are mapped), and `TCSI_LOCK` is not held.
 unsafe fn tcsi_deliver(status_bits: u32, ints_bits: u32) {
     let dma = TCSI_REGS[0].load(Ordering::Relaxed);
     let cfg = TCSI_REGS[2].load(Ordering::Relaxed);
-    // The status starts empty: the driver's write-to-clear (START, the stop, the handler's write-back) is a
-    // no-op on this memory and leaves what it wrote behind, so whatever is there is cleared first.
+    // The tick runs on any CPU and takes a status word without the fake's mark as the driver's
+    // write-back: it could take this delivery's word for one and clear it before the handler reads it,
+    // and the frame start or end would be lost. So the delivery is marked under the fake's lock, and
+    // while it is, the tick takes no write-back and a latch only adds to what the delivery puts back.
+    // The lock is not held while the handler runs: the handler takes the driver's locks, which may not
+    // nest in the fake's raw one.
+    // SAFETY: the lock is initialised by init_statics; the flags go back to the unlock below.
+    let flags = unsafe { tcsi_lock() };
+    TCSI_DELIVERING.fetch_add(1, Ordering::Relaxed);
+    // The status holds only this delivery's bits: the driver's write-to-clear (START, the stop, the
+    // handler's write-back) is not one on this memory, so whatever is there is replaced first.
     // SAFETY: the caller's: the DMA window is mapped.
     unsafe { wr(dma, R_STATUS, status_bits) };
+    // SAFETY: the lock taken above, with the flags it saved.
+    unsafe { tcsi_unlock(flags) };
+    // Local interrupts are off while the handler runs and back as they were after (the C's
+    // local_irq_save and local_irq_restore; the kernel crate's guard saves and restores the flags).
+    let irqs_off = kernel::interrupt::local_interrupt_disable();
     // The handler sees only this delivery's bits: a PiSP front-end interrupt pending from TCSI_IOC_FE_FIRE
     // is taken by its own IRQ, once, and is put back as it was.
     // SAFETY: the caller's: the MIPI cfg window is mapped.
     let saved = unsafe { rd(cfg, R_INTS) };
     // SAFETY: as above.
     unsafe { wr(cfg, R_INTS, ints_bits) };
-    // Local interrupts are off while the handler runs and back as they were after (the C's
-    // local_irq_save and local_irq_restore; the kernel crate's guard saves and restores the flags).
-    let irqs_off = kernel::interrupt::local_interrupt_disable();
     // SAFETY: the receiver's interrupt is mapped by setup; the handler runs with local interrupts off.
     unsafe { bindings::generic_handle_irq(TCSI_IRQ.load(Ordering::Relaxed)) };
-    drop(irqs_off);
-    // SAFETY: as above: the DMA window is mapped.
-    unsafe { wr(dma, R_STATUS, 0) };
     // SAFETY: as above.
     unsafe { wr(cfg, R_INTS, saved) };
+    drop(irqs_off);
+    // SAFETY: as above.
+    let flags = unsafe { tcsi_lock() };
+    // What stays latched comes back, marked as the fake's.
+    // SAFETY: as above: the DMA window is mapped.
+    unsafe {
+        wr(
+            dma,
+            R_STATUS,
+            TCSI_LATCHED.load(Ordering::Relaxed) | TCSI_STATUS_MARK,
+        )
+    };
+    TCSI_DELIVERING.fetch_sub(1, Ordering::Relaxed);
+    // SAFETY: the lock taken above, with the flags it saved.
+    unsafe { tcsi_unlock(flags) };
 }
 
 /// The FORCE in `ctrl` has had its frame end, or never will: latched, and the FE_ACK enable taken out
 /// of the register, so the next stop's write of the enable is a change the tick sees (see `tcsi_tick`).
-/// FAKE-ONLY ASSUMPTION: the hardware keeps the word as written; nothing reads the enable back.
+/// Nothing is in flight after it. FAKE-ONLY ASSUMPTION: the hardware keeps the word as written; nothing
+/// reads the enable back.
 ///
 /// # Safety
 ///
@@ -409,6 +454,55 @@ unsafe fn settle_force(dma: *mut u8, ctrl: u32) {
     unsafe { wr(dma, R_CTRL, settled) };
     TCSI_LAST_CTRL.store(settled, Ordering::Relaxed);
     TCSI_ACKED.store(true, Ordering::Relaxed);
+    TCSI_IN_FRAME.store(false, Ordering::Relaxed);
+    TCSI_EMB_IN_FRAME.store(false, Ordering::Relaxed);
+}
+
+/// The driver's write-back of the status, taken as the hardware's write-1-to-clear: a word without the
+/// fake's mark is what the driver wrote, and clears those bits of what is latched.
+///
+/// # Safety
+///
+/// `dma` is the mapped DMA window, and `TCSI_LOCK` is held.
+unsafe fn take_write_back(dma: *mut u8) {
+    // SAFETY: the caller's: the window is mapped; the status is its first word.
+    let word = unsafe { rd(dma, R_STATUS) };
+    if TCSI_DELIVERING.load(Ordering::Relaxed) == 0 && (word & TCSI_STATUS_MARK) == 0 {
+        let latched = TCSI_LATCHED.load(Ordering::Relaxed) & !word;
+        TCSI_LATCHED.store(latched, Ordering::Relaxed);
+        // SAFETY: as above.
+        unsafe { wr(dma, R_STATUS, latched | TCSI_STATUS_MARK) };
+    }
+}
+
+/// Raises `bits` of the status: delivered when the MIPI config's DMA interrupt is on, latched in the
+/// status otherwise, as the hardware keeps an interrupt it may not raise.
+///
+/// # Safety
+///
+/// The receiver is set up, and `TCSI_LOCK` is not held.
+unsafe fn tcsi_raise(bits: u32) {
+    let cfg = TCSI_REGS[2].load(Ordering::Relaxed);
+    let dma = TCSI_REGS[0].load(Ordering::Relaxed);
+    // SAFETY: the caller's: the MIPI config window is mapped.
+    if (unsafe { rd(cfg, R_INTE) } & TCSI_R_INT_CSI_DMA) != 0 {
+        // SAFETY: the caller's.
+        unsafe { tcsi_deliver(bits, TCSI_R_INT_CSI_DMA) };
+        return;
+    }
+    // SAFETY: the lock is initialised by init_statics; the flags go back to the unlock below.
+    let flags = unsafe { tcsi_lock() };
+    // SAFETY: the window is mapped, and the lock is held.
+    unsafe { take_write_back(dma) };
+    let latched = TCSI_LATCHED.load(Ordering::Relaxed) | bits;
+    TCSI_LATCHED.store(latched, Ordering::Relaxed);
+    // A delivery under way owns the word, and puts this back when it ends.
+    if TCSI_DELIVERING.load(Ordering::Relaxed) == 0 {
+        // SAFETY: as above.
+        unsafe { wr(dma, R_STATUS, latched | TCSI_STATUS_MARK) };
+    }
+    // SAFETY: the lock taken above, with the flags it saved.
+    unsafe { tcsi_unlock(flags) };
 }
 
 /// The hard timer: counts the lines a FORCE has left to write, delivers a FORCE's frame end once its busy
@@ -426,6 +520,8 @@ unsafe extern "C" fn tcsi_tick(t: *mut bindings::hrtimer) -> bindings::hrtimer_r
     }
     // SAFETY: the lock is initialised by init_statics; the flags are returned to the unlock below.
     let flags = unsafe { tcsi_lock() };
+    // SAFETY: the window is mapped, and the lock is held.
+    unsafe { take_write_back(dma) };
     // SAFETY: the DMA window is mapped by setup, and the offset is its control register.
     let ctrl = unsafe { rd(dma, R_CTRL) };
     let busy = TCSI_BUSY.load(Ordering::Relaxed);
@@ -454,11 +550,11 @@ unsafe extern "C" fn tcsi_tick(t: *mut bindings::hrtimer) -> bindings::hrtimer_r
         }
     }
     // The stop's frame end: once the busy window is over (or there was none), a FORCE with the FE_ACK
-    // interrupt enabled gets its frame end, once. A FORCE with it disabled gets none, as the board showed.
-    //
-    // Every FORCE gets its frame end once the busy window is over, with or without a frame started: the
-    // stop after a START with no frame is acknowledged too. The tick runs for the module's life, so a
-    // FORCE is seen.
+    // interrupt enabled gets its frame end, once, when it found a frame in flight (a frame start with no
+    // frame end after it, or a busy window). A FORCE with the enable off gets none, and so does a FORCE
+    // between frames, as the board showed: a sensor stopped before its receiver left nothing in flight,
+    // and the stop's frame end never came (testing/board-runs/CZ-MOD-FE-ACK.md). The embedded channel's
+    // frame end is its own, by the same rule. The tick runs for the module's life, so a FORCE is seen.
     //
     // The latch is per acknowledgement, not per FORCE state. A control write that changed the register since
     // the last tick (a START clears FORCE, then a stop raises it) starts a new one, so a stale latch from a
@@ -473,10 +569,18 @@ unsafe extern "C" fn tcsi_tick(t: *mut bindings::hrtimer) -> bindings::hrtimer_r
     // the register too (`settle_force`): the enable is taken out of the word, and the next stop's
     // write puts it back, which is always a change. Nothing reads the enable back after a stop: the
     // driver writes the word whole at every START and stop.
-    let mut ack = false;
+    let mut ack = 0;
     if ctrl != TCSI_LAST_CTRL.load(Ordering::Relaxed) {
         TCSI_LAST_CTRL.store(ctrl, Ordering::Relaxed);
         TCSI_ACKED.store(false, Ordering::Relaxed);
+        if (ctrl & R_FORCE) != 0 {
+            // A new FORCE: whether it has a frame to end is decided as it lands.
+            TCSI_FORCE_LIVE.store(
+                TCSI_IN_FRAME.load(Ordering::Relaxed) || busy != 0,
+                Ordering::Relaxed,
+            );
+            TCSI_EMB_FORCE_LIVE.store(TCSI_EMB_IN_FRAME.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
     }
     if (ctrl & R_FORCE) == 0 {
         TCSI_ACKED.store(false, Ordering::Relaxed);
@@ -484,23 +588,26 @@ unsafe extern "C" fn tcsi_tick(t: *mut bindings::hrtimer) -> bindings::hrtimer_r
         && !TCSI_ACKED.load(Ordering::Relaxed)
         && (ctrl & TCSI_IRQ_EN_FE_ACK) != 0
     {
+        if TCSI_FORCE_LIVE.load(Ordering::Relaxed) {
+            ack |= TCSI_FE_ACK;
+        }
+        // SAFETY: the DMA window is mapped; the embedded channel's control register is in it.
+        if (unsafe { rd(dma, r_emb(R_CTRL)) } & (R_FORCE | TCSI_IRQ_EN_FE_ACK))
+            == (R_FORCE | TCSI_IRQ_EN_FE_ACK)
+            && TCSI_EMB_FORCE_LIVE.load(Ordering::Relaxed)
+        {
+            ack |= TCSI_EMB_FE_ACK;
+        }
+        // Settled either way: a FORCE with nothing to end never gets a frame end.
         // SAFETY: the DMA window is mapped, and the lock is held.
         unsafe { settle_force(dma, ctrl) };
-        ack = true;
     }
     // SAFETY: the lock taken above, with the flags it saved.
     unsafe { tcsi_unlock(flags) };
     // The stop's frame end, delivered with the lock released: the driver's handler may run to completion.
-    if ack {
-        let mut emb = 0;
-        // SAFETY: the DMA window is mapped; the embedded channel's control register is in it.
-        if (unsafe { rd(dma, r_emb(R_CTRL)) } & (R_FORCE | TCSI_IRQ_EN_FE_ACK))
-            == (R_FORCE | TCSI_IRQ_EN_FE_ACK)
-        {
-            emb = TCSI_EMB_FE_ACK;
-        }
+    if ack != 0 {
         // SAFETY: as above: the delivery runs in the timer's own context, with the lock released.
-        unsafe { tcsi_deliver(TCSI_FE_ACK | emb, TCSI_R_INT_CSI_DMA) };
+        unsafe { tcsi_deliver(ack, TCSI_R_INT_CSI_DMA) };
     }
     bindings::hrtimer_restart::HRTIMER_RESTART
 }
@@ -767,8 +874,8 @@ unsafe fn tcsi_cmd(cmd: c_uint, arg: c_ulong) -> kernel::error::Result<c_long> {
             // SAFETY: the lock taken above, with the flags it saved.
             unsafe { tcsi_unlock(flags) };
             if late_ack {
-                // SAFETY: the receiver is set up.
-                unsafe { tcsi_deliver(TCSI_FE_ACK, TCSI_R_INT_CSI_DMA) };
+                // SAFETY: the receiver is set up, and the lock is released.
+                unsafe { tcsi_raise(TCSI_FE_ACK) };
             }
             if lines != 0 {
                 tcsi_start_timer();
@@ -798,6 +905,19 @@ unsafe fn tcsi_cmd(cmd: c_uint, arg: c_ulong) -> kernel::error::Result<c_long> {
         TCSI_IOC_FIRE => {
             // SAFETY: `arg` is the caller's user address.
             let status: u32 = unsafe { copy_in(arg)? };
+            // A start opens a frame and an end closes it. Both in one word are taken as the handler
+            // takes them: in a frame, its end and the next one's start; between frames, one whole frame.
+            // Either way the channel is where it was.
+            for (fs, fe, open) in [
+                (TCSI_FS, TCSI_FE_ACK, &TCSI_IN_FRAME),
+                (TCSI_EMB_FS, TCSI_EMB_FE_ACK, &TCSI_EMB_IN_FRAME),
+            ] {
+                match ((status & fs) != 0, (status & fe) != 0) {
+                    (true, false) => open.store(true, Ordering::Relaxed),
+                    (false, true) => open.store(false, Ordering::Relaxed),
+                    _ => {}
+                }
+            }
             if (status & TCSI_FS) != 0 {
                 // A real sensor makes a frame whether or not a buffer is armed: the pattern is the frame's,
                 // taken here, so a frame with no buffer still counts (the driver's sequence number counts it too).
@@ -872,7 +992,7 @@ unsafe fn tcsi_cmd(cmd: c_uint, arg: c_ulong) -> kernel::error::Result<c_long> {
                 );
             }
             // SAFETY: the receiver is set up.
-            unsafe { tcsi_deliver(status, R_INT_DMA) };
+            unsafe { tcsi_raise(status) };
             Ok(0)
         }
         _ => Err(ENOTTY),

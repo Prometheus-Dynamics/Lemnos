@@ -18,9 +18,14 @@
  * A stream's file carries one receiver at most; closing the stream's file,
  * STOP, closing this node and unbinding the block all stop the receiver, and
  * none returns until the block's DMA has stopped and every buffer it held is
- * back. If the DMA can't be seen to stop, LEMNOS_RP1_CSI2_INFO_WEDGED is set:
- * the buffers involved stay pinned for good and the receiver refuses START
- * until it is bound again.
+ * back. A stop is confirmed by the frame end that follows FORCE, or by the
+ * channel being between frames when FORCE landed with no frame start within
+ * the stop's bound. If neither, LEMNOS_RP1_CSI2_INFO_WEDGED is set: the buffers
+ * involved stay pinned and the receiver refuses START (EIO). While wedged the
+ * receiver keeps looking for the late frame end, on a backoff capped at 8 s;
+ * when it comes the buffers are released and the wedge clears. A DMA never
+ * seen to stop keeps its buffers for good. LEMNOS_RP1_CSI2_IOC_DMA and the
+ * node's sysfs attributes `dma` and `fe_dma` say which.
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
@@ -34,8 +39,49 @@
 
 #define LEMNOS_RP1_CSI2_ABI 1
 
-/* A previous stop couldn't be confirmed. Bind the block again to clear it. */
+/* A stop couldn't be confirmed and its DMA hasn't been seen to stop since. */
 #define LEMNOS_RP1_CSI2_INFO_WEDGED	(1u << 0)
+
+/*
+ * What a part's DMA holds, LEMNOS_RP1_CSI2_IOC_DMA (no claim needed). `state`:
+ * idle, streaming, or wedged (a stop not confirmed, its buffers pinned). `stop`
+ * is the last stop's outcome:
+ *  NONE         no stop since the block was bound;
+ *  ACKED        the receiver: the frame end after FORCE came, `stop_us` after
+ *               FORCE; the front end: it reported idle, `stop_us` after ABORT;
+ *  IDLE         the receiver only: between frames when FORCE landed, and no
+ *               frame start within the bound (`stop_us` is the time waited);
+ *  UNCONFIRMED  neither within the bound: wedged (`stop_us` is the time waited);
+ *  LATE         was wedged; the DMA was then seen to stop, `stop_us` after the
+ *               stop (saturated), and every buffer it held was released.
+ * `pinned` and `pinned_bytes` count the dma-bufs the part's DMA can write
+ * (its streams while streaming, the quarantined ones while wedged), at the
+ * dma-bufs' own sizes.
+ */
+#define LEMNOS_RP1_CSI2_DMA_IDLE	0
+#define LEMNOS_RP1_CSI2_DMA_STREAMING	1
+#define LEMNOS_RP1_CSI2_DMA_WEDGED	2
+
+#define LEMNOS_RP1_CSI2_STOP_NONE	0
+#define LEMNOS_RP1_CSI2_STOP_ACKED	1
+#define LEMNOS_RP1_CSI2_STOP_IDLE	2
+#define LEMNOS_RP1_CSI2_STOP_UNCONFIRMED 3
+#define LEMNOS_RP1_CSI2_STOP_LATE	4
+
+struct lemnos_rp1_csi2_dma_part {
+	__u32 state;		/* LEMNOS_RP1_CSI2_DMA_* */
+	__u32 stop;		/* LEMNOS_RP1_CSI2_STOP_* */
+	__u32 stop_us;
+	__u32 bound_us;		/* the last stop's bound */
+	__u32 pinned;		/* dma-bufs */
+	__u32 reserved;
+	__u64 pinned_bytes;
+};
+
+struct lemnos_rp1_csi2_dma {
+	struct lemnos_rp1_csi2_dma_part csi2;	/* the receiver's channels */
+	struct lemnos_rp1_csi2_dma_part fe;	/* the front end; zero on a block without one */
+};
 
 /*
  * Unpack each pixel to 16 bits, most significant bit aligned: the layout the
@@ -99,6 +145,7 @@ struct lemnos_rp1_csi2_frame_starts {
 #define LEMNOS_RP1_CSI2_IOC_START	 _IOW('L', 0xc2, struct lemnos_rp1_csi2_start)
 #define LEMNOS_RP1_CSI2_IOC_STOP	 _IO('L', 0xc3)
 #define LEMNOS_RP1_CSI2_IOC_FRAME_STARTS _IOR('L', 0xc4, struct lemnos_rp1_csi2_frame_starts)
+#define LEMNOS_RP1_CSI2_IOC_DMA	 _IOR('L', 0xc7, struct lemnos_rp1_csi2_dma)
 
 /*
  * The embedded data stream: CSI-2 data type 0x12 on the image's virtual
@@ -131,7 +178,7 @@ struct lemnos_rp1_csi2_embedded {
  * closed (its receiver stops when the receiver's claim ends, and the front end
  * stops with it, since the front end is fed by the receiver); a claim the file
  * never made is refused with EPERM. Observe-only calls need no claim from any
- * file: INFO, FRAME_STARTS, and the front end's INFO.
+ * file: INFO, FRAME_STARTS, DMA, and the front end's INFO.
  */
 #define LEMNOS_RP1_CSI2_PART_CSI2	(1u << 0)
 #define LEMNOS_RP1_CSI2_PART_FE		(1u << 1)

@@ -6,10 +6,11 @@
 use std::fmt::Write as _;
 
 use lemnos_core::{ItemKind, UnitState};
-use lemnos_wire::{DeviceDescription, OwnedItem};
+use lemnos_wire::{DeviceDescription, OwnedItem, StreamLayout};
 
-/// The panel for a described device, one line each.
-pub fn panel(description: &DeviceDescription) -> Vec<String> {
+/// The panel for a described device, one line each. `health` is the list's word for it (`ok`,
+/// `degraded`, `failed`), or `None` when the list didn't give the device.
+pub fn panel(description: &DeviceDescription, health: Option<&str>) -> Vec<String> {
     let mut lines = Vec::new();
     let name = if description.label.is_empty() {
         "(unnamed)"
@@ -29,17 +30,26 @@ pub fn panel(description: &DeviceDescription) -> Vec<String> {
         lines.push(format!("  location {}", description.location));
     }
     lines.push(format!("  state    {}", state_text(description)));
+    if let Some(health) = health {
+        lines.push(format!("  health   {health}"));
+    }
     for job in &description.jobs {
         lines.push(format!("  {}", job.words()));
     }
+    // Each stream's pool as the board declares it: what the device's buffers come to whether or not
+    // anything is attached. Then the memory the host keeps apart from buffers in use: on standby
+    // for the next consumer, and released memory a gone driver's handle still keeps open.
+    for layout in &description.stream_layouts {
+        lines.push(format!("  stream   {}", pool_text(layout)));
+    }
     for stream in &description.streams {
         lines.push(format!(
-            "  stream   {} standby: {} bytes held",
+            "  stream   {} kept for the next consumer: {} bytes",
             stream.name, stream.standby
         ));
         lines.push(format!(
-            "  stream   {} held by driver {}: {} bytes",
-            stream.name, description.label, stream.held
+            "  stream   {} released, still open in a gone driver's handle: {} bytes",
+            stream.name, stream.held
         ));
     }
     if !description.contracts.is_empty() {
@@ -64,6 +74,17 @@ pub fn panel(description: &DeviceDescription) -> Vec<String> {
         }
     }
     lines
+}
+
+/// A declared pool: `frames pool 8 buffers of 1280000 bytes, 10240000 bytes in all`.
+fn pool_text(layout: &StreamLayout) -> String {
+    format!(
+        "{} pool {} buffers of {} bytes, {} bytes in all",
+        layout.name,
+        layout.buffers,
+        layout.buffer_bytes,
+        u64::from(layout.buffers) * u64::from(layout.buffer_bytes)
+    )
 }
 
 fn or_unknown(text: &str) -> &str {
@@ -217,16 +238,49 @@ mod location_tests {
             ..DeviceDescription::default()
         };
         assert!(
-            !panel(&description)
+            !panel(&description, None)
                 .iter()
                 .any(|line| line.contains("location"))
         );
         description.location = "/sys/class/hwmon/hwmon2".into();
         assert!(
-            panel(&description)
+            panel(&description, None)
                 .iter()
                 .any(|line| line == "  location /sys/class/hwmon/hwmon2")
         );
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::panel;
+    use lemnos_wire::{DeviceDescription, StreamLayout, StreamStandby};
+
+    #[test]
+    fn the_panel_counts_each_declared_pool_and_says_what_the_kept_memory_is() {
+        let description = DeviceDescription {
+            label: "receiver".into(),
+            stream_layouts: vec![StreamLayout {
+                name: "frames".into(),
+                buffers: 8,
+                buffer_bytes: 1_280_000,
+            }],
+            streams: vec![StreamStandby {
+                name: "frames".into(),
+                standby: 0,
+                held: 4096,
+            }],
+            ..DeviceDescription::default()
+        };
+        let lines = panel(&description, Some("failed"));
+        for want in [
+            "  health   failed",
+            "  stream   frames pool 8 buffers of 1280000 bytes, 10240000 bytes in all",
+            "  stream   frames kept for the next consumer: 0 bytes",
+            "  stream   frames released, still open in a gone driver's handle: 4096 bytes",
+        ] {
+            assert!(lines.iter().any(|l| l == want), "{want:?} in {lines:#?}");
+        }
     }
 }
 

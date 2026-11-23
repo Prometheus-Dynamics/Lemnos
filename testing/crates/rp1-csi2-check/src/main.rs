@@ -46,6 +46,7 @@ const RP1_STOP: u32 = ioc(0, b'L', 0xc3, 0);
 const RP1_FRAME_STARTS: u32 = ior::<[u8; 24]>(b'L', 0xc4);
 const RP1_EMBEDDED: u32 = iow::<[u8; 16]>(b'L', 0xc5);
 const RP1_CLAIM: u32 = iow::<[u8; 8]>(b'L', 0xc6);
+const RP1_DMA: u32 = ior::<[u8; 64]>(b'L', 0xc7);
 
 // The fake receiver's requests (testing/qemu/test_block/lemnos_test_csi2.h), on /dev/lemnos-test-csi2.
 const TCSI_FIRE: u32 = iow::<u32>(b'T', 1);
@@ -65,6 +66,14 @@ const TCSI_EMB_FE_ACK: u32 = 0x200;
 // lemnos_rp1_csi2.h.
 const ABI: u32 = 1;
 const INFO_WEDGED: u32 = 1 << 0;
+// LEMNOS_RP1_CSI2_DMA_* and LEMNOS_RP1_CSI2_STOP_*.
+const DMA_IDLE: u32 = 0;
+const DMA_WEDGED: u32 = 2;
+const STOP_ACKED: u32 = 1;
+const STOP_IDLE: u32 = 2;
+const STOP_LATE: u32 = 4;
+/// The stop's bound is never below this (docs/streams.md), in us.
+const STOP_MIN_US: u32 = 250_000;
 const UNPACK16: u32 = 1 << 0;
 const PART_CSI2: u32 = 1 << 0;
 const EMBEDDED_DT: u32 = 0x12;
@@ -262,6 +271,43 @@ fn info(c: &Ctx) -> Info {
         dropped: get64(&b, 40),
         errors: get64(&b, 48),
     }
+}
+
+/// One part of `struct lemnos_rp1_csi2_dma`.
+#[derive(Clone, Copy, Debug)]
+struct Dma {
+    state: u32,
+    stop: u32,
+    stop_us: u32,
+    bound_us: u32,
+    pinned: u32,
+    pinned_bytes: u64,
+}
+
+/// Whether the receiver is wedged, read without a line of its own (for waiting on it).
+fn wedged_quiet(c: &Ctx) -> bool {
+    let mut b = [0xffu8; 56];
+    ioc_on(ctl_fd(c), RP1_INFO, &mut b).is_ok() && get32(&b, 12) & INFO_WEDGED != 0
+}
+
+/// The receiver's part of LEMNOS_RP1_CSI2_IOC_DMA.
+fn dma(c: &Ctx) -> Dma {
+    let mut b = [0xffu8; 64];
+    check!(ioc_on(ctl_fd(c), RP1_DMA, &mut b).is_ok(), "DMA");
+    Dma {
+        state: get32(&b, 0),
+        stop: get32(&b, 4),
+        stop_us: get32(&b, 8),
+        bound_us: get32(&b, 12),
+        pinned: get32(&b, 16),
+        pinned_bytes: get64(&b, 24),
+    }
+}
+
+/// The node's `dma` attribute in sysfs, or empty when it can't be read.
+fn dma_sysfs(dev: &str) -> String {
+    std::fs::read_to_string(format!("/sys/class/misc/lemnos-rp1-csi2-{dev}/dma"))
+        .unwrap_or_default()
 }
 
 /// The frame-start count (`struct lemnos_rp1_csi2_frame_starts`).
@@ -1271,6 +1317,15 @@ fn test_stop_nothing_in_flight(c: &mut Ctx, pool: &OwnedFd) {
         stop(c) == 0,
         "stop idle: STOP with nothing in flight returns"
     );
+    let d = dma(c);
+    check!(
+        d.stop == STOP_IDLE
+            && d.state == DMA_IDLE
+            && d.bound_us >= STOP_MIN_US
+            && d.stop_us >= d.bound_us,
+        "stop idle: confirmed between frames, after the whole bound with no frame start ({d:?})"
+    );
+    check!(info(c).flags & INFO_WEDGED == 0, "stop idle: not wedged");
     let i = info(c);
     check!(
         i.frames == 0 && i.written == 0 && i.errors == 0 && i.dropped == 0,
@@ -1312,12 +1367,13 @@ fn test_stop_nothing_in_flight(c: &mut Ctx, pool: &OwnedFd) {
     stream_close(s);
 }
 
-/// START and STOP back to back, nothing between them, many times: each stop gets its frame end, and
-/// the receiver never wedges. The stop writes the same control word every time, so a START and the
-/// STOP after it can leave the register as the last stop left it between two looks of the fake's
-/// line timer; that stop is still a new FORCE and the hardware ends it.
+/// START and STOP back to back, nothing between them, many times: each stop is confirmed (between
+/// frames: no frame in flight, none started within the bound), and the receiver never wedges. The stop
+/// writes the same control word every time, so a START and the STOP after it can leave the register as
+/// the last stop left it between two looks of the fake's line timer; that stop is still a new FORCE.
+/// Each pair waits a whole bound, so there are few of them.
 fn test_stop_right_after_start(c: &mut Ctx, pool: &OwnedFd) {
-    const PAIRS: u32 = 200;
+    const PAIRS: u32 = 12;
     let mut failed: Option<String> = None;
     for n in 0..PAIRS {
         let Ok(s) = stream_open(c, Some(pool)) else {
@@ -1342,6 +1398,96 @@ fn test_stop_right_after_start(c: &mut Ctx, pool: &OwnedFd) {
         "back to back: {PAIRS} STOPs right after their START each end the DMA ({})",
         failed.as_deref().unwrap_or("all")
     );
+}
+
+/// The stop's confirmation, each way it can go. A frame in flight: the frame end after FORCE confirms
+/// it, well inside the bound. A frame start while an idle stop waits: the channel latched an address,
+/// so the stop is not confirmed and the receiver is wedged, with the buffers pinned and START refused.
+/// Then the late frame end (raised with the interrupt off, so latched in the status) is found by the
+/// receiver's own look, the buffers come back and the receiver starts again.
+fn test_stop_confirmed(c: &mut Ctx, pool: &OwnedFd, dev: &str) {
+    let Ok(mut s) = stream_open(c, Some(pool)) else {
+        check!(false, "confirm: stream made");
+        return;
+    };
+    let a = good_start(s.fd.as_raw_fd());
+    check!(start(c, &a) == 0, "confirm: START");
+    let d = dma(c);
+    check!(
+        d.state != DMA_IDLE && d.pinned == 1 && d.pinned_bytes >= u64::from(BUFFERS) * STRIDE_POOL,
+        "confirm: streaming, the pool counted as pinned ({d:?})"
+    );
+    check!(
+        dma_sysfs(dev).starts_with("state streaming\npinned 1\n"),
+        "confirm: sysfs dma says streaming ({:?})",
+        dma_sysfs(dev)
+    );
+    fire(c, TCSI_FS);
+    check!(stop(c) == 0, "confirm: STOP with a frame in flight");
+    let d = dma(c);
+    check!(
+        d.stop == STOP_ACKED && d.stop_us < d.bound_us && d.state == DMA_IDLE,
+        "confirm: the frame end after FORCE confirmed it inside the bound ({d:?})"
+    );
+
+    // A frame start while the idle stop waits for its bound.
+    check!(start(c, &a) == 0, "confirm: START again");
+    let hw = hw_fd(c);
+    let stopped = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            sleep_ms(50);
+            let mut b = TCSI_FS.to_ne_bytes();
+            let _ = ioc_on(hw, TCSI_FIRE, &mut b);
+        });
+        stop(c)
+    });
+    check!(
+        stopped == 0,
+        "confirm: STOP returns with a frame started during it"
+    );
+    let d = dma(c);
+    check!(
+        d.state == DMA_WEDGED && d.pinned == 1 && info(c).flags & INFO_WEDGED != 0,
+        "confirm: a frame start during the stop leaves it unconfirmed: wedged, the pool pinned ({d:?})"
+    );
+    check!(
+        dma_sysfs(dev).starts_with("state wedged\npinned 1\n"),
+        "confirm: sysfs dma says wedged ({:?})",
+        dma_sysfs(dev)
+    );
+    check!(
+        start(c, &a) == -libc::EIO,
+        "confirm: wedged refuses START (EIO)"
+    );
+    // The frame's end comes late, after the stop gave up; the interrupt is off by then.
+    fire(c, TCSI_FE_ACK);
+    wait_until(3000, || !wedged_quiet(c));
+    let d = dma(c);
+    check!(
+        info(c).flags & INFO_WEDGED == 0
+            && d.stop == STOP_LATE
+            && d.state == DMA_IDLE
+            && d.pinned == 0,
+        "confirm: the late frame end found by the receiver's look: buffers released, wedge over ({d:?})"
+    );
+    check!(start(c, &a) == 0, "confirm: START after the late stop");
+    let mut f = Frame::default();
+    let mut got = 0;
+    for _ in 0..BUFFERS {
+        fire(c, TCSI_FS);
+        fire(c, TCSI_FE_ACK);
+        if pop_frame(&mut s, &mut f) {
+            got += 1;
+            give_back(&mut s, f.buffer);
+        }
+    }
+    check!(
+        got == BUFFERS,
+        "confirm: every buffer came back from the wedge ({got} frames of {BUFFERS})"
+    );
+    fire(c, TCSI_FS);
+    check!(stop(c) == 0, "confirm: STOP");
+    stream_close(s);
 }
 
 /// Closing the node with a frame in flight: a second file may open it but not drive the receiver;
@@ -1746,7 +1892,8 @@ fn make_pool(heap_path: &str) -> Option<OwnedFd> {
     dma_heap::allocate(heap.as_fd(), u64::from(BUFFERS) * STRIDE_POOL).ok()
 }
 
-/// DMA that never stops: the buffers stay pinned for good and the receiver refuses to start.
+/// DMA that stops late: the wedge ends when its frame end comes, and the receiver starts again. DMA that
+/// never stops: the buffers stay pinned for good and the receiver refuses to start.
 fn run_wedge(c: &mut Ctx, node: &str, dev: &str, heap: &str) -> i32 {
     c.ctl = open_rdwr(node);
     c.hw = open_rdwr("/dev/lemnos-test-csi2");
@@ -1795,9 +1942,11 @@ fn run_wedge(c: &mut Ctx, node: &str, dev: &str, heap: &str) -> i32 {
     check!(start(c, &a) == 0, "START");
     fire(c, TCSI_FS);
     busy(c, forever);
-    check!(stop(c) == 0, "STOP returns, DMA never seen to stop");
+    check!(stop(c) == 0, "STOP returns, DMA not seen to stop");
     // A late FE_ACK: the wedged DMA stops only as the window is released, after the stop gave up. It
-    // must count no frame, and the wedge still refuses START. FAKE-ONLY ASSUMPTION (TCSI_IOC_LATE_ACK).
+    // counts no frame, and the receiver's look finds it: the wedge is over. FAKE-ONLY ASSUMPTION
+    // (TCSI_IOC_LATE_ACK).
+    check!(info(c).flags & INFO_WEDGED != 0, "wedged is reported");
     let before = info(c);
     check!(
         hw_u32(c, TCSI_LATE_ACK, 1).is_ok(),
@@ -1816,6 +1965,29 @@ fn run_wedge(c: &mut Ctx, node: &str, dev: &str, heap: &str) -> i32 {
         after.written,
         after.errors
     );
+    wait_until(3000, || !wedged_quiet(c));
+    check!(
+        info(c).flags & INFO_WEDGED == 0 && dma(c).stop == STOP_LATE,
+        "late: the wedge is over once the DMA is seen to stop ({:?})",
+        dma(c)
+    );
+    stream_close(s);
+    sleep_ms(5);
+    check!(
+        bufinfo_attached(dev) == 0,
+        "late: the pool is released once its stream is closed"
+    );
+
+    // DMA that never stops.
+    let Ok(s) = stream_open(c, Some(&pool)) else {
+        check!(false, "never: stream made");
+        return 1;
+    };
+    let a = good_start(s.fd.as_raw_fd());
+    check!(start(c, &a) == 0, "never: START");
+    fire(c, TCSI_FS);
+    busy(c, forever);
+    check!(stop(c) == 0, "never: STOP returns, DMA never seen to stop");
     check!(info(c).flags & INFO_WEDGED != 0, "wedged is reported");
     let Ok(s2) = stream_open(c, Some(&pool2)) else {
         check!(false, "a new stream can be made");
@@ -2153,6 +2325,7 @@ fn main() -> ExitCode {
     test_stop_waits(&mut c, &pool);
     test_stop_nothing_in_flight(&mut c, &pool);
     test_stop_right_after_start(&mut c, &pool);
+    test_stop_confirmed(&mut c, &pool, dev);
     test_window(&mut c, &pool);
     test_close_node(&mut c, &node, &pool);
     test_unbind(&mut c, &node, unbind, dev, &pool);

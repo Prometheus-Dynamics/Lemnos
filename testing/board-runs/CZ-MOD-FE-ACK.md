@@ -1,10 +1,53 @@
-# CZ-MOD-FE-ACK: the rp1-csi2 stop is confirmed by the frame end after FORCE
+# CZ-MOD-FE-ACK: the rp1-csi2 stop is confirmed by the frame end after FORCE, or by idle
 
-Status: **untested on board.** The design is in the commit "CZ-MOD FE_ACK stop"; this file is the board
-check. It is run by the RAZE runner, after the module is loaded the way M34 loads it: through modprobe with
-`options lemnos`, never insmod (docs/device-tree.md), with the receiver owned (`owned=` names the receiver's
-compatible, as M34's load line does).
+Status: **partly run on board** (passes 2 and 3, against the module before CSI2-STOP-CONFIRMED). The
+rule as it now stands (CSI2-STOP-CONFIRMED) is **confirmed in QEMU, untested on board**. It is run by the
+RAZE runner, after the module is loaded the way M34 loads it: through modprobe with `options lemnos`,
+never insmod (docs/device-tree.md), with the receiver owned (`owned=` names the receiver's compatible, as
+M34's load line does).
 
+## The rule (CSI2-STOP-CONFIRMED)
+A stop writes FORCE and waits a bound (four frame times, at least 250 ms). It is confirmed when:
+- **ACKED**: the channel's FE_ACK came within the bound; or
+- **IDLE**: the channel was between frames at FORCE (no frame start without its frame end) and no frame
+  started within the bound. The board raises no FE_ACK for an idle FORCE (pass 3), so idle is proven by the
+  absence of a frame start, never by a quiet line counter.
+
+Otherwise it is **UNCONFIRMED**: the buffers stay pinned, START is refused with EIO, and the module looks
+for a late FE_ACK on a backoff from 10 ms doubling to 8 s. A late FE_ACK releases the buffers and the stop
+reads **LATE**. The witness for every step is `/sys/class/misc/lemnos-rp1-csi2-<block>/dma` (and `fe_dma`
+for the front end), read with `cat`; see docs/kernel-module.md "Stopping a receiver".
+
+## Steps for the current rule
+Read `dma` after every step and record all six lines.
+1. Start the chain and stream. `dma` reads `state streaming`, `pinned` equals the stream's buffer count and
+   `pinned_bytes` their bytes.
+2. Stop the receiver first, the sensor still sending. Expected: `state idle`, `stop acked`, `pinned 0`,
+   `stop_us` below `bound_us`.
+3. Start again (expected to work), then stop the receiver again after stopping nothing else. Expected as 2.
+4. Start, stop the sensor first, wait one second, then stop the receiver (the order that wedged in pass 2).
+   Two outcomes, both recorded:
+   - 4a: the receiver was between frames: `stop idle`, `pinned 0`, `state idle`.
+   - 4b: a frame was in flight: `state wedged`, `stop unconfirmed`, `pinned` and `pinned_bytes` the pool's,
+     the kernel log line `DMA did not stop: ...`, and `lemnos-ctl show` for the receiver reads health
+     `failed` with the words. A START is refused with EIO.
+5. After 4b only: start the sensor again and read `dma` every second for 60 s. Record whether it reaches
+   `stop late` with `pinned 0` (the log line `DMA stopped late: ...`). If it does, a START works. If it does
+   not, record that and leave the block as it is: do not unbind (a wedged unbind keeps the module until
+   reboot). Report to Helios.
+6. With nothing in flight: start and stop with no sensor stream at all. Expected `stop idle`.
+
+## Results so far (the module before CSI2-STOP-CONFIRMED)
+- Pass 2 (2026-11-22, files in pass2-20261122): sensor stopped first, then the receiver: wedged 2/2. The
+  wedge held 9 dma-buf objects, 11,538,432 bytes. The stream before it ran 54,277 frames at 119.966 fps with
+  0 errors.
+- Pass 3 (2026-11-22, files in pass3-20261122): receiver stopped first: clean, 3/3 including a second start
+  and stop. M33 passes with the receiver stopped first. No FE_ACK was seen for an idle FORCE.
+- So under the old rule an idle FORCE could not be confirmed and a sensor-first stop always wedged until
+  unbind. The current rule confirms the idle case and recovers on a late FE_ACK; steps 1-6 check it.
+
+The sections below are the first version of this check (one rule: FE_ACK or wedged until unbind), kept for
+what it assumed and why.
 ## What is assumed about the hardware (why this check exists)
 - After FORCE is written to the channel's CH_CTRL with the FE_ACK interrupt enable kept set (`FORCE | IRQ_EN_FE_ACK`),
   the channel raises its FE_ACK interrupt (CSI2_STATUS bit `IRQ_FE_ACK(0)` = BIT(8)) once the DMA has stopped.
@@ -53,4 +96,4 @@ Whether the board acks a FORCE whose DMA never stopped is outcome 4 above.
   kernel and module revision. Outcome B blocks M1 until the assumption is replaced by a measured one.
 
 ## Results
-(none yet)
+See "Results so far" above.

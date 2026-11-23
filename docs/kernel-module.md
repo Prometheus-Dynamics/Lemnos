@@ -258,12 +258,61 @@ target:
 At most 4096 claims exist at once. The Linux backend builds these names from the board file's
 names. A board file never spells them.
 
+## Stopping a receiver
+
+A CSI-2 receiver's stop writes FORCE to each channel and waits a bound: four frame times at the
+configured link, and at least 250 ms. The stop is confirmed in one of two ways:
+
+- **Acked**: the channel raised its frame end after FORCE within the bound.
+- **Idle**: the channel was between frames when FORCE was written, and no frame started within the
+  bound. The block raises no frame end for an idle FORCE, so this is the only proof there is.
+
+Either way the buffers go back to their streams. Otherwise the stop is **unconfirmed**: a frame was
+in flight and no frame end came, so the DMA may still write. The receiver is then *wedged*:
+
+- Its buffers stay pinned (the streams' dma-bufs are kept, even when their consumer closes), and
+  `START` is refused with `EIO`.
+- The module keeps looking for the late frame end, on a backoff from 10 ms that doubles to 8 s,
+  for as long as the block is bound. When it comes, the buffers are released, the wedge is
+  cleared, and the stop reads **late**. The kernel log says both.
+- A PiSP front end on the receiver is the same: a stop that does not find it idle keeps its
+  buffers pinned and refuses `START` until the module sees it idle.
+
+The order of a stop matters. A receiver stopped while its sensor still sends frames ends cleanly:
+the next frame end acks the FORCE. A sensor stopped first, with the receiver part-way through a
+frame, leaves the receiver waiting for a frame end that never comes: that stop is unconfirmed.
+Stop the receiver before the sensor. A sensor that dies mid-frame on its own wedges the receiver
+the same way; the module keeps looking. Whether a sensor that comes back ends the frame and
+releases it is untested on board; if no frame end ever comes, the buffers stay pinned until the
+block is unbound, and then until reboot.
+
+The receiver's state is readable two ways, neither of which changes anything:
+
+- `LEMNOS_RP1_CSI2_IOC_DMA` fills `struct lemnos_rp1_csi2_dma`: a part for the receiver and one for
+  its front end, each with its state (`IDLE`, `STREAMING`, `WEDGED`), its last stop (`NONE`,
+  `ACKED`, `IDLE`, `UNCONFIRMED`, `LATE`), how long that stop took or waited (`LATE`: from the stop
+  to the late frame end), its bound, and the buffers and bytes its DMA can write.
+- `/sys/class/misc/lemnos-rp1-csi2-<block>/dma` and `fe_dma` give the same, one figure a line:
+
+```text
+state wedged
+pinned 9
+pinned_bytes 11538432
+stop unconfirmed
+stop_us 266000
+bound_us 266000
+```
+
+`fe_dma` reads `none` when the receiver has no front end. The daemon's driver reads the same
+figures: while the block is wedged its health is failed, and a refused start says why with the
+counts.
+
 ## Unbinding and unloading
 
 Requests for a block fail with `ENODEV` from the moment its unbind starts, and its register
 mappings fault. The unbind waits until every DMA buffer made for the block is closed, so stop the
-daemon first. A block that was wedged (its DMA could not be shown to stop) keeps the module loaded
-until reboot, and the kernel log says so.
+daemon first. A block still wedged at unbind (its DMA was never seen to stop) keeps the module
+loaded until reboot, and the kernel log says so.
 
 ## Testing
 

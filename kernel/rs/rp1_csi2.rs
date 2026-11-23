@@ -22,9 +22,12 @@
 //!    buffer. The channel's line count only decides whether a frame is published or counted as gone
 //!    wrong.
 //!  - A buffer is the block's from lem_stream_next() until the channel is known not to be using it.
-//!    Stopping runs FORCE, then waits for the frame end that follows it, then gives the buffers back;
-//!    if that frame end never comes the buffers stay pinned for good. Closing the stream, STOP,
-//!    closing this node and unbinding all come through here.
+//!    Stopping runs FORCE and gives the buffers back once the stop is confirmed: by the frame end
+//!    that follows FORCE, or by the channel being between frames when FORCE landed with no frame
+//!    start within the stop's bound. Unconfirmed, the buffers stay pinned and the receiver is wedged;
+//!    it keeps looking for the late frame end on a backoff capped at 8 s, and releases them when it
+//!    comes (`lrc_unwedge`). Closing the stream, STOP, closing this node and unbinding all come
+//!    through here. docs/streams.md, "Stopping a receiver", has the why.
 //!
 //! The receiver's state is `LrcDev`, below: the front end on the same block (rs/pisp_fe.rs) reads a
 //! few fields of it.
@@ -38,12 +41,12 @@
 use crate::bindings as lb;
 use crate::pisp_fe::{
     FE_WINDOW, LemPispFe, lem_pisp_fe_create, lem_pisp_fe_csi_fs, lem_pisp_fe_destroy,
-    lem_pisp_fe_ioctl, lem_pisp_fe_isr, lem_pisp_fe_stop, lem_pisp_fe_streaming,
+    lem_pisp_fe_dma, lem_pisp_fe_ioctl, lem_pisp_fe_isr, lem_pisp_fe_stop, lem_pisp_fe_streaming,
 };
 use crate::stream::{
     Handle, Producer, Slot, Stream, lem_stream_attach, lem_stream_complete_at, lem_stream_create,
-    lem_stream_detach, lem_stream_from_file, lem_stream_next, lem_streams_block_gone,
-    msecs_to_jiffies, usleep_range,
+    lem_stream_detach, lem_stream_from_file, lem_stream_next, lem_stream_unquarantine,
+    lem_streams_block_gone, msecs_to_jiffies, usleep_range,
 };
 use core::{
     cell::UnsafeCell,
@@ -173,6 +176,23 @@ const LRC_RETRY_MS: u32 = 1;
 /// The stop's bound is never below this (docs/streams.md), in us.
 const LRC_STOP_MIN_US: u64 = 250_000;
 
+/// While wedged, the first look for the late frame end comes this long after the stop gave up; each
+/// look after doubles it, up to LRC_UNWEDGE_MAX_MS, for as long as it takes (the failure rule).
+const LRC_UNWEDGE_FIRST_MS: u32 = 10;
+const LRC_UNWEDGE_MAX_MS: u32 = 8000;
+
+/// `wedged`: whose stop wasn't confirmed. Either refuses START on the block.
+pub(crate) const WEDGED_CSI2: u8 = 1 << 0;
+pub(crate) const WEDGED_FE: u8 = 1 << 1;
+
+const DMA_IDLE: u32 = lb::LEMNOS_RP1_CSI2_DMA_IDLE;
+const DMA_STREAMING: u32 = lb::LEMNOS_RP1_CSI2_DMA_STREAMING;
+const DMA_WEDGED: u32 = lb::LEMNOS_RP1_CSI2_DMA_WEDGED;
+pub(crate) const STOP_ACKED: u32 = lb::LEMNOS_RP1_CSI2_STOP_ACKED;
+const STOP_IDLE: u32 = lb::LEMNOS_RP1_CSI2_STOP_IDLE;
+pub(crate) const STOP_UNCONFIRMED: u32 = lb::LEMNOS_RP1_CSI2_STOP_UNCONFIRMED;
+pub(crate) const STOP_LATE: u32 = lb::LEMNOS_RP1_CSI2_STOP_LATE;
+
 // fwnode_graph_get_endpoint_by_id's flags (linux/property.h): the next endpoint up when the one named
 // is absent, and an endpoint whose far end is not an enabled device.
 const FWNODE_GRAPH_ENDPOINT_NEXT: c_ulong = 1 << 0;
@@ -190,6 +210,7 @@ const IOC_STOP: u32 = _IO(b'L' as u32, 0xc3);
 const IOC_FRAME_STARTS: u32 = _IOR::<lb::lemnos_rp1_csi2_frame_starts>(b'L' as u32, 0xc4);
 const IOC_EMBEDDED: u32 = _IOW::<lb::lemnos_rp1_csi2_embedded>(b'L' as u32, 0xc5);
 const IOC_CLAIM: u32 = _IOW::<lb::lemnos_rp1_csi2_claim>(b'L' as u32, 0xc6);
+const IOC_DMA: u32 = _IOR::<lb::lemnos_rp1_csi2_dma>(b'L' as u32, 0xc7);
 /// LEMNOS_PISP_FE_IOC_INFO (lemnos_pisp_fe.h): the one call of the front end's that needs no claim.
 const FE_IOC_INFO: u32 = _IOR::<lb::lemnos_pisp_fe_info>(b'L' as u32, 0xc8);
 
@@ -198,6 +219,8 @@ const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_start>() == 48);
 const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_frame_starts>() == 24);
 const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_embedded>() == 16);
 const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_claim>() == 8);
+const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_dma_part>() == 32);
+const _: () = assert!(size_of::<lb::lemnos_rp1_csi2_dma>() == 64);
 const _: () = assert!(size_of::<lb::lemnos_stream_create>() == 56);
 const _: () =
     assert!(lb::LEMNOS_RP1_CSI2_PART_CSI2 == 1 << 0 && lb::LEMNOS_RP1_CSI2_PART_FE == 1 << 1);
@@ -213,6 +236,8 @@ unsafe impl AsBytes for lb::lemnos_rp1_csi2_frame_starts {}
 unsafe impl FromBytes for lb::lemnos_rp1_csi2_embedded {}
 // SAFETY: as above.
 unsafe impl FromBytes for lb::lemnos_rp1_csi2_claim {}
+// SAFETY: as above.
+unsafe impl AsBytes for lb::lemnos_rp1_csi2_dma {}
 
 /// `struct lemnos_stream_create` as this file copies it in and out: the stream's own type, wrapped so
 /// the copy's traits are declared here and nowhere else.
@@ -280,6 +305,15 @@ pub(crate) struct LrcEmb {
     pub(crate) fe_line: u16,
 }
 
+/// A stop's outcome (LEMNOS_RP1_CSI2_STOP_*), how long it took or waited, and its bound, in us.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LrcStop {
+    pub(crate) outcome: u32,
+    pub(crate) us: u32,
+    pub(crate) bound_us: u32,
+}
+
 /// One open file of the node: the parts it has claimed (LEMNOS_RP1_CSI2_PART_*). `parts` is written
 /// only by this file's own CLAIM, under the receiver's `ctl`; the file's own calls read it.
 #[repr(C)]
@@ -316,12 +350,33 @@ pub(crate) struct LrcDev {
     pub(crate) ctl: bindings::mutex,
     /// Unbound: every register access is off.
     pub(crate) gone: bool,
-    /// A stop couldn't be confirmed.
-    pub(crate) wedged: bool,
+    /// WEDGED_*: whose stop couldn't be confirmed, and hasn't been seen to stop since. The front end
+    /// sets and clears its bit too, holding `ctl` as well.
+    pub(crate) wedged: u8,
     /// STOP_ARM_*: the FE_ACKs a stop waits for, set under lock.
     pub(crate) stop_armed: u8,
+    /// STOP_ARM_*: a frame start the handler saw while the stop was armed (under lock).
+    pub(crate) stop_fs: u8,
+    /// STOP_ARM_*: the channels a wedge waits on for the late frame end, and those it has seen (under lock).
+    pub(crate) wedge_armed: u8,
+    pub(crate) wedge_seen: u8,
     /// The stop's FE_ACK after its FORCE: image, then embedded.
     pub(crate) stop_done: [bindings::completion; 2],
+    /// The streams an unconfirmed stop kept (image, embedded): the receiver's references, from
+    /// Handle::quarantine, given back when the DMA is seen to stop. Under `ctl`.
+    pub(crate) held: [*mut Stream; 2],
+    /// The last stop, for LEMNOS_RP1_CSI2_IOC_DMA. Under `ctl`.
+    pub(crate) last_stop: LrcStop,
+    /// When the receiver's wedge began, and the looks since. Under `ctl`.
+    pub(crate) wedged_ns: u64,
+    pub(crate) unwedge_attempt: u32,
+    /// Looks for the late frame end while wedged: `lrc_unwedge`.
+    pub(crate) unwedge: bindings::delayed_work,
+    /// The front end's: its last stop, the stream its unconfirmed stop kept, when that began. Under
+    /// `ctl`; the front end's own (rs/pisp_fe.rs).
+    pub(crate) fe_stop: LrcStop,
+    pub(crate) fe_held: *mut Stream,
+    pub(crate) fe_wedged_ns: u64,
 
     /// The front end, when the block has one; null otherwise.
     pub(crate) fe: *mut LemPispFe,
@@ -430,6 +485,27 @@ impl Lrc {
     fn retry(self) -> *mut bindings::delayed_work {
         // SAFETY: the receiver is alive; only the field's address is taken.
         unsafe { &raw mut (*self.0).retry }
+    }
+
+    fn unwedge(self) -> *mut bindings::delayed_work {
+        // SAFETY: the receiver is alive; only the field's address is taken.
+        unsafe { &raw mut (*self.0).unwedge }
+    }
+
+    /// The next look for the late frame end, `ms` from now.
+    fn queue_unwedge(self, ms: u32) {
+        // SAFETY: the kernel's own queue, set before any module runs and never changed.
+        let wq = unsafe { bindings::system_wq };
+        // SAFETY: the work was initialised at probe and lives as long as the receiver; unbinding
+        // cancels it before the receiver can go.
+        unsafe {
+            bindings::queue_delayed_work_on(
+                bindings::wq_misc_consts_WORK_CPU_UNBOUND as c_int,
+                wq,
+                self.unwedge(),
+                msecs_to_jiffies(ms),
+            )
+        };
     }
 
     fn device(&self) -> &Device {
@@ -670,10 +746,31 @@ impl Ctl {
         unsafe { (*self.l.0).gone }
     }
 
-    /// A stop couldn't be confirmed. The front end sets it too, holding `ctl` as well.
-    fn wedged(&mut self) -> &mut bool {
+    /// WEDGED_*: whose stop couldn't be confirmed. The front end sets its bit too, holding `ctl` as well.
+    fn wedged(&mut self) -> &mut u8 {
         // SAFETY: `ctl` is held (`self`), and it guards the field.
         unsafe { &mut (*self.l.0).wedged }
+    }
+
+    /// The streams an unconfirmed stop kept.
+    fn held(&mut self) -> &mut [*mut Stream; 2] {
+        // SAFETY: `ctl` is held (`self`), and it guards the field.
+        unsafe { &mut (*self.l.0).held }
+    }
+
+    fn last_stop(&mut self) -> &mut LrcStop {
+        // SAFETY: as held.
+        unsafe { &mut (*self.l.0).last_stop }
+    }
+
+    fn wedged_ns(&mut self) -> &mut u64 {
+        // SAFETY: as held.
+        unsafe { &mut (*self.l.0).wedged_ns }
+    }
+
+    fn unwedge_attempt(&mut self) -> &mut u32 {
+        // SAFETY: as held.
+        unsafe { &mut (*self.l.0).unwedge_attempt }
     }
 
     /// The file that claims the part whose bit is `part`.
@@ -741,6 +838,9 @@ macro_rules! frame_fields {
 
 frame_fields! {
     stop_armed: u8 => stop_armed;
+    stop_fs: u8 => stop_fs;
+    wedge_armed: u8 => wedge_armed;
+    wedge_seen: u8 => wedge_seen;
     fs_int: bool => fs_int;
     fe_int: bool => fe_int;
     cur: LrcFrame => cur;
@@ -1025,6 +1125,14 @@ unsafe extern "C" fn lrc_isr(_irq: c_int, data: *mut c_void) -> bindings::irqret
             // SAFETY: as above.
             unsafe { bindings::complete(l.stop_done(1)) };
         }
+        // A frame start while the stop is armed: a frame began with an address the channel latched
+        // before its ADDR0 went to zero, so only the frame end after it confirms the stop.
+        if status & irq_fs(LRC_CH) != 0 {
+            *f.stop_fs() |= *f.stop_armed() & STOP_ARM_IMAGE;
+        }
+        if status & irq_fs(LRC_EMB_CH) != 0 {
+            *f.stop_fs() |= *f.stop_armed() & STOP_ARM_EMB;
+        }
     }
     let mut sof = status & irq_fs(LRC_CH) != 0;
     let eof = status & irq_fe_ack(LRC_CH) != 0;
@@ -1087,23 +1195,38 @@ unsafe extern "C" fn lrc_isr(_irq: c_int, data: *mut c_void) -> bindings::irqret
     bindings::irqreturn::IRQ_HANDLED
 }
 
-/// Whether the stop's FE_ACK arrived: after its FORCE, for each channel stopped, within the stop
-/// bound. The bound is max(4 frame periods, 250 ms) (docs/streams.md). The frame period is the START
-/// layout's, height x line time: the contract period. DEBT-C's measured period replaces it when it
-/// lands (B7). A still line counter is not evidence of a stop and is not used. Sleeps: never on the
-/// frame path.
-fn fe_ack_wait(l: Lrc, st: &lb::lemnos_rp1_csi2_start, emb: bool) -> bool {
+/// The stop's bound, in us: max(4 frame periods, 250 ms) (docs/streams.md). The frame period is the
+/// START layout's, height x line time: the contract period. DEBT-C's measured period replaces it when
+/// it lands (B7).
+fn stop_bound_us(st: &lb::lemnos_rp1_csi2_start) -> u32 {
     let frame_us = lrc_line_us(u64::from(st.stride), st.lanes, st.mbps) * u64::from(st.height);
-    // usecs_to_jiffies takes 32 bits: a bound past them is the longest it can name, never a short one.
-    let us = (4 * frame_us).max(LRC_STOP_MIN_US).min(u64::from(u32::MAX)) as c_uint;
-    // SAFETY: the exported conversion, valid for any value.
-    let bound = unsafe { bindings::__usecs_to_jiffies(us) };
-    // SAFETY: the completion is initialised at probe; process context, with `ctl` held and no spinlock.
-    if unsafe { bindings::wait_for_completion_timeout(l.stop_done(0), bound) } == 0 {
-        return false;
+    (4 * frame_us).max(LRC_STOP_MIN_US).min(u64::from(u32::MAX)) as u32
+}
+
+/// Microseconds since `t0` (a now_ns()), saturated.
+fn us_since(t0: u64) -> u32 {
+    (now_ns().saturating_sub(t0) / 1000).min(u64::from(u32::MAX)) as u32
+}
+
+/// The STOP_ARM_* channels whose FE_ACK came after their FORCE, within one bound from `t0` shared by
+/// both. A still line counter is not evidence of a stop and is not used. Sleeps: never on the frame
+/// path.
+fn fe_ack_wait(l: Lrc, armed: u8, t0: u64, bound_us: u32) -> u8 {
+    let mut acked = 0;
+    for (bit, which) in [(STOP_ARM_IMAGE, 0), (STOP_ARM_EMB, 1)] {
+        if armed & bit == 0 {
+            continue;
+        }
+        let left = bound_us.saturating_sub(us_since(t0));
+        // SAFETY: the exported conversion, valid for any value.
+        let left = unsafe { bindings::__usecs_to_jiffies(left as c_uint) };
+        // SAFETY: the completion is initialised at probe; process context, with `ctl` held and no
+        // spinlock. A zero timeout only looks.
+        if unsafe { bindings::wait_for_completion_timeout(l.stop_done(which), left) } != 0 {
+            acked |= bit;
+        }
     }
-    // SAFETY: as above.
-    !emb || unsafe { bindings::wait_for_completion_timeout(l.stop_done(1), bound) } != 0
+    acked
 }
 
 /// reinit_completion(): no completion left over from a stop before this one. Frame lock held, as the
@@ -1114,15 +1237,22 @@ fn reinit_completion(c: *mut bindings::completion) {
     unsafe { (*c).done = 0 };
 }
 
-/// Stops the channels, waits for them, and gives back what they held. Only when the channels are seen
-/// to have stopped does anything go back: otherwise they were still writing, so every buffer they
-/// could reach stays pinned for good. Takes no stream lock of its own (the stream's ctl may be held by
-/// a caller above us). Stops the receiver whole: the frame stream and the embedded stream, if one is
-/// attached. `ctl` held, and streaming.
+/// Stops the channels, waits for them, and gives back what they held. Takes no stream lock of its own
+/// (the stream's ctl may be held by a caller above us). Stops the receiver whole: the frame stream and
+/// the embedded stream, if one is attached. `ctl` held, and streaming.
+///
+/// A channel's stop is confirmed by its FE_ACK after FORCE, or by the channel having been between
+/// frames when FORCE landed with no frame start before the bound ran out. The board gives no FE_ACK for
+/// a FORCE between frames (a sensor stopped first; testing/board-runs/CZ-MOD-FE-ACK.md), and a channel
+/// between frames has nothing in flight: its next frame would start with the address its ADDR0 holds,
+/// which the stop zeroes, and a frame start with an address raises FS, which the handler records while
+/// the stop is armed. Only when every channel is confirmed does anything go back. Otherwise the streams
+/// are quarantined (pinned, kept by the receiver) and the receiver is wedged until `lrc_unwedge` sees
+/// the late FE_ACK.
 fn stop_locked(ctl: &mut Ctl) {
     let l = ctl.l;
     let dma = l.dma();
-    let (s, e, start);
+    let (s, e, start, armed, mid);
     {
         let mut f = l.frame();
         s = f.stream();
@@ -1131,6 +1261,18 @@ fn stop_locked(ctl: &mut Ctl) {
         f.set_streaming(false);
         reinit_completion(l.stop_done(0));
         reinit_completion(l.stop_done(1));
+        armed = STOP_ARM_IMAGE | if e.is_null() { 0 } else { STOP_ARM_EMB };
+        // Where each channel is. In a frame: its start was handled and its end wasn't. A frame end the
+        // handler hasn't taken yet closed it. A frame start it hasn't taken is left pending: the
+        // handler takes it once this lock is dropped, while the stop is armed (stop_fs).
+        let pending = rd(dma, CSI2_STATUS);
+        let in_frame = |open: bool, ch: usize| open && pending & irq_fe_ack(ch) == 0;
+        mid = (if in_frame(*f.fs_int(), LRC_CH) { STOP_ARM_IMAGE } else { 0 })
+            | (if !e.is_null() && in_frame(f.emb_cur().valid, LRC_EMB_CH) {
+                STOP_ARM_EMB
+            } else {
+                0
+            });
         // Only a frame end after the FORCE below is the stop's acknowledgement. An FE_ACK still in the
         // status is from before the stop, so it is cleared here; the handler counts one only while
         // the stop is armed.
@@ -1140,30 +1282,37 @@ fn stop_locked(ctl: &mut Ctl) {
             irq_fe_ack(LRC_EMB_CH)
         };
         wr(dma, CSI2_STATUS, irq_fe_ack(LRC_CH) | emb_ack);
-        *f.stop_armed() = STOP_ARM_IMAGE | if e.is_null() { 0 } else { STOP_ARM_EMB };
+        *f.stop_fs() = 0;
+        *f.stop_armed() = armed;
         // csi2_stop_channel writes FORCE alone, which drops the channel's IRQ enables. This keeps the
-        // FE_ACK enable set, so the frame end that follows FORCE is delivered.
-        wr(dma, csi2_ch_ctrl(LRC_CH), FORCE | IRQ_EN_FE_ACK);
+        // FE_ACK enable set, so the frame end that follows FORCE is delivered, and the FS enable, so a
+        // frame that starts after FORCE is seen.
+        wr(dma, csi2_ch_ctrl(LRC_CH), FORCE | IRQ_EN_FE_ACK | IRQ_EN_FS);
         wr(dma, csi2_ch_addr0(LRC_CH), 0);
         wr(dma, csi2_ch_addr0(LRC_CH), 0);
         if !e.is_null() {
-            wr(dma, csi2_ch_ctrl(LRC_EMB_CH), FORCE | IRQ_EN_FE_ACK);
+            wr(dma, csi2_ch_ctrl(LRC_EMB_CH), FORCE | IRQ_EN_FE_ACK | IRQ_EN_FS);
             wr(dma, csi2_ch_addr0(LRC_EMB_CH), 0);
             wr(dma, csi2_ch_addr0(LRC_EMB_CH), 0);
         }
     }
     // Everything written above is posted across a bus: a read makes it land first.
     let _ = rd(dma, csi2_ch_ctrl(LRC_CH));
+    let t0 = now_ns();
+    let bound_us = stop_bound_us(&start);
 
-    // Confirmed by the frame end after FORCE, or not at all, within the bound.
-    let ack = fe_ack_wait(l, &start, !e.is_null());
+    // A channel in a frame needs its frame end; one between frames needs the whole bound to pass
+    // with no frame start, so the wait is the bound unless every channel's frame end comes first.
+    let acked = fe_ack_wait(l, armed, t0, bound_us);
+    let waited_us = us_since(t0);
 
-    {
+    let started = {
         let mut f = l.frame();
         *f.stop_armed() = 0;
         wr(dma, CSI2_IRQ_MASK, 0);
         wr(l.cfg(), MIPICFG_INTE, 0);
-    }
+        *f.stop_fs()
+    };
     // Not streaming, so a retry finds nothing to do and doesn't come again.
     // SAFETY: the work was initialised at probe; process context, and the work takes no lock held here.
     unsafe { bindings::cancel_delayed_work_sync(l.retry()) };
@@ -1171,48 +1320,175 @@ fn stop_locked(ctl: &mut Ctl) {
     // No handler still holds cur/next, and none will start.
     // SAFETY: the block's interrupt, requested at probe; process context, no lock the handler takes.
     unsafe { bindings::synchronize_irq(l.irq() as c_uint) };
+    // A start the handler took after the wait: in the count too.
+    let started = started | *l.frame().stop_fs();
 
-    if ack {
-        let mut f = l.frame();
-        if f.cur().valid {
-            Handle(s).cancel(slot_of(f.cur()));
-        }
-        if f.next().valid {
-            Handle(s).cancel(slot_of(f.next()));
-        }
-        f.cur().valid = false;
-        f.next().valid = false;
-        if !e.is_null() {
-            if f.emb_cur().valid {
-                Handle(e).cancel(slot_of(f.emb_cur()));
-            }
-            if f.emb_next().valid {
-                Handle(e).cancel(slot_of(f.emb_next()));
-            }
-            f.emb_cur().valid = false;
-            f.emb_next().valid = false;
-        }
+    let unconfirmed = armed & !acked & (mid | started);
+    let outcome = if unconfirmed != 0 {
+        STOP_UNCONFIRMED
+    } else if acked == armed {
+        STOP_ACKED
     } else {
-        // Not known to be finished: pinned for good, and refused until rebound.
+        STOP_IDLE
+    };
+    *ctl.last_stop() = LrcStop {
+        outcome,
+        us: waited_us,
+        bound_us,
+    };
+
+    if unconfirmed == 0 {
+        let mut f = l.frame();
+        release_slots(&mut f, s, e);
+    } else {
+        let (count, bytes) = pinned_of(s, e);
+        // Not known to be finished: pinned, and refused until the DMA is seen to stop.
         dev_err!(
             l.device(),
-            "DMA did not stop; buffers stay pinned until reboot\n"
+            "DMA did not stop: no frame end after FORCE within {} us, with a frame in flight; {} buffers ({} bytes) stay pinned until it does\n",
+            bound_us,
+            count,
+            bytes
         );
-        *ctl.wedged() = true;
-        Handle(s).wedge();
-        if !e.is_null() {
-            Handle(e).wedge();
+        *ctl.wedged() |= WEDGED_CSI2;
+        let held = [
+            Handle(s).quarantine(),
+            if e.is_null() {
+                ptr::null_mut()
+            } else {
+                Handle(e).quarantine()
+            },
+        ];
+        *ctl.held() = held;
+        *ctl.wedged_ns() = t0;
+        *ctl.unwedge_attempt() = 0;
+        {
+            let mut f = l.frame();
+            *f.wedge_armed() = unconfirmed;
+            *f.wedge_seen() = 0;
         }
+        l.queue_unwedge(LRC_UNWEDGE_FIRST_MS);
     }
 
     l.frame().set_streams(ptr::null_mut(), ptr::null_mut());
-    // SAFETY: the stream is alive: the producer's reference to it is given up only by this call.
+    // SAFETY: the stream is alive: the producer's reference to it is given up only by this call (and
+    // a quarantined one is the receiver's own besides).
     if unsafe { lem_stream_detach(s) } {
         l.ref_put();
     }
     // SAFETY: as above, for the embedded stream.
     if !e.is_null() && unsafe { lem_stream_detach(e) } {
         l.ref_put();
+    }
+}
+
+/// Gives back every buffer the channels held: the stop is confirmed. Frame lock held.
+fn release_slots(f: &mut Frame, s: *mut Stream, e: *mut Stream) {
+    if f.cur().valid {
+        Handle(s).cancel(slot_of(f.cur()));
+    }
+    if f.next().valid {
+        Handle(s).cancel(slot_of(f.next()));
+    }
+    f.cur().valid = false;
+    f.next().valid = false;
+    if !e.is_null() {
+        if f.emb_cur().valid {
+            Handle(e).cancel(slot_of(f.emb_cur()));
+        }
+        if f.emb_next().valid {
+            Handle(e).cancel(slot_of(f.emb_next()));
+        }
+    }
+    f.emb_cur().valid = false;
+    f.emb_next().valid = false;
+}
+
+/// The dma-bufs both streams pin, and their bytes. Either may be null.
+fn pinned_of(s: *mut Stream, e: *mut Stream) -> (u32, u64) {
+    let mut out = (0, 0);
+    for st in [s, e] {
+        if !st.is_null() {
+            let (n, b) = Handle(st).pinned();
+            out = (out.0 + n, out.1 + b);
+        }
+    }
+    out
+}
+
+/// While wedged: looks for the frame end after the stop's FORCE that never came in time. The handler's
+/// interrupt is off once a stop is over, so the channel's status is read here; an FE_ACK in it is the
+/// DMA stopping, for the channels the wedge waits on. Seen on all of them: every buffer goes back, the
+/// quarantined streams are let go, and the wedge is over. Not yet: looks again, the gap doubling up to
+/// LRC_UNWEDGE_MAX_MS, for as long as the receiver is bound.
+unsafe extern "C" fn lrc_unwedge(work: *mut bindings::work_struct) {
+    // The work is the delayed work's, which is the receiver's `unwedge`; unbinding cancels it before
+    // the receiver can be freed, so the receiver is alive.
+    let off = offset_of!(bindings::delayed_work, work) + offset_of!(LrcDev, unwedge);
+    let l = Lrc(work.wrapping_byte_sub(off).cast());
+    let held;
+    {
+        let mut ctl = l.ctl();
+        if ctl.gone() || *ctl.wedged() & WEDGED_CSI2 == 0 {
+            return;
+        }
+        let dma = l.dma();
+        let stopped = {
+            let mut f = l.frame();
+            let status = rd(dma, CSI2_STATUS);
+            let mut seen = 0;
+            if status & irq_fe_ack(LRC_CH) != 0 {
+                seen |= STOP_ARM_IMAGE;
+            }
+            if status & irq_fe_ack(LRC_EMB_CH) != 0 {
+                seen |= STOP_ARM_EMB;
+            }
+            let clear = (if seen & STOP_ARM_IMAGE != 0 { irq_fe_ack(LRC_CH) } else { 0 })
+                | (if seen & STOP_ARM_EMB != 0 { irq_fe_ack(LRC_EMB_CH) } else { 0 });
+            if clear != 0 {
+                wr(dma, CSI2_STATUS, clear); // write back to clear
+            }
+            *f.wedge_seen() |= seen & *f.wedge_armed();
+            let stopped = *f.wedge_seen() == *f.wedge_armed();
+            if stopped {
+                let [s, e] = *ctl.held();
+                release_slots(&mut f, s, e);
+                *f.wedge_armed() = 0;
+                *f.wedge_seen() = 0;
+            }
+            stopped
+        };
+        if !stopped {
+            let attempt = *ctl.unwedge_attempt();
+            *ctl.unwedge_attempt() = attempt.saturating_add(1);
+            let ms = LRC_UNWEDGE_FIRST_MS
+                .checked_shl(attempt.min(16) + 1)
+                .unwrap_or(LRC_UNWEDGE_MAX_MS)
+                .min(LRC_UNWEDGE_MAX_MS);
+            l.queue_unwedge(ms);
+            return;
+        }
+        let late_us = us_since(*ctl.wedged_ns());
+        let bound_us = ctl.last_stop().bound_us;
+        *ctl.last_stop() = LrcStop {
+            outcome: STOP_LATE,
+            us: late_us,
+            bound_us,
+        };
+        *ctl.wedged() &= !WEDGED_CSI2;
+        held = core::mem::replace(ctl.held(), [ptr::null_mut(); 2]);
+        dev_info!(
+            l.device(),
+            "DMA stopped late: frame end after FORCE {} us after the stop; buffers released\n",
+            late_us
+        );
+    }
+    // Without `ctl`: the stream's control mutex comes before it.
+    for st in held {
+        if !st.is_null() {
+            // SAFETY: the reference lem_stream_quarantine answered, given back once, here.
+            unsafe { lem_stream_unquarantine(st) };
+        }
     }
 }
 
@@ -1332,7 +1608,7 @@ fn attach(
 fn start(ctl: &mut Ctl, s: &lb::lemnos_rp1_csi2_start) -> Result {
     let l = ctl.l;
     check_start(l, s)?;
-    if *ctl.wedged() {
+    if *ctl.wedged() != 0 {
         return Err(EIO);
     }
     let fe = l.fe();
@@ -1555,7 +1831,7 @@ fn info(l: Lrc, arg: c_ulong) -> Result {
     };
     {
         let mut ctl = l.ctl();
-        info.flags = if *ctl.wedged() {
+        info.flags = if *ctl.wedged() != 0 {
             lb::LEMNOS_RP1_CSI2_INFO_WEDGED
         } else {
             0
@@ -1568,6 +1844,54 @@ fn info(l: Lrc, arg: c_ulong) -> Result {
         info.errors = *f.errors();
     }
     write_user(arg, &info)
+}
+
+/// What the receiver's DMA holds and how its last stop ended, `ctl` held. A wedged receiver's pins are
+/// its quarantined streams'.
+fn csi2_dma(ctl: &mut Ctl) -> lb::lemnos_rp1_csi2_dma_part {
+    let l = ctl.l;
+    let stop = *ctl.last_stop();
+    let (state, (pinned, bytes)) = if *ctl.wedged() & WEDGED_CSI2 != 0 {
+        let [s, e] = *ctl.held();
+        (DMA_WEDGED, pinned_of(s, e))
+    } else {
+        let f = l.frame();
+        let (s, e) = (f.stream(), f.emb_stream());
+        drop(f);
+        // Under `ctl`: an attached stream stays attached, and alive, until a stop that takes it.
+        if s.is_null() {
+            (DMA_IDLE, (0, 0))
+        } else {
+            (DMA_STREAMING, pinned_of(s, e))
+        }
+    };
+    lb::lemnos_rp1_csi2_dma_part {
+        state,
+        stop: stop.outcome,
+        stop_us: stop.us,
+        bound_us: stop.bound_us,
+        pinned,
+        reserved: 0,
+        pinned_bytes: bytes,
+    }
+}
+
+/// Both parts' DMA: the receiver's and, on a block with one, the front end's.
+fn dma_report(l: Lrc) -> lb::lemnos_rp1_csi2_dma {
+    let mut ctl = l.ctl();
+    let csi2 = csi2_dma(&mut ctl);
+    let fe = l.fe();
+    let fe = if fe.is_null() {
+        lb::lemnos_rp1_csi2_dma_part::default()
+    } else {
+        // SAFETY: the front end lives as long as its receiver; `ctl` is held, as the call wants.
+        unsafe { lem_pisp_fe_dma(fe.cast()) }
+    };
+    lb::lemnos_rp1_csi2_dma { csi2, fe }
+}
+
+fn dma(l: Lrc, arg: c_ulong) -> Result {
+    write_user(arg, &dma_report(l))
 }
 
 /// The frame-start count since START and the latest start's time, read together under the frame
@@ -1668,6 +1992,7 @@ fn ioctl(lf: LrcFile, cmd: c_uint, arg: c_ulong) -> Result {
     match cmd {
         IOC_INFO => info(l, arg),
         IOC_FRAME_STARTS => frame_starts(l, arg),
+        IOC_DMA => dma(l, arg),
         IOC_CLAIM => claim(l, lf, arg),
         IOC_STREAM_CREATE => {
             if !lf.holds(PART_CSI2 | PART_FE) {
@@ -1813,6 +2138,130 @@ static LRC_FOPS: Fops = Fops(bindings::file_operations {
     ..unsafe { core::mem::zeroed() }
 });
 
+/// The node's sysfs attributes, `dma` (the receiver's channels) and `fe_dma` (the front end on the same
+/// block, which has no node of its own): what LEMNOS_RP1_CSI2_IOC_DMA answers, one `key value` a line.
+/// Made once at module load (`sysfs_init`) and given to every receiver's node as its groups, so they
+/// come and go with the node.
+#[repr(C)]
+struct Sysfs {
+    attrs: [bindings::device_attribute; 2],
+    list: [*mut bindings::attribute; 3],
+    group: bindings::attribute_group,
+    groups: [*const bindings::attribute_group; 2],
+}
+
+struct SysfsCell(UnsafeCell<Sysfs>);
+
+// SAFETY: written once by sysfs_init, at module load before any receiver can be bound, and only read
+// after (by the driver core, and by the show for its own address).
+unsafe impl Sync for SysfsCell {}
+
+// SAFETY: attributes, pointers and a group of zeros: no name, no show, no attribute; sysfs_init fills
+// them in before anything reads them.
+static LRC_SYSFS: SysfsCell = SysfsCell(UnsafeCell::new(unsafe { core::mem::zeroed() }));
+
+/// Fills in the attributes. Static storage, so lockdep needs no key of their own.
+fn sysfs_init() {
+    let s = LRC_SYSFS.0.get();
+    for (i, name) in [c"dma", c"fe_dma"].into_iter().enumerate() {
+        // SAFETY: at module load, before the driver is registered: nothing else reads the statics yet.
+        unsafe {
+            (*s).attrs[i].attr.name = name.as_ptr().cast();
+            (*s).attrs[i].attr.mode = 0o444;
+            (*s).attrs[i].__bindgen_anon_1.show = Some(lrc_dma_show);
+            (*s).list[i] = &raw mut (*s).attrs[i].attr;
+        }
+    }
+    // SAFETY: as above.
+    unsafe {
+        (*s).list[2] = ptr::null_mut();
+        (*s).group.__bindgen_anon_2.attrs = (&raw mut (*s).list).cast();
+        (*s).groups[0] = &raw const (*s).group;
+        (*s).groups[1] = ptr::null();
+    }
+}
+
+/// The groups a receiver's node is made with.
+fn sysfs_groups() -> *mut *const bindings::attribute_group {
+    // SAFETY: only the field's address is taken.
+    unsafe { (&raw mut (*LRC_SYSFS.0.get()).groups).cast() }
+}
+
+/// A sysfs page being written: a show's buffer, PAGE_SIZE bytes, cut at its end.
+struct Page {
+    buf: *mut u8,
+    len: usize,
+}
+
+impl core::fmt::Write for Page {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let room = (bindings::PAGE_SIZE as usize - 1).saturating_sub(self.len);
+        let n = text.len().min(room);
+        // SAFETY: the show's buffer is PAGE_SIZE bytes; `len + n` stays below it.
+        unsafe { ptr::copy_nonoverlapping(text.as_ptr(), self.buf.add(self.len), n) };
+        self.len += n;
+        Ok(())
+    }
+}
+
+fn state_word(state: u32) -> &'static str {
+    match state {
+        DMA_IDLE => "idle",
+        DMA_STREAMING => "streaming",
+        DMA_WEDGED => "wedged",
+        _ => "unknown",
+    }
+}
+
+fn stop_word(stop: u32) -> &'static str {
+    match stop {
+        lb::LEMNOS_RP1_CSI2_STOP_NONE => "none",
+        STOP_ACKED => "acked",
+        STOP_IDLE => "idle",
+        STOP_UNCONFIRMED => "unconfirmed",
+        STOP_LATE => "late",
+        _ => "unknown",
+    }
+}
+
+/// `dma` and `fe_dma`: `state`, `pinned` (dma-bufs), `pinned_bytes`, `stop` and its `stop_us` and
+/// `bound_us`; `fe_dma` on a block with no front end is `none`.
+unsafe extern "C" fn lrc_dma_show(
+    dev: *mut bindings::device,
+    attr: *mut bindings::device_attribute,
+    buf: *mut c_char,
+) -> isize {
+    use core::fmt::Write;
+    // SAFETY: the node's device, whose driver data misc_register set to the miscdevice: the
+    // receiver's `misc`. The node is deregistered, which waits out every show, before the block's
+    // reference is given up, so the receiver is alive.
+    let misc = unsafe { bindings::dev_get_drvdata(dev) };
+    let l = Lrc(misc.wrapping_byte_sub(offset_of!(LrcDev, misc)).cast());
+    // SAFETY: only the field's address is taken.
+    let fe_attr = ptr::eq(attr, unsafe { &raw mut (*LRC_SYSFS.0.get()).attrs[1] });
+    let mut page = Page {
+        buf: buf.cast(),
+        len: 0,
+    };
+    if fe_attr && l.fe().is_null() {
+        let _ = page.write_str("none\n");
+        return page.len as isize;
+    }
+    let report = dma_report(l);
+    let part = if fe_attr { &report.fe } else { &report.csi2 };
+    let _ = write!(
+        page,
+        "state {}\npinned {}\npinned_bytes {}\nstop {}\nstop_us {}\nbound_us {}\n",
+        state_word(part.state),
+        part.pinned,
+        part.pinned_bytes,
+        stop_word(part.stop),
+        part.stop_us,
+        part.bound_us
+    );
+    page.len as isize
+}
+
 /// The lanes wired and their polarities, from the device tree's endpoint: the first endpoint of port
 /// 0, whatever its far end is.
 fn read_dt(d: &mut LrcDev) {
@@ -1947,6 +2396,7 @@ fn probe(pdev: *mut bindings::platform_device, dev: *mut bindings::device, l: Lr
     d.misc.name = d.name.as_ptr();
     d.misc.fops = &raw const LRC_FOPS.0;
     d.misc.parent = dev;
+    d.misc.groups = sysfs_groups();
     let (irq, host_version, max_lanes, name) = (d.irq, d.host_version, d.max_lanes, d.misc.name);
 
     // SAFETY: the handler's data is the receiver, alive until the handler is freed: at unbind, or
@@ -2058,6 +2508,27 @@ unsafe extern "C" fn lrc_probe(pdev: *mut bindings::platform_device) -> c_int {
             static_lock_class!().as_ptr(),
         )
     };
+    // INIT_DELAYED_WORK(&l->unwedge, lrc_unwedge), as `retry`.
+    // SAFETY: as `retry`'s.
+    unsafe {
+        bindings::init_work_with_key(
+            &raw mut b.unwedge.work,
+            Some(lrc_unwedge),
+            false,
+            c"lrc_dev.unwedge".as_ptr().cast(),
+            static_lock_class!().as_ptr(),
+        )
+    };
+    // SAFETY: as `retry`'s.
+    unsafe {
+        bindings::timer_init_key(
+            &raw mut b.unwedge.timer,
+            Some(bindings::delayed_work_timer_fn),
+            bindings::TIMER_IRQSAFE,
+            c"lrc_dev.unwedge".as_ptr().cast(),
+            static_lock_class!().as_ptr(),
+        )
+    };
     let l = Lrc(KBox::into_raw(b));
     // SAFETY: platform_set_drvdata: `dev` is live, and lrc_remove reads this back.
     unsafe { bindings::dev_set_drvdata(dev, l.0.cast()) };
@@ -2093,6 +2564,10 @@ unsafe extern "C" fn lrc_remove(pdev: *mut bindings::platform_device) {
     }
     // SAFETY: taken for writing above, on this task.
     unsafe { bindings::up_write(going) };
+    // Gone: a look for the late frame end finds nothing to do, and doesn't come again. What a wedge
+    // kept stays kept: its DMA was never seen to stop.
+    // SAFETY: the work was initialised at probe; process context, no lock held.
+    unsafe { bindings::cancel_delayed_work_sync(l.unwedge()) };
 
     {
         let mut ctl = l.ctl();
@@ -2152,6 +2627,7 @@ fn this_module() -> *mut bindings::module {
 
 /// platform_driver_register(&lrc_driver): the receiver's platform driver, at module load.
 pub(crate) extern "C" fn lem_rp1_csi2_register() -> c_int {
+    sysfs_init();
     // SAFETY: the driver is a static; the owner is this module and the name is the module's, the
     // string KBUILD_MODNAME gives.
     unsafe {

@@ -1143,8 +1143,8 @@ impl Tool<'_> {
 
     /// The device as a panel, from its description (see [`show`](crate::show)).
     fn show(&mut self, name: &str) -> Outcome {
-        let (_, description) = self.description(name)?;
-        for row in show::panel(&description) {
+        let (device, description) = self.description(name)?;
+        for row in show::panel(&description, Some(health_name(device.health))) {
             line(self.out, format_args!("{row}"))?;
         }
         Ok(())

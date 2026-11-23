@@ -15,8 +15,10 @@ use crate::bindings as lb;
 /// The stream's calls a block makes by the stream's pointer (the receiver and the front end): one
 /// definition each, in rs/stream_producer.rs and rs/stream_file.rs.
 pub(crate) use crate::stream_file::{
-    lem_stream_cpu_read_enable, lem_stream_create, lem_stream_from_file, lem_streams_block_gone,
+    lem_stream_cpu_read_enable, lem_stream_create, lem_stream_from_file, lem_stream_unquarantine,
+    lem_streams_block_gone,
 };
+use crate::stream_file::{lem_stream_pinned, lem_stream_quarantine};
 pub(crate) use crate::stream_producer::{
     lem_stream_attach, lem_stream_complete_at, lem_stream_detach, lem_stream_next,
 };
@@ -180,6 +182,19 @@ impl Handle {
     pub(crate) fn wedge(self) {
         // SAFETY: as complete; called once, when the stream is being stopped.
         unsafe { lem_stream_wedge(self.0) };
+    }
+
+    /// As `wedge`, and the block keeps the stream: the reference answered is the block's, for the day
+    /// its DMA is seen to stop (`lem_stream_unquarantine`). Kept for good otherwise.
+    pub(crate) fn quarantine(self) -> *mut Stream {
+        // SAFETY: as complete; called once, when the stream is being stopped.
+        unsafe { lem_stream_quarantine(self.0) }
+    }
+
+    /// The dma-bufs the block can write through the stream, and their bytes.
+    pub(crate) fn pinned(self) -> (u32, u64) {
+        // SAFETY: as complete.
+        unsafe { lem_stream_pinned(self.0) }
     }
 
     /// The device address of a held job's range, computed by the stream.

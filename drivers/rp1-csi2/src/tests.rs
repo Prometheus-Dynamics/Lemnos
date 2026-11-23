@@ -57,6 +57,9 @@ struct Mock {
     emb_given_back: Vec<(u32, u32)>,
     emb_held: Vec<u32>,
     emb_handed: Vec<u32>,
+    /// The block's DMA as the kernel reports it: a stop it couldn't confirm leaves it wedged, and
+    /// a wedged block refuses every start (EIO), as the kernel does, until its DMA is seen to stop.
+    dma: sys::Dma,
 }
 
 impl Mock {
@@ -106,6 +109,9 @@ impl Hardware for Hw {
     }
 
     fn go(&mut self) -> Result<()> {
+        if self.with(|m| m.dma.csi2.state == sys::DMA_WEDGED || m.dma.fe.state == sys::DMA_WEDGED) {
+            return Err(Status::IO);
+        }
         self.with(|m| {
             m.started += 1;
             m.set_before_go = m.set.len();
@@ -210,6 +216,10 @@ impl Hardware for Hw {
 
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
         Ok(self.with(|m| m.receiving.then_some(m.starts)))
+    }
+
+    fn dma(&mut self) -> Result<Option<sys::Dma>> {
+        Ok(Some(self.with(|m| m.dma)))
     }
 
     fn check(&mut self) -> Result<()> {
@@ -1651,4 +1661,62 @@ fn a_recovery_restart_carries_the_frame_sequence_on() {
         got.sequence, 3,
         "the new stream's first frame is numbered on from the last delivered one (2)"
     );
+}
+
+/// The kernel holds the block wedged after a stop it couldn't confirm: health says so, a start is
+/// refused with the kernel's counts in words, and the driver keeps looking on its backoff until the
+/// kernel has seen the DMA stop. Then health is back and the receiver starts.
+#[test]
+fn a_wedged_block_fails_health_refuses_start_with_words_and_recovers_when_the_kernel_does() {
+    let frames = stream(4);
+    let (mut d, hw) = driver_on(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    let wedge = sys::DmaPart {
+        state: sys::DMA_WEDGED,
+        stop: sys::STOP_UNCONFIRMED,
+        stop_us: 266_000,
+        bound_us: 266_000,
+        pinned: 9,
+        reserved: 0,
+        pinned_bytes: 11_538_432,
+    };
+    hw.with(|m| m.dma.csi2 = wedge);
+    d.stop().unwrap();
+    assert!(matches!(d.health(), Health::Failed(why) if why.contains("not confirmed")));
+
+    assert_eq!(
+        d.start(),
+        Err(Status::IO),
+        "the kernel refuses START while wedged"
+    );
+    let why = d.why.clone().expect("words for the refusal");
+    assert!(
+        why.contains("266000 us") && why.contains("9 buffers (11538432 bytes)"),
+        "the refusal names the bound and the pinned pool: {why}"
+    );
+    d.stop().unwrap();
+
+    // Stopped and wedged: the driver looks again on its backoff, and is still failed.
+    let first = d.tick(0).expect("a look is due while wedged");
+    assert_eq!(first, backoff_ns(0));
+    assert_eq!(d.tick(first), Some(first + backoff_ns(1)));
+    assert!(matches!(d.health(), Health::Failed(_)));
+
+    // The kernel saw the late frame end: the next look finds it, and the wedge is over.
+    hw.with(|m| {
+        m.dma.csi2 = sys::DmaPart {
+            state: sys::DMA_IDLE,
+            stop: sys::STOP_LATE,
+            ..wedge
+        }
+    });
+    assert_eq!(
+        d.tick(first + backoff_ns(1)),
+        None,
+        "nothing more to look for"
+    );
+    assert_eq!(d.health(), Health::Ok);
+    d.start().unwrap();
+    assert_eq!(d.state, crate::State::Streaming { next_check: None });
 }

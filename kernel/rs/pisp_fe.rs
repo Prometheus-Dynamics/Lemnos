@@ -30,9 +30,11 @@
 //!    dirty flags are ignored. The hardware cannot end up running a stale value the checks never saw.
 //!  - Only the front end's own window is touched here, at constant offsets.
 //!
-//! Stopping is one path: ABORT, then the channel, then waiting for the block to report idle (bounded).
-//! If it never does, nothing it could reach is released: the stream is wedged, its pins kept for good,
-//! and START is refused until the block is bound again.
+//! Stopping is one path: ABORT, then the channel, then waiting for the block to report idle (bounded),
+//! with a RESET when it doesn't. If it still never does, nothing it could reach is released: the stream
+//! is quarantined (its pins kept, the receiver holding it), and START is refused on the block. While so,
+//! the front end keeps looking for idle on a backoff capped at 8 s (`lpf_unwedge`), and releases
+//! everything when it sees it.
 //!
 //! Locking: the receiver's `ctl` orders START, STOP, close and unbind (see rs/rp1_csi2.rs). `state`
 //! is the frame path's, nesting the stream's lock. The stream's ctl is taken only before the receiver's
@@ -47,11 +49,13 @@ use crate::param::param;
 // The receiver on the same block: its reference count, and the link with the channel feeding the front
 // end. The last three are called holding the receiver's ctl.
 use crate::rp1_csi2::{
-    LrcDev, lrc_fe_channel_start, lrc_fe_channel_stop, lrc_fe_open_rx, lrc_ref_get, lrc_ref_put,
+    LrcDev, LrcStop, STOP_ACKED, STOP_LATE, STOP_UNCONFIRMED, WEDGED_FE, lrc_fe_channel_start,
+    lrc_fe_channel_stop, lrc_fe_open_rx, lrc_ref_get, lrc_ref_put,
 };
 use crate::stream::{
     DelayedWork, Handle, JobRange, Producer, Slot, Stream, dev_warn_ratelimited,
-    lem_stream_cpu_read_enable, lem_stream_from_file, msecs_to_jiffies, usleep_range,
+    lem_stream_cpu_read_enable, lem_stream_from_file, lem_stream_unquarantine, msecs_to_jiffies,
+    usleep_range,
 };
 use core::{
     ffi::c_void,
@@ -191,6 +195,12 @@ const STOP_POLLS: u32 = 250;
 
 /// How often a front end with no job queued looks for a free buffer again.
 const RETRY_MS: u32 = 1;
+/// While wedged, the looks for idle: the first this long after the stop gave up, each after twice the
+/// last, up to UNWEDGE_MAX_MS, for as long as the block is bound (the failure rule).
+const UNWEDGE_FIRST_MS: u32 = 10;
+const UNWEDGE_MAX_MS: u32 = 8000;
+/// The longest a stop's looks for idle take: two rounds (after ABORT, after RESET) of STOP_POLLS.
+const STOP_BOUND_US: u32 = 2 * STOP_POLLS * 400;
 
 /// Test only: entries the write log holds.
 const TRACE_ENTRIES: usize = 2048;
@@ -263,6 +273,11 @@ pub(crate) struct LemPispFe {
     /// Queues again while nothing is queued and no buffer was free; see `arm`.
     #[pin]
     retry: DelayedWork,
+    /// Looks for idle while wedged: `lpf_unwedge`.
+    #[pin]
+    unwedge: DelayedWork,
+    /// Its looks since the wedge, for the backoff.
+    unwedge_attempt: AtomicU32,
     /// Test only, None unless test_pisp_fe: each entry is its offset, and its value above it.
     trace: Option<KVec<AtomicU64>>,
     trace_count: AtomicU32,
@@ -822,6 +837,18 @@ impl LemPispFe {
         self.arm(st);
     }
 
+    /// Every buffer the block held goes back: it is known to have stopped. `state` held.
+    fn release_slots(&self, st: &mut FeState, s: Handle) {
+        if st.cur.valid {
+            s.cancel(&st.cur.slot);
+        }
+        if st.next.valid {
+            s.cancel(&st.next.slot);
+        }
+        st.cur.valid = false;
+        st.next.valid = false;
+    }
+
     /// The block reports idle after ABORT and holds it. Bounded; sleeps; never on the frame path.
     fn idle(&self) -> bool {
         let mut still = 0;
@@ -856,6 +883,7 @@ impl LemPispFe {
         // Not streaming, so a retry finds nothing to do and doesn't come again.
         self.retry.cancel_sync();
 
+        let t0 = crate::stream_frame::now_ns();
         self.wr(FE_INT_EN, 0);
         self.wr(FE_CONTROL, FE_CONTROL_ABORT);
         // Those writes are posted across a bus: a read lands them first.
@@ -883,25 +911,35 @@ impl LemPispFe {
                 if idle { "idle" } else { "still busy" }
             );
         }
+        let us = (crate::stream_frame::now_ns().saturating_sub(t0) / 1000).min(u64::from(u32::MAX)) as u32;
+        // SAFETY: the receiver's field, written under its ctl, which the caller holds.
+        unsafe {
+            (*l).fe_stop = LrcStop {
+                outcome: if idle { STOP_ACKED } else { STOP_UNCONFIRMED },
+                us,
+                bound_us: STOP_BOUND_US,
+            }
+        };
         if idle {
             self.wr(FE_INT_STATUS, !0);
             let mut st = self.state.lock();
-            if st.cur.valid {
-                s.cancel(&st.cur.slot);
-            }
-            if st.next.valid {
-                s.cancel(&st.next.slot);
-            }
-            st.cur.valid = false;
-            st.next.valid = false;
+            self.release_slots(&mut st, s);
         } else {
+            let (count, bytes) = s.pinned();
             dev_err!(
                 self.device(),
-                "PiSP front end did not stop; buffers stay pinned until reboot\n"
+                "PiSP front end did not stop: not idle after ABORT and RESET; {} buffers ({} bytes) stay pinned until it is\n",
+                count,
+                bytes
             );
-            // SAFETY: the receiver's flag, written under its ctl, which the caller holds.
-            unsafe { (*l).wedged = true };
-            s.wedge();
+            // SAFETY: the receiver's fields, written under its ctl, which the caller holds.
+            unsafe {
+                (*l).wedged |= WEDGED_FE;
+                (*l).fe_held = s.quarantine();
+                (*l).fe_wedged_ns = t0;
+            }
+            self.unwedge_attempt.store(0, Ordering::Relaxed);
+            self.unwedge.queue_highpri(msecs_to_jiffies(UNWEDGE_FIRST_MS));
         }
 
         {
@@ -961,7 +999,7 @@ impl LemPispFe {
             release: None,
         };
         // SAFETY: the receiver's flag, read under its ctl.
-        if unsafe { (*l).wedged } {
+        if unsafe { (*l).wedged } != 0 {
             return Err(EIO);
         }
         // SAFETY: the receiver's own stream, written under its ctl.
@@ -1073,7 +1111,7 @@ impl LemPispFe {
         {
             let _ctl = Ctl::lock(self.l);
             // SAFETY: the receiver's flag, read under its ctl.
-            let wedged = unsafe { (*self.l).wedged };
+            let wedged = unsafe { (*self.l).wedged } & WEDGED_FE != 0;
             info.flags = if wedged {
                 lb::LEMNOS_PISP_FE_INFO_WEDGED
             } else {
@@ -1174,6 +1212,89 @@ unsafe extern "C" fn lpf_retry(work: *mut bindings::work_struct) {
     let fe = unsafe { &*fe };
     let mut st = fe.state.lock();
     fe.arm(&mut st);
+}
+
+/// While wedged: looks for the block reporting idle, which it didn't within its stop. Seen: every buffer
+/// it held goes back, the quarantined stream is let go and the wedge is over. Not yet: looks again, the
+/// gap doubling up to UNWEDGE_MAX_MS, for as long as the block is bound.
+unsafe extern "C" fn lpf_unwedge(work: *mut bindings::work_struct) {
+    // SAFETY: the work is the `unwedge` field of a LemPispFe (its delayed work begins with its work),
+    // which lives until lem_pisp_fe_destroy has cancelled it.
+    let fe = unsafe { work.cast::<u8>().sub(offset_of!(LemPispFe, unwedge)) }.cast::<LemPispFe>();
+    // SAFETY: the container found above, which is live while its work runs.
+    let fe = unsafe { &*fe };
+    let l = fe.l;
+    let held;
+    {
+        let _ctl = Ctl::lock(l);
+        // SAFETY: the receiver's flags, read under its ctl.
+        if unsafe { (*l).gone } || unsafe { (*l).wedged } & WEDGED_FE == 0 {
+            return;
+        }
+        if !fe.idle() {
+            let attempt = fe.unwedge_attempt.fetch_add(1, Ordering::Relaxed);
+            let ms = UNWEDGE_FIRST_MS
+                .checked_shl(attempt.min(16) + 1)
+                .unwrap_or(UNWEDGE_MAX_MS)
+                .min(UNWEDGE_MAX_MS);
+            fe.unwedge.queue_highpri(msecs_to_jiffies(ms));
+            return;
+        }
+        fe.wr(FE_INT_STATUS, !0);
+        // SAFETY: the receiver's fields, under its ctl.
+        let (s, since) = unsafe { ((*l).fe_held, (*l).fe_wedged_ns) };
+        {
+            let mut st = fe.state.lock();
+            fe.release_slots(&mut st, Handle(s));
+        }
+        let us = (crate::stream_frame::now_ns().saturating_sub(since) / 1000).min(u64::from(u32::MAX)) as u32;
+        // SAFETY: as above.
+        unsafe {
+            (*l).fe_stop.outcome = STOP_LATE;
+            (*l).fe_stop.us = us;
+            (*l).wedged &= !WEDGED_FE;
+            (*l).fe_held = ptr::null_mut();
+        }
+        held = s;
+        dev_info!(
+            fe.device(),
+            "PiSP front end stopped late: idle {} us after the stop; buffers released\n",
+            us
+        );
+    }
+    // Without the receiver's ctl: the stream's control mutex comes before it.
+    // SAFETY: the reference the stop's quarantine answered, given back once, here.
+    unsafe { lem_stream_unquarantine(held) };
+}
+
+/// The front end's DMA for LEMNOS_RP1_CSI2_IOC_DMA and `fe_dma`, the receiver's ctl held.
+///
+/// # Safety
+/// As `lem_pisp_fe_isr`, with the receiver's ctl held.
+pub(crate) unsafe extern "C" fn lem_pisp_fe_dma(fe: *const LemPispFe) -> lb::lemnos_rp1_csi2_dma_part {
+    // SAFETY: the caller's contract.
+    let fe = unsafe { &*fe };
+    let l = fe.l;
+    // SAFETY: the receiver's fields, under its ctl.
+    let (wedged, held, stop) = unsafe { ((*l).wedged & WEDGED_FE != 0, (*l).fe_held, (*l).fe_stop) };
+    let s = fe.stream.load(Ordering::Relaxed);
+    let (state, (pinned, bytes)) = if wedged {
+        (lb::LEMNOS_RP1_CSI2_DMA_WEDGED, Handle(held).pinned())
+    } else if !s.is_null() {
+        // Attached under the receiver's ctl, which is held: alive until a stop that takes it.
+        (lb::LEMNOS_RP1_CSI2_DMA_STREAMING, Handle(s).pinned())
+    } else {
+        (lb::LEMNOS_RP1_CSI2_DMA_IDLE, (0, 0))
+    };
+    lb::lemnos_rp1_csi2_dma_part {
+        state,
+        stop: stop.outcome,
+        stop_us: stop.us,
+        bound_us: stop.bound_us,
+        pinned,
+        reserved: 0,
+        pinned_bytes: bytes,
+    }
 }
 
 /// The stream is going: its stop() contract. Takes the receiver's ctl under the stream's.
@@ -1298,6 +1419,8 @@ fn create(l: *mut LrcDev, window: *mut c_void) -> Result<*mut LemPispFe> {
             test_scribble: AtomicBool::new(false),
             state <- new_spinlock_irq!(FeState::default()),
             retry <- DelayedWork::new(c"lem_pisp_fe.retry", lpf_retry),
+            unwedge <- DelayedWork::new(c"lem_pisp_fe.unwedge", lpf_unwedge),
+            unwedge_attempt: AtomicU32::new(0),
             trace,
             trace_count: AtomicU32::new(0),
         }),
@@ -1342,5 +1465,6 @@ pub(crate) unsafe extern "C" fn lem_pisp_fe_destroy(fe: *mut LemPispFe) {
     // SAFETY: the caller's contract: the pointer `create` leaked, given back once.
     let fe = unsafe { KBox::from_raw(fe) };
     fe.retry.cancel_sync();
+    fe.unwedge.cancel_sync();
     drop(fe);
 }

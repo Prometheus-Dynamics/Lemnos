@@ -3243,7 +3243,9 @@ fn open_all(node: &str, heap: &str, dev: &str) -> Option<(Env, Bufs)> {
     Some((env, b))
 }
 
-/// DMA that never stops: buffers stay pinned for good and START is refused.
+/// DMA that does not stop: while the block stays busy its buffers stay pinned, even with nobody
+/// holding them, and START is refused. When the block goes idle the module sees it, releases them
+/// and clears the wedge by itself.
 fn wedge(dev: &str, unbind: &str, heap: &str) -> ExitCode {
     let node = format!("/dev/lemnos-rp1-csi2-{dev}");
     let opened = open_all(&node, heap, dev);
@@ -3277,7 +3279,6 @@ fn wedge(dev: &str, unbind: &str, heap: &str) -> ExitCode {
         ret == 0,
         "STOP returns even when the block never goes idle ({ret})"
     );
-    hw_word(hw, TCSI_FE_BUSY, 0);
     check!(
         (fe_info(ctl).flags & INFO_WEDGED) != 0,
         "wedged is reported"
@@ -3301,6 +3302,29 @@ fn wedge(dev: &str, unbind: &str, heap: &str) -> ExitCode {
     check!(
         ret == env.attached_before + 4,
         "pool, configuration, statistics and output 1 stay attached ({} more)",
+        ret - env.attached_before
+    );
+    check!(
+        (fe_info(ctl).flags & INFO_WEDGED) != 0,
+        "still wedged while the block is busy"
+    );
+    // The block goes idle: the module's look on its backoff finds it, releases what it pinned and
+    // clears the wedge, with nothing asked of it.
+    hw_word(hw, TCSI_FE_BUSY, 0);
+    let mut waited = 0;
+    while (fe_info(ctl).flags & INFO_WEDGED) != 0 && waited < 20_000 {
+        sleep_ms(10);
+        waited += 10;
+    }
+    check!(
+        (fe_info(ctl).flags & INFO_WEDGED) == 0,
+        "the wedge clears once the block is idle ({waited} ms)"
+    );
+    sleep_ms(5);
+    let ret = bufinfo_attached(dev);
+    check!(
+        ret == env.attached_before,
+        "every buffer the wedge pinned is released ({} more)",
         ret - env.attached_before
     );
     check!(write_node(unbind, dev.as_bytes()), "unbound while wedged");

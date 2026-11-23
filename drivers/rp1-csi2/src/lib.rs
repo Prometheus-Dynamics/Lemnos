@@ -134,7 +134,7 @@ use lemnos_contract_camera_receiver::{
 };
 use lemnos_core::{
     BufferHandle, CallerId, Config, ConfigError, Description, Dev, Health, Item, Key, Kind,
-    Lifecycle, MethodId, RefusalKind, Result, ResumeRecord, Status, StreamHandle, driver,
+    Lifecycle, MethodId, RefusalKind, Reply, Result, ResumeRecord, Status, StreamHandle, driver,
 };
 
 use lemnos_hal::blocks::BufferKind;
@@ -281,6 +281,38 @@ impl Saved {
     }
 }
 
+/// Health while the kernel holds the receiver wedged: a stop it couldn't confirm, so the DMA may
+/// still write into the buffers it had. They stay pinned, and START is refused, until the kernel sees
+/// the DMA stop; it keeps looking, and so does the driver.
+const WEDGED_CSI2: &str = "the receiver's last stop was not confirmed (no frame end after FORCE with a \
+     frame in flight): its buffers stay pinned and START is refused until the kernel sees its DMA \
+     stop (counts in the node's sysfs `dma`)";
+const WEDGED_FE: &str = "the front end on this block did not stop: its buffers stay pinned and START \
+     is refused on the block until the kernel sees it idle (counts in the node's sysfs `fe_dma`)";
+
+/// Whether a part's DMA is wedged.
+const fn wedged(part: &sys::DmaPart) -> bool {
+    part.state == sys::DMA_WEDGED
+}
+
+/// Why START is refused while the block is wedged, with the kernel's counts.
+fn wedge_words(dma: &sys::Dma) -> String {
+    if wedged(&dma.csi2) {
+        format!(
+            "the receiver is wedged: its last stop was not confirmed (no frame end after FORCE within \
+             {} us, with a frame in flight), so its DMA may still write; {} buffers ({} bytes) stay \
+             pinned and START is refused until the kernel sees the DMA stop",
+            dma.csi2.bound_us, dma.csi2.pinned, dma.csi2.pinned_bytes
+        )
+    } else {
+        format!(
+            "the front end on this block is wedged: it was not idle after its stop; {} buffers ({} \
+             bytes) stay pinned and START is refused until the kernel sees it idle",
+            dma.fe.pinned, dma.fe.pinned_bytes
+        )
+    }
+}
+
 /// The delay before recovery attempt `attempt` (from 0), doubling to the cap.
 const fn backoff_ns(attempt: u32) -> u64 {
     BACKOFF_FIRST_NS << if attempt > 5 { 5 } else { attempt }
@@ -341,6 +373,13 @@ pub struct Rp1Csi2 {
     frame_stopped: bool,
     /// The frame times the block reports, for the measured frame period.
     clock: FrameClock,
+    /// The block's DMA while the kernel holds it wedged (`None` when it isn't), and the looks for
+    /// its end: their count and when the next is due.
+    wedge: Option<sys::Dma>,
+    wedge_attempt: u32,
+    wedge_due: Option<u64>,
+    /// Why the last call was refused, in words, for the host to take (`Lifecycle::refusal`).
+    why: Option<String>,
 }
 
 /// The frame intervals of the last few frames, from the frame start times the block reports. The
@@ -506,6 +545,12 @@ impl Lifecycle for Rp1Csi2 {
         self.caller = Some(caller);
     }
 
+    fn refusal(&mut self, _status: Status, words: &mut Reply<'_>) {
+        if let Some(why) = self.why.take() {
+            lemnos_core::say(words, &why);
+        }
+    }
+
     fn caller_gone(&mut self, caller: CallerId) {
         if self.owner == Some(caller) {
             self.owner = None;
@@ -622,6 +667,13 @@ impl Lifecycle for Rp1Csi2 {
     }
 
     fn health(&self) -> Health {
+        if let Some(dma) = &self.wedge {
+            return Health::Failed(if wedged(&dma.csi2) {
+                WEDGED_CSI2
+            } else {
+                WEDGED_FE
+            });
+        }
         match self.state {
             State::Recovering { .. } if self.frame_stopped => Health::Failed(
                 "no frame arrived within the bound for the configured mode while buffers were armed: \
@@ -645,7 +697,7 @@ impl Lifecycle for Rp1Csi2 {
     /// recovery attempt. Returns when next.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         match self.state {
-            State::Stopped => None,
+            State::Stopped => self.wedge_tick(now_ns),
             State::Streaming { next_check } => {
                 let due = next_check.is_some_and(|at| now_ns >= at);
                 // A tick at or after the time the last one asked for came from its deadline: no
@@ -728,6 +780,42 @@ impl Lifecycle for Rp1Csi2 {
 }
 
 impl Rp1Csi2 {
+    /// Reads the block's DMA: wedged or not. An unreadable answer keeps what was known.
+    fn look_at_dma(&mut self) {
+        match self.hw.dma() {
+            Ok(Some(dma)) if wedged(&dma.csi2) || wedged(&dma.fe) => {
+                if self.wedge.is_none() {
+                    self.wedge_attempt = 0;
+                    self.wedge_due = None;
+                }
+                self.wedge = Some(dma);
+            }
+            Ok(_) => {
+                self.wedge = None;
+                self.wedge_due = None;
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Stopped and wedged: looks at the block on the backoff until the kernel has seen the DMA stop,
+    /// so health says when it has. Nothing to do otherwise.
+    fn wedge_tick(&mut self, now_ns: u64) -> Option<u64> {
+        self.wedge?;
+        match self.wedge_due {
+            Some(at) if now_ns < at => return Some(at),
+            Some(_) => {
+                self.look_at_dma();
+                self.wedge?;
+                self.wedge_attempt = self.wedge_attempt.saturating_add(1);
+            }
+            None => {}
+        }
+        let at = now_ns.saturating_add(backoff_ns(self.wedge_attempt));
+        self.wedge_due = Some(at);
+        Some(at)
+    }
+
     /// Whether the driver is waiting on the consumer: the stream has buffers and holds none of
     /// them, so no frame can reach the block while the consumer keeps what it has.
     fn starved(&self) -> bool {
@@ -789,6 +877,10 @@ impl Rp1Csi2 {
             last_frame_ns: None,
             frame_stopped: false,
             clock: FrameClock::default(),
+            wedge: None,
+            wedge_attempt: 0,
+            wedge_due: None,
+            why: None,
         }
     }
 
@@ -840,7 +932,7 @@ impl Rp1Csi2 {
             (Some(link), Some(layout)) => (link, layout),
             _ => return Err(Status::INVALID_ARGUMENT),
         };
-        let Some(frames) = self.frames.as_mut() else {
+        let Some(frames) = self.frames.as_ref() else {
             // Nowhere for a frame to go.
             return Err(Status::NOT_FOUND);
         };
@@ -868,6 +960,11 @@ impl Rp1Csi2 {
         };
         // Whatever was running ends first; a failure here is not a reason to not try the start.
         let _ = self.hw.stop();
+        // A stop the kernel couldn't confirm wedges the block: then the start is refused, and why.
+        self.look_at_dma();
+        let Some(frames) = self.frames.as_mut() else {
+            return Err(Status::NOT_FOUND);
+        };
         self.hw.make(&hw::StartParams {
             embedded_buffers,
             embedded_frame_slots: if embedded_buffers == 0 {
@@ -991,7 +1088,13 @@ impl CameraReceiver for Rp1Csi2 {
         }
         // Whoever starts the receiver owns it until it stops, even if the start then fails.
         self.owner = self.caller;
-        self.begin()?;
+        self.why = None;
+        if let Err(status) = self.begin() {
+            if let Some(dma) = &self.wedge {
+                self.why = Some(wedge_words(dma));
+            }
+            return Err(status);
+        }
         self.state = State::Streaming { next_check: None };
         Ok(())
     }
@@ -1003,7 +1106,9 @@ impl CameraReceiver for Rp1Csi2 {
         self.last_frame_ns = None;
         self.frame_stopped = false;
         self.clock = FrameClock::default();
-        self.hw.stop()
+        let stopped = self.hw.stop();
+        self.look_at_dma();
+        stopped
     }
 
     fn counters(&mut self) -> Result<Counters> {

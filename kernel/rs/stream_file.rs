@@ -901,6 +901,74 @@ pub(crate) unsafe extern "C" fn lem_stream_from_file(file: *mut bindings::file, 
     st.as_ptr()
 }
 
+/// The block's DMA can't be shown to have stopped: the stream keeps every pin, and the block keeps the
+/// stream, which it may yet see stop (`lem_stream_unquarantine`). Answers the block's own reference to
+/// the stream: given back by `lem_stream_unquarantine` only. A stream never let out stays pinned for good,
+/// file closed or not, which is the wedge as it always was.
+///
+/// # Safety
+/// `s` is a live stream.
+pub(crate) unsafe extern "C" fn lem_stream_quarantine(s: *mut Stream) -> *mut Stream {
+    // SAFETY: the caller's contract: a live stream, made by `create` as an Arc whose pointer this is.
+    let borrowed = unsafe { ArcBorrow::from_raw(s.cast_const()) };
+    borrowed.lock().wedged = true;
+    let held: Arc<Stream> = borrowed.into();
+    Arc::into_raw(held).cast_mut()
+}
+
+/// The quarantined stream's DMA was seen to stop: the wedge is over. A stream whose end already came
+/// gives up now what its end kept (every region); a stream still open goes on as one whose producer
+/// stopped. Then the block's reference goes, and with the last one the stream is freed as any other.
+/// Takes the stream's control mutex: never under the block's `ctl` or locks.
+///
+/// # Safety
+/// `s` is what `lem_stream_quarantine` answered, given back once.
+pub(crate) unsafe extern "C" fn lem_stream_unquarantine(s: *mut Stream) {
+    // SAFETY: the caller's contract: the reference lem_stream_quarantine took, given back once.
+    let st = unsafe { Arc::from_raw(s.cast_const()) };
+    {
+        // Ordered with the end (`shutdown`), which holds this while it looks at `wedged`.
+        let _ctl = st.ctl();
+        let dead = {
+            let mut f = st.lock();
+            f.wedged = false;
+            f.dead
+        };
+        if dead {
+            let regions = REGIONS as u32 + if st.lock().own_mode() { st.g.buffers } else { 0 };
+            for i in 0..regions {
+                // Taken out under the lock, unmapped (which sleeps) with it dropped.
+                let mut r = core::mem::take(st.lock().region_at(i));
+                r.unmap();
+            }
+        }
+    }
+    st.wake();
+}
+
+/// The memory the block can write through the stream: how many dma-bufs it has pinned and their bytes,
+/// as the dma-bufs are (a buffer's own dma-buf may be bigger than the buffer). Any context: the
+/// stream's lock only.
+///
+/// # Safety
+/// `s` is a live stream.
+pub(crate) unsafe fn lem_stream_pinned(s: *mut Stream) -> (u32, u64) {
+    // SAFETY: the caller's contract.
+    let st = unsafe { &*s };
+    let mut f = st.lock();
+    let regions = REGIONS as u32 + if f.own_mode() { st.g.buffers } else { 0 };
+    let (mut count, mut bytes) = (0u32, 0u64);
+    for i in 0..regions {
+        let buf = f.region_at(i).buf;
+        if !buf.is_null() {
+            count += 1;
+            // SAFETY: a dma-buf the region holds a reference on; its size is fixed at its making.
+            bytes += unsafe { (*buf).size } as u64;
+        }
+    }
+    (count, bytes)
+}
+
 /// Registered regions keep a kernel mapping from here on, so a block can read through
 /// `lem_stream_range_read()`. Takes the control mutex, so never under the block's locks.
 ///

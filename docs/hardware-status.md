@@ -56,7 +56,7 @@ F2b) also gave the PIO I2C bus a module route.
 | [`F2g1.md`](../testing/board-runs/F2g1.md) | The chain proof's checks (not checked is a failure; timestamps; rate; the latch beside the chain) and the isp proof's 640x400 luma readout: not run, untested on board |
 | [`CZ-MOD-CSI2.md`](../testing/board-runs/CZ-MOD-CSI2.md) | Not run on the board. The `rp1-csi2` receiver of the kernel module in Rust: the bind line and lane count, the raw run's counts and sequences, the frame-end stop, fifty stops and starts with no wedge, a consumer holding every buffer, an unbind while streaming |
 | [`M34.md`](../testing/board-runs/M34.md) | Not run on the board. A front end's output0 lent to the back end's job with no copy: the chain proof end to end, the pool page's layout word and the lend's release on the board |
-| [`CZ-MOD-FE-ACK.md`](../testing/board-runs/CZ-MOD-FE-ACK.md) | Not run on the board. The `rp1-csi2` stop confirmed by the frame end after FORCE; a wedged receiver refuses START until unbind; what an ack on an idle FORCE does |
+| [`CZ-MOD-FE-ACK.md`](../testing/board-runs/CZ-MOD-FE-ACK.md) | Partly run on the board (passes 2 and 3, the earlier module): a sensor stopped first wedges the receiver; a receiver stopped first ends clean; no frame end for an idle FORCE. Not yet run: the stop confirmed by the frame end or by idle, the `dma` attribute, release on a late frame end |
 | [`CZ-MOD-PISP.md`](../testing/board-runs/CZ-MOD-PISP.md) | Not run on the board. The PiSP front end and back end of the kernel module in Rust: the chain runs, the front end's register write log against the C module's, fifty stops and starts with no wedge, a consumer keeping frames, the back end's queued and paced jobs, fifty closes with a job on the block, an unbind of each while streaming |
 | [`F2e1.md`](../testing/board-runs/F2e1.md) | Not run yet: a receiver unbound mid-stream stops the OV9782 (host tests only: the watch and the check in `select_mode`, two tests fail with the check off); five unbind and rebind cycles on the board are the check |
 | [`F2f2.md`](../testing/board-runs/F2f2.md) | Not run on the board. A client that goes away while its sensor streams stops the sensor (host check only) |
@@ -98,8 +98,11 @@ These are stated in the code and can only be settled on a board:
 - **Register facts the code marks `Unconfirmed`**: the `k230-capture` frame path
   (`drivers/k230-capture-sys/src/regs.rs`) and parts of the `k230isp` register map
   (`drivers/k230isp-sys/src/regs.rs`).
-- **What happens after a block is wedged.** The module keeps its memory pinned until reboot by
-  design. The path has run only against a test block.
+- **What happens after a block is wedged.** The module keeps its memory pinned until it sees the
+  DMA stop, and refuses `START` meanwhile ([Stopping a receiver](kernel-module.md#stopping-a-receiver)).
+  On the board a sensor stopped before its receiver wedges the receiver, and the block raises no
+  frame end for an idle FORCE (`CZ-MOD-FE-ACK.md`, passes 2 and 3). Release on a late frame end,
+  and the idle-FORCE confirmation, are confirmed in QEMU and untested on board.
 - **USB reset and kernel-driver detach** on usbfs (`A22.md`), and the gadget's asynchronous
   transfers and their cancel path (`E36.md`), have run only against test files and mocks.
 

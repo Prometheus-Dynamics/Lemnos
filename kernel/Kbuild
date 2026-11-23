@@ -43,7 +43,7 @@ lem_bindgen_items := \
 	--allowlist-type 'pisp_.*' --allowlist-var 'PISP_.*' \
 	--allowlist-type 'lemnos_pisp_fe_.*' --allowlist-var 'LEMNOS_PISP_FE_.*' \
 	--allowlist-type 'lemnos_pisp_be_.*' --allowlist-var 'LEMNOS_PISP_BE_.*' \
-	--allowlist-type 'lemnos_rp1_csi2_(info|start|frame_starts|embedded|claim)' --allowlist-var 'LEMNOS_RP1_CSI2_.*' \
+	--allowlist-type 'lemnos_rp1_csi2_(info|start|frame_starts|embedded|claim|dma|dma_part)' --allowlist-var 'LEMNOS_RP1_CSI2_.*' \
 	--allowlist-var 'LEMNOS_(MAX_THERMAL_WATCHES|EVENT_TEMPERATURE)' \
 	--allowlist-type 'lemnos_regjob_.*' \
 	--allowlist-type 'lemnos_stream_.*' \

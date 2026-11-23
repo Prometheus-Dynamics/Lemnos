@@ -96,6 +96,10 @@ pub trait Hardware: Send {
     /// The frame-start count since the last start, or `None` while nothing is streaming (not
     /// started, or stopped): unknown, and not a count of zero.
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>>;
+    /// What the block's DMA holds and how each part's last stop ended (the kernel's
+    /// `LEMNOS_RP1_CSI2_IOC_DMA`). `None` where the block can't say: a module without the call, or a
+    /// node that is gone.
+    fn dma(&mut self) -> Result<Option<sys::Dma>>;
     /// The doorbell the block's streams ring at each finished frame: an eventfd the driver waits
     /// on in place of a poll. `None` where there is none (the driver then polls).
     fn doorbell(&self) -> Option<BorrowedFd<'_>> {
@@ -425,6 +429,17 @@ impl Hardware for LinuxHardware {
             dropped: info.dropped.saturating_add(passed_by),
             errors: info.errors,
         })
+    }
+
+    fn dma(&mut self) -> Result<Option<sys::Dma>> {
+        let Ok(node) = self.node() else {
+            return Ok(None);
+        };
+        match node.dma() {
+            Ok(dma) => Ok(Some(dma)),
+            Err(e) if e.raw_os_error() == Some(libc_errno::ENOTTY) => Ok(None),
+            Err(e) => Err(self.node_error(e)),
+        }
     }
 
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
