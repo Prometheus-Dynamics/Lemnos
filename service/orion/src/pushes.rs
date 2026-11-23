@@ -13,8 +13,16 @@ use lemnos_client::{Client, DeviceDescription};
 
 use crate::config::Config;
 
-/// `pushes` for a device the bridge takes files for.
+/// `pushes` for a device the bridge takes files for, while its file sink is Orion's: a push to
+/// `lemnos/<device>/…` reaches the bridge.
 pub const ACCEPTED: &str = "accepted";
+
+/// `pushes` for a device the bridge takes files for, while its file sink is not Orion's: from the
+/// bridge's start until the sink is accepted, and again from the moment its files session is lost
+/// until the next sink is accepted. A push sent now reaches no receiver, so a sender waits for
+/// [`ACCEPTED`]. It is published as soon as the device's status topic is declared, so a
+/// subscriber held across a bridge restart reads it in place of the last bridge's `accepted`.
+pub const NOT_READY: &str = "not ready: the bridge is not receiving this device's files yet";
 
 /// Whether a device described as `description` takes files ([`lemnos_wire::text::takes_files`]).
 pub fn takes_files(description: &DeviceDescription) -> bool {

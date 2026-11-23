@@ -392,7 +392,21 @@ pub fn run(config: &Config, shared: &Shared) {
         if let Err(error) = lost {
             log(&format!("files: Orion lost: {error}"));
         }
+        // The sinks went with the session: a push now reaches no receiver, until the next ones
+        // are accepted. Said at once, so no status reads `accepted` across the gap.
+        not_ready(shared, takers.iter().map(|taker| taker.device.as_str()));
     }
+}
+
+/// Says each of `devices` takes no pushes for now ([`crate::pushes::NOT_READY`]), and wakes the
+/// publisher.
+fn not_ready<'a>(shared: &Shared, devices: impl Iterator<Item = &'a str>) {
+    shared.with(|mirror| {
+        for device in devices {
+            mirror.set_pushes(device, crate::pushes::NOT_READY);
+        }
+    });
+    shared.changed();
 }
 
 /// A session of its own on Orion, as the receiver of every file sent to `lemnos/<device>/`, with

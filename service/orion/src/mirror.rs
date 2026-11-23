@@ -292,6 +292,14 @@ impl Mirror {
         }
     }
 
+    /// What `name` says of pushes until the files thread says otherwise: set only when nothing
+    /// has been said of it yet, so it never takes back what the files thread found.
+    pub fn init_pushes(&mut self, name: &str, text: &str) {
+        if !self.pushes.iter().any(|(n, _)| n == name) {
+            self.set_pushes(name, text);
+        }
+    }
+
     /// The identity device's facts as the source has just read them, or `None` when it could not
     /// be read: then none of its facts is published.
     pub fn set_identity(&mut self, identity: Option<Vec<(String, String)>>) {
@@ -929,6 +937,32 @@ mod tests {
         );
         mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "read", 0);
         assert!(take(&mut mirror).hello.is_none());
+    }
+
+    #[test]
+    fn pushes_start_not_ready_are_accepted_by_the_files_thread_and_go_back_when_it_loses_them() {
+        use crate::pushes::{ACCEPTED, NOT_READY};
+        let mut mirror = Mirror::new();
+        // Said before the device is listed: its first status carries it.
+        mirror.init_pushes("a", NOT_READY);
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        let first = take(&mut mirror);
+        assert_eq!(first.status.len(), 1);
+        assert_eq!(first.status[0].1.pushes, NOT_READY);
+        // The files thread has its sink.
+        mirror.set_pushes("a", ACCEPTED);
+        assert_eq!(take(&mut mirror).status[0].1.pushes, ACCEPTED);
+        // A start that comes after never takes that back.
+        mirror.init_pushes("a", NOT_READY);
+        assert!(take(&mut mirror).status.is_empty());
+        // Its session is lost: not ready again, at once.
+        mirror.set_pushes("a", NOT_READY);
+        assert_eq!(take(&mut mirror).status[0].1.pushes, NOT_READY);
+        // A device the bridge takes no files for says nothing of pushes.
+        mirror.set_devices(vec![spec(0, "a", &[]), spec(1, "b", &[])], None);
+        let listed = take(&mut mirror);
+        assert!(listed.status.iter().all(|(_, s)| s.pushes != ACCEPTED));
+        assert!(listed.status.iter().any(|(_, s)| s.pushes.is_empty()));
     }
 
     #[test]

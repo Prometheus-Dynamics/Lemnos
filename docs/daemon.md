@@ -1151,9 +1151,21 @@ description (until it answers), and for each such device:
   that sentence, so nothing is written and the node keeps nothing;
 - the device's status topic says `refused: <that sentence>` in `pushes`.
 
-A device the bridge takes files for says `accepted` there, and any other device says nothing. `pushes`
-is set once the receiver is Orion's, so a push sent after it reads `accepted` or `refused` reaches the
-bridge. Each receiver has its own Orion session: a session hands each kind of file frame to its first
+A device the bridge takes files for says `accepted` there while the bridge is its receiver, and
+`not ready: the bridge is not receiving this device's files yet` while it is not: from the bridge's
+start until Orion has accepted its receiver, and again from the moment the receiver's session is
+lost until the next one is accepted. Any other device says nothing. A push sent while it reads
+`not ready` reaches no receiver: the node keeps the file in its own store and answers it committed,
+so a sender waits for `accepted` first.
+
+A subscriber held across a bridge restart: Orion keeps a publisher's last values while anyone
+subscribes, and a bridge that starts again carries on in the same topic. So while the bridge is
+down, and until it has listed the device again, a subscriber still reads the last bridge's `state`,
+`health` and `pushes`; the topic's own status says its publisher is gone, and that is what to go
+by. As soon as the new bridge declares the topic it publishes all five fields as they stand, with
+`pushes` at `not ready`, so nothing stale is read from a live publisher. A bridge that is up while
+lemnosd is down has no device to declare, and what was last published stays, with its publisher
+gone. Each receiver has its own Orion session: a session hands each kind of file frame to its first
 receiver, so two receivers on one session would leave the second unanswered (the pinned Orion
 172054f4, `crates/client/connect/src/client.rs`). Tests: `service/orion/tests/pushes.rs`.
 

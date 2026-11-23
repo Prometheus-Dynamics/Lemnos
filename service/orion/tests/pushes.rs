@@ -145,6 +145,12 @@ fn config(lemnosd: &Path, orion: &Path, files: Vec<(String, PathBuf)>) -> Config
 }
 
 fn start_bridge(config: Config) -> Bridge {
+    start_bridge_with(config, true)
+}
+
+/// A bridge, with its files thread (the one that becomes Orion's receiver) or without it: without,
+/// it is a bridge whose sink is never accepted.
+fn start_bridge_with(config: Config, receiving: bool) -> Bridge {
     let shared = Arc::new(Shared::new().expect("shared"));
     let (jobs, queue) = mpsc::channel();
     let socket = config.lemnosd_socket.clone();
@@ -161,7 +167,11 @@ fn start_bridge(config: Config) -> Bridge {
         },
         {
             let (config, shared) = (config.clone(), Arc::clone(&shared));
-            std::thread::spawn(move || files::run(&config, &shared))
+            std::thread::spawn(move || {
+                if receiving {
+                    files::run(&config, &shared);
+                }
+            })
         },
         {
             let shared = Arc::clone(&shared);
@@ -194,7 +204,7 @@ fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
 struct Setup {
     dashboard: Orion,
     socket: PathBuf,
-    _bridge: Bridge,
+    bridge: Option<Bridge>,
     _service: Service,
     _logic: Logic,
     _board: Board,
@@ -225,7 +235,7 @@ fn setup(test: &str, placed: &[&str]) -> Setup {
         dir,
         socket,
         dashboard,
-        _bridge: bridge,
+        bridge: Some(bridge),
         _service: service,
         _logic: logic,
         _board: board,
@@ -314,6 +324,44 @@ fn the_status_topic_says_whether_pushes_are_taken() {
     let s = setup("status", &["slots"]);
     assert_eq!(s.pushes("slots"), pushes::ACCEPTED);
     assert_eq!(s.pushes("flash"), pushes::refused_text("flash"));
+}
+
+/// PUSHES-NOT-STALE: a subscriber held across a bridge restart does not go on reading the last
+/// bridge's `accepted`. Orion keeps a gone publisher's last value while anyone subscribes, and the
+/// new bridge carries on in the same topic, so the new bridge publishes where it stands as soon as
+/// it declares the topic: not ready, until its own sink is accepted. Here the second bridge never
+/// becomes the receiver, so `accepted` after the restart could only be the stale one.
+#[test]
+fn a_subscriber_held_across_a_bridge_restart_reads_not_ready_until_the_new_sink_is_accepted() {
+    let mut s = setup("restart", &["slots"]);
+    let mut held: Subscriber = wait_for("the status topic", || {
+        s.dashboard.subscribe("lemnos.slots.status").ok()
+    });
+    let says = |held: &mut Subscriber| {
+        let _ = held.wait(Duration::from_millis(50));
+        let bytes = held.latest(FieldId(PUSHES))?.payload.to_vec();
+        String::from_utf8(bytes).ok()
+    };
+    wait_for("accepted from the first bridge", || {
+        (says(&mut held)? == pushes::ACCEPTED).then_some(())
+    });
+
+    drop(s.bridge.take());
+    let files = vec![("slots".to_owned(), s.dir.join("data/slots/.incoming"))];
+    let second = start_bridge_with(config(&s.socket, s._board.socket(), files.clone()), false);
+    wait_for("not ready from the second bridge", || {
+        (says(&mut held)? == pushes::NOT_READY).then_some(())
+    });
+    // It stays so: nothing of the second bridge ever says accepted.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(says(&mut held).as_deref(), Some(pushes::NOT_READY));
+
+    // A bridge that does become the receiver says accepted, to the same held subscriber.
+    drop(second);
+    let _third = start_bridge(config(&s.socket, s._board.socket(), files));
+    wait_for("accepted from the third bridge", || {
+        (says(&mut held)? == pushes::ACCEPTED).then_some(())
+    });
 }
 
 #[test]
