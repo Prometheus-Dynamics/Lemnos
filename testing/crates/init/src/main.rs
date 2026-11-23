@@ -1198,6 +1198,10 @@ fn way_back(c: &mut Checks) {
 /// gadget drop-in), FunctionFS on dummy_hcd, and a host.
 fn gadget(c: &mut Checks) {
     usb_ready(c);
+    c.check(
+        run(&["/lemnos-gadget-check", "stage"]) == 0,
+        "lemnos_gadget_check_stage",
+    );
     c.check(run(&["/lemnos-gadget-check"]) == 0, "lemnos_gadget_check");
 }
 

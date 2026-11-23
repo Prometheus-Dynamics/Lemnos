@@ -175,6 +175,9 @@ pub struct Function<P, const N: usize> {
     configured: bool,
     /// The control request waiting for the function's answer, and its `wLength`.
     pending: Option<(ControlSetup, u16)>,
+    /// The `wLength` of a request whose data stage from the host is under way: begun, and the
+    /// host has not sent it yet.
+    out_under_way: Option<u16>,
 }
 
 impl<P: FunctionPort, const N: usize> Function<P, N> {
@@ -186,6 +189,7 @@ impl<P: FunctionPort, const N: usize> Function<P, N> {
             enabled: None,
             configured: false,
             pending: None,
+            out_under_way: None,
         }
     }
 
@@ -312,6 +316,7 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
         self.pending = None;
+        self.out_under_way = None;
         self.configured = false;
         if self.enabled.take().is_none() {
             return Ok(());
@@ -322,6 +327,10 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
     fn next_event(&mut self) -> Result<Option<UsbFunctionEvent>, ErrorKind> {
         if self.enabled.is_none() {
             return Err(ErrorKind::Unavailable);
+        }
+        // The host sends nothing more on endpoint 0 while it owes a data stage.
+        if self.out_under_way.is_some() {
+            return Ok(None);
         }
         if self.pending.take().is_some() {
             self.port.stall().map_err(port_error)?;
@@ -373,9 +382,26 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
                 return Ok(n.min(length));
             }
             if passed(self.clock, until) {
-                // The host never sent its data: the request ends here, refused.
-                let _ = self.port.stall();
+                // The host has not sent its data yet: the stage goes on, for `control_end`.
+                self.out_under_way = Some(length as u16);
                 return Err(ErrorKind::Timeout);
+            }
+        }
+    }
+
+    /// The port takes an IN data stage whole, so only an OUT stage is ever under way.
+    fn control_end(&mut self, data: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
+        let length = usize::from(self.out_under_way.ok_or(ErrorKind::InvalidInput)?);
+        let data = data.get_mut(..length).ok_or(ErrorKind::InvalidInput)?;
+        match self.port.control_out(data) {
+            Ok(Some(n)) => {
+                self.out_under_way = None;
+                Ok(Some(n.min(length)))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => {
+                self.out_under_way = None;
+                Err(port_error(error))
             }
         }
     }

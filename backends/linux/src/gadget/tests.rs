@@ -15,6 +15,8 @@ use crate::LinuxBoard;
 
 const UDC: &str = "udc0";
 const WAIT: Duration = Duration::from_millis(200);
+/// A data stage begun and only looked at: the driver's way.
+const NOW: Duration = Duration::ZERO;
 
 fn string(text: &str) -> Vec<u8> {
     let mut bytes = vec![0, 3];
@@ -972,8 +974,32 @@ enum Did {
 struct FakeWire {
     events: VecDeque<Event>,
     did: Vec<Did>,
-    /// The errno the next call answers with, instead of what FunctionFS says on success.
+    /// The errno the next call answers with, instead of what FunctionFS says on success. A data
+    /// stage's is its end's, as FunctionFS's write or read of the stage answers it.
     fail: Option<i32>,
+    /// The host ends no data stage until the test says so.
+    holds: bool,
+    /// A data stage was begun and not yet reported ended.
+    under_way: bool,
+    /// How it ended, once the host ended it.
+    ended: Option<io::Result<usize>>,
+}
+
+impl FakeWire {
+    /// The host ends the stage under way: all of `len`, or as the scripted failure says.
+    fn end_stage(&mut self, len: usize) {
+        if self.under_way && self.ended.is_none() {
+            self.ended = Some(self.answer(len));
+        }
+    }
+
+    fn begin(&mut self, len: usize) {
+        self.under_way = true;
+        self.ended = None;
+        if !self.holds {
+            self.end_stage(len);
+        }
+    }
 }
 
 impl FakeWire {
@@ -991,14 +1017,26 @@ impl Wire for FakeWire {
         Ok(self.events.pop_front())
     }
 
-    fn send(&mut self, data: &[u8]) -> io::Result<usize> {
+    fn begin_send(&mut self, data: &[u8]) -> io::Result<()> {
         self.did.push(Did::Send(data.to_vec()));
-        self.answer(data.len())
+        self.begin(data.len());
+        Ok(())
     }
 
-    fn receive(&mut self, data: &mut [u8]) -> io::Result<usize> {
-        self.did.push(Did::Receive(data.len()));
-        self.answer(data.len())
+    fn begin_receive(&mut self, len: usize) -> io::Result<()> {
+        self.did.push(Did::Receive(len));
+        self.begin(len);
+        Ok(())
+    }
+
+    fn stage_end(&mut self, _into: &mut [u8], _timeout: Duration) -> Option<io::Result<usize>> {
+        let done = self.ended.take()?;
+        self.under_way = false;
+        Some(done)
+    }
+
+    fn stage_under_way(&self) -> bool {
+        self.under_way && self.ended.is_none()
     }
 
     fn stall(&mut self, request_is_in: bool) -> io::Result<()> {
@@ -1102,36 +1140,42 @@ fn a_request_read_past_is_stalled_the_way_its_direction_needs() {
 fn a_request_is_answered_once_in_its_own_direction() {
     let mut session = session();
     let mut data = [0u8; 8];
-    assert_eq!(session.control_in(&[1]), Err(ErrorKind::InvalidInput));
-    assert_eq!(session.control_out(&mut data), Err(ErrorKind::InvalidInput));
+    assert_eq!(session.control_in(&[1], NOW), Err(ErrorKind::InvalidInput));
+    assert_eq!(
+        session.control_out(&mut data, NOW),
+        Err(ErrorKind::InvalidInput)
+    );
 
     session
         .wire
         .events
         .push_back(Event::Setup(request(0xc0, 2)));
     session.next_event().unwrap();
-    assert_eq!(session.control_out(&mut data), Err(ErrorKind::InvalidInput));
-    assert_eq!(session.control_in(&[1, 2, 3]), Ok(2));
-    assert_eq!(session.control_in(&[1]), Err(ErrorKind::InvalidInput));
+    assert_eq!(
+        session.control_out(&mut data, NOW),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(session.control_in(&[1, 2, 3], NOW), Ok(2));
+    assert_eq!(session.control_in(&[1], NOW), Err(ErrorKind::InvalidInput));
 
     session
         .wire
         .events
         .push_back(Event::Setup(request(0x40, 3)));
     session.next_event().unwrap();
-    assert_eq!(session.control_in(&[1]), Err(ErrorKind::InvalidInput));
+    assert_eq!(session.control_in(&[1], NOW), Err(ErrorKind::InvalidInput));
     assert_eq!(
-        session.control_out(&mut data[..2]),
+        session.control_out(&mut data[..2], NOW),
         Err(ErrorKind::InvalidInput)
     );
-    assert_eq!(session.control_out(&mut data), Ok(3));
+    assert_eq!(session.control_out(&mut data, NOW), Ok(3));
 
     session
         .wire
         .events
         .push_back(Event::Setup(request(0x40, 0)));
     session.next_event().unwrap();
-    assert_eq!(session.control_out(&mut []), Ok(0));
+    assert_eq!(session.control_out(&mut [], NOW), Ok(0));
 
     session
         .wire
@@ -1153,6 +1197,94 @@ fn a_request_is_answered_once_in_its_own_direction() {
     );
 }
 
+/// FunctionFS waits in a data stage until the host ends it. The session begins it and is told
+/// later: a host that holds it costs the stage, and nothing waits for it.
+#[test]
+fn a_data_stage_the_host_has_not_ended_goes_on_and_its_end_comes_later() {
+    let mut session = session();
+    session.wire.holds = true;
+    let mut data = [0u8; 8];
+    assert_eq!(session.control_end(&mut data), Err(ErrorKind::InvalidInput));
+
+    session
+        .wire
+        .events
+        .push_back(Event::Setup(request(0xc0, 2)));
+    session.next_event().unwrap();
+    session.wire.events.push_back(Event::Suspend);
+    assert_eq!(session.control_in(&[1, 2, 3], NOW), Err(ErrorKind::Timeout));
+    assert!(session.wire.stage_under_way());
+    // While it is under way the request is answered, and nothing new is read.
+    assert_eq!(session.control_in(&[1], NOW), Err(ErrorKind::InvalidInput));
+    assert_eq!(session.control_stall(), Err(ErrorKind::InvalidInput));
+    assert_eq!(session.next_event(), Ok(None));
+    assert_eq!(session.control_end(&mut data), Ok(None));
+    // The host takes it.
+    session.wire.end_stage(2);
+    assert_eq!(session.control_end(&mut data), Ok(Some(2)));
+    assert_eq!(session.control_end(&mut data), Err(ErrorKind::InvalidInput));
+    assert_eq!(session.next_event(), Ok(Some(UsbFunctionEvent::Suspended)));
+
+    // A stage from the host: its bytes come with its end, into room for wLength.
+    session
+        .wire
+        .events
+        .push_back(Event::Setup(request(0x40, 3)));
+    session.next_event().unwrap();
+    assert_eq!(session.control_out(&mut data, NOW), Err(ErrorKind::Timeout));
+    session.wire.end_stage(3);
+    assert_eq!(
+        session.control_end(&mut data[..2]),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(session.control_end(&mut data), Ok(Some(3)));
+
+    // A stage the host abandons (a new request, a reset) ends Unavailable.
+    session
+        .wire
+        .events
+        .push_back(Event::Setup(request(0xc0, 2)));
+    session.next_event().unwrap();
+    assert_eq!(session.control_in(&[1, 2], NOW), Err(ErrorKind::Timeout));
+    session.wire.fail = Some(libc::ESHUTDOWN);
+    session.wire.end_stage(2);
+    assert_eq!(session.control_end(&mut data), Err(ErrorKind::Unavailable));
+    assert_eq!(session.control_end(&mut data), Err(ErrorKind::InvalidInput));
+    assert_eq!(
+        session.wire.did,
+        [
+            Did::Send(vec![1, 2]),
+            Did::Receive(3),
+            Did::Send(vec![1, 2]),
+        ]
+    );
+}
+
+/// A stage that ended and was never asked about does not hold the next request up.
+#[test]
+fn an_ended_stage_nobody_asked_about_gives_way_to_the_next_request() {
+    let mut session = session();
+    session.wire.holds = true;
+    session
+        .wire
+        .events
+        .push_back(Event::Setup(request(0xc0, 2)));
+    session.next_event().unwrap();
+    assert_eq!(session.control_in(&[1, 2], NOW), Err(ErrorKind::Timeout));
+    session.wire.end_stage(2);
+    session
+        .wire
+        .events
+        .push_back(Event::Setup(request(0xc0, 1)));
+    assert!(matches!(
+        session.next_event(),
+        Ok(Some(UsbFunctionEvent::Setup { length: 1, .. }))
+    ));
+    session.wire.holds = false;
+    assert_eq!(session.control_in(&[7], NOW), Ok(1));
+    assert_eq!(session.control_end(&mut []), Err(ErrorKind::InvalidInput));
+}
+
 #[test]
 fn a_request_the_host_abandoned_is_unavailable_and_no_longer_pending() {
     for errno in [
@@ -1168,11 +1300,11 @@ fn a_request_the_host_abandoned_is_unavailable_and_no_longer_pending() {
         session.next_event().unwrap();
         session.wire.fail = Some(errno);
         assert_eq!(
-            session.control_in(&[1]),
+            session.control_in(&[1], NOW),
             Err(ErrorKind::Unavailable),
             "{errno}"
         );
-        assert_eq!(session.control_in(&[1]), Err(ErrorKind::InvalidInput));
+        assert_eq!(session.control_in(&[1], NOW), Err(ErrorKind::InvalidInput));
 
         session
             .wire

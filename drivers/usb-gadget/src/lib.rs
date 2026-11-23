@@ -50,7 +50,9 @@
 //! - `max_power_ma` (integer, default 100): the most the device draws from the bus, up to 500.
 //! - `self_powered` (boolean, default false).
 //! - `control_timeout_ms` (integer, default 1000, 1 to 60000): how long a control request
-//!   waits for the caller's answer before it is stalled.
+//!   waits for the caller's answer before it is stalled, and how long an answered request's data
+//!   stage waits for the host before it is logged ([`STAGE_WAITING`]; the stage is left to the
+//!   host, and no call or tick waits on it).
 //!
 //! A setting that is missing, out of range or malformed fails the bind with
 //! `INVALID_ARGUMENT`. Binding does not touch the function.
@@ -132,8 +134,8 @@ use lemnos_contract_usb_function::{
 };
 use lemnos_core::{
     BufferHandle, CallerId, Config, ConfigError, Description, Health, Item, Key, Kind as KeyKind,
-    Lifecycle, MethodId, RefusalKind, Result, Retry, Status, StreamHandle, UsbFunctionHandle,
-    driver, status_of,
+    Lifecycle, MethodId, Note, Notes, RefusalKind, Result, Retry, Status, StreamHandle,
+    UsbFunctionHandle, driver, status_of,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::UsbFunctionEvent;
@@ -166,9 +168,22 @@ pub const SERVE_NS: u64 = NS_PER_MS;
 /// The most events dealt with in one tick, so a host that floods requests can't hold the
 /// lane.
 const EVENTS_PER_TICK: usize = 16;
-/// How long the host is given to take or send the data stage of a request the caller answers.
-/// The host is in the middle of the request, so the stage moves at once or not at all.
-const CONTROL_STAGE: Duration = Duration::from_millis(100);
+/// How long a call waits for the data stage of a request it answers: not at all. The function
+/// begins the stage and the call returns; the tick, or the caller's next `control_out`, learns how
+/// it ended. A host that never ends a stage costs that one transfer, never a call or a tick.
+const CONTROL_STAGE: Duration = Duration::ZERO;
+/// Logged once when a data stage has waited the control timeout for the host, with the request as
+/// one number: bmRequestType in the top byte, bRequest next, then wLength.
+pub const STAGE_WAITING: &str = "a control request's data stage has waited the control timeout \
+                                 for the host to end it; it is left to the host, which ends it \
+                                 with a new request or a reset (request as bmRequestType << 24 | \
+                                 bRequest << 16 | wLength)";
+/// Logged when a data stage that was reported waiting ends, with how long it took in ms.
+pub const STAGE_ENDED_LATE: &str = "the control data stage reported waiting has ended, after ms";
+/// Logged when a data stage ends with the host abandoning it, with the request as
+/// [`STAGE_WAITING`] gives it.
+pub const STAGE_ABANDONED: &str = "the host abandoned a control request's data stage (request \
+                                   as bmRequestType << 24 | bRequest << 16 | wLength)";
 /// The name the data stream is opened by: its need's.
 const DATA_STREAM: &str = "data";
 
@@ -199,6 +214,24 @@ pub const NO_SERIAL: &str = "no USB serial string: the board names no readable s
 /// Health while up, when the gadget has no serial string although the board names one that
 /// could not be read.
 pub const NO_SERIAL_READ: &str = "no USB serial string: the board serial could not be read";
+
+/// A data stage the host has not ended yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stage {
+    /// Its data goes to the host.
+    to_host: bool,
+    /// When a tick first saw it under way (`None` until one has).
+    seen_ns: Option<u64>,
+    /// [`STAGE_WAITING`] has been logged for it.
+    reported: bool,
+}
+
+/// A request as one number, for a note: bmRequestType, bRequest, wLength.
+fn request_word(request: &Request) -> u32 {
+    (u32::from(request.request_type) << 24)
+        | (u32::from(request.request) << 16)
+        | u32::from(request.length)
+}
 
 /// The name the kernel gave the NCM interface, as the bound gadget reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +286,12 @@ pub struct UsbGadget {
     /// The length of the pending request when its data comes from the host, else `None`: the
     /// bytes `control_out` must be able to hold.
     request_out: Option<u16>,
+    /// The pending request (or the one whose data stage is under way), for its length and the
+    /// note about a stage the host is slow to end.
+    request: Request,
+    /// The data stage under way: begun, and the host has not ended it.
+    stage: Option<Stage>,
+    notes: Notes,
     /// The caller holding the bulk endpoints, if one does: see [`Lifecycle::endpoints`].
     holder: Option<CallerId>,
     serve: Serve,
@@ -330,6 +369,7 @@ impl UsbGadget {
         self.ifname = None;
         self.suspended = false;
         self.serve.request_deadline_ns = None;
+        self.stage = None;
         // The holder keeps the endpoints through a let-go: the function keeps ep0 open for them
         // (`UsbFunction::disable`), and the same descriptors work again once it is bound. Only the
         // holder's release, its going, or the device's switching off ends the hold.
@@ -357,10 +397,62 @@ impl UsbGadget {
         }
     }
 
+    /// Learns how the data stage under way ended, if it has: an IN stage here, an OUT stage
+    /// only when its bytes are taken by the caller's `control_out`. A stage that has waited the
+    /// control timeout is logged once by its request; nothing waits for it.
+    fn watch_stage(&mut self, now_ns: u64) {
+        let Some(stage) = self.stage.as_mut() else {
+            return;
+        };
+        let seen = *stage.seen_ns.get_or_insert(now_ns);
+        if stage.to_host {
+            match self.function.control_end(&mut []) {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    self.ended_stage(now_ns, seen, true);
+                    return;
+                }
+                Err(_) => {
+                    self.ended_stage(now_ns, seen, false);
+                    return;
+                }
+            }
+        }
+        let Some(stage) = self.stage.as_mut() else {
+            return;
+        };
+        if !stage.reported && now_ns.saturating_sub(seen) >= self.control_timeout_ns {
+            stage.reported = true;
+            self.notes
+                .push(Note::with_value(STAGE_WAITING, request_word(&self.request)));
+        }
+    }
+
+    /// The stage under way ended: taken (`taken`) or abandoned by the host.
+    fn ended_stage(&mut self, now_ns: u64, seen_ns: u64, taken: bool) {
+        let Some(stage) = self.stage.take() else {
+            return;
+        };
+        if !taken {
+            self.serve.counters.errors += 1;
+            self.notes.push(Note::with_value(
+                STAGE_ABANDONED,
+                request_word(&self.request),
+            ));
+        } else if stage.reported {
+            let ms = now_ns.saturating_sub(seen_ns) / NS_PER_MS;
+            self.notes.push(Note::with_value(
+                STAGE_ENDED_LATE,
+                u32::try_from(ms).unwrap_or(u32::MAX),
+            ));
+        }
+    }
+
     fn keep_up(&mut self, now_ns: u64) -> u64 {
         if now_ns.saturating_sub(self.up_since_ns) >= self.retry_cap_ns {
             self.attempts = 0;
         }
+        self.watch_stage(now_ns);
         // Whether a consumer has the data stream open. A stream that fails counts as nobody
         // there for this tick. Nobody is served while a caller holds the bulk endpoints: the
         // bytes on them are that caller's, and this driver's reads would race it.
@@ -411,16 +503,19 @@ impl UsbGadget {
                     self.serve.note(serve::plain(EventKind::Resumed));
                 }
                 Ok(Some(UsbFunctionEvent::Setup { setup, length })) => {
+                    // A new request: whatever stage was under way has ended with the old one.
+                    self.stage = None;
+                    self.request = Request {
+                        request_type: setup.request_type,
+                        request: setup.request,
+                        value: setup.value,
+                        index: setup.index,
+                        length,
+                    };
                     if serving {
                         self.serve.note(Event {
                             kind: EventKind::Setup,
-                            request: Request {
-                                request_type: setup.request_type,
-                                request: setup.request,
-                                value: setup.value,
-                                index: setup.index,
-                                length,
-                            },
+                            request: self.request,
                         });
                         self.serve.request_deadline_ns =
                             Some(now_ns.saturating_add(self.control_timeout_ns));
@@ -450,6 +545,15 @@ impl UsbGadget {
             (false, _) => now_ns.saturating_add(POLL_NS),
         };
         self.next_ns
+    }
+
+    /// A data stage the function began and the host has not ended.
+    fn begin_stage(&mut self, to_host: bool) {
+        self.stage = Some(Stage {
+            to_host,
+            seen_ns: None,
+            reported: false,
+        });
     }
 
     /// What an answer to the pending request came to. Nothing is pending afterwards, unless
@@ -514,11 +618,37 @@ impl UsbFunction for UsbGadget {
     }
 
     fn control_in(&mut self, data: &[u8]) -> Result<u32> {
-        let sent = self.function.control_in(data, CONTROL_STAGE);
+        let handed = data.len().min(usize::from(self.request.length));
+        let sent = match self.function.control_in(data, CONTROL_STAGE) {
+            // Begun: the host takes it when it takes it, and the tick learns how it ended.
+            Err(ErrorKind::Timeout) => {
+                self.begin_stage(true);
+                Ok(handed)
+            }
+            sent => sent,
+        };
         self.answered(sent).map(|sent| sent as u32)
     }
 
     fn control_out(&mut self, into: &mut [u8]) -> Result<usize> {
+        // A stage under way: its bytes, once the host has sent them.
+        if self.stage.is_some_and(|stage| !stage.to_host) {
+            if into.len() < usize::from(self.request.length) {
+                return Err(Status::BUFFER_TOO_SMALL);
+            }
+            return match self.function.control_end(into) {
+                Ok(None) => Err(Status::AGAIN),
+                Ok(Some(n)) => {
+                    self.stage = None;
+                    Ok(n)
+                }
+                Err(kind) => {
+                    self.stage = None;
+                    self.serve.counters.errors += 1;
+                    Err(status_of(kind))
+                }
+            };
+        }
         // The data stage is taken whole or not at all: a buffer that cannot hold the pending
         // request's data is refused before the function is asked, so nothing is transferred
         // and the request stays pending.
@@ -529,8 +659,15 @@ impl UsbFunction for UsbGadget {
         {
             return Err(Status::BUFFER_TOO_SMALL);
         }
-        let came = self.function.control_out(into, CONTROL_STAGE);
-        self.answered(came)
+        match self.function.control_out(into, CONTROL_STAGE) {
+            // Accepted, and the host has not sent its bytes yet: the next call takes them.
+            Err(ErrorKind::Timeout) => {
+                self.serve.request_deadline_ns = None;
+                self.begin_stage(false);
+                Err(Status::AGAIN)
+            }
+            came => self.answered(came),
+        }
     }
 
     fn control_stall(&mut self) -> Result<()> {
@@ -666,6 +803,9 @@ impl Lifecycle for UsbGadget {
             retry_cap_ns,
             request_gone: 0,
             request_out: None,
+            request: Request::default(),
+            stage: None,
+            notes: Notes::default(),
             serve,
             holder: None,
             next_ns: 0,
@@ -673,6 +813,10 @@ impl Lifecycle for UsbGadget {
             attempts: 0,
             fault: STARTING,
         })
+    }
+
+    fn notes(&mut self) -> Option<&mut Notes> {
+        Some(&mut self.notes)
     }
 
     fn health(&self) -> Health {

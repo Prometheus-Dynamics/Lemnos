@@ -72,7 +72,11 @@
 //!   or accepts one that has none;
 //! - [`UsbFunction::control_stall`] refuses it.
 //!
-//! One request is pending at a time, and nothing else is reported while it is. A request
+//! One request is pending at a time, and nothing else is reported while it is, nor while its
+//! data stage is under way: the host sends nothing more on endpoint 0 until it ends the stage. No
+//! answer waits for the host. A data stage the host has not ended within
+//! [`FunctionInfo::control_timeout_ms`] is logged once by its request and left to the host, which
+//! ends it with a new request or a reset; it costs that one transfer and holds up nothing else. A request
 //! nobody answers within [`FunctionInfo::control_timeout_ms`] is refused with a stall and
 //! counted, and so is every request that comes while no consumer has the data stream open:
 //! a device nobody serves refuses what it is asked.
@@ -310,17 +314,23 @@ pub trait UsbFunction {
     fn state(&mut self) -> Result<State>;
     /// Answers the pending control request, one whose data goes to the host, with `data` as
     /// its data stage. At most the request's `length` bytes are sent, and fewer end the stage
-    /// short. Returns how many were sent.
+    /// short. Returns how many were sent, or handed to the stage when the host has not taken
+    /// them yet: the call never waits for the host. The request is answered either way; a stage
+    /// the host takes late, or abandons, is logged by the device, and an abandoned one counts in
+    /// [`Counters::errors`].
     ///
-    /// `INVALID_ARGUMENT` when no request is pending or the pending one goes the other way
-    /// (it stays pending). `NO_DEVICE` when the host abandoned the request or the device is
-    /// not on the bus.
+    /// `INVALID_ARGUMENT` when no request is pending, the pending one goes the other way, or the
+    /// data stage of the one before is still under way (it stays pending). `NO_DEVICE` when the
+    /// host abandoned the request or the device is not on the bus.
     #[method(5)]
     fn control_in(&mut self, data: &[u8]) -> Result<u32>;
     /// Takes the data stage of the pending control request, one whose data comes from the
     /// host, into `into`, and so accepts the request. `into` must hold the request's `length`
     /// bytes; a request with a `length` of 0 is accepted with nothing taken. Returns how many
-    /// bytes came. Errors are as for [`control_in`](Self::control_in).
+    /// bytes came. The call never waits for the host: `AGAIN` when the request is accepted and
+    /// the host has not sent its bytes yet, and the next `control_out` (with room for them)
+    /// takes them once they have come. Other errors are as for [`control_in`](Self::control_in);
+    /// a stage the host abandoned is `NO_DEVICE`.
     #[method(6)]
     fn control_out(&mut self, #[out(bytes)] into: &mut [u8]) -> Result<usize>;
     /// Refuses the pending control request with a stall. `INVALID_ARGUMENT` when none is

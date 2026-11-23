@@ -653,19 +653,35 @@ fn a_function_takes_the_data_of_a_control_request_or_times_out_and_stalls_it() {
     assert_eq!(function.control_out(&mut [], SHORT), Ok(0));
     assert_eq!(function.port().accepted, 2);
 
-    // The host never sends its data.
+    // The host has not sent its data by the timeout: the stage goes on, and is not refused.
     function.port().events.push_back(request);
     function.next_event().unwrap();
     assert_eq!(
         function.control_out(&mut data, SHORT),
         Err(ErrorKind::Timeout)
     );
-    assert_eq!(function.port().stalls, 1);
+    assert_eq!(function.port().stalls, 0);
     assert_eq!(
         function.control_stall(),
         Err(ErrorKind::InvalidInput),
-        "nothing is pending after a timeout"
+        "nothing is pending while the stage is under way"
     );
+    assert_eq!(function.next_event(), Ok(None), "nothing new while it is");
+    assert_eq!(function.control_end(&mut data), Ok(None));
+    assert_eq!(
+        function.control_end(&mut data[..1]),
+        Err(ErrorKind::InvalidInput),
+        "too small for wLength"
+    );
+    // The host sends it: the stage ends with its bytes.
+    function.port().control_data = Some((0, vec![4, 5]));
+    assert_eq!(function.control_end(&mut data), Ok(Some(2)));
+    assert_eq!(data[..2], [4, 5]);
+    assert_eq!(
+        function.control_end(&mut data),
+        Err(ErrorKind::InvalidInput)
+    );
+    assert_eq!(function.port().accepted, 3);
 }
 
 #[test]

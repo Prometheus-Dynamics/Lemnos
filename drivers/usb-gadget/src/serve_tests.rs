@@ -1020,6 +1020,10 @@ impl HalFunction for Quiet {
         Err(ErrorKind::InvalidInput)
     }
 
+    fn control_end(&mut self, _: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
+        Err(ErrorKind::InvalidInput)
+    }
+
     fn control_stall(&mut self) -> core::result::Result<(), ErrorKind> {
         Err(ErrorKind::InvalidInput)
     }
@@ -1212,4 +1216,99 @@ fn a_control_out_that_cannot_hold_the_request_is_refused_before_anything_is_take
     assert_eq!(UsbFunction::control_out(&mut rig.driver, &mut taken), Ok(8));
     assert_eq!(&taken, b"12345678");
     assert_eq!(rig.host.answers(), [(request(0x40), ControlAnswer::Out)]);
+}
+
+/// The notes the driver has for the log, oldest first.
+fn notes(driver: &mut UsbGadget) -> Vec<(&'static str, Option<u32>)> {
+    let mut out = Vec::new();
+    if let Some(notes) = Driver::notes(driver) {
+        while let Some(note) = notes.pop() {
+            out.push((note.text, note.value));
+        }
+    }
+    out
+}
+
+/// A host that does not end a data stage costs that stage and nothing else: the answer returns at
+/// once, the ticks go on, the stage is logged once by its request, and its end comes later.
+#[test]
+fn a_data_stage_the_host_holds_costs_no_wait_and_is_logged_once_by_its_request() {
+    let mut rig = Rig::with(BYTES, &[("control_timeout_ms", ConfigValue::Int(5))]);
+    rig.want_event(9, 1);
+    rig.host.event(UsbFunctionEvent::Configured);
+    rig.tick();
+    assert_eq!(rig.event(9).kind, EventKind::Configured);
+    rig.host.hold_stages(true);
+    rig.want_event(1, 0);
+    rig.host.request(request(0xc0), 8, &[]);
+    rig.tick();
+    assert_eq!(rig.event(1).kind, EventKind::Setup);
+    assert_eq!(UsbFunction::control_in(&mut rig.driver, b"reply"), Ok(5));
+    assert!(!UsbFunction::state(&mut rig.driver).unwrap().request_pending);
+    assert!(rig.host.stage_under_way());
+    let start = rig.now;
+    while rig.now < start + 20 * NS_PER_MS {
+        rig.tick();
+    }
+    let word = (0xc0 << 24) | (7 << 16) | 8;
+    assert_eq!(notes(&mut rig.driver), [(STAGE_WAITING, Some(word))]);
+    assert!(rig.host.stage_under_way(), "the stage is the host's to end");
+    rig.tick();
+    assert!(notes(&mut rig.driver).is_empty(), "logged once");
+    rig.host.end_stage();
+    rig.tick();
+    assert!(!rig.host.stage_under_way());
+    let late = notes(&mut rig.driver);
+    assert_eq!(late.len(), 1);
+    assert_eq!(late[0].0, STAGE_ENDED_LATE);
+
+    // A stage from the host: accepted at once, and its bytes come with a later call.
+    rig.consumer
+        .return_buffer(0)
+        .expect("the consumer holds this buffer");
+    rig.want_event(2, 0);
+    rig.host.request(request(0x40), 3, b"abc");
+    rig.tick();
+    assert_eq!(rig.event(2).request.length, 3);
+    let mut taken = [0u8; 16];
+    assert_eq!(
+        UsbFunction::control_out(&mut rig.driver, &mut taken),
+        Err(Status::AGAIN)
+    );
+    rig.tick();
+    assert_eq!(
+        UsbFunction::control_out(&mut rig.driver, &mut taken[..2]),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+    assert_eq!(
+        UsbFunction::control_out(&mut rig.driver, &mut taken),
+        Err(Status::AGAIN)
+    );
+    rig.host.end_stage();
+    assert_eq!(UsbFunction::control_out(&mut rig.driver, &mut taken), Ok(3));
+    assert_eq!(&taken[..3], b"abc");
+
+    // A stage the host abandons is counted and logged by its request.
+    rig.consumer
+        .return_buffer(0)
+        .expect("the consumer holds this buffer");
+    rig.want_event(3, 0);
+    rig.host.request(request(0xc1), 2, &[]);
+    rig.tick();
+    assert_eq!(rig.event(3).request.request_type, 0xc1);
+    assert_eq!(UsbFunction::control_in(&mut rig.driver, b"no"), Ok(2));
+    rig.host.abandon_stage();
+    rig.tick();
+    assert_eq!(
+        notes(&mut rig.driver),
+        [(STAGE_ABANDONED, Some((0xc1 << 24) | (7 << 16) | 2))]
+    );
+    assert_eq!(rig.counters().errors, 1);
+    assert_eq!(
+        rig.host.answers(),
+        [
+            (request(0xc0), ControlAnswer::In(b"reply".to_vec())),
+            (request(0x40), ControlAnswer::Out),
+        ]
+    );
 }

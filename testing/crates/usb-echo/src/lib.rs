@@ -1,9 +1,13 @@
 //! Serves a `usb.function/1` device through the service, for the board checks in
 //! `testing/board-runs/E36.md`: it is the device a USB host talks to.
 //!
-//! - A vendor request whose data goes to the host (`bmRequestType` 0xc0) is answered with the
-//!   bytes `lemnos`, cut to the request's length.
-//! - A vendor request whose data comes from the host (0x40) is accepted, and its bytes printed.
+//! - A vendor request whose data goes to the host (`bmRequestType` 0xc0, or 0xc1 to an
+//!   interface) is answered with the bytes `lemnos`, cut to the request's length. One with
+//!   `bRequest` [`LATE`] is answered [`LATE_BY`] after it came: a host that gave up on it by then
+//!   leaves its data stage incomplete, which is how a check stages a host that never ends one.
+//! - A vendor request whose data comes from the host (0x40, or 0x41) is accepted, and its bytes
+//!   printed. The device's answer never waits for the host: until the bytes have come it is
+//!   `AGAIN`, and the program asks again.
 //! - Any other request is stalled.
 //! - What arrives on the first OUT endpoint is sent back on the first IN endpoint.
 //!
@@ -23,6 +27,12 @@ use lemnos_core::{Decode, Encode, Reader, Status, Writer};
 use lemnos_linux_stream::LinuxStreams;
 
 const TAG: &str = "usb.function/1";
+/// The `bRequest` of a vendor request whose data goes to the host that is answered late.
+pub const LATE: u8 = 0x5d;
+/// How late.
+pub const LATE_BY: Duration = Duration::from_millis(200);
+/// How long a request whose bytes have not come yet is asked about again, a millisecond apart.
+const OUT_WAIT: Duration = Duration::from_secs(2);
 /// The buffers this program names: one each for the event job, the receive and the send.
 const EVENT_BUFFER: u32 = 0;
 const RECEIVE_BUFFER: u32 = 1;
@@ -177,10 +187,23 @@ pub fn serve(socket: &str, name: &str) -> Result<(), Stop> {
                     EventKind::Setup => {
                         let request = event.request;
                         let answer = match request.request_type {
-                            0xc0 => device.control_in(b"lemnos").map(|sent| sent as usize),
-                            0x40 => {
+                            0xc0 | 0xc1 => {
+                                if request.request == LATE {
+                                    std::thread::sleep(LATE_BY);
+                                }
+                                device.control_in(b"lemnos").map(|sent| sent as usize)
+                            }
+                            0x40 | 0x41 => {
                                 let mut taken = [0u8; 256];
-                                device.control_out(&mut taken).inspect(|&came| {
+                                let until = std::time::Instant::now() + OUT_WAIT;
+                                let mut came = device.control_out(&mut taken);
+                                while came == Err(Status::AGAIN)
+                                    && std::time::Instant::now() < until
+                                {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                    came = device.control_out(&mut taken);
+                                }
+                                came.inspect(|&came| {
                                     say!("request data {:02x?}", &taken[..came]);
                                 })
                             }

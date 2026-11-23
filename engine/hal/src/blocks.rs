@@ -839,25 +839,42 @@ pub trait UsbFunction {
     /// ([`ControlSetup::is_in`]), with `data` as its data stage. At most the request's
     /// `length` bytes are sent, and fewer end the stage short. Returns how many were sent.
     ///
-    /// `InvalidInput` when no request is pending or the pending one goes the other way; it
-    /// stays pending. `Unavailable` when the host abandoned the request (a new request, a
-    /// reset, a pull): nothing is pending afterwards. After `Ok` and after any other error
-    /// nothing is pending either.
+    /// `InvalidInput` when no request is pending, the pending one goes the other way, or a data
+    /// stage is still under way; nothing changes. `Unavailable` when the host abandoned the
+    /// request (a new request, a reset, a pull): nothing is pending afterwards. After `Ok` and
+    /// after any other error nothing is pending either.
     ///
-    /// Waits at most `timeout` for the host to take the data, then fails with `Timeout`. A
-    /// backend that can't abandon a data stage once it has begun waits until the host ends
-    /// it, which a host does within its own control timeout or by a reset.
+    /// Waits at most `timeout` for the host to take the data. A stage the host has not ended by
+    /// then is not abandoned: it is `Timeout`, the stage goes on under way, and
+    /// [`control_end`](Self::control_end) says how it ends. So a `timeout` of zero begins the
+    /// stage and only looks, and a host that never ends a stage costs that one transfer and
+    /// never a caller's wait. While a stage is under way [`next_event`](Self::next_event)
+    /// reports nothing new: the host sends nothing more on endpoint 0 until it ends the stage,
+    /// which it does within its own control timeout, by a new request, or by a reset.
     fn control_in(&mut self, data: &[u8], timeout: Duration) -> Result<usize, Self::Error>;
     /// Takes the data stage of the pending control request, which must be one whose data
     /// comes from the host, into `data`, and so accepts the request. `data` must hold the
     /// request's `length` bytes. A request with a `length` of 0 has no data stage and is
     /// accepted by this call with an empty `data`. Returns how many bytes came.
     ///
-    /// Errors, what stays pending and `timeout` are as for [`control_in`](Self::control_in).
+    /// Errors and what stays pending are as for [`control_in`](Self::control_in), and so is
+    /// `timeout`: a stage the host has not ended by then is `Timeout` and goes on under way,
+    /// and its bytes come with [`control_end`](Self::control_end).
     fn control_out(&mut self, data: &mut [u8], timeout: Duration) -> Result<usize, Self::Error>;
+    /// How the data stage under way ended, without waiting: `None` while the host has not ended
+    /// it, `Some(n)` once it has, with `n` the bytes sent or, for a request whose data comes from
+    /// the host, the bytes taken into `data`. `data` must then hold the request's `length`,
+    /// else `InvalidInput` and the bytes stay for the next call; for a request whose data goes
+    /// to the host `data` is not used.
+    ///
+    /// `Unavailable` when the host abandoned the stage (a new request, a reset, a pull).
+    /// `InvalidInput` when no stage is under way. After `Some` and after `Unavailable` nothing is
+    /// under way. Disabling the function ends a stage under way with it.
+    fn control_end(&mut self, data: &mut [u8]) -> Result<Option<usize>, Self::Error>;
     /// Refuses the pending control request with a protocol stall, which the host sees as
     /// "request not supported". Nothing is pending afterwards. `InvalidInput` when no request
-    /// is pending, `Unavailable` when the host had already abandoned it.
+    /// is pending (or its data stage is under way), `Unavailable` when the host had already
+    /// abandoned it.
     fn control_stall(&mut self) -> Result<(), Self::Error>;
     /// Halts `endpoint` (`halted` true: it answers the host with a stall until the halt is
     /// cleared) or clears its halt and resets its data toggle (`halted` false). The host can

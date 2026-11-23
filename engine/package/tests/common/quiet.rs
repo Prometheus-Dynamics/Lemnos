@@ -401,6 +401,10 @@ impl UsbFunction for Quiet {
         Ok(fill(data))
     }
 
+    fn control_end(&mut self, data: &mut [u8]) -> Hal<Option<usize>> {
+        Ok(Some(fill(data)))
+    }
+
     fn control_stall(&mut self) -> Hal<()> {
         Ok(())
     }

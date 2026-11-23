@@ -104,7 +104,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use lemnos_hal::blocks::{BufferHandle, ControlSetup, UsbFunctionEvent, iso_interval_bytes};
 use lemnos_hal::usb_descriptors::{
@@ -668,11 +669,13 @@ impl Paths {
                 None => Transfers::One(aio::Queue::new(TRANSFER_BYTES)?),
             });
         }
+        let stage = Ep0Stage::spawn()?;
         bind()?;
         Ok(FfsWire {
             ep0,
             endpoints,
             queues,
+            stage,
         })
     }
 }
@@ -681,8 +684,19 @@ impl Paths {
 /// numbered by their place in the plan.
 trait Wire {
     fn next_event(&mut self) -> io::Result<Option<Event>>;
-    fn send(&mut self, data: &[u8]) -> io::Result<usize>;
-    fn receive(&mut self, data: &mut [u8]) -> io::Result<usize>;
+    /// Begins the data stage of the pending request whose data goes to the host, with `data`.
+    /// Never waits: the stage runs on until the host ends it, and [`stage_end`](Self::stage_end)
+    /// says how it ended.
+    fn begin_send(&mut self, data: &[u8]) -> io::Result<()>;
+    /// Begins taking the `len` bytes of the data stage of the pending request whose data comes
+    /// from the host (0: accepting one that has none). Never waits.
+    fn begin_receive(&mut self, len: usize) -> io::Result<()>;
+    /// How the stage begun last ended, waiting at most `timeout`: `None` while it is still under
+    /// way. A receive's bytes are copied into `into`, which holds them. Once it has said `Some`,
+    /// nothing is under way.
+    fn stage_end(&mut self, into: &mut [u8], timeout: Duration) -> Option<io::Result<usize>>;
+    /// Whether the stage begun last is still under way: the host has not ended it. Never waits.
+    fn stage_under_way(&self) -> bool;
     fn stall(&mut self, request_is_in: bool) -> io::Result<()>;
     fn halt(&mut self, endpoint: usize, endpoint_is_in: bool) -> io::Result<()>;
     fn clear_halt(&mut self, endpoint: usize) -> io::Result<()>;
@@ -711,6 +725,160 @@ struct FfsWire {
     endpoints: Vec<Endpoint>,
     /// Each endpoint's transfers, in the endpoints' order.
     queues: Vec<Transfers>,
+    /// Endpoint 0's data stages, on their own thread.
+    stage: Ep0Stage,
+}
+
+/// The most a data stage carries: `wLength` is 16 bits.
+const STAGE_BYTES: usize = u16::MAX as usize;
+
+/// The data stages of endpoint 0, run on a thread of their own. FunctionFS waits in the write or
+/// read that is a data stage until the host ends the stage, whatever the file's flags
+/// (`__ffs_ep0_queue_wait` in f_fs.c), and holds the function's lock while it waits, so other
+/// reads of ep0 find it busy and say so (`EAGAIN`) instead of waiting. The host ends a stage by
+/// taking it, within its own control timeout, by a new request, or by a reset; an unbind ends it
+/// too. So a stage the host never ends costs this thread, idle in that one transfer, and never the
+/// caller: the caller begins a stage and is told later how it ended. Each stage is given its own
+/// copy of ep0 and closes it as the stage ends, so an idle thread holds nothing open. The buffer
+/// is made once, with the thread, and nothing allocates per stage.
+struct Ep0Stage {
+    shared: Arc<StageShared>,
+}
+
+#[derive(Default)]
+struct StageShared {
+    state: Mutex<StageState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct StageState {
+    /// The stage to run: a copy of ep0, whether it sends, and its length.
+    job: Option<(Ep0, bool, usize)>,
+    /// The stage's bytes: what goes to the host, or what came from it. With the thread while
+    /// a stage runs.
+    buf: Vec<u8>,
+    /// The thread is in a stage now.
+    running: bool,
+    /// How the last stage ended, until it is taken.
+    done: Option<io::Result<usize>>,
+    stop: bool,
+}
+
+impl StageShared {
+    fn lock(&self) -> MutexGuard<'_, StageState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// How often a stage that finds ep0 busy (another file operation holds the function's lock for
+/// a moment) tries again, a millisecond apart, before it gives up as the busy file said.
+const STAGE_BUSY_TRIES: u32 = 20;
+
+impl Ep0Stage {
+    fn spawn() -> io::Result<Self> {
+        let shared = Arc::new(StageShared::default());
+        shared.lock().buf = vec![0; STAGE_BYTES];
+        let worker = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("gadget-ep0".into())
+            .spawn(move || serve_stages(&worker))?;
+        Ok(Self { shared })
+    }
+
+    fn begin(&self, ep0: &Ep0, send: Option<&[u8]>, len: usize) -> io::Result<()> {
+        let mut state = self.shared.lock();
+        if state.job.is_some() || state.running {
+            return Err(io::Error::from_raw_os_error(libc::EBUSY));
+        }
+        let len = len.min(state.buf.len());
+        if let Some(data) = send {
+            state.buf[..len].copy_from_slice(&data[..len]);
+        }
+        state.job = Some((ep0.try_clone()?, send.is_some(), len));
+        state.done = None;
+        self.shared.changed.notify_all();
+        Ok(())
+    }
+
+    fn end(&self, into: &mut [u8], timeout: Duration) -> Option<io::Result<usize>> {
+        let until = Instant::now() + timeout;
+        let mut state = self.shared.lock();
+        while state.done.is_none() && (state.job.is_some() || state.running) {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            state = self
+                .shared
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        let done = state.done.take()?;
+        if let Ok(n) = done {
+            let n = n.min(into.len()).min(state.buf.len());
+            into[..n].copy_from_slice(&state.buf[..n]);
+        }
+        Some(done)
+    }
+
+    fn under_way(&self) -> bool {
+        let state = self.shared.lock();
+        state.job.is_some() || state.running
+    }
+}
+
+impl Drop for Ep0Stage {
+    /// The thread ends once it is idle: at once, or as the stage it is in ends, which the unbind
+    /// that comes with a disable makes it do.
+    fn drop(&mut self) {
+        self.shared.lock().stop = true;
+        self.shared.changed.notify_all();
+    }
+}
+
+fn serve_stages(shared: &StageShared) {
+    let mut state = shared.lock();
+    loop {
+        let Some((ep0, send, len)) = state.job.take() else {
+            if state.stop {
+                return;
+            }
+            state = shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+            continue;
+        };
+        state.running = true;
+        let mut buf = std::mem::take(&mut state.buf);
+        drop(state);
+        let mut tries = 0;
+        let done = loop {
+            let done = if send {
+                ep0.send(&buf[..len])
+            } else {
+                ep0.receive(&mut buf[..len])
+            };
+            match done {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::EAGAIN) && tries < STAGE_BUSY_TRIES =>
+                {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                done => break done,
+            }
+        };
+        drop(ep0);
+        state = shared.lock();
+        state.buf = buf;
+        state.running = false;
+        state.done = Some(done);
+        shared.changed.notify_all();
+    }
 }
 
 impl Wire for FfsWire {
@@ -718,12 +886,20 @@ impl Wire for FfsWire {
         self.ep0.next_event()
     }
 
-    fn send(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.ep0.send(data)
+    fn begin_send(&mut self, data: &[u8]) -> io::Result<()> {
+        self.stage.begin(&self.ep0, Some(data), data.len())
     }
 
-    fn receive(&mut self, data: &mut [u8]) -> io::Result<usize> {
-        self.ep0.receive(data)
+    fn begin_receive(&mut self, len: usize) -> io::Result<()> {
+        self.stage.begin(&self.ep0, None, len)
+    }
+
+    fn stage_end(&mut self, into: &mut [u8], timeout: Duration) -> Option<io::Result<usize>> {
+        self.stage.end(into, timeout)
+    }
+
+    fn stage_under_way(&self) -> bool {
+        self.stage.under_way()
     }
 
     fn stall(&mut self, request_is_in: bool) -> io::Result<()> {
@@ -778,6 +954,9 @@ struct Session<W> {
     /// The gadget was unbound from its controller.
     released: bool,
     pending: Option<Setup>,
+    /// The data stage under way, begun and not yet reported ended: whether it goes to the host,
+    /// and the request's `wLength`.
+    stage: Option<(bool, usize)>,
 }
 
 impl<W: Wire> Session<W> {
@@ -789,6 +968,7 @@ impl<W: Wire> Session<W> {
             configured: false,
             released: false,
             pending: None,
+            stage: None,
         }
     }
 
@@ -825,6 +1005,11 @@ impl<W: Wire> Session<W> {
     fn next_event(&mut self) -> Result<Option<UsbFunctionEvent>, ErrorKind> {
         if self.released {
             return Err(ErrorKind::Unavailable);
+        }
+        // The host sends nothing more on endpoint 0 while it has a stage to end, and FunctionFS
+        // holds ep0 for it. An ended stage's answer is kept for `control_end`.
+        if self.stage.is_some() && self.wire.stage_under_way() {
+            return Ok(None);
         }
         if let Some(setup) = self.pending.take() {
             // Read past without an answer. If the host has let it go there is nothing to
@@ -872,21 +1057,54 @@ impl<W: Wire> Session<W> {
         }
     }
 
-    fn control_in(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
+    /// Begins the IN data stage and waits at most `timeout` for its end. A stage the host has not
+    /// ended by then goes on: `Timeout`, and `control_end` reports it.
+    fn control_in(&mut self, data: &[u8], timeout: Duration) -> Result<usize, ErrorKind> {
         let setup = self.take_pending(true)?;
         let data = &data[..data.len().min(usize::from(setup.length))];
-        self.wire.send(data).map_err(|e| wire_kind(&e))
+        // A stage ended and not taken goes with the new one.
+        self.stage = None;
+        self.wire.begin_send(data).map_err(|e| wire_kind(&e))?;
+        self.stage = Some((true, data.len()));
+        self.finish(&mut [], timeout)
     }
 
-    fn control_out(&mut self, data: &mut [u8]) -> Result<usize, ErrorKind> {
+    /// Begins taking the OUT data stage into `data`, and waits at most `timeout` for it, as
+    /// `control_in` does.
+    fn control_out(&mut self, data: &mut [u8], timeout: Duration) -> Result<usize, ErrorKind> {
         let length = usize::from(self.pending.map_or(0, |setup| setup.length));
         if data.len() < length {
             return Err(ErrorKind::InvalidInput);
         }
         self.take_pending(false)?;
-        self.wire
-            .receive(&mut data[..length])
-            .map_err(|e| wire_kind(&e))
+        self.stage = None;
+        self.wire.begin_receive(length).map_err(|e| wire_kind(&e))?;
+        self.stage = Some((false, length));
+        self.finish(&mut data[..length], timeout)
+    }
+
+    /// The end of the stage under way, waited for at most `timeout`; `Timeout` while it goes on.
+    fn finish(&mut self, into: &mut [u8], timeout: Duration) -> Result<usize, ErrorKind> {
+        match self.wire.stage_end(into, timeout) {
+            None => Err(ErrorKind::Timeout),
+            Some(done) => {
+                self.stage = None;
+                done.map_err(|e| wire_kind(&e))
+            }
+        }
+    }
+
+    fn control_end(&mut self, data: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
+        let (to_host, length) = self.stage.ok_or(ErrorKind::InvalidInput)?;
+        let into = if to_host {
+            &mut data[..0]
+        } else {
+            data.get_mut(..length).ok_or(ErrorKind::InvalidInput)?
+        };
+        match self.finish(into, Duration::ZERO) {
+            Err(ErrorKind::Timeout) => Ok(None),
+            done => done.map(Some),
+        }
     }
 
     fn control_stall(&mut self) -> Result<(), ErrorKind> {
@@ -1192,14 +1410,19 @@ impl UsbFunction for FunctionFsGadget {
         self.session()?.next_event()
     }
 
-    /// Waits for the host: FunctionFS can't abandon a data stage.
-    fn control_in(&mut self, data: &[u8], _timeout: Duration) -> Result<usize, ErrorKind> {
-        self.session()?.control_in(data)
+    /// The stage runs on ep0's own thread: this waits at most `timeout`, and a stage the host has
+    /// not ended by then goes on (see [`Ep0Stage`]).
+    fn control_in(&mut self, data: &[u8], timeout: Duration) -> Result<usize, ErrorKind> {
+        self.session()?.control_in(data, timeout)
     }
 
-    /// Waits for the host: FunctionFS can't abandon a data stage.
-    fn control_out(&mut self, data: &mut [u8], _timeout: Duration) -> Result<usize, ErrorKind> {
-        self.session()?.control_out(data)
+    /// As `control_in`.
+    fn control_out(&mut self, data: &mut [u8], timeout: Duration) -> Result<usize, ErrorKind> {
+        self.session()?.control_out(data, timeout)
+    }
+
+    fn control_end(&mut self, data: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
+        self.session()?.control_end(data)
     }
 
     fn control_stall(&mut self) -> Result<(), ErrorKind> {

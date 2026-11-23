@@ -19,3 +19,5 @@ lemnos-core = { path = "../../../engine/core" }
 lemnos-linux = { path = "../../../backends/linux" }
 lemnos-linux-stream = { path = "../../../backends/linux-stream" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+lemnos-usb-echo = { path = "../usb-echo" }
+lemnos-contract-usb-function = { path = "../../../contracts/usb-function" }

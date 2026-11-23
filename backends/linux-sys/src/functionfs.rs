@@ -384,6 +384,14 @@ impl Ep0 {
         Ok(Self { file: open(path)? })
     }
 
+    /// The same open file again (a `dup`), for a thread that runs one data stage while this one
+    /// goes on. The function stays on its controller until every copy is closed.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone()?,
+        })
+    }
+
     /// Gives the function its descriptors (a [`descriptors_blob`]) and then its strings (a
     /// [`strings_blob`]), each in the one write the kernel requires. The endpoint files exist
     /// once both are in.

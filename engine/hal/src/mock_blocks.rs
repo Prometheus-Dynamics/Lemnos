@@ -1213,6 +1213,22 @@ struct UsbFunctionState {
     busy: Vec<u8>,
     from_host: VecDeque<(u8, Vec<u8>)>,
     to_host: Vec<(u8, Vec<u8>)>,
+    /// The host ends no data stage until the test says so ([`MockUsbFunction::hold_stages`]).
+    holds_stages: bool,
+    /// The data stage under way, as `control_end` will report it.
+    stage: Option<Stage>,
+}
+
+/// A data stage the host has not ended yet.
+#[derive(Debug)]
+struct Stage {
+    setup: ControlSetup,
+    answer: ControlAnswer,
+    /// The bytes sent, or the host's data stage for a request whose data comes from it.
+    sent: usize,
+    from_host: Vec<u8>,
+    /// How the host ended it, once it has.
+    ended: Option<Result<(), ErrorKind>>,
 }
 
 impl UsbFunctionState {
@@ -1248,6 +1264,26 @@ impl UsbFunctionState {
         if let Some((setup, _, _)) = self.pending.take() {
             self.answers.push((setup, answer));
         }
+    }
+
+    /// The answer to the pending request, as a stage: ended at once, or under way while the
+    /// host holds stages (`Timeout`, as a backend whose host has not taken the data says).
+    fn stage(&mut self, answer: ControlAnswer, sent: usize) -> Result<usize, ErrorKind> {
+        if !self.holds_stages {
+            self.answer(answer);
+            return Ok(sent);
+        }
+        let Some((setup, _, from_host)) = self.pending.take() else {
+            return Err(ErrorKind::InvalidInput);
+        };
+        self.stage = Some(Stage {
+            setup,
+            answer,
+            sent,
+            from_host,
+            ended: None,
+        });
+        Err(ErrorKind::Timeout)
     }
 
     /// The `wLength` of the pending request, if it is one whose data goes to the host
@@ -1339,6 +1375,36 @@ impl MockUsbFunction {
     pub fn request(&self, setup: ControlSetup, length: u16, data: &[u8]) {
         let event = UsbFunctionEvent::Setup { setup, length };
         with(&self.state, |s| s.events.push_back((event, data.to_vec())));
+    }
+
+    /// The host takes no data stage until it is told to (`held` true), or goes back to taking
+    /// each at once. A stage begun while it holds them is `Timeout` and stays under way until
+    /// [`end_stage`](Self::end_stage) or [`abandon_stage`](Self::abandon_stage).
+    pub fn hold_stages(&self, held: bool) {
+        with(&self.state, |s| s.holds_stages = held);
+    }
+
+    /// The host ends the data stage under way, taking or sending all of it.
+    pub fn end_stage(&self) {
+        with(&self.state, |s| {
+            if let Some(stage) = s.stage.as_mut() {
+                stage.ended = Some(Ok(()));
+            }
+        });
+    }
+
+    /// The host abandons the data stage under way (a new request, a reset).
+    pub fn abandon_stage(&self) {
+        with(&self.state, |s| {
+            if let Some(stage) = s.stage.as_mut() {
+                stage.ended = Some(Err(ErrorKind::Unavailable));
+            }
+        });
+    }
+
+    /// Whether a data stage is under way: begun, and not yet reported ended by `control_end`.
+    pub fn stage_under_way(&self) -> bool {
+        with(&self.state, |s| s.stage.is_some())
     }
 
     /// Every control request the function has dealt with, and how.
@@ -1441,6 +1507,7 @@ impl UsbFunction for MockUsbFunction {
             s.descriptors = None;
             s.configured = false;
             s.pending = None;
+            s.stage = None;
             s.halted.clear();
             s.events.clear();
         });
@@ -1451,6 +1518,10 @@ impl UsbFunction for MockUsbFunction {
         with(&self.state, |s| {
             if s.descriptors.is_none() || s.released {
                 return Err(ErrorKind::Unavailable);
+            }
+            // The host sends nothing more on endpoint 0 while it has a stage to end.
+            if s.stage.as_ref().is_some_and(|stage| stage.ended.is_none()) {
+                return Ok(None);
             }
             s.answer(ControlAnswer::Stalled);
             let Some((event, data)) = s.events.pop_front() else {
@@ -1478,8 +1549,7 @@ impl UsbFunction for MockUsbFunction {
         with(&self.state, |s| {
             let length = s.pending(true)?;
             let sent = &data[..data.len().min(usize::from(length))];
-            s.answer(ControlAnswer::In(sent.to_vec()));
-            Ok(sent.len())
+            s.stage(ControlAnswer::In(sent.to_vec()), sent.len())
         })
     }
 
@@ -1490,9 +1560,42 @@ impl UsbFunction for MockUsbFunction {
                 return Err(ErrorKind::InvalidInput);
             }
             let sent = s.pending.as_ref().map_or(&[][..], |(_, _, sent)| sent);
-            let n = copy(&sent[..sent.len().min(length)], data);
+            let sent = &sent[..sent.len().min(length)];
+            if s.holds_stages {
+                return s.stage(ControlAnswer::Out, sent.len());
+            }
+            let n = copy(sent, data);
             s.answer(ControlAnswer::Out);
             Ok(n)
+        })
+    }
+
+    fn control_end(&mut self, data: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
+        with(&self.state, |s| {
+            let Some(stage) = s.stage.as_ref() else {
+                return Err(ErrorKind::InvalidInput);
+            };
+            match stage.ended {
+                None => return Ok(None),
+                Some(Err(kind)) => {
+                    s.stage = None;
+                    return Err(kind);
+                }
+                Some(Ok(())) => {}
+            }
+            if stage.answer == ControlAnswer::Out && data.len() < stage.sent {
+                return Err(ErrorKind::InvalidInput);
+            }
+            let Some(stage) = s.stage.take() else {
+                return Err(ErrorKind::InvalidInput);
+            };
+            let n = if stage.answer == ControlAnswer::Out {
+                copy(&stage.from_host[..stage.sent], data)
+            } else {
+                stage.sent
+            };
+            s.answers.push((stage.setup, stage.answer));
+            Ok(Some(n))
         })
     }
 
@@ -2190,6 +2293,63 @@ mod tests {
         assert_eq!(function.write(0x81, &[6], WAIT), off);
         function.enable(&GADGET).unwrap();
         assert_eq!(host.enables(), 2);
+    }
+
+    #[test]
+    fn a_held_data_stage_times_out_goes_on_and_ends_later() {
+        let mut function = MockUsbFunction::new();
+        let host = function.clone();
+        function.enable(&GADGET).unwrap();
+        host.hold_stages(true);
+        let to_host = vendor_request(0xc0, 1);
+        host.request(to_host, 2, &[]);
+        host.event(UsbFunctionEvent::Suspended);
+        function.next_event().unwrap();
+        assert_eq!(function.control_in(&[1, 2], WAIT), Err(ErrorKind::Timeout));
+        assert!(host.stage_under_way());
+        // Nothing new comes while the host has the stage to end, and no second answer is taken.
+        assert_eq!(function.next_event(), Ok(None));
+        assert_eq!(
+            function.control_in(&[1], WAIT),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(function.control_end(&mut []), Ok(None));
+        host.end_stage();
+        assert_eq!(function.control_end(&mut []), Ok(Some(2)));
+        assert!(!host.stage_under_way());
+        assert_eq!(function.control_end(&mut []), Err(ErrorKind::InvalidInput));
+        assert_eq!(function.next_event(), Ok(Some(UsbFunctionEvent::Suspended)));
+
+        // An OUT stage: its bytes come with its end, into room for all of them.
+        let from_host = vendor_request(0x40, 2);
+        host.request(from_host, 3, &[7, 8, 9]);
+        function.next_event().unwrap();
+        let mut data = [0; 3];
+        assert_eq!(
+            function.control_out(&mut data, WAIT),
+            Err(ErrorKind::Timeout)
+        );
+        host.end_stage();
+        assert_eq!(
+            function.control_end(&mut data[..2]),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(function.control_end(&mut data), Ok(Some(3)));
+        assert_eq!(data, [7, 8, 9]);
+
+        // One the host abandons ends unavailable, and is no answer.
+        host.request(to_host, 2, &[]);
+        function.next_event().unwrap();
+        assert_eq!(function.control_in(&[1, 2], WAIT), Err(ErrorKind::Timeout));
+        host.abandon_stage();
+        assert_eq!(function.control_end(&mut []), Err(ErrorKind::Unavailable));
+        assert_eq!(
+            host.answers(),
+            [
+                (to_host, ControlAnswer::In([1, 2].to_vec())),
+                (from_host, ControlAnswer::Out),
+            ]
+        );
     }
 
     #[test]

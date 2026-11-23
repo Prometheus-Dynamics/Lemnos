@@ -22,6 +22,8 @@ pub struct Lemnosd {
     program: PathBuf,
     board: PathBuf,
     socket: PathBuf,
+    /// Where the daemon's standard output and error go, when not to this check's.
+    log: Option<PathBuf>,
     child: Option<Child>,
 }
 
@@ -33,6 +35,26 @@ impl Lemnosd {
             program: program.to_path_buf(),
             board: board.to_path_buf(),
             socket: socket.to_path_buf(),
+            log: None,
+            child: None,
+        };
+        daemon.spawn()?;
+        Ok(daemon)
+    }
+
+    /// As [`Lemnosd::start`], with the daemon's lines (its standard output and error) appended to
+    /// the file `log` for the check to read.
+    pub fn start_logged(
+        program: &Path,
+        board: &Path,
+        socket: &Path,
+        log: &Path,
+    ) -> Result<Self, String> {
+        let mut daemon = Self {
+            program: program.to_path_buf(),
+            board: board.to_path_buf(),
+            socket: socket.to_path_buf(),
+            log: Some(log.to_path_buf()),
             child: None,
         };
         daemon.spawn()?;
@@ -61,6 +83,17 @@ impl Lemnosd {
             .arg("--group")
             .arg(DAEMON_ID);
         ready.give(&mut command);
+        if let Some(log) = &self.log {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+                .map_err(|error| format!("open {}: {error}", log.display()))?;
+            let copy = file
+                .try_clone()
+                .map_err(|error| format!("dup {}: {error}", log.display()))?;
+            command.stdout(file).stderr(copy);
+        }
         let child = self.child.insert(
             command
                 .spawn()

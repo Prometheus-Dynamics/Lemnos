@@ -496,6 +496,10 @@ impl UsbFunction for ReadOnly<UsbFunctionHandle> {
         Err(REFUSED)
     }
 
+    fn control_end(&mut self, _: &mut [u8]) -> Refusable<Option<usize>> {
+        Err(REFUSED)
+    }
+
     fn control_stall(&mut self) -> Refusable<()> {
         Err(REFUSED)
     }

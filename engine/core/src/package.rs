@@ -1671,6 +1671,12 @@ impl UsbFunction for Taken {
         length(status, len, room)
     }
 
+    /// The package boundary carries no stage's end: a stage a package's `control_in` or
+    /// `control_out` left under way at its `timeout` ends with the host, unreported here.
+    fn control_end(&mut self, _: &mut [u8]) -> Hal<Option<usize>> {
+        Err(ErrorKind::Unsupported)
+    }
+
     fn control_stall(&mut self) -> Hal<()> {
         done((self.host.usb_function.control_stall)(self.handle))
     }

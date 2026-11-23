@@ -322,6 +322,7 @@ impl<T: UsbFunction<Error = ErrorKind>> UsbFunction for Faulty<T> {
         next_event() -> Option<UsbFunctionEvent>;
         control_in(data: &[u8], timeout: Duration) -> usize;
         control_out(data: &mut [u8], timeout: Duration) -> usize;
+        control_end(data: &mut [u8]) -> Option<usize>;
         control_stall() -> ();
         set_halt(endpoint: u8, halted: bool) -> ();
         read(endpoint: u8, data: &mut [u8], timeout: Duration) -> usize;

@@ -20,7 +20,9 @@
 //!    switched off through the client (case 5). END is asserted in each case.
 //!
 //! Prints one `ok` or `FAIL` line per check and exits non-zero if any failed. `host`, `hub` and
-//! `probe` are the roles of the child processes this program starts.
+//! `probe` are the roles of the child processes this program starts. `stage` is a check of its own,
+//! run before this one (`stage.rs`): a host that never ends a control data stage costs the device's
+//! consumer no wait.
 
 use std::fs;
 use std::os::unix::process::CommandExt;
@@ -92,6 +94,7 @@ macro_rules! say {
 
 mod contract;
 mod host;
+mod stage;
 
 fn main() -> ExitCode {
     // The first argument decides which role this process plays; the children are this program.
@@ -103,6 +106,13 @@ fn main() -> ExitCode {
         }
         Some("host") => {
             return if host::host_side() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        Some("stage") => {
+            return if stage::run() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -434,6 +444,11 @@ fn processes(comm: &str) -> Vec<(u32, u32, u64, u32)> {
                 .map(|rest| rest.trim().to_string())
                 .unwrap_or_default()
         };
+        // A process that has ended and nobody reaped (the guest's init reaps no orphan, and a
+        // check before this one leaves the ended processes of its daemon) is not running.
+        if field("State:").starts_with('Z') {
+            continue;
+        }
         let uid = field("Uid:")
             .split_whitespace()
             .next()
