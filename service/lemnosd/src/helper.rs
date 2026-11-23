@@ -329,7 +329,17 @@ impl<M: Mounts> Ops for System<M> {
     }
 
     fn bind(&mut self, gadget: &Gadget) -> io::Result<()> {
-        self.trees.bind(&gadget.udc)
+        self.trees.bind(&gadget.udc)?;
+        if let Some(rebind) = self.trees.take_rebind(&gadget.udc) {
+            lemnos_linux_sys::stderr::line(&format!(
+                "lemnosd-gadget: gadget {}: bound again after it was {}: UDC was clear for {} ms \
+                 first, so the host sees the device go and come back",
+                gadget.udc,
+                rebind.path,
+                rebind.clear_for.as_millis()
+            ));
+        }
+        Ok(())
     }
 
     fn unbind(&mut self, gadget: &Gadget) -> io::Result<()> {

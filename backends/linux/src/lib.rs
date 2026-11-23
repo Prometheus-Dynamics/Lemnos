@@ -39,10 +39,10 @@ use lemnos_core::{
 use lemnos_hal::ErrorKind;
 
 pub use gadget::{
-    FunctionFsGadget, GadgetHelper, HELD_LIMIT, Mounts, Outcome, Owner, Roots, SerialString,
-    SharedHelper, SystemMounts, Trees, bind as bind_gadget, errno_of, fault as gadget_fault,
-    is_controller_name, prepare as prepare_gadget, prepare_for_helper, teardown as teardown_gadget,
-    unbind as unbind_gadget,
+    FunctionFsGadget, GadgetHelper, HELD_LIMIT, Mounts, Outcome, Owner, REBIND_GAP, Rebind, Roots,
+    SerialString, SharedHelper, SystemMounts, Trees, bind as bind_gadget, errno_of,
+    fault as gadget_fault, is_controller_name, prepare as prepare_gadget, prepare_for_helper,
+    teardown as teardown_gadget, unbind as unbind_gadget,
 };
 pub use gpio::GpioLine;
 pub use i2c::I2cBus;

@@ -214,6 +214,18 @@ and the held copies fail from then on. With the 8 s cap on retries, the link is 
 hand-over. The gadget check runs the daemon under `lemnos-unit-check exec`, and its hub moves into the
 daemon's namespace (`ns PID`) for the mounts it makes and removes.
 
+**A rebind the host can see.** A gadget the host may still hold configured is never bound again at
+once. Every enable unbinds and then binds, and on a tree that was still bound that is a clear and a
+set of `UDC` a few milliseconds apart: a host may not register it, keeps the configuration it had
+against endpoints that are fresh and unconfigured, and every function of the link goes silent with
+the device still enumerated. So the bind waits until `UDC` has been clear for
+`lemnos_linux::REBIND_GAP` (500 ms) since the gadget was let go: unbound while it was bound, or
+found there by a setup (adopted, remade or taken over). A tree made fresh has no host to tell and
+is bound at once. The wait is the daemon's, before it asks for the bind: the helper's system-call
+filter has no sleep and gets none for this. The helper says each such bind in one line: `gadget
+<udc>: bound again after it was <adopted | taken over | remade | unbound>: UDC was clear for N ms
+first`. A daemon with no helper keeps the same gap around its own unbind and bind.
+
 **Every file it touches is an entry of a directory it opened once.** It opens configfs
 (`/sys/kernel/config`, which must be a mounted configfs: the directory of an unmounted configfs is "not
 there yet" and is tried again at the next setup), the directory of the FunctionFS mount points, and

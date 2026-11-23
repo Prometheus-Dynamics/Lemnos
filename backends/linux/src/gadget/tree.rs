@@ -54,6 +54,23 @@ pub enum Outcome {
 /// within `HELD_LIMIT` + 8 s of the first setup that found it held.
 pub const HELD_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The least time a controller's `UDC` stays clear before a gadget the host may still hold
+/// configured is bound again. A clear and a set a few milliseconds apart is a rebind a host may
+/// not register: it keeps the configuration it had, against endpoints that are fresh and
+/// unconfigured, and every function on the link goes silent with the device still enumerated.
+/// Half a second is well over what a hub needs to report a disconnect.
+pub const REBIND_GAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A bind that followed a let-go of a gadget the host may have held: which way it was let go, and
+/// how long `UDC` had been clear when the bind was written. The wait itself is the daemon's
+/// (`FunctionFsGadget`): the helper's system-call filter has no sleep, and gets none for this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rebind {
+    /// `adopted`, `taken over`, `remade` or `unbound`.
+    pub path: &'static str,
+    pub clear_for: std::time::Duration,
+}
+
 /// The directories a gadget is made in. Opened once where they can be, and again at the next setup
 /// where they could not (configfs not mounted yet, the mount point's parent not there yet).
 pub struct Trees {
@@ -72,6 +89,14 @@ pub struct Trees {
     /// Each controller whose kernel refused the network device on a fresh function: its gadget
     /// is bound without the network function from then on (see [`Trees::bind`]).
     network_refused: Vec<String>,
+    /// Each controller whose gadget the host may still hold configured: since when its `UDC` is
+    /// known clear (or, for a tree found there, since it was found), and how it came to be.
+    let_go: Vec<(String, std::time::Instant, &'static str)>,
+    /// Each controller whose tree the last setup found there, and what it did with it (`adopted`,
+    /// `taken over`, `remade`): what the next bind is told as, in place of `unbound`.
+    origin: Vec<(String, &'static str)>,
+    /// What the last bind after a let-go did, until [`Trees::take_rebind`] takes it.
+    rebind: Option<(String, Rebind)>,
     /// A test's kernel: a `UDC` write it refuses (with `EBUSY`), from the tree as it is then.
     #[cfg(test)]
     pub(super) refuses: Option<fn(&Dir) -> bool>,
@@ -123,8 +148,38 @@ impl Trees {
             held_limit: HELD_LIMIT,
             functions: Vec::new(),
             network_refused: Vec::new(),
+            let_go: Vec::new(),
+            origin: Vec::new(),
+            rebind: None,
             #[cfg(test)]
             refuses: None,
+        }
+    }
+
+    /// The gadget on `udc_name` was let go `path`'s way, now: the next bind tells how long ago. A
+    /// let-go already noted stands as it is: a note is dropped at the bind that follows it, so
+    /// one that is still there means `UDC` has been clear since, and its time is the true one.
+    fn note_let_go(&mut self, udc_name: &str, path: &'static str) {
+        if !self.let_go.iter().any(|(name, _, _)| name == udc_name) {
+            self.let_go
+                .push((udc_name.to_string(), std::time::Instant::now(), path));
+        }
+    }
+
+    /// The last setup found `udc_name`'s tree there and did `what` with it.
+    fn note_origin(&mut self, udc_name: &str, what: &'static str) {
+        self.origin.retain(|(name, _)| name != udc_name);
+        self.origin.push((udc_name.to_string(), what));
+    }
+
+    /// What the last bind after a let-go on `udc_name` did, once.
+    pub fn take_rebind(&mut self, udc_name: &str) -> Option<Rebind> {
+        match self.rebind.take() {
+            Some((name, rebind)) if name == udc_name => Some(rebind),
+            other => {
+                self.rebind = other;
+                None
+            }
         }
     }
 
@@ -259,7 +314,18 @@ impl Trees {
                     }
                 };
                 match found {
-                    Found::Same => return Ok(Outcome::Adopted),
+                    Found::Same => {
+                        // The host may hold it configured from the daemon before this one. A
+                        // tree found bound is noted when it is unbound; one found unbound came
+                        // off its controller at a time nobody here saw, so it counts from now.
+                        let unbound = !bound(&dir);
+                        drop(held);
+                        self.note_origin(udc_name, "adopted");
+                        if unbound {
+                            self.note_let_go(udc_name, "adopted");
+                        }
+                        return Ok(Outcome::Adopted);
+                    }
                     Found::Held => {
                         let waited = since.map_or(std::time::Duration::ZERO, |s| s.elapsed());
                         if waited < limit {
@@ -307,6 +373,18 @@ impl Trees {
             }
         };
         make(&g, &plan, owner, functions, system, udc)?;
+        drop(held);
+        match outcome {
+            Outcome::TakenOver => {
+                self.note_origin(udc_name, "taken over");
+                self.note_let_go(udc_name, "taken over");
+            }
+            Outcome::Remade => {
+                self.note_origin(udc_name, "remade");
+                self.note_let_go(udc_name, "remade");
+            }
+            Outcome::Made | Outcome::Adopted => {}
+        }
         Ok(outcome)
     }
 
@@ -380,6 +458,35 @@ impl Trees {
     ///
     /// The name is not a controller's, or the write fails (`ENOENT` when the gadget is not made).
     pub fn bind(&mut self, udc_name: &str) -> io::Result<()> {
+        let noted = self
+            .let_go
+            .iter()
+            .find(|(name, _, _)| name == udc_name)
+            .map(|(_, since, path)| (*since, *path));
+        let result = self.bind_written(udc_name);
+        // Told when it follows a let-go: the daemon kept `UDC` clear for [`REBIND_GAP`] first.
+        if let (Ok(()), Some((since, path))) = (&result, noted) {
+            self.let_go.retain(|(name, _, _)| name != udc_name);
+            // What the setup did with a tree it found says more than `unbound`.
+            let found = self
+                .origin
+                .iter()
+                .position(|(name, _)| name == udc_name)
+                .map(|at| self.origin.swap_remove(at).1);
+            let path = found.unwrap_or(path);
+            self.rebind = Some((
+                udc_name.to_string(),
+                Rebind {
+                    path,
+                    clear_for: since.elapsed(),
+                },
+            ));
+        }
+        result
+    }
+
+    /// The bind itself: see [`Trees::bind`].
+    fn bind_written(&mut self, udc_name: &str) -> io::Result<()> {
         let functions = self
             .functions
             .iter()
@@ -451,8 +558,15 @@ impl Trees {
     /// The name is not a controller's.
     pub fn unbind(&mut self, udc_name: &str) -> io::Result<()> {
         let g = self.gadget(udc_name)?;
+        let mut was_bound = false;
         if let Ok(dir) = g.gadgets.open_dir(&g.dir_name()) {
+            was_bound = bound(&dir);
             let _ = dir.write("UDC", b"\n");
+        }
+        // Only a gadget that was bound has a host to tell: a tree that was never bound (a fresh
+        // one at boot) is bound at once.
+        if was_bound {
+            self.note_let_go(udc_name, "unbound");
         }
         Ok(())
     }

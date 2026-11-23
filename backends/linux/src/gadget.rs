@@ -121,7 +121,7 @@ use lemnos_linux_sys::functionfs::{self, CompatEntry, Endpoint, Ep0, Event, ExtP
 use crate::Claim;
 
 mod tree;
-pub use tree::{HELD_LIMIT, Outcome, Trees};
+pub use tree::{HELD_LIMIT, Outcome, REBIND_GAP, Rebind, Trees};
 
 /// Whether a gadget's tree carries a USB serial string: what a helper's setup tells the daemon,
 /// from the tree it made or adopted, not from the settings it was asked for.
@@ -551,8 +551,12 @@ impl Paths {
     }
 
     /// Takes the gadget off its controller. The attribute exists in configfs; it is not made
-    /// where it doesn't. Never fails: a gadget that isn't bound is already off.
-    fn unbind(&self) {
+    /// where it doesn't. Never fails: a gadget that isn't bound is already off. Returns whether
+    /// it was bound: then a host may hold it configured, and the bind that follows waits
+    /// [`REBIND_GAP`] so the host sees it go.
+    fn unbind(&self) -> bool {
+        let was_bound = fs::read_to_string(self.gadget.join("UDC"))
+            .is_ok_and(|text| !text.trim_matches(['\n', '\0', ' ']).is_empty());
         let udc = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -560,6 +564,7 @@ impl Paths {
         if let Ok(mut udc) = udc {
             let _ = udc.write(b"\n");
         }
+        was_bound
     }
 }
 
@@ -1238,6 +1243,13 @@ pub struct FunctionFsGadget {
     serial: Option<bool>,
     /// What the gadget the last enable bound lacks: [`NETWORK_REFUSED`].
     note: Option<&'static str>,
+    /// When this gadget was last taken off a controller a host may have held it on, until the
+    /// bind that follows has waited out the gap.
+    unbound_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Whether this function has enabled the gadget before (see `enable`).
+    enabled_before: bool,
+    /// [`REBIND_GAP`]; shorter in this crate's tests, which rebind hundreds of times.
+    rebind_gap: std::time::Duration,
     /// The descriptors the session was enabled with: what a session parked for the next function
     /// is matched on.
     set: Vec<u8>,
@@ -1335,6 +1347,13 @@ impl FunctionFsGadget {
             helper: None,
             serial: None,
             note: None,
+            unbound_at: std::sync::Mutex::new(None),
+            enabled_before: false,
+            rebind_gap: if cfg!(test) {
+                std::time::Duration::from_millis(20)
+            } else {
+                REBIND_GAP
+            },
             set: Vec::new(),
             parking: None,
             parked_here: None,
@@ -1360,6 +1379,13 @@ impl FunctionFsGadget {
         self
     }
 
+    /// The same gadget with another gap before a bind that follows a let-go (tests).
+    #[cfg(test)]
+    pub(crate) fn with_rebind_gap(mut self, gap: std::time::Duration) -> Self {
+        self.rebind_gap = gap;
+        self
+    }
+
     /// Makes and binds this gadget through `helper`, as its index `index` there.
     #[must_use]
     pub fn with_helper(mut self, helper: SharedHelper, index: u32) -> Self {
@@ -1371,11 +1397,53 @@ impl FunctionFsGadget {
     fn unbind_now(&self) {
         match &self.helper {
             Some((helper, index)) => {
+                let was_bound = self.udc_bound();
                 if let Ok(mut helper) = helper.lock() {
                     let _ = helper.unbind(*index);
                 }
+                if was_bound {
+                    self.note_unbound();
+                }
             }
-            None => self.paths.unbind(),
+            None => {
+                if self.paths.unbind() {
+                    self.note_unbound();
+                }
+            }
+        }
+    }
+
+    /// Whether the gadget is on a controller now, as far as this process can read: a host may
+    /// hold it configured. A tree that is there and can't be read counts as bound.
+    fn udc_bound(&self) -> bool {
+        match fs::read_to_string(self.paths.gadget.join("UDC")) {
+            Ok(text) => !text.trim_matches(['\n', '\0', ' ']).is_empty(),
+            Err(_) => self.paths.gadget.is_dir(),
+        }
+    }
+
+    /// The gadget was taken off a controller it was bound to (or may have been), now.
+    fn note_unbound(&self) {
+        *self
+            .unbound_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
+    }
+
+    /// Before a bind: waits out what is left of the gap ([`REBIND_GAP`]) since this gadget was
+    /// last taken off a controller a host may have held it on, so the host sees it go. Done here
+    /// and not in the helper, whose system-call filter has no sleep.
+    fn wait_rebind_gap(&self) {
+        let since = self
+            .unbound_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(since) = since {
+            let left = self.rebind_gap.saturating_sub(since.elapsed());
+            if !left.is_zero() {
+                std::thread::sleep(left);
+            }
         }
     }
 
@@ -1473,6 +1541,14 @@ impl UsbFunction for FunctionFsGadget {
         // attempt is the driver's, on its backoff. A tree that differs and is still bound is not
         // remade under its binding: the daemon takes it off its controller (what it does before
         // every attach anyway) and asks again, once.
+        // What a host may hold configured as this enable begins: a gadget that is bound, or, the
+        // first time this function enables it, a tree that was already there (a daemon before
+        // this one made it, and when it came off its controller is not known). Either is bound
+        // again only after `UDC` has been clear for the gap.
+        let host_may_hold = !released
+            && (self.udc_bound()
+                || (!std::mem::replace(&mut self.enabled_before, true)
+                    && self.paths.gadget.is_dir()));
         let mut serial = None;
         if !released && let Some((helper, index)) = &self.helper {
             let mut asked = helper
@@ -1519,11 +1595,18 @@ impl UsbFunction for FunctionFsGadget {
             return Ok(());
         }
         self.unbind_now();
+        if host_may_hold {
+            // Whoever took it off (the helper's takeover or remake, the unbind above, the kernel):
+            // the gap runs from now.
+            self.note_unbound();
+        }
         let attached = match &self.helper {
             Some((helper, index)) => self.paths.attach(&plan, &mut || {
+                self.wait_rebind_gap();
                 helper.lock().map_err(|_| poisoned())?.bind(*index)
             }),
             None => self.paths.attach(&plan, &mut || {
+                self.wait_rebind_gap();
                 attribute(&self.paths.gadget, "UDC", &self.paths.name)
             }),
         };

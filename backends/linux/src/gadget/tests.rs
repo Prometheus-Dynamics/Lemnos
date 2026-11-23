@@ -2355,3 +2355,94 @@ fn a_function_with_no_session_or_one_the_controller_let_go_parks_nothing() {
     alone.enable(&set()).unwrap();
     assert!(!alone.park());
 }
+
+/// GADGET-REBIND-VISIBLE: the helper's trees tell each bind that follows a let-go, with the way
+/// the gadget was let go and how long `UDC` had been clear. A tree made fresh, unbound though
+/// never bound (as every enable does), is not a let-go. The wait itself is the daemon's.
+#[test]
+fn the_trees_tell_a_bind_after_a_let_go_and_how_long_udc_was_clear() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    fs::remove_dir_all(tree.gadget_dir()).unwrap();
+    assert_eq!(
+        helper_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Made
+    );
+    trees.unbind(UDC).unwrap();
+    trees.bind(UDC).unwrap();
+    assert_eq!(
+        trees.take_rebind(UDC),
+        None,
+        "a fresh tree has no host to tell"
+    );
+
+    // Bound, unbound, and bound again 30 ms later.
+    trees.unbind(UDC).unwrap();
+    assert_eq!(tree.attribute("UDC").trim(), "");
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    trees.bind(UDC).unwrap();
+    let rebind = trees.take_rebind(UDC).expect("the rebind is told");
+    assert_eq!(rebind.path, "unbound");
+    assert!(rebind.clear_for >= std::time::Duration::from_millis(30));
+    assert_eq!(trees.take_rebind(UDC), None, "told once");
+
+    // The next daemon's helper finds a tree the last one made, still bound: adopted, and that is
+    // the path told.
+    let tree = Tree::new();
+    let mut first = Trees::new(&tree.roots());
+    helper_setup(&mut first, &mut recorder).unwrap();
+    first.bind(UDC).unwrap();
+    let mut again = Trees::new(&tree.roots());
+    assert_eq!(
+        helper_setup(&mut again, &mut recorder).unwrap(),
+        Outcome::Adopted
+    );
+    again.unbind(UDC).unwrap();
+    again.bind(UDC).unwrap();
+    assert_eq!(again.take_rebind(UDC).unwrap().path, "adopted");
+    assert_eq!(tree.attribute("UDC").trim(), UDC);
+}
+
+/// GADGET-REBIND-VISIBLE, the daemon's side: a gadget taken off a controller it was bound to is
+/// bound again only after the gap, so a host that held it configured sees it go. An unbind long
+/// enough ago costs nothing. (The gap is [`REBIND_GAP`]; 300 ms here, and 20 ms in this crate's
+/// other tests, which rebind hundreds of times.)
+#[test]
+fn a_gadget_that_was_bound_is_bound_again_only_after_the_gap() {
+    let gap = std::time::Duration::from_millis(300);
+    let tree = Tree::new();
+    setup(&tree);
+    let mut gadget = tree.gadget().with_rebind_gap(gap);
+    gadget.enable(&set()).unwrap();
+    assert_eq!(tree.attribute("UDC").trim(), UDC);
+
+    // Off and on again at once, as a driver that lets go and brings the function up does. The
+    // gap runs from the unbind, which is the first thing `disable` does.
+    let before = std::time::Instant::now();
+    gadget.disable().unwrap();
+    assert_eq!(tree.attribute("UDC").trim(), "");
+    let disabled = before.elapsed();
+    gadget.enable(&set()).unwrap();
+    assert!(
+        before.elapsed() >= gap,
+        "bound again {:?} after the unbind began",
+        before.elapsed()
+    );
+    assert!(
+        disabled < gap / 2,
+        "the disable alone took {disabled:?}: the wait was the bind's"
+    );
+    assert_eq!(tree.attribute("UDC").trim(), UDC);
+
+    // Let go long enough ago: the bind waits for nothing more.
+    gadget.disable().unwrap();
+    std::thread::sleep(gap + std::time::Duration::from_millis(50));
+    let began = std::time::Instant::now();
+    gadget.enable(&set()).unwrap();
+    assert!(
+        began.elapsed() < gap / 2,
+        "waited {:?} again",
+        began.elapsed()
+    );
+}
