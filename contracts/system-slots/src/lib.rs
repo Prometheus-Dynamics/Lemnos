@@ -127,8 +127,9 @@ pub trait Slots {
     /// `ENOSPC` when it and the reserve don't, `BUSY` while an install runs.
     #[method(10)]
     fn accept(&mut self, size: u64) -> Result<()>;
-    /// Installs the bundle a sender put in the data partition's `slots/.incoming/<name>`, as
-    /// [`Slots::install`] does: the job's progress is the bytes of the file checked and
+    /// Installs the bundle a sender sent to `lemnos/<device>/<name>` (Orion's file delivery, with
+    /// `<device>` this driver's id), which the bridge lands in the data partition's
+    /// `slots/.incoming/<name>` once its SHA-256 checks, as [`Slots::install`] does: the job's progress is the bytes of the file checked and
     /// unpacked, its result the new slot's id. `name` is one path component of
     /// `[A-Za-z0-9._-]`, and the file must be a regular file there, not a link. The driver owns
     /// the file: it is deleted when the job ends, however it ends, and `.incoming` is emptied
