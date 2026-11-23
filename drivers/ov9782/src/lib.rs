@@ -21,7 +21,7 @@
 //! sensor, so the delay runs from the sensor's own start, which comes after the supplies rise. A
 //! chip that still does not answer then is recovered with the backoff below, as any bus fault is.
 //!
-//! Modes are one table (`chip::MODES`): 1280x800, 1280x720 and a 2x2-binned 640x400, each at RAW10
+//! Modes are one table (`chip::MODES`): 1280x800, 1280x720 and a 2x2-subsampled 640x400, each at RAW10
 //! and RAW8. A mode's array crop is reported as `Mode::crop`; the contract has no way to change a
 //! crop at runtime, so a different crop is a different row of that table.
 //!

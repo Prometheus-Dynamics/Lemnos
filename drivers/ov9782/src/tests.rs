@@ -317,7 +317,7 @@ fn full_start_sequence_1280x800_raw10_gated_clock() {
 }
 
 #[test]
-fn full_start_sequence_640x400_binned_raw8_continuous_clock() {
+fn full_start_sequence_640x400_subsampled_raw8_continuous_clock() {
     let bus = bus_with_id(0x9782);
     let mut s = sensor_on(&bus, &[("continuous_clock", ConfigValue::Bool(true))]);
     s.select_mode(5).unwrap();
@@ -345,13 +345,13 @@ fn full_start_sequence_640x400_binned_raw8_continuous_clock() {
         (0x3811, 0x04),
         (0x3812, 0x00),
         (0x3813, 0x04),
-        // 2x2 binning: both increments colour-preserving.
+        // 2x2 subsample: of each four columns and rows, two adjacent read, so Bayer quads stay whole.
         (0x3814, 0x31),
         (0x3815, 0x31),
-        // Vertical binning on, horizontal binning on, digital binning control set.
-        (0x3820, 0x61),
-        (0x3821, 0x01),
-        (0x3837, 0x0c),
+        // No binning: vertical, horizontal and digital all off.
+        (0x3820, 0x60),
+        (0x3821, 0x00),
+        (0x3837, 0x00),
         (0x4003, 0x40),
         (0x4008, 0x02),
         (0x4009, 0x05),
@@ -619,14 +619,14 @@ fn mode_table_reports_the_values_the_registers_program() {
     assert_eq!(raw8_800.line_time_ps, 7_968_750); // 765 / 96 MHz
     assert_eq!(raw8_800.black_level, 16);
 
-    let binned = s.mode(4).unwrap();
-    assert_eq!(binned.link.width, 640);
-    assert_eq!(binned.link.height, 400);
-    assert_eq!((binned.binning_x, binned.binning_y), (2, 2));
-    assert_eq!(binned.frame_length_min, 422);
-    // The binned mode reads the whole active array.
+    let subsampled = s.mode(4).unwrap();
+    assert_eq!(subsampled.link.width, 640);
+    assert_eq!(subsampled.link.height, 400);
+    assert_eq!((subsampled.binning_x, subsampled.binning_y), (2, 2));
+    assert_eq!(subsampled.frame_length_min, 422);
+    // The subsampled mode reads the whole active array.
     assert_eq!(
-        binned.crop,
+        subsampled.crop,
         Rect {
             x: 8,
             y: 8,
@@ -1118,12 +1118,12 @@ fn set_flips_sets_the_flip_bits_over_the_mode_base_values() {
     assert_eq!(s.set_flips(false, false), Ok(BayerOrder::Bggr));
     assert_eq!(writes(&bus), vec![(0x3820, 0x40), (0x3821, 0x00)]);
 
-    // In a binned mode the binning bits stay set alongside the flip bits.
+    // In the subsampled mode the flip bits go on the mode's own values, which have no binning bits.
     let (mut s, bus) = sensor();
     s.select_mode(4).unwrap();
     clear(&bus);
     s.set_flips(true, true).unwrap();
-    assert_eq!(writes(&bus), vec![(0x3820, 0x65), (0x3821, 0x05)]);
+    assert_eq!(writes(&bus), vec![(0x3820, 0x64), (0x3821, 0x04)]);
 }
 
 #[test]

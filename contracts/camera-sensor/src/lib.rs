@@ -247,7 +247,7 @@ pub struct Mode {
     pub digital_gain: GainRange,
     /// The part of the array this mode reads.
     pub crop: Rect,
-    /// Array pixels combined into one output pixel across and down. 1 for none.
+    /// Array pixels per output pixel across and down, binned or subsampled. 1 for neither.
     pub binning_x: u8,
     pub binning_y: u8,
     pub black_level: u16,

@@ -295,6 +295,23 @@ board: no production path on the board is known to take the controller's device 
 | [`H1.md`](../testing/board-runs/H1.md) | The kernel module's `unconfined=`: the K230 ISP's registers mapped though no IOMMU confines it |
 | [`J1.md`](../testing/board-runs/J1.md) | The sensor's link confirmed from the receiver's `source`, the receiver's `layout` with its stride, and the buffer length a stream reports: each receiver's answer on the reference board |
 
+### Sensor modes: which have been looked at
+
+A mode is *seen clean* when a real frame from it has been looked at on a board and was right: the
+whole field, the right colours, no missing or doubled rows. Frame rates and test patterns do not
+count. A consumer that selects no mode gets none: the `ov9782` refuses `start` until a mode is
+selected, so there is no default to fall back on. The proof tools and the simulator select mode 0,
+which is seen clean.
+
+| `ov9782` mode | Output | Looked at |
+|---|---|---|
+| 0 | 1280x800 RAW10 | Seen clean |
+| 1 | 1280x800 RAW8 | Test pattern only (colour bars, `D8.md` step 1); no real frame looked at |
+| 2 | 1280x720 RAW10, the top 720 lines | Not looked at |
+| 3 | 1280x720 RAW8, the top 720 lines | Not looked at |
+| 4 | 640x400 RAW10, 2x2 subsampled | Not looked at; the table row changed from binning to a Bayer-keeping subsample (`D8.md` step 13) |
+| 5 | 640x400 RAW8, 2x2 subsampled | Not looked at; as mode 4 |
+
 ## Frame streams on dma-bufs
 
 | Check | What a board has to show |

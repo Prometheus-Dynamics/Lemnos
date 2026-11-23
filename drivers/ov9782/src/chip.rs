@@ -168,7 +168,7 @@ const RAW8: Depth = Depth {
 pub struct Window {
     pub width: u16,
     pub height: u16,
-    /// Array pixels combined into one output pixel across and down: 1 or 2.
+    /// Array pixels per output pixel across and down: 1, or 2 for a 2x2 subsample.
     pub binning: u8,
     /// Array start and end column and row (inclusive), including the dummy rows and columns.
     pub array: [u16; 4],
@@ -311,12 +311,14 @@ const WINDOW_720: Window = Window {
     vblank_min: 41,
 };
 
-/// 640x400: 2x2 analogue binning of the whole active array.
+/// 640x400: a 2x2 subsample of the whole active array that keeps the Bayer pattern.
 ///
-/// Differs from the reference 640x400 table on purpose, which horizontally binned and skipped
-/// lines with an increment that keeps only same-colour rows on a colour filter: the row increment
-/// is `0x31` (not `0x22`), vertical binning is on (`format1` bit 0) and the digital binning
-/// control is set. It also writes the black-level target, which the reference table left at reset.
+/// Both increments are `0x31`: of each four columns and four rows, two adjacent ones are read and
+/// two skipped, so every output 2x2 is one colour-filter quad. No binning is on: `format1` and
+/// `format2` have their binning bits clear and the digital binning control is 0. Binning combined
+/// columns or rows across colour-filter sites, which mixed colours on a colour sensor. Differs from
+/// the reference 640x400 table, whose row increment `0x22` kept only same-colour rows. It also
+/// writes the black-level target, which the reference table left at reset.
 const WINDOW_400: Window = Window {
     width: 640,
     height: 400,
@@ -325,9 +327,9 @@ const WINDOW_400: Window = Window {
     offset: (4, 4),
     x_inc: 0x31,
     y_inc: 0x31,
-    format1: 0x61,
-    format2: 0x01,
-    digital_binning: 0x0c,
+    format1: 0x60,
+    format2: 0x00,
+    digital_binning: 0x00,
     analog: 0x10,
     blc: Blc {
         target: 0x40,
