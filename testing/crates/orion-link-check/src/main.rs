@@ -32,7 +32,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A line on standard output, which the harness reads.
 macro_rules! say {
@@ -434,13 +434,7 @@ fn stuck_call_keeps_the_link(
     let kept = daemon.count(KEPT);
     let held: Vec<_> = threads
         .iter()
-        .filter_map(|&tid| match lemnos_linux_sys::test_hold::hold(tid) {
-            Ok(held) => Some(held),
-            Err(error) => {
-                say!("     lane thread {tid} not held: {error}");
-                None
-            }
-        })
+        .filter_map(|&tid| hold_waiting(tid))
         .collect();
     check(
         held.len() == threads.len(),
@@ -513,6 +507,136 @@ fn stuck_call_keeps_the_link(
         bridge.count(OFFERED) == offers,
         &named("the bridge kept its offer: no second offer across the rebind"),
     );
+}
+
+/// The futex system call's number: what a thread waiting for work, or for a lock, is in.
+#[cfg(target_arch = "x86_64")]
+const SYS_FUTEX: &str = "202";
+#[cfg(target_arch = "aarch64")]
+const SYS_FUTEX: &str = "98";
+
+/// Whether a `/proc/<tid>/syscall` line is a futex wait: the futex call, with an operation that
+/// waits (`FUTEX_WAIT` 0 or `FUTEX_WAIT_BITSET` 9, whatever its flags). A futex wake is the same
+/// call and no wait: a lane wakes its caller while it still holds its mutex.
+fn in_futex_wait(line: &str) -> bool {
+    let mut words = line.split(' ');
+    if words.next() != Some(SYS_FUTEX) {
+        return false;
+    }
+    let op = words
+        .nth(1)
+        .and_then(|op| u64::from_str_radix(op.trim_start_matches("0x"), 16).ok());
+    matches!(op.map(|op| op & 0x7f), Some(0 | 9))
+}
+
+/// Says what a stopped thread's stack holds of its program's code: each word of the stack's first
+/// 8 KiB that points into an executable mapping of the daemon's file, as its offset in the file, so
+/// the line can be read against the unstripped binary. Its tracer may read its memory; nothing is
+/// written. Says nothing when a file can't be read.
+fn say_stack(tid: i32, at: &str) {
+    use std::os::unix::fs::FileExt;
+    let hex = |word: &str| u64::from_str_radix(word.trim_start_matches("0x"), 16).ok();
+    let mut words = at.rsplit(' ');
+    let (Some(pc), Some(sp)) = (words.next().and_then(hex), words.next().and_then(hex)) else {
+        return;
+    };
+    let Ok(maps) = fs::read_to_string(format!("/proc/{tid}/maps")) else {
+        return;
+    };
+    // (start, end, file offset) of each executable mapping of a file.
+    let text: Vec<(u64, u64, u64)> = maps
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (range, perms, offset) = (fields.next()?, fields.next()?, fields.next()?);
+            let path = fields.nth(2)?;
+            if !perms.contains('x') || !path.starts_with('/') {
+                return None;
+            }
+            let (start, end) = range.split_once('-')?;
+            Some((hex(start)?, hex(end)?, hex(offset)?))
+        })
+        .collect();
+    let offset_of = |address: u64| {
+        text.iter()
+            .find(|(start, end, _)| (*start..*end).contains(&address))
+            .map(|(start, _, offset)| address - start + offset)
+    };
+    let Ok(memory) = fs::File::open(format!("/proc/{tid}/mem")) else {
+        return;
+    };
+    let mut stack = vec![0u8; 8192];
+    let Ok(read) = memory.read_at(&mut stack, sp) else {
+        return;
+    };
+    let found: Vec<String> = offset_of(pc)
+        .into_iter()
+        .chain(
+            stack[..read]
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .filter_map(|word| offset_of(u64::from_le_bytes(*word))),
+        )
+        .take(40)
+        .map(|offset| format!("{offset:#x}"))
+        .collect();
+    say!(
+        "     lane thread {tid} code offsets, innermost first: {}",
+        found.join(" ")
+    );
+}
+
+/// Stops lane thread `tid` while it waits, and says where it stood (`/proc/<tid>/syscall`: the
+/// call's number and arguments, the stack pointer and the program counter).
+///
+/// A driver's call that hangs holds what the driver took and nothing of the host's: the lane's own
+/// mutex is held only by the lane's bookkeeping around the call. A tracer can stop a thread at any
+/// instruction, so it can stop one inside that bookkeeping, holding the mutex; the caller's deadline
+/// is a timed wait that starts by taking it, and never comes (the host's own test,
+/// `a_holder_of_the_lanes_mutex_stops_the_callers_deadline_with_it`). That is not the fault this
+/// check stages. So a thread found running is let go and stopped again, until it is found in a
+/// wait: waiting for work it holds nothing, and waiting inside a call it holds what a hung driver
+/// would. Each time is said, with where it stood.
+///
+/// One of the daemon's lanes is busy through this check (its condvar counts hundreds of thousands
+/// of wakes, three a call), so its thread is as likely to be stopped in the lane's handoff as in
+/// its wait. Seen in runs of this check, each resolved against the unstripped daemon:
+/// - stopped in a futex wake: the lane's `notify_all` after it stored a result, made with the
+///   lane's mutex held (the stop that froze every caller), and the mutex's own unlock wake;
+/// - stopped in a futex wait: for work (the lane's condvar), or, just woken, for the lane's mutex
+///   while the caller takes its result (a wait on the value 2). In both it holds nothing of the
+///   lane's, so those are where it is held.
+fn hold_waiting(tid: i32) -> Option<lemnos_linux_sys::test_hold::Held> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let held = match lemnos_linux_sys::test_hold::hold(tid) {
+            Ok(held) => held,
+            Err(error) => {
+                say!("     lane thread {tid} not held: {error}");
+                return None;
+            }
+        };
+        let at = fs::read_to_string(format!("/proc/{tid}/syscall"))
+            .map(|text| text.trim().to_string())
+            .unwrap_or_else(|error| format!("<{error}>"));
+        if in_futex_wait(&at) {
+            say!("     lane thread {tid} stopped in a wait: {at}");
+            say_stack(tid, &at);
+            return Some(held);
+        }
+        say_stack(tid, &at);
+        say!("     lane thread {tid} was not in a wait when stopped ({at}): let go, stopped again");
+        if let Err(error) = held.release() {
+            say!("     lane thread {tid} not let go: {error}");
+            return None;
+        }
+        if Instant::now() >= deadline {
+            say!("     lane thread {tid} never found in a wait");
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
 }
 
 /// The delays the hello sweep tries, in milliseconds, one bounce each. A short delay sends the host's
@@ -660,5 +784,30 @@ impl HostRun {
             .position(|l| l.contains("round trips with the node"));
         status.is_ok_and(|status| status.success())
             && matches!((up, trips), (Some(u), Some(t)) if u < t)
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::{SYS_FUTEX, in_futex_wait};
+
+    #[test]
+    fn only_a_futex_wait_is_a_wait() {
+        // A private wait and a private bitset wait.
+        assert!(in_futex_wait(&format!(
+            "{SYS_FUTEX} 0x7f00 0x80 0x2 0x0 0x0 0x0 0x7ffd 0x4011"
+        )));
+        assert!(in_futex_wait(&format!(
+            "{SYS_FUTEX} 0x7f00 0x189 0x2 0x0 0x0 0xffffffff 0x7ffd 0x4011"
+        )));
+        // A private wake, another call, a thread in no call, and a thread that is running.
+        assert!(!in_futex_wait(&format!(
+            "{SYS_FUTEX} 0x7f00 0x81 0x1 0x0 0x0 0x0 0x7ffd 0x4011"
+        )));
+        assert!(!in_futex_wait(
+            "0 0x3 0x7f00 0x40 0x0 0x0 0x0 0x7ffd 0x4011"
+        ));
+        assert!(!in_futex_wait("-1 0x7ffd 0x4011"));
+        assert!(!in_futex_wait("running"));
     }
 }
