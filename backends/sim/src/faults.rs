@@ -314,6 +314,17 @@ impl<T: UsbFunction<Error = ErrorKind>> UsbFunction for Faulty<T> {
     fn endpoint_handles(&self) -> Result<[lemnos_hal::blocks::BufferHandle<'_>; 2], ErrorKind> {
         self.inner.endpoint_handles()
     }
+    /// A parked session lets go of the board's claim, so the next function on the name opens.
+    fn park(&mut self) -> bool {
+        let parked = self.inner.park();
+        if parked {
+            self._release = Release(None);
+        }
+        parked
+    }
+    fn took_up(&self) -> Option<lemnos_hal::TookUp> {
+        self.inner.took_up()
+    }
     fn enable_note(&self) -> Option<&'static str> {
         self.inner.enable_note()
     }

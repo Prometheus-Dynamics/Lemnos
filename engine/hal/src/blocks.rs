@@ -692,6 +692,19 @@ pub const fn iso_shape_ok(transfers: u8, packets: u16, packet_bytes: u32) -> boo
         && packet_bytes <= MAX_ISO_PACKET_BYTES
 }
 
+/// What an [`UsbFunction::enable`] did with a session an earlier function on the same controller
+/// parked ([`UsbFunction::park`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TookUp {
+    /// The parked session was taken up as it was: the gadget stayed bound, the endpoints a holder
+    /// has keep working, and the session's state (configured, suspended, a request pending) is
+    /// told again as events, first.
+    Adopted,
+    /// The parked session described other descriptors: it was taken down, and the function was
+    /// enabled fresh. A holder's endpoints are gone with it.
+    Replaced,
+}
+
 /// What happened on the wire to this board acting as a USB device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsbFunctionEvent {
@@ -834,6 +847,20 @@ pub trait UsbFunction {
     /// the rest up): a state of the system the function runs on that no retry clears (the
     /// backend's own text). `None` by default, and after an enable that met nothing.
     fn enable_note(&self) -> Option<&'static str> {
+        None
+    }
+    /// Parks the live session (the bound gadget, its `ep0` and endpoint files) for the next
+    /// function opened on the same controller, and lets go of the controller, so that function
+    /// can be opened while this one still exists. Its [`enable`](Self::enable) with the same
+    /// descriptors takes the session up without the gadget ever leaving the bus, so a holder's
+    /// copies of the endpoints keep working. This function does nothing more after a park: its
+    /// [`disable`](Self::disable) (and its drop) takes the parked session down only if nothing
+    /// took it up. `true` when a live session was parked. `false` by default.
+    fn park(&mut self) -> bool {
+        false
+    }
+    /// What the last [`enable`](Self::enable) did with a parked session, if there was one.
+    fn took_up(&self) -> Option<TookUp> {
         None
     }
     /// What happened since the last call, oldest first, or `None`. Never waits.

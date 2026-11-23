@@ -10,8 +10,8 @@ use super::{Shared, with};
 use crate::ErrorKind;
 use crate::blocks::{
     BufferHandle, BufferKind, Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt,
-    InterruptEvent, IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UartFormat,
-    UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
+    InterruptEvent, IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, TookUp, Uart,
+    UartFormat, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
 };
 use crate::usb_descriptors::{self, UsbDescriptors, UsbEndpoint};
 
@@ -1197,6 +1197,15 @@ pub enum ControlAnswer {
 struct UsbFunctionState {
     descriptors: Option<Vec<u8>>,
     configured: bool,
+    suspended: bool,
+    /// The number of the park whose session waits to be taken up ([`UsbFunction::park`]).
+    parked: Option<u32>,
+    parks: u32,
+    /// Parked sessions taken down because nothing took them up.
+    parked_dropped: u32,
+    took_up: Option<TookUp>,
+    /// The next `next_event` takes this long first: a driver's call that overruns its deadline.
+    stall_next: Option<Duration>,
     /// The controller let go: `next_event` fails until the function is enabled again.
     released: bool,
     refuse_enable: Option<ErrorKind>,
@@ -1234,6 +1243,16 @@ struct Stage {
 }
 
 impl UsbFunctionState {
+    fn take_down(&mut self) {
+        self.descriptors = None;
+        self.configured = false;
+        self.suspended = false;
+        self.pending = None;
+        self.stage = None;
+        self.halted.clear();
+        self.events.clear();
+    }
+
     fn named(&self, endpoint: u8) -> Option<UsbEndpoint> {
         let set = UsbDescriptors::parse(self.descriptors.as_deref()?).ok()?;
         usb_descriptors::endpoints(set.full_speed()).find(|e| e.address == endpoint)
@@ -1310,6 +1329,8 @@ pub struct MockUsbFunction {
     /// Outside the state, so a borrow of it can outlive the lock.
     #[cfg(all(feature = "std", unix))]
     endpoint_files: Option<super::std::sync::Arc<[super::std::os::fd::OwnedFd; 2]>>,
+    /// The park this handle made, if it parked the session (see [`UsbFunction::park`]).
+    parked_here: Option<u32>,
 }
 
 impl MockUsbFunction {
@@ -1353,6 +1374,18 @@ impl MockUsbFunction {
     /// How many times `enable` has succeeded.
     pub fn enables(&self) -> u32 {
         with(&self.state, |s| s.enables)
+    }
+
+    /// Makes the next `next_event` take `wait` before it answers, as a call stuck in the kernel
+    /// does.
+    pub fn stall_next_event(&self, wait: Duration) {
+        with(&self.state, |s| s.stall_next = Some(wait));
+    }
+
+    /// How many sessions were parked, and how many of those were taken down because nothing took
+    /// them up.
+    pub fn parks(&self) -> (u32, u32) {
+        with(&self.state, |s| (s.parks, s.parked_dropped))
     }
 
     /// Makes `enable` fail with `kind` until this is called with `None`.
@@ -1475,8 +1508,51 @@ impl UsbFunction for MockUsbFunction {
         })
     }
 
+    fn park(&mut self) -> bool {
+        if self.parked_here.is_some() {
+            return false;
+        }
+        let parked = with(&self.state, |s| {
+            if s.descriptors.is_none() || s.released || s.parked.is_some() {
+                return None;
+            }
+            s.parks += 1;
+            s.parked = Some(s.parks);
+            s.parked
+        });
+        self.parked_here = parked;
+        parked.is_some()
+    }
+
+    fn took_up(&self) -> Option<TookUp> {
+        with(&self.state, |s| s.took_up)
+    }
+
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
         with(&self.state, |s| {
+            s.took_up = None;
+            if s.parked.take().is_some() {
+                if s.descriptors.as_deref() == Some(descriptors) {
+                    // Taken up as it is: what the host set up is told again, first.
+                    s.took_up = Some(TookUp::Adopted);
+                    if let Some((setup, length, data)) = s.pending.take() {
+                        s.events
+                            .push_front((UsbFunctionEvent::Setup { setup, length }, data));
+                    }
+                    if s.suspended {
+                        s.events
+                            .push_front((UsbFunctionEvent::Suspended, Vec::new()));
+                    }
+                    if s.configured {
+                        s.configured = false;
+                        s.events
+                            .push_front((UsbFunctionEvent::Configured, Vec::new()));
+                    }
+                    return Ok(());
+                }
+                s.took_up = Some(TookUp::Replaced);
+                s.take_down();
+            }
             if s.descriptors.is_some() {
                 return Err(ErrorKind::Busy);
             }
@@ -1514,18 +1590,26 @@ impl UsbFunction for MockUsbFunction {
     }
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
-        with(&self.state, |s| {
-            s.descriptors = None;
-            s.configured = false;
-            s.pending = None;
-            s.stage = None;
-            s.halted.clear();
-            s.events.clear();
+        let parked_here = self.parked_here.take();
+        with(&self.state, |s| match parked_here {
+            // Parked by this handle: taken down only if nothing took it up.
+            Some(park) => {
+                if s.parked == Some(park) {
+                    s.parked = None;
+                    s.parked_dropped += 1;
+                    s.take_down();
+                }
+            }
+            None => s.take_down(),
         });
         Ok(())
     }
 
     fn next_event(&mut self) -> Result<Option<UsbFunctionEvent>, ErrorKind> {
+        #[cfg(feature = "std")]
+        if let Some(wait) = with(&self.state, |s| s.stall_next.take()) {
+            super::std::thread::sleep(wait);
+        }
         with(&self.state, |s| {
             if s.descriptors.is_none() || s.released {
                 return Err(ErrorKind::Unavailable);
@@ -1545,12 +1629,14 @@ impl UsbFunction for MockUsbFunction {
                 }
                 UsbFunctionEvent::Deconfigured => {
                     s.configured = false;
+                    s.suspended = false;
                     s.halted.clear();
                 }
                 UsbFunctionEvent::Setup { setup, length } => {
                     s.pending = Some((setup, length, data));
                 }
-                UsbFunctionEvent::Suspended | UsbFunctionEvent::Resumed => {}
+                UsbFunctionEvent::Suspended => s.suspended = true,
+                UsbFunctionEvent::Resumed => s.suspended = false,
             }
             Ok(Some(event))
         })

@@ -375,3 +375,80 @@ fn the_description_says_when_the_pair_is_lent_and_when_it_is_not_any_more() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// A watch of the gadget's state on its own connection, the first value read.
+fn watch(socket: &std::path::Path) -> (Session, [bool; 4]) {
+    let mut watch = connect(socket, "watch");
+    let mut handle = watch.open("gadget", "usb.function/1").unwrap();
+    watch.subscribe(&mut handle, STATE, 10_000, true).unwrap();
+    let first = next_state(&mut watch);
+    (watch, first)
+}
+
+#[test]
+fn a_tick_that_overruns_keeps_the_holders_pair_and_the_gadget_on_the_bus() {
+    let (running, mut host) = start();
+    let mut holder = connect(&running.socket, "holder");
+    let device = device_index(&mut holder);
+    let lent = take_end(&mut holder, device).unwrap();
+    host.function.event(UsbFunctionEvent::Configured);
+    let (mut seen, _) = watch(&running.socket);
+    until(&mut seen, |state| state[1]);
+    assert_eq!(host.function.enables(), 1);
+
+    // The driver's tick is stuck past the call deadline: the host abandons it, and binds the
+    // device again once it returns. The old instance parks its session; the new one takes it up.
+    host.function.stall_next_event(Duration::from_millis(600));
+    let mut other = connect(&running.socket, "other");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        // The new instance knows its holder once it has the pair lent again: another is refused.
+        let refused_busy = host.function.parks() == (1, 0)
+            && matches!(
+                other.usb_endpoints(device, std::sync::Arc::new(LinuxStreams)),
+                Err(Error::Refused {
+                    status: Status::BUSY,
+                    ..
+                })
+            );
+        if refused_busy {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no rebind that kept the hold: parks {:?}",
+            host.function.parks()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        host.function.enables(),
+        1,
+        "never enabled again: never off the bus"
+    );
+    assert!(host.function.is_configured());
+
+    // The holder's copies carry bytes both ways, as before.
+    let (mut out, mut input) = (UnixStream::from(lent.out), UnixStream::from(lent.input));
+    host.to_device.write_all(b"after").unwrap();
+    assert_eq!(read_exact(&mut out, 5), b"after");
+    input.write_all(b"still").unwrap();
+    assert_eq!(read_exact(&mut host.from_device, 5), b"still");
+
+    // The new instance's state is the session's: configured, as the host left it.
+    let (mut seen, first) = watch(&running.socket);
+    let state = if first[1] {
+        first
+    } else {
+        until(&mut seen, |state| state[1])
+    };
+    assert_eq!(state, [true, true, false, false]);
+    // And the host going away is seen by the new instance.
+    host.function.event(UsbFunctionEvent::Deconfigured);
+    assert_eq!(
+        until(&mut seen, |state| !state[1]),
+        [true, false, false, false]
+    );
+    // The hold stood through it all.
+    assert_eq!(end_reads(lent.end, Duration::from_millis(300)), None);
+}

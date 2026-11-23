@@ -29,6 +29,8 @@ multiple_unsafe_ops_per_block = "deny"
 default = []
 # `test_alloc`: an allocation-counting global allocator for another crate's tests.
 alloc-count = []
+# Holding one thread of another process stopped, for the QEMU harness: a driver call that overruns.
+test-hold = []
 # A pseudo-terminal pair, for tests of serial code in other crates.
 test-pty = []
 # A recording stand-in for usbdevfs, for tests of USB code in other crates.

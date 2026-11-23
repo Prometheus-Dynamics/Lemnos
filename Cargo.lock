@@ -2636,6 +2636,7 @@ dependencies = [
  "lemnos-measure",
  "lemnos-sim",
  "lemnos-wire",
+ "rustix",
  "serde",
  "shm-measure",
  "shm-ring",

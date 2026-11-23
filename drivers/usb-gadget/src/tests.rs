@@ -1599,3 +1599,58 @@ fn the_links_name_is_the_name_on_the_first_interface() {
         Err(Fault::LinkNotFirst)
     );
 }
+
+/// A rebind while a caller holds the pair: the old instance parks the session, and the new one
+/// takes the link up when its descriptors are the same: never enabled again, and it says so. With
+/// other descriptors the parked session is taken down, and the new instance says why the link was
+/// not taken up: the function changed.
+#[cfg(unix)]
+#[test]
+fn a_rebind_takes_the_link_up_with_the_same_descriptors_and_drops_it_with_others() {
+    type Taken = core::result::Result<(), &'static str>;
+    let cases: [(Vec<(&str, ConfigValue<'_>)>, Taken); 2] = [
+        (settings(), Ok(())),
+        (settings_without_serial(), Err(LINK_DROPPED_CHANGED)),
+    ];
+    for (entries, taken) in cases {
+        let mut rig = lending_rig();
+        rig.step();
+        assert!(
+            !Driver::rebinding(&mut rig.driver),
+            "nobody holds the pair: nothing parks"
+        );
+        lent(&mut rig, 1).expect("lent");
+        assert!(
+            Driver::rebinding(&mut rig.driver),
+            "parked for the next instance"
+        );
+        assert_eq!(rig.host.parks(), (1, 0));
+
+        let mut next = bind(&rig.host, &entries).map_err(|_| ()).expect("bind");
+        assert_eq!(
+            Driver::took_up_link(&next),
+            Err(LINK_NOT_UP),
+            "not before its first tick"
+        );
+        Driver::tick(&mut next, rig.now);
+        assert_eq!(Driver::took_up_link(&next), taken);
+        let mut said = Vec::new();
+        if let Some(notes) = Driver::notes(&mut next) {
+            while let Some(note) = notes.pop() {
+                said.push(note.text);
+            }
+        }
+        match taken {
+            Ok(()) => {
+                assert_eq!(rig.host.enables(), 1, "taken up: never enabled again");
+                assert!(said.contains(&LINK_TAKEN_UP), "{said:?}");
+            }
+            Err(_) => {
+                assert_eq!(rig.host.enables(), 2, "set up afresh");
+                assert!(!said.contains(&LINK_TAKEN_UP), "{said:?}");
+            }
+        }
+        drop(rig);
+        drop(next);
+    }
+}

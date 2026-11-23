@@ -2254,3 +2254,104 @@ fn a_gadget_bound_without_its_network_function_says_so_and_keeps_its_session_thr
     assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
     assert!(gadget.session.is_some());
 }
+
+// ---- A session parked for the next function on the controller (`UsbFunction::park`) ----
+
+fn parked_gadget(tree: &Tree, helper: &Arc<Mutex<Helped>>, parking: &Parking) -> FunctionFsGadget {
+    with_helper(tree, helper).parking(parking.clone())
+}
+
+#[test]
+fn a_parked_session_is_taken_up_by_the_next_function_with_nothing_written_and_its_state_told_again()
+{
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let parking = Parking::default();
+    let mut old = parked_gadget(&tree, &helper, &parking);
+    old.enable(&set()).unwrap();
+    {
+        let session = old.session.as_mut().unwrap();
+        session.configured = true;
+        session.suspended = true;
+    }
+    assert!(old.park());
+    assert!(old.session.is_none());
+    assert!(!old.park(), "parked once");
+    helper.lock().unwrap().calls.clear();
+
+    let mut new = parked_gadget(&tree, &helper, &parking);
+    new.enable(&set()).unwrap();
+    assert_eq!(new.took_up(), Some(TookUp::Adopted));
+    assert!(
+        helper.lock().unwrap().calls.is_empty(),
+        "nothing set up, bound or unbound"
+    );
+    assert_eq!(new.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
+    assert_eq!(new.next_event(), Ok(Some(UsbFunctionEvent::Suspended)));
+    // The old function's drop leaves the session the new one took up.
+    drop(old);
+    assert!(helper.lock().unwrap().calls.is_empty());
+    assert!(new.session.is_some());
+}
+
+#[test]
+fn a_parked_session_with_other_descriptors_is_taken_down_and_the_next_function_starts_fresh() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let parking = Parking::default();
+    let mut old = parked_gadget(&tree, &helper, &parking);
+    old.enable(&set()).unwrap();
+    assert!(old.park());
+    helper.lock().unwrap().calls.clear();
+
+    let mut new = parked_gadget(&tree, &helper, &parking);
+    new.enable(&set_without_serial()).unwrap();
+    assert_eq!(new.took_up(), Some(TookUp::Replaced));
+    let calls = helper.lock().unwrap().calls.clone();
+    assert_eq!(
+        calls.first(),
+        Some(&"unbind"),
+        "taken down first: {calls:?}"
+    );
+    assert!(
+        calls.contains(&"setup") && calls.contains(&"bind"),
+        "{calls:?}"
+    );
+    drop(old);
+    assert!(new.session.is_some());
+}
+
+#[test]
+fn a_parked_session_nothing_took_up_is_taken_down_by_the_drop_of_the_function_that_parked_it() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let parking = Parking::default();
+    let mut old = parked_gadget(&tree, &helper, &parking);
+    old.enable(&set()).unwrap();
+    assert!(old.park());
+    helper.lock().unwrap().calls.clear();
+    drop(old);
+    assert_eq!(helper.lock().unwrap().calls, ["unbind"], "never orphaned");
+    // Nothing is left to take up: the next function enables as any does.
+    let mut new = parked_gadget(&tree, &helper, &parking);
+    new.enable(&set()).unwrap();
+    assert_eq!(new.took_up(), None);
+}
+
+#[test]
+fn a_function_with_no_session_or_one_the_controller_let_go_parks_nothing() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let parking = Parking::default();
+    let mut gadget = parked_gadget(&tree, &helper, &parking);
+    assert!(!gadget.park(), "not enabled");
+    gadget.enable(&set()).unwrap();
+    gadget.session.as_mut().unwrap().released = true;
+    assert!(!gadget.park(), "let go by the controller");
+    // Without the daemon's parking, nothing is parked either.
+    let mut alone = with_helper(&tree, &helper);
+    fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
+    drop(gadget);
+    alone.enable(&set()).unwrap();
+    assert!(!alone.park());
+}

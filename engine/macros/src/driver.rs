@@ -213,6 +213,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::resume_record(self)
             }
 
+            fn rebinding(&mut self) -> bool {
+                <Self as ::lemnos_core::Lifecycle>::rebinding(self)
+            }
+
+            fn took_up_link(&self) -> ::core::result::Result<(), &'static str> {
+                <Self as ::lemnos_core::Lifecycle>::took_up_link(self)
+            }
+
             fn resume(&mut self, __record: &::lemnos_core::ResumeRecord) -> bool {
                 <Self as ::lemnos_core::Lifecycle>::resume(self, __record)
             }

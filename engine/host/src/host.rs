@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
     AddressWidth, BoardDevice, BoardView, BusKind, CallerId, ClocksHandle, Config, ConfigError,
@@ -53,6 +53,14 @@ pub trait Instance: Send {
     /// See [`Driver::resume`].
     fn resume(&mut self, _record: &ResumeRecord) -> bool {
         false
+    }
+    /// See [`Driver::rebinding`].
+    fn rebinding(&mut self) -> bool {
+        false
+    }
+    /// See [`Driver::took_up_link`].
+    fn took_up_link(&self) -> core::result::Result<(), &'static str> {
+        Err(lemnos_core::NOT_TAKEN_UP)
     }
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
@@ -119,6 +127,14 @@ impl<D: Driver + Send> Instance for D {
 
     fn resume(&mut self, record: &ResumeRecord) -> bool {
         Driver::resume(self, record)
+    }
+
+    fn rebinding(&mut self) -> bool {
+        Driver::rebinding(self)
+    }
+
+    fn took_up_link(&self) -> core::result::Result<(), &'static str> {
+        Driver::took_up_link(self)
     }
 
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status {
@@ -645,6 +661,14 @@ struct Slot {
     open_jobs: AtomicU32,
     /// The END descriptor of the hold the caller has, if it was lent with one. See [`EndHold`].
     end: Mutex<Option<EndHold>>,
+    /// The caller an END hold was lent to and has not given up, for a switch-off to wait on (see
+    /// [`Host::off`]), with the condition its release signals.
+    lent_to: Mutex<Option<CallerId>>,
+    released: Condvar,
+    /// The instance a rebind let go of when it parked what the holder of its endpoints uses
+    /// ([`Driver::rebinding`]): kept until the new instance's first tick has run, then dropped and
+    /// the holder's pair lent to the new one. Never ticked or called while kept.
+    kept: Mutex<Option<Kept>>,
     /// The callers that have called this device and have not gone, for [`Router::others_use`]. A
     /// full set holds at least `MAX_USERS - 1` callers, so a caller that does not fit is not kept:
     /// the answer for any asker is the same.
@@ -659,6 +683,16 @@ struct EndHold {
     read: OwnedFd,
     /// Kept open, and never written to: dropping it is what ends the hold for the holder.
     _write: OwnedFd,
+}
+
+/// How long a switch-off waits for the holder of an END hold to give it up once END is closed.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// An instance kept across a rebind, and the holder whose hold it kept.
+struct Kept {
+    /// Held for its drop: it is never ticked or called while kept.
+    _instance: Box<dyn Instance>,
+    holder: CallerId,
 }
 
 const NO_TICK: u64 = u64::MAX;
@@ -898,6 +932,9 @@ impl Slot {
             hung: AtomicBool::new(false),
             in_tick: AtomicBool::new(false),
             end: Mutex::new(None),
+            lent_to: Mutex::new(None),
+            released: Condvar::new(),
+            kept: Mutex::new(None),
             errors: AtomicU32::new(0),
             missing: Mutex::new(Vec::new()),
             link_refusal: Mutex::new(None),
@@ -956,6 +993,45 @@ impl Slot {
         if held.as_ref().is_some_and(|hold| hold.caller == caller) {
             *held = None;
         }
+        drop(held);
+        self.holder_released(caller);
+    }
+
+    /// `caller` gave up its hold, or went: a switch-off waiting on it goes on.
+    fn holder_released(&self, caller: CallerId) {
+        let mut lent = lock(&self.lent_to);
+        if *lent == Some(caller) {
+            *lent = None;
+            self.released.notify_all();
+        }
+    }
+
+    /// Waits at most `within` for the holder of an END hold to give it up: the holder's copies of
+    /// the pair are its own to close before the function goes.
+    fn wait_for_release(&self, within: std::time::Duration) {
+        let lent = lock(&self.lent_to);
+        let (mut lent, _) = self
+            .released
+            .wait_timeout_while(lent, within, |lent| lent.is_some())
+            .unwrap_or_else(PoisonError::into_inner);
+        *lent = None;
+    }
+
+    /// The instance kept across a rebind, let go of: the bind failed, or the device is switched
+    /// off or shut down before the new instance's first tick. What it kept for the next instance
+    /// and nothing took up goes with it, and so does the hold.
+    fn drop_kept(&self, why: &str) {
+        let Some(kept) = lock(&self.kept).take() else {
+            return;
+        };
+        warn(|| {
+            format!(
+                "device {} (driver {}): the instance kept across the rebind is let go ({why}): what it kept for the holder's link is taken down, and the hold ends",
+                self.spec.id, self.spec.driver
+            )
+        });
+        self.end_close();
+        drop(catch_unwind(AssertUnwindSafe(move || drop(kept))));
     }
 
     /// Ends whatever hold has an END descriptor, whoever has it.
@@ -2036,12 +2112,6 @@ impl Inner {
 
     /// Lets go of a driver that is not in a call, outside its lock, with a panic in its drop
     /// contained.
-    fn let_go(mut guard: MutexGuard<'_, Option<Box<dyn Instance>>>) {
-        let dead = guard.take();
-        drop(guard);
-        drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
-    }
-
     fn wake(&self) {
         if let Some(waker) = self.waker.get() {
             waker();
@@ -2136,17 +2206,101 @@ impl Inner {
     /// What the driver keeps for its next instance is read first, while the instance is still held
     /// (`Driver::resume_record`), and the next bind takes it up. A driver that panics while it
     /// answers keeps nothing: a panic is a fault, not a rebind.
-    fn rebind(&self, slot: &Slot, guard: MutexGuard<'_, Option<Box<dyn Instance>>>, why: &str) {
+    ///
+    /// An instance that parks what the holder of its endpoints uses ([`Driver::rebinding`]) is
+    /// kept, not dropped, and the hold goes on (see [`Inner::keep_for_rebind`]).
+    fn rebind(&self, slot: &Slot, mut guard: MutexGuard<'_, Option<Box<dyn Instance>>>, why: &str) {
         let record = guard.as_ref().and_then(|instance| {
             catch_unwind(AssertUnwindSafe(|| instance.resume_record()))
                 .ok()
                 .flatten()
         });
         *lock(&slot.resume) = record;
-        Self::let_go(guard);
+        let instance = guard.take();
+        drop(guard);
+        if let Some(instance) = instance
+            && let Some(dead) = self.keep_for_rebind(slot, instance)
+        {
+            drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+        }
         self.fault(slot, why);
+        // A device the failure rule's policy turned off keeps nothing for a bind that won't come.
+        if matches!(*lock(&slot.state), DeviceState::Off(_)) {
+            slot.drop_kept("the device is off");
+        }
         if slot.hinted.swap(false, Ordering::AcqRel) {
             self.bring_forward(slot);
+        }
+    }
+
+    /// Asks an instance the host is letting go of to rebind whether it parked what the holder of
+    /// its endpoints uses ([`Driver::rebinding`]), inside the panic boundary. Kept when it did and
+    /// a caller holds the endpoints with END: `None` then, and the hold goes on. Otherwise the
+    /// instance comes back for the caller to drop. An instance kept before is let go first: it
+    /// was the one before this one, and this one has taken up what it kept or never will.
+    fn keep_for_rebind(
+        &self,
+        slot: &Slot,
+        mut instance: Box<dyn Instance>,
+    ) -> Option<Box<dyn Instance>> {
+        let earlier = lock(&slot.kept).take();
+        drop(catch_unwind(AssertUnwindSafe(move || drop(earlier))));
+        let Some(holder) = lock(&slot.end).as_ref().map(|hold| hold.caller) else {
+            return Some(instance);
+        };
+        let parked = catch_unwind(AssertUnwindSafe(|| instance.rebinding())).unwrap_or(false);
+        if !parked {
+            return Some(instance);
+        }
+        warn(|| {
+            format!(
+                "device {} (driver {}): the instance is kept across the rebind: it parked the endpoints' link, and the hold goes on",
+                slot.spec.id, slot.spec.driver
+            )
+        });
+        *lock(&slot.kept) = Some(Kept {
+            _instance: instance,
+            holder,
+        });
+        None
+    }
+
+    /// The new instance's first tick has run: the instance kept across the rebind goes, and the
+    /// holder's pair is lent to the new one. A lend that fails ends the hold.
+    fn relend_after_rebind(&self, slot: &Slot, instance: &mut dyn Instance) {
+        let Some(kept) = lock(&slot.kept).take() else {
+            return;
+        };
+        let holder = kept.holder;
+        drop(catch_unwind(AssertUnwindSafe(move || drop(kept))));
+        let taken = catch_unwind(AssertUnwindSafe(|| instance.took_up_link()))
+            .unwrap_or(Err("the new instance panicked when asked"));
+        if let Err(why) = taken {
+            warn(|| {
+                format!(
+                    "device {} (driver {}): the link kept across the rebind is dropped: {why}; the hold ends",
+                    slot.spec.id, slot.spec.driver
+                )
+            });
+            slot.end_close();
+            return;
+        }
+        let lent = catch_unwind(AssertUnwindSafe(|| instance.endpoints(holder)));
+        match lent {
+            // The holder has its copies already: the new instance only learns who holds them.
+            Ok(Ok(fds)) => drop(fds),
+            Ok(Err(status)) => {
+                warn(|| {
+                    format!(
+                        "device {} (driver {}): the new instance did not take up the holder's endpoints ({}): the hold ends",
+                        slot.spec.id,
+                        slot.spec.driver,
+                        status_words(status)
+                    )
+                });
+                slot.end_close();
+            }
+            Err(_) => slot.end_close(),
         }
     }
 
@@ -2734,7 +2888,12 @@ impl Inner {
         }
         let dead = old.take();
         drop(old);
-        slot.end_close();
+        // An instance that parked the holder's link is kept, and the hold with it; one kept by the
+        // rebind before this bind keeps it too. Otherwise the hold ends here.
+        let dead = dead.and_then(|dead| self.keep_for_rebind(&slot, dead));
+        if lock(&slot.kept).is_none() {
+            slot.end_close();
+        }
         slot.stop_wait();
         drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
         slot.hung.store(false, Ordering::Release);
@@ -2892,6 +3051,7 @@ impl Inner {
 
     /// A bind refused with `reason`, of `kind`: the device waits and is retried under the failure rule.
     fn record_refusal(&self, slot: &Slot, reason: &str, kind: Option<RefusalKind>) {
+        slot.drop_kept("the bind failed");
         let mut state = lock(&slot.state);
         let attempts = match &*state {
             DeviceState::Off(_) => return,
@@ -2918,6 +3078,7 @@ impl Inner {
         if !slot.first_tick_traced.swap(true, Ordering::AcqRel) {
             start_trace(|| format!("first tick {} returned", slot.spec.id));
         }
+        self.relend_after_rebind(slot, instance);
         self.stamp_running_ok(slot, instance, slot.is_running());
         if instance.endpoints_ended() {
             slot.end_close();
@@ -3873,6 +4034,7 @@ impl Host {
             move |instance| instance.endpoints(caller),
         )?;
         let end = slot.end_for(caller)?;
+        *lock(&slot.lent_to) = Some(caller);
         Ok([out, input, end])
     }
 
@@ -4361,7 +4523,12 @@ impl Host {
         *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
         self.inner.moved(&slot);
         self.inner.end_jobs(&slot, Status::INTERRUPTED);
+        slot.drop_kept("the device is switched off");
+        // The hold ends first, and its holder has a moment to close its copies of the pair
+        // before the function goes: a holder that lets go in time never sees its endpoints fail
+        // under it.
         slot.end_close();
+        slot.wait_for_release(RELEASE_WAIT);
         slot.stop_wait();
         let mut failed = None;
         // The instance is waited for, not tried. A tick or a call holds it while it runs, and a
@@ -4450,6 +4617,7 @@ impl Host {
             *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
             self.inner.moved(slot);
             self.inner.end_jobs(slot, Status::INTERRUPTED);
+            slot.drop_kept("the host shuts down");
             slot.end_close();
             slot.stop_wait();
             // Waited for: a tick running now must not keep the driver (and its hardware) up.

@@ -25,6 +25,7 @@ toml.workspace = true
 thiserror = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "event"] }
 lemnos-sim = { path = "../../backends/sim" }
 shm-measure = { path = "../../shm/measure" }
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }

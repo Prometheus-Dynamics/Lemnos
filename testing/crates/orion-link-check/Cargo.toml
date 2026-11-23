@@ -21,7 +21,7 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-daemon-ready = { path = "../daemon-ready" }
 lemnos-host = { path = "../../../engine/host" }
-lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys", features = ["test-hold"] }
 # The setting the bridge is started with comes from the tool an image builder runs: `tree --bridge-env`.
 lemnos-ctl = { path = "../../../service/ctl" }
 # The comm core and the host's session, from the one pinned Orion the bridge uses (service/orion).

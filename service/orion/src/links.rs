@@ -81,26 +81,52 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
         .ok_or_else(|| format!("no device {:?} on lemnosd", link.device))?;
 
     // The gadget's state comes on a second connection, so the hold's own is never read by it.
-    let mut watch = Session::connect(&config.lemnosd_socket, LEMNOSD_WATCH_NAME)
-        .map_err(|error| format!("lemnosd: {error}"))?;
-    let mut handle = watch
-        .open(&link.device, TAG)
-        .map_err(|error| format!("opening {:?}: {error}", link.device))?;
-    watch
-        .subscribe(&mut handle, STATE, 100_000, true)
-        .map_err(|error| format!("watching {:?}: {error}", link.device))?;
+    let mut watch = watch_of(config, link)?;
     wait_for_ready(&mut watch)?;
 
     let UsbEndpointsEnd { out, input, end } = lemnos
         .usb_endpoints_end(index, Arc::new(LinuxStreams))
         .map_err(|error| format!("taking the endpoints: {error}"))?;
-    let _comm = offer(config, link, &out, &input)?;
+    let _comm = offer(config, link, &out, &input, &end)?;
     log(&format!("link {}: offered the endpoints", link.link));
-    // OUT and IN are closed here: the comm core holds its own copies. END stays with this hold,
-    // and it is what says the hold is over for good.
+    // OUT and IN are closed here: the comm core holds its own copies, and END's. This hold keeps
+    // END too: it is what says the hold is over for good.
     drop((out, input));
 
-    let over = wait_while_held(&mut watch, link, &end)?;
+    // The watch may end under the hold: a rebind of the gadget that keeps the link (the hold
+    // goes on, END stays open) is not the hold's end. Only END says that; the watch is made again.
+    let mut wait = FIRST;
+    let over = loop {
+        match wait_while_held(&mut watch, link, &end) {
+            Ok(over) => break over,
+            Err(error) => {
+                if over(&end) {
+                    break true;
+                }
+                log(&format!(
+                    "link {}: {error}; the hold is kept and the watch made again",
+                    link.link
+                ));
+                loop {
+                    if over(&end) {
+                        break;
+                    }
+                    match watch_of(config, link) {
+                        Ok(again) => {
+                            watch = again;
+                            wait = FIRST;
+                            break;
+                        }
+                        Err(error) => {
+                            log(&format!("link {}: {error}", link.link));
+                            std::thread::sleep(wait);
+                            wait = wait.saturating_mul(2).min(CAP);
+                        }
+                    }
+                }
+            }
+        }
+    };
     lemnos
         .usb_endpoints_release(index)
         .or_else(|error| match error {
@@ -112,6 +138,19 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
         log(&format!("link {}: the endpoints' hold is over", link.link));
     }
     Ok(())
+}
+
+/// A connection that watches the gadget's state.
+fn watch_of(config: &Config, link: &Link) -> Result<Session, String> {
+    let mut watch = Session::connect(&config.lemnosd_socket, LEMNOSD_WATCH_NAME)
+        .map_err(|error| format!("lemnosd: {error}"))?;
+    let mut handle = watch
+        .open(&link.device, TAG)
+        .map_err(|error| format!("opening {:?}: {error}", link.device))?;
+    watch
+        .subscribe(&mut handle, STATE, 100_000, true)
+        .map_err(|error| format!("watching {:?}: {error}", link.device))?;
+    Ok(watch)
 }
 
 /// Whether END reads EOF or hangs up: the hold is over for good. Never blocks.
@@ -187,10 +226,16 @@ fn wait_while_held(watch: &mut Session, link: &Link, end: &OwnedFd) -> Result<bo
     }
 }
 
-/// Sends the offer to the comm core, with the endpoints as `[read, write]`: the OUT endpoint, then
-/// the IN endpoint. END is not sent: the pinned comm core's `LinkOffer` takes two. Returns the comm
-/// core's session, which stays open with the link.
-fn offer(config: &Config, link: &Link, out: &OwnedFd, input: &OwnedFd) -> Result<Comm, String> {
+/// Sends the offer to the comm core, with the descriptors as `[read, write, END]`: the OUT
+/// endpoint, the IN endpoint, then END, which reads EOF once the hold is over for good (the comm
+/// core takes two or three). Returns the comm core's session, which stays open with the link.
+fn offer(
+    config: &Config,
+    link: &Link,
+    out: &OwnedFd,
+    input: &OwnedFd,
+    end: &OwnedFd,
+) -> Result<Comm, String> {
     let mut comm = Comm::connect(&config.orion, COMM_NAME, Options::default())
         .map_err(|error| format!("the comm core: {error}"))?;
     let offer = LinkOffer {
@@ -200,10 +245,8 @@ fn offer(config: &Config, link: &Link, out: &OwnedFd, input: &OwnedFd) -> Result
         endpoint_in: 0,
         endpoint_out: 0,
     };
-    // ORION-R2: at R2 the descriptors are `[OUT, IN]` plus an optional END, in that order (END is
-    // R1f's third descriptor, which the bridge keeps); `LinkOffer` takes the same list then.
     let seq = comm
-        .send_with_fds(&offer, &[out.as_fd(), input.as_fd()])
+        .send_with_fds(&offer, &[out.as_fd(), input.as_fd(), end.as_fd()])
         .map_err(|error| format!("offering the endpoints: {error}"))?;
     // Taken only once the comm core answers LinkTaken; a refusal (no such link, say) is an error.
     comm.answer(seq, <LinkTaken as Body>::KIND)

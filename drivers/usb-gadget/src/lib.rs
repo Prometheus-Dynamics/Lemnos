@@ -138,7 +138,7 @@ use lemnos_core::{
     UsbFunctionHandle, driver, status_of,
 };
 use lemnos_hal::ErrorKind;
-use lemnos_hal::blocks::UsbFunctionEvent;
+use lemnos_hal::blocks::{TookUp, UsbFunctionEvent};
 use lemnos_hal::usb_descriptors::{self, UsbDescriptors};
 use serve::Serve;
 
@@ -180,6 +180,17 @@ pub const STAGE_WAITING: &str = "a control request's data stage has waited the c
                                  bRequest << 16 | wLength)";
 /// Logged when a data stage that was reported waiting ends, with how long it took in ms.
 pub const STAGE_ENDED_LATE: &str = "the control data stage reported waiting has ended, after ms";
+/// The note when the new instance took up the session the instance before it parked at a rebind:
+/// the gadget never left the bus, and the holder's endpoints go on.
+pub const LINK_TAKEN_UP: &str = "the gadget's session was taken up across the rebind: the link \
+     and its holder's endpoints go on";
+/// Why the link kept across a rebind is dropped when the session the instance before parked
+/// described other descriptors: it was taken down. The host's one line about the dropped hold
+/// carries it ([`Lifecycle::took_up_link`]).
+pub const LINK_DROPPED_CHANGED: &str = "the function changed: the session the instance before \
+     kept had other descriptors, and it was taken down";
+/// Why the link kept across a rebind is dropped when the new instance's gadget is not up.
+pub const LINK_NOT_UP: &str = "the gadget did not come up again";
 /// Logged when a data stage ends with the host abandoning it, with the request as
 /// [`STAGE_WAITING`] gives it.
 pub const STAGE_ABANDONED: &str = "the host abandoned a control request's data stage (request \
@@ -351,6 +362,9 @@ impl UsbGadget {
             Ok(()) => {
                 self.up = true;
                 self.enabled_without = self.function.enable_note();
+                if self.function.took_up() == Some(TookUp::Adopted) {
+                    self.notes.push(Note::new(LINK_TAKEN_UP));
+                }
                 self.read_serial_note();
                 self.ifname = self.read_interface_name();
                 self.up_since_ns = now_ns;
@@ -737,6 +751,23 @@ impl Lifecycle for UsbGadget {
         let handles = self.function.endpoint_handles().map_err(status_of)?;
         self.holder = Some(caller);
         Ok(handles)
+    }
+
+    /// A rebind while a caller holds the bulk pair: the live session is parked for the next
+    /// instance, which takes it up with the same descriptors, so the gadget never leaves the bus
+    /// and the holder's copies keep working. Nothing is parked while the gadget is down or nobody
+    /// holds the pair: the rebind is the plain one then.
+    fn rebinding(&mut self) -> bool {
+        self.up && self.holder.is_some() && self.function.park()
+    }
+
+    /// The new instance took the link up when its enable adopted the parked session.
+    fn took_up_link(&self) -> core::result::Result<(), &'static str> {
+        match self.function.took_up() {
+            Some(TookUp::Adopted) if self.up => Ok(()),
+            Some(TookUp::Replaced) => Err(LINK_DROPPED_CHANGED),
+            _ => Err(LINK_NOT_UP),
+        }
     }
 
     /// Gives up the hold `caller` has. `NOT_FOUND` when it holds none.

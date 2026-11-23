@@ -22,6 +22,8 @@ use crate::{EP_IN, EP_OUT, LINK_INTERFACE};
 
 /// The most one bulk transfer carries in the shim.
 const TRANSFER: usize = 16 * 1024;
+/// What a paced session says after each round trip, before its number.
+pub const ROUND: &str = "host: round trip ";
 /// The first number the pings carry.
 const BASE: u64 = 7_000_000;
 
@@ -34,7 +36,9 @@ struct Pongs {
 /// The host side. `true` when the session came up and every round trip came back.
 /// `hello_after` is the time between claiming the link's interface and sending the first HELLO: the
 /// test-only knob for the order of the host's hello and the bridge's re-offer after a bounce.
-pub fn run(rounds: u64, hello_after: Duration) -> bool {
+/// `pace`, when not zero, is the time between round trips, each of which is said as `ROUND` and
+/// its number: a session that lasts, so the check can stop the daemon's driver while it runs.
+pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
     let (usb, path) = match open_and_claim(Duration::from_secs(60)) {
         Ok(claimed) => claimed,
         Err(error) => {
@@ -137,6 +141,16 @@ pub fn run(rounds: u64, hello_after: Duration) -> bool {
             if Instant::now() >= until {
                 say!("FAIL host: no pong for ping {round}");
                 return false;
+            }
+        }
+        if !pace.is_zero() {
+            say!("     {ROUND}{round}");
+            let next = Instant::now() + pace;
+            while Instant::now() < next {
+                if let Err(error) = session.next(Duration::from_millis(10)) {
+                    say!("FAIL host: the session failed after round {round}: {error:?}");
+                    return false;
+                }
             }
         }
     }

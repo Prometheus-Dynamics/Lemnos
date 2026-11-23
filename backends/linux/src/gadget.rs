@@ -107,7 +107,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use lemnos_hal::blocks::{BufferHandle, ControlSetup, UsbFunctionEvent, iso_interval_bytes};
+use lemnos_hal::blocks::{
+    BufferHandle, ControlSetup, TookUp, UsbFunctionEvent, iso_interval_bytes,
+};
 use lemnos_hal::usb_descriptors::{
     self, CONFIGURATION_LEN, GadgetFunction, INTERFACE, UsbDescriptors, ms_os,
 };
@@ -959,9 +961,14 @@ struct Session<W> {
     /// is that pair: see [`Plan::lend`]. Set once at enable, `None` otherwise.
     lend: Option<[usize; 2]>,
     configured: bool,
+    /// The bus is idle (a suspend came, and no resume or deconfigure since).
+    suspended: bool,
     /// The gadget was unbound from its controller.
     released: bool,
     pending: Option<Setup>,
+    /// What a function that took this session up is told first: its state as the function
+    /// before it had it (see [`Session::taken_up`]).
+    replay: std::collections::VecDeque<UsbFunctionEvent>,
     /// The data stage under way, begun and not yet reported ended: whether it goes to the host,
     /// and the request's `wLength`.
     stage: Option<(bool, usize)>,
@@ -974,10 +981,37 @@ impl<W: Wire> Session<W> {
             endpoints,
             lend: None,
             configured: false,
+            suspended: false,
             released: false,
             pending: None,
+            replay: std::collections::VecDeque::new(),
             stage: None,
         }
+    }
+
+    /// The session, taken up by a new function: what the one before it saw of the host is told
+    /// again, first (the configuration chosen, an idle bus, a request still to answer). The
+    /// request stays pending for the new function to answer.
+    fn taken_up(mut self) -> Self {
+        self.replay.clear();
+        if self.configured {
+            self.replay.push_back(UsbFunctionEvent::Configured);
+        }
+        if self.suspended {
+            self.replay.push_back(UsbFunctionEvent::Suspended);
+        }
+        if let Some(setup) = self.pending {
+            self.replay.push_back(UsbFunctionEvent::Setup {
+                setup: ControlSetup {
+                    request_type: setup.request_type,
+                    request: setup.request,
+                    value: setup.value,
+                    index: setup.index,
+                },
+                length: setup.length,
+            });
+        }
+        self
     }
 
     /// The place of `endpoint` and, for an isochronous one, its bytes per interval, if the
@@ -1014,6 +1048,9 @@ impl<W: Wire> Session<W> {
         if self.released {
             return Err(ErrorKind::Unavailable);
         }
+        if let Some(event) = self.replay.pop_front() {
+            return Ok(Some(event));
+        }
         // The host sends nothing more on endpoint 0 while it has a stage to end, and FunctionFS
         // holds ep0 for it. An ended stage's answer is kept for `control_end`.
         if self.stage.is_some() && self.wire.stage_under_way() {
@@ -1033,6 +1070,7 @@ impl<W: Wire> Session<W> {
                 Event::Unbind => {
                     self.released = true;
                     self.configured = false;
+                    self.suspended = false;
                     return Err(ErrorKind::Unavailable);
                 }
                 Event::Enable => {
@@ -1042,13 +1080,20 @@ impl<W: Wire> Session<W> {
                     UsbFunctionEvent::Configured
                 }
                 Event::Disable => {
+                    self.suspended = false;
                     if !std::mem::take(&mut self.configured) {
                         continue;
                     }
                     UsbFunctionEvent::Deconfigured
                 }
-                Event::Suspend => UsbFunctionEvent::Suspended,
-                Event::Resume => UsbFunctionEvent::Resumed,
+                Event::Suspend => {
+                    self.suspended = true;
+                    UsbFunctionEvent::Suspended
+                }
+                Event::Resume => {
+                    self.suspended = false;
+                    UsbFunctionEvent::Resumed
+                }
                 Event::Setup(setup) => {
                     self.pending = Some(setup);
                     UsbFunctionEvent::Setup {
@@ -1193,6 +1238,57 @@ pub struct FunctionFsGadget {
     serial: Option<bool>,
     /// What the gadget the last enable bound lacks: [`NETWORK_REFUSED`].
     note: Option<&'static str>,
+    /// The descriptors the session was enabled with: what a session parked for the next function
+    /// is matched on.
+    set: Vec<u8>,
+    /// Where sessions wait for the next function on their controller ([`UsbFunction::park`]).
+    parking: Option<Parking>,
+    /// The park this function made, if it parked its session.
+    parked_here: Option<u64>,
+    took_up: Option<TookUp>,
+}
+
+/// Sessions parked by functions about to go, each for the next function on its controller: one
+/// per daemon, shared by its gadgets.
+#[derive(Clone, Default)]
+pub struct Parking(std::sync::Arc<std::sync::Mutex<ParkedSessions>>);
+
+#[derive(Default)]
+struct ParkedSessions {
+    next: u64,
+    parked: Vec<Parked>,
+}
+
+struct Parked {
+    /// The controller's name.
+    name: String,
+    park: u64,
+    session: Session<FfsWire>,
+    set: Vec<u8>,
+    serial: Option<bool>,
+    note: Option<&'static str>,
+}
+
+impl Parking {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ParkedSessions> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The session parked for controller `name`, taken out.
+    fn take(&self, name: &str) -> Option<Parked> {
+        let mut parked = self.lock();
+        let at = parked.parked.iter().position(|p| p.name == name)?;
+        Some(parked.parked.swap_remove(at))
+    }
+
+    /// The session of park `park`, taken out, if nothing took it up.
+    fn take_park(&self, park: u64) -> Option<Parked> {
+        let mut parked = self.lock();
+        let at = parked.parked.iter().position(|p| p.park == park)?;
+        Some(parked.parked.swap_remove(at))
+    }
 }
 
 /// The `/sys/class/udc` entry a `udc:` name stands for. A name that is an entry of that directory is
@@ -1239,7 +1335,24 @@ impl FunctionFsGadget {
             helper: None,
             serial: None,
             note: None,
+            set: Vec::new(),
+            parking: None,
+            parked_here: None,
+            took_up: None,
         })
+    }
+
+    /// Parks sessions in `parking`, shared with the other gadgets of the daemon.
+    #[must_use]
+    pub fn parking(mut self, parking: Parking) -> Self {
+        self.parking = Some(parking);
+        self
+    }
+
+    /// Takes a parked session down: the gadget off its controller, then its files closed.
+    fn take_down(&self, parked: Parked) {
+        self.unbind_now();
+        drop(parked);
     }
 
     pub(crate) fn holding(mut self, claim: Claim) -> Self {
@@ -1330,6 +1443,25 @@ impl UsbFunction for FunctionFsGadget {
     }
 
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
+        self.took_up = None;
+        if self.session.is_none()
+            && let Some(parked) = self
+                .parking
+                .as_ref()
+                .and_then(|parking| parking.take(&self.paths.name))
+        {
+            if parked.set == descriptors {
+                // The gadget never left the bus: nothing is written, the holder's copies stay.
+                self.session = Some(parked.session.taken_up());
+                self.serial = parked.serial;
+                self.note = parked.note;
+                self.set = parked.set;
+                self.took_up = Some(TookUp::Adopted);
+                return Ok(());
+            }
+            self.take_down(parked);
+            self.took_up = Some(TookUp::Replaced);
+        }
         let released = match self.session.as_ref() {
             Some(session) if session.released => true,
             Some(_) => return Err(ErrorKind::Busy),
@@ -1405,6 +1537,7 @@ impl UsbFunction for FunctionFsGadget {
                 let mut session = Session::new(wire, plan.endpoints);
                 session.lend = plan.lend;
                 self.session = Some(session);
+                descriptors.clone_into(&mut self.set);
                 refused(self);
                 Ok(())
             }
@@ -1416,6 +1549,12 @@ impl UsbFunction for FunctionFsGadget {
     }
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
+        // A session this function parked is taken down only if nothing took it up.
+        if let Some(park) = self.parked_here.take()
+            && let Some(parked) = self.parking.as_ref().and_then(|p| p.take_park(park))
+        {
+            self.take_down(parked);
+        }
         match self.session.as_ref() {
             // The controller let go already, so there is nothing to unbind. The session keeps ep0
             // and the endpoints open: a holder's copies stay valid, and `enable` binds again on the
@@ -1452,6 +1591,46 @@ impl UsbFunction for FunctionFsGadget {
 
     fn enable_note(&self) -> Option<&'static str> {
         self.note
+    }
+
+    /// The bound session goes into the daemon's parking, for the next function on this
+    /// controller, and the controller's claim goes with it: this function does nothing more.
+    fn park(&mut self) -> bool {
+        let Some(parking) = self.parking.clone() else {
+            return false;
+        };
+        if self.parked_here.is_some() || self.session.as_ref().is_none_or(|s| s.released) {
+            return false;
+        }
+        let Some(session) = self.session.take() else {
+            return false;
+        };
+        let mut parked = parking.lock();
+        parked.next += 1;
+        let park = parked.next;
+        // One parked session a controller: an older one nothing took up goes now.
+        let older = parked
+            .parked
+            .iter()
+            .position(|p| p.name == self.paths.name)
+            .map(|at| parked.parked.swap_remove(at));
+        parked.parked.push(Parked {
+            name: self.paths.name.clone(),
+            park,
+            session,
+            set: std::mem::take(&mut self.set),
+            serial: self.serial,
+            note: self.note,
+        });
+        drop(parked);
+        drop(older);
+        self.parked_here = Some(park);
+        self._claim = None;
+        true
+    }
+
+    fn took_up(&self) -> Option<TookUp> {
+        self.took_up
     }
 
     fn control_stall(&mut self) -> Result<(), ErrorKind> {

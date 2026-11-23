@@ -14,8 +14,15 @@
 //!      endpoints, the description says the pair is lent, a host session comes up and exchanges
 //!      ping and pong round trips with the node;
 //!   3. the controller lets go of the gadget (the `UDC` attribute is cleared): the bridge gives the hold
-//!      up and offers again once the gadget is up, and a second host session does the same.
-//! - `comm`: the comm core. `host N`: the host session, with N round trips.
+//!      up and offers again once the gadget is up, and a second host session does the same;
+//!   4. the hello sweep: more bounces, with the host's first HELLO at set delays;
+//!   5. a stuck driver call: the daemon's lane threads stand still while a host session moves
+//!      bytes, the gadget's call runs past its deadline, and the device rebinds with its session
+//!      kept: `UDC` stays set, the bridge keeps its offer and the session never breaks; twice in a
+//!      row;
+//!   6. the controller lets go after the rebinds: the instance that took the session up sees it,
+//!      enables the gadget again, and a host session comes up.
+//! - `comm`: the comm core. `host N [HELLO_MS [PACE_MS]]`: the host session, with N round trips.
 //!
 //! Nothing here stops a process: the guest powers off when the checks end. Prints one `ok` or
 //! `FAIL` line per check and exits non-zero if any failed.
@@ -23,7 +30,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -120,7 +127,12 @@ fn main() -> ExitCode {
         Some("host") => {
             let rounds = args.next().and_then(|n| n.parse().ok()).unwrap_or(ROUNDS);
             let hello_after_ms: u64 = args.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-            let ok = host::run(rounds, Duration::from_millis(hello_after_ms));
+            let pace_ms: u64 = args.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let ok = host::run(
+                rounds,
+                Duration::from_millis(hello_after_ms),
+                Duration::from_millis(pace_ms),
+            );
             // The shim's threads sit in transfers: leave without waiting for them.
             std::process::exit(i32::from(!ok));
         }
@@ -330,7 +342,177 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
             ),
         );
     }
+
+    // 5. A driver call that does not return in time while the link carries a session. The daemon's
+    // lane threads (which run its drivers' ticks and calls) stand still while a host session moves
+    // bytes; the gadget's tick runs past its deadline, the host abandons it, and when the call
+    // returns the device rebinds. The old instance parks its session and is kept across the
+    // rebind, the new one takes the session up, and the holder's hold and copies go on: the
+    // controller never lets go of the gadget (`UDC` stays set) and the session never breaks.
+    // Twice in a row: the instance that took the session up parks it again for the next one.
+    for round in 1..=2 {
+        stuck_call_keeps_the_link(check, &me, &daemon, &bridge, &mut lent, round);
+    }
+
+    // 6. The instance that took the session up has the live link's state: the controller letting
+    // go now is seen by it, as by the first instance in step 3, and the link comes back.
+    let went_down = bridge.count(WENT_DOWN) + 1;
+    check(
+        fs::write(format!("{GADGET_DIR}/UDC"), "\n").is_ok(),
+        "after the rebinds: the controller lets go of the gadget",
+    );
+    check(
+        bridge.wait_for(WENT_DOWN, went_down, LONG),
+        "after the rebinds: the bridge sees the gadget go down",
+    );
+    check(
+        wait_until(LONG, enabled),
+        "after the rebinds: the new instance enables the gadget again",
+    );
+    check(
+        host_session(&me, 12, 0),
+        "after the rebinds: a host session comes up again, and the round trips with the node",
+    );
     Ok(())
+}
+
+/// The round trips of the paced host session in step 5, and the time between them.
+const PACED_ROUNDS: u64 = 200;
+const PACE_MS: u64 = 100;
+/// How long the lane threads stay still after the gadget's call ran past its deadline.
+const HELD_ON: Duration = Duration::from_secs(3);
+/// The daemon's lines step 5 looks for.
+const GADGET: &str = "device gadget (driver usb-gadget)";
+const RAN_PAST: &str = "ran past its";
+const KEPT: &str = "device gadget (driver usb-gadget): the instance is kept across the rebind";
+const LET_GO: &str = "the instance kept across the rebind is let go";
+const NOT_TAKEN_UP: &str = "did not take up the holder's endpoints";
+
+fn stuck_call_keeps_the_link(
+    check: &mut dyn FnMut(bool, &str) -> bool,
+    me: &Path,
+    daemon: &Lemnosd,
+    bridge: &Bridge,
+    lent: &mut dyn FnMut() -> Option<bool>,
+    round: u32,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let named = |what: &str| format!("stuck call {round}: {what}");
+
+    let threads = daemon.lane_threads();
+    check(
+        !threads.is_empty(),
+        &named(&format!("the daemon's lane threads are found: {threads:?}")),
+    );
+    let offers = bridge.count(OFFERED);
+    let Some(run) = HostRun::start(me, 9 + round, PACED_ROUNDS, 0, PACE_MS) else {
+        check(false, &named("the paced host session starts"));
+        return;
+    };
+    check(
+        wait_until(LONG, || run.count(host::ROUND) >= 3),
+        &named("paced host session: up, and its round trips under way"),
+    );
+
+    // The controller's hold on the gadget, sampled from here to the end of the session.
+    let bound = Arc::new(AtomicBool::new(enabled()));
+    let sampling = Arc::new(AtomicBool::new(true));
+    let sampler = {
+        let (bound, sampling) = (Arc::clone(&bound), Arc::clone(&sampling));
+        std::thread::spawn(move || {
+            while sampling.load(Ordering::Relaxed) {
+                if !enabled() {
+                    bound.store(false, Ordering::Relaxed);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+
+    let ran_past = daemon.count_both(GADGET, RAN_PAST);
+    let kept = daemon.count(KEPT);
+    let held: Vec<_> = threads
+        .iter()
+        .filter_map(|&tid| match lemnos_linux_sys::test_hold::hold(tid) {
+            Ok(held) => Some(held),
+            Err(error) => {
+                say!("     lane thread {tid} not held: {error}");
+                None
+            }
+        })
+        .collect();
+    check(
+        held.len() == threads.len(),
+        &named("every lane thread of the daemon stands still"),
+    );
+    let before = run.count(host::ROUND);
+    // The gadget ticks only when it has something to do, so the check's own call into it is what
+    // runs past the deadline: it is answered with an error once the host abandons it.
+    let answered = daemon.connect("stuck-call").and_then(|mut session| {
+        let mut handle = session.open("gadget", "usb.function/1")?;
+        let mut reply = [0u8; 8];
+        session.call(&mut handle, PAIR_LENT, &[], &mut reply)
+    });
+    check(
+        answered.is_err(),
+        &named(&format!(
+            "a call into the stuck gadget is not answered ({answered:?})"
+        )),
+    );
+    check(
+        wait_until(Duration::from_secs(15), || {
+            daemon.count_both(GADGET, RAN_PAST) > ran_past
+        }),
+        &named("the gadget's call runs past its deadline and the host abandons it"),
+    );
+    std::thread::sleep(HELD_ON);
+    let during = run.count(host::ROUND);
+    check(
+        during > before,
+        &named(&format!(
+            "the holder's copies go on while the driver stands still ({before} round trips, then {during})"
+        )),
+    );
+    // Each is released, whatever an earlier one answered.
+    let failed = held
+        .into_iter()
+        .map(lemnos_linux_sys::test_hold::Held::release)
+        .filter(Result::is_err)
+        .count();
+    let released = failed == 0;
+    check(released, &named("the lane threads run again"));
+    check(
+        daemon.wait_for(KEPT, kept + 1, LONG),
+        &named(
+            "the call returned: the old instance parked its session and is kept across the rebind",
+        ),
+    );
+    check(
+        wait_until(Duration::from_secs(10), || lent() == Some(true)),
+        &named("the new instance has the holder's pair: the description says it is lent"),
+    );
+    let finished = run.finish();
+    sampling.store(false, Ordering::Relaxed);
+    let _ = sampler.join();
+    check(
+        finished,
+        &named(
+            "paced host session: every round trip came back, across the stuck call and the rebind",
+        ),
+    );
+    check(
+        bound.load(Ordering::Relaxed),
+        &named("the controller never let go of the gadget: UDC stayed set throughout"),
+    );
+    check(
+        daemon.count(LET_GO) == 0 && daemon.count(NOT_TAKEN_UP) == 0,
+        &named("the kept instance was never let go early, and the new one took the endpoints up"),
+    );
+    check(
+        bridge.count(OFFERED) == offers,
+        &named("the bridge kept its offer: no second offer across the rebind"),
+    );
 }
 
 /// The delays the hello sweep tries, in milliseconds, one bounce each. A short delay sends the host's
@@ -404,39 +586,79 @@ fn pair_lent_method(description: &lemnos_client::DeviceDescription) -> Option<u1
 /// Runs the host role as a child, with its lines on this check's output. True when the session came
 /// up, in that order the round trips followed, and the child exited cleanly.
 fn host_session(me: &Path, number: u32, hello_after_ms: u64) -> bool {
-    let child = Command::new(me)
-        .arg("host")
-        .arg(ROUNDS.to_string())
-        .arg(hello_after_ms.to_string())
-        .stdout(Stdio::piped())
-        .spawn();
-    let Ok(mut child) = child else {
-        say!("FAIL host session {number}: cannot start");
-        return false;
-    };
-    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
-    let stdout = child.stdout.take();
-    let reader = {
-        let lines = Arc::clone(&lines);
-        std::thread::spawn(move || {
-            if let Some(stdout) = stdout {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    say!("{line}");
-                    lines
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(line);
+    HostRun::start(me, number, ROUNDS, hello_after_ms, 0).is_some_and(HostRun::finish)
+}
+
+/// A host session running as a child, its lines kept as they come.
+struct HostRun {
+    child: Child,
+    lines: Arc<Mutex<Vec<String>>>,
+    reader: std::thread::JoinHandle<()>,
+}
+
+impl HostRun {
+    fn start(
+        me: &Path,
+        number: u32,
+        rounds: u64,
+        hello_after_ms: u64,
+        pace_ms: u64,
+    ) -> Option<Self> {
+        let child = Command::new(me)
+            .arg("host")
+            .arg(rounds.to_string())
+            .arg(hello_after_ms.to_string())
+            .arg(pace_ms.to_string())
+            .stdout(Stdio::piped())
+            .spawn();
+        let Ok(mut child) = child else {
+            say!("FAIL host session {number}: cannot start");
+            return None;
+        };
+        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+        let stdout = child.stdout.take();
+        let reader = {
+            let lines = Arc::clone(&lines);
+            std::thread::spawn(move || {
+                if let Some(stdout) = stdout {
+                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                        say!("{line}");
+                        lines
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(line);
+                    }
                 }
-            }
+            })
+        };
+        Some(Self {
+            child,
+            lines,
+            reader,
         })
-    };
-    let status = child.wait();
-    let _ = reader.join();
-    let lines = lines.lock().unwrap_or_else(PoisonError::into_inner);
-    let up = lines.iter().position(|l| l.contains("host session up"));
-    let trips = lines
-        .iter()
-        .position(|l| l.contains("round trips with the node"));
-    status.is_ok_and(|status| status.success())
-        && matches!((up, trips), (Some(u), Some(t)) if u < t)
+    }
+
+    /// How many lines so far contain `text`.
+    fn count(&self, text: &str) -> usize {
+        self.lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|line| line.contains(text))
+            .count()
+    }
+
+    /// Waits for the child. True when the session came up, the round trips followed, and the
+    /// child exited cleanly.
+    fn finish(mut self) -> bool {
+        let status = self.child.wait();
+        let _ = self.reader.join();
+        let lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let up = lines.iter().position(|l| l.contains("host session up"));
+        let trips = lines
+            .iter()
+            .position(|l| l.contains("round trips with the node"));
+        status.is_ok_and(|status| status.success())
+            && matches!((up, trips), (Some(u), Some(t)) if u < t)
+    }
 }

@@ -257,6 +257,14 @@ pub trait Driver: Sized {
     fn resume_record(&self) -> Option<ResumeRecord> {
         None
     }
+    /// See [`Lifecycle::rebinding`].
+    fn rebinding(&mut self) -> bool {
+        false
+    }
+    /// See [`Lifecycle::took_up_link`].
+    fn took_up_link(&self) -> core::result::Result<(), &'static str> {
+        Err(NOT_TAKEN_UP)
+    }
     /// See [`Lifecycle::resume`].
     fn resume(&mut self, _record: &ResumeRecord) -> bool {
         false
@@ -319,6 +327,9 @@ pub trait Driver: Sized {
     fn job_cancel(&mut self, _job: JobId) {}
 }
 
+/// What [`Lifecycle::took_up_link`] answers for a driver that does not say.
+pub const NOT_TAKEN_UP: &str = "the new instance does not take up a kept link";
+
 /// The part of a driver its author writes when using `#[driver]`.
 pub trait Lifecycle: Sized {
     /// The struct `#[driver]` generates from the `#[needs]` fields.
@@ -367,6 +378,27 @@ pub trait Lifecycle: Sized {
     /// touches the hardware. `None`, the default, keeps nothing.
     fn resume_record(&self) -> Option<ResumeRecord> {
         None
+    }
+    /// The host is about to drop this instance and bind the same device again at once: a rebind
+    /// after [`Health::Gone`], or after a call into it that overran and has now returned. Returns
+    /// `true` when the instance has parked what a holder of its endpoints uses for the next
+    /// instance to take up, so the hold need not end: the host then keeps the endpoints' hold (END
+    /// stays open), keeps this instance until the new one's first tick has run, and then lends the
+    /// new instance the holder's pair again ([`endpoints`](Self::endpoints) for the holder). If that
+    /// lend fails, or the bind fails, END is closed then. Not called for a switch-off, a removal, a
+    /// shutdown, or a driver that panicked or stopped answering. Never while a call or a tick of
+    /// it runs, inside the panic boundary (a panic reads `false`); it must not block. `false` by
+    /// default.
+    fn rebinding(&mut self) -> bool {
+        false
+    }
+    /// After a rebind that kept the hold ([`Lifecycle::rebinding`]), asked of the new instance once
+    /// its first tick has run: `Ok` when it took up what the old instance parked, so the holder's
+    /// copies go on working; `Err` with why not (the parked part was another, or the instance is
+    /// not up), and the host ends the hold with that reason in its one line. Inside the panic
+    /// boundary (a panic reads as not taken up); it must not block. Not taken up by default.
+    fn took_up_link(&self) -> core::result::Result<(), &'static str> {
+        Err(NOT_TAKEN_UP)
     }
     /// Restores what [`Lifecycle::resume_record`] kept, on the new instance the host bound in place
     /// of the old one. The host calls it once, after the bind and before the first tick, on the

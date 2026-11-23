@@ -594,6 +594,41 @@ rule that a hello on a link always begins a session). The check on a board is in
 `testing/board-runs/R1.md`, and the QEMU check `testing/crates/orion-link-check` makes the let-go with the
 pinned comm core and a host session on the emulated bus.
 
+### A rebind that keeps the link
+
+The host binds a device again when its driver says what it was bound with is gone, and when a call or
+a tick into it overran its deadline and has since returned. A driver that holds a gadget's session
+can keep the hold through that (`Lifecycle::rebinding`): `usb-gadget` does when a caller holds the
+pair and the gadget is up. The old instance parks its live session (the bound gadget, its ep0 and
+endpoint files) in the daemon for the next function on the same controller, and lets go of the
+controller; the host keeps END open and keeps the old instance until the new one's first tick has
+run, then drops it and lends the new instance the holder's pair again. The new instance's enable,
+with the same descriptors, takes the session up as it is: `UDC` is never cleared, nothing is set up
+again, the holder's copies keep working, and the session's state (the host's configuration, an idle
+bus, a request still to answer) is told to the new instance first, so its `state` is the session's.
+It logs `the gadget's session was taken up across the rebind`.
+
+What ends the hold instead, with END hung up: a new enable with other descriptors (the parked
+session is taken down; the new instance answers `Lifecycle::took_up_link` with why, and the host's
+one line says the link kept across the rebind is dropped because the function changed);
+a bind that fails, a switch-off or a shutdown while the old instance is kept (the host logs it, and
+the old instance's drop takes its parked session down: a parked session is never left behind);
+and a new instance that did not take the link up or is refused the holder's pair. A switch-off ends the hold first and
+waits up to 1 s for the holder to release before the function goes, so a holder that lets go when
+END says so never has its endpoints fail under it.
+
+Parked sessions live in the daemon's own process, so a restart of `lemnosd` drops the link as before
+(case 6 above). The bridge (`service/orion/src/links.rs`) offers the comm core `[OUT, IN, END]`, and
+keeps its hold when its watch of the gadget's state ends under a rebind: only END ends the hold, and
+the watch is made again.
+
+The QEMU harness checks it end to end (`testing/crates/orion-link-check`, step 5): the daemon's
+lane threads are held still while a host session moves bytes, a call into the gadget runs past its
+deadline, and after the call returns the device rebinds with the session kept: `UDC` stays set,
+the bridge keeps its first offer and every round trip of the session comes back. It does that twice
+in a row, then (step 6) the controller lets go and the instance that took the session up sees it
+and brings the link back.
+
 ### The bus state
 
 The host reports the bus as it sees it on endpoint 0 through the function's `state` method (method

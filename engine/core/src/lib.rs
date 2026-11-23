@@ -40,8 +40,8 @@ pub use description::{
 };
 pub use driver::{
     BoardDevice, BoardView, CallerId, Driver, FIGURES, Figures, Health, HostClock, HostOwned,
-    JobId, JobState, Lifecycle, Manifest, MethodId, Origin, RESUME_BYTES, Reply, ResumeRecord,
-    Retry,
+    JobId, JobState, Lifecycle, Manifest, MethodId, NOT_TAKEN_UP, Origin, RESUME_BYTES, Reply,
+    ResumeRecord, Retry,
 };
 pub use fixed::{NO_VALUE, rescale};
 #[cfg(feature = "float")]

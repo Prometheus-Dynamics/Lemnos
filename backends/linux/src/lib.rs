@@ -63,6 +63,8 @@ pub struct LinuxBoard {
     /// The helper that makes and binds the USB gadgets, and each gadget's controller name and
     /// index there. Set by [`Self::use_gadget_helper`]; without it the daemon writes configfs itself.
     gadget_helper: Option<(SharedHelper, Vec<(String, u32)>)>,
+    /// Where a gadget about to go parks its session for the next one on its controller.
+    parking: gadget::Parking,
 }
 
 type Claims = Arc<Mutex<BTreeSet<String>>>;
@@ -100,6 +102,7 @@ impl LinuxBoard {
             claimed: Claims::default(),
             module: None,
             gadget_helper: None,
+            parking: gadget::Parking::default(),
         }
     }
 
@@ -605,7 +608,7 @@ impl LinuxBoard {
             },
             None => gadget,
         };
-        Ok(gadget.holding(claim))
+        Ok(gadget.parking(self.parking.clone()).holding(claim))
     }
 }
 

@@ -41,7 +41,7 @@ pub mod usb_match;
 
 pub use blocks::{
     Clocks, DmaBuffers, Interrupt, Lend, LendSource, LentBuffer, Parity, Registers, Reset,
-    StopBits, StreamEndpoint, Uart, UartFormat, UsbDevice, UsbFunction, UsbHost,
+    StopBits, StreamEndpoint, TookUp, Uart, UartFormat, UsbDevice, UsbFunction, UsbHost,
 };
 pub use embedded_hal;
 pub use embedded_hal::{delay, digital, i2c, pwm, spi};
