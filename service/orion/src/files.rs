@@ -303,14 +303,29 @@ struct Taker {
     device: String,
     prefix: String,
     sink: Sink,
+    /// The session the sink is on, its own.
+    _orion: Orion,
     receiver: Receiver,
     /// The device's streams: its index in the workers [`run`] keeps across Orion sessions.
     streamer: usize,
 }
 
-/// Receives files for the devices `config.files` names, until the service stops.
+/// A device that takes files on a board that gave the bridge no place for them: every push to it
+/// is refused at its start, with why (see [`crate::pushes`]).
+struct Refuser {
+    sink: Sink,
+    /// The session the sink is on, its own.
+    _orion: Orion,
+    why: String,
+}
+
+/// Receives files for the devices `config.files` names, and refuses them, with why, for each
+/// device that takes files and that it does not name, until the service stops.
 pub fn run(config: &Config, shared: &Shared) {
-    if config.files.is_empty() {
+    let Some(unplaced) = find_unplaced(config, shared) else {
+        return;
+    };
+    if config.files.is_empty() && unplaced.is_empty() {
         return;
     }
     let mut backoff = Backoff::new();
@@ -331,68 +346,145 @@ pub fn run(config: &Config, shared: &Shared) {
         })
         .collect();
     while !shared.stopping() {
-        // Orion's patience keeps trying while nobody answers, so this only sees a refusal.
-        let orion = match Orion::connect_watching(
-            &config.orion,
-            FILES_CLIENT_NAME,
-            Options::default(),
-            |status| {
-                if status.failures == 1 {
-                    log(&format!(
-                        "files: Orion not available at {}: waiting for it",
-                        config.orion
-                    ));
-                }
-                !shared.stopping()
-            },
-        ) {
-            Ok(orion) => orion,
-            Err(error) => {
-                log(&format!(
-                    "files: Orion at {} refused the session: {error}",
-                    config.orion
-                ));
-                std::thread::sleep(backoff.next_delay());
-                continue;
-            }
-        };
+        // One Orion session for each receiver: a session hands each kind of file frame to the
+        // first receiver on it, so two prefixes on one session would leave the second unanswered.
         let mut takers = Vec::new();
         for (index, (device, dir)) in config.files.iter().enumerate() {
-            let prefix = format!("{DESTINATION_PREFIX}{device}/");
-            match orion.files().sink(&prefix) {
-                Ok(sink) => {
-                    takers.push(Taker {
-                        device: device.clone(),
-                        prefix,
-                        sink,
-                        receiver: Receiver::new(dir),
-                        streamer: index,
-                    });
-                }
-                Err(error) => log(&format!("files: Orion refused {prefix}: {error}")),
+            if let Some((orion, prefix, sink)) = receiver_for(config, shared, device) {
+                // Said once the sink is Orion's: a push from now on reaches this thread.
+                shared.with(|mirror| mirror.set_pushes(device, crate::pushes::ACCEPTED));
+                takers.push(Taker {
+                    device: device.clone(),
+                    prefix,
+                    sink,
+                    _orion: orion,
+                    receiver: Receiver::new(dir),
+                    streamer: index,
+                });
             }
         }
-        if takers.is_empty() {
+        let mut refusers = Vec::new();
+        for device in &unplaced {
+            if let Some((orion, _, sink)) = receiver_for(config, shared, device) {
+                let text = crate::pushes::refused_text(device);
+                shared.with(|mirror| mirror.set_pushes(device, &text));
+                refusers.push(Refuser {
+                    sink,
+                    _orion: orion,
+                    why: crate::pushes::refused_why(device),
+                });
+            }
+        }
+        shared.changed();
+        if takers.is_empty() && refusers.is_empty() {
             std::thread::sleep(backoff.next_delay());
             continue;
         }
         backoff.reset();
-        let lost = serve(config, shared, &mut takers, &mut workers, &mut lemnosd);
+        let lost = serve(
+            config,
+            shared,
+            &mut takers,
+            &mut refusers,
+            &mut workers,
+            &mut lemnosd,
+        );
         if let Err(error) = lost {
             log(&format!("files: Orion lost: {error}"));
         }
     }
 }
 
+/// A session of its own on Orion, as the receiver of every file sent to `lemnos/<device>/`, with
+/// that prefix. `None`, said in the log, when Orion refuses the session or the prefix, or the
+/// service stops: the caller tries again on its backoff.
+fn receiver_for(config: &Config, shared: &Shared, device: &str) -> Option<(Orion, String, Sink)> {
+    // Orion's patience keeps trying while nobody answers, so this only sees a refusal.
+    let orion = Orion::connect_watching(
+        &config.orion,
+        FILES_CLIENT_NAME,
+        Options::default(),
+        |status| {
+            if status.failures == 1 {
+                log(&format!(
+                    "files: Orion not available at {}: waiting for it",
+                    config.orion
+                ));
+            }
+            !shared.stopping()
+        },
+    )
+    .map_err(|error| {
+        log(&format!(
+            "files: Orion at {} refused the session: {error}",
+            config.orion
+        ));
+    })
+    .ok()?;
+    let prefix = format!("{DESTINATION_PREFIX}{device}/");
+    match orion.files().sink(&prefix) {
+        Ok(sink) => Some((orion, prefix, sink)),
+        Err(error) => {
+            log(&format!("files: Orion refused {prefix}: {error}"));
+            None
+        }
+    }
+}
+
+/// Asks lemnosd, until it answers, which devices take files and have no place given, and says so
+/// once for each. `None` when the service stops first.
+fn find_unplaced(config: &Config, shared: &Shared) -> Option<Vec<String>> {
+    let mut backoff = Backoff::new();
+    let mut said = false;
+    while !shared.stopping() {
+        let found = Client::connect(&config.lemnosd_socket, LEMNOSD_FILES_NAME)
+            .map_err(|e| format!("lemnosd: {e}"))
+            .and_then(|client| crate::pushes::unplaced(&client, config));
+        match found {
+            Ok(unplaced) => {
+                for notice in crate::pushes::notices(&unplaced) {
+                    log(&notice);
+                }
+                return Some(unplaced);
+            }
+            Err(why) => {
+                if !said {
+                    log(&format!(
+                        "files: can't tell yet which devices take files: {why}"
+                    ));
+                    said = true;
+                }
+                std::thread::sleep(backoff.next_delay());
+            }
+        }
+    }
+    None
+}
+
 fn serve(
     config: &Config,
     shared: &Shared,
     takers: &mut [Taker],
+    refusers: &mut [Refuser],
     workers: &mut [StreamWorker],
     lemnosd: &mut Option<Client>,
 ) -> Result<(), orion::ClientError> {
-    let look = LOOK / u32::try_from(takers.len()).unwrap_or(1).max(1);
+    let look = LOOK
+        / u32::try_from(takers.len() + refusers.len())
+            .unwrap_or(1)
+            .max(1);
     while !shared.stopping() {
+        for refuser in refusers.iter_mut() {
+            let Some(handed) = refuser.sink.next(look)? else {
+                continue;
+            };
+            let (Handed::Begin { transfer, .. }
+            | Handed::Chunk { transfer, .. }
+            | Handed::Commit { transfer }) = handed;
+            refuser
+                .sink
+                .status(transfer, 0, FileState::Rejected, &refuser.why)?;
+        }
         for taker in takers.iter_mut() {
             for (transfer, answer) in taker.receiver.expire(config.stall) {
                 taker

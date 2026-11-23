@@ -541,6 +541,19 @@ pub fn method_of<'a>(
 /// # Errors
 ///
 /// When no contract has it, or more than one does and no tag was given.
+/// The methods a device that takes a file as a stream has, all of them: the bridge reads the file's
+/// transport manifest into `manifest`, starts the `write` job, feeds it each chunk through `data`, and
+/// asks `info` why a write failed.
+pub const STREAM_FILE_METHODS: [&str; 4] = ["manifest", "write", "data", "info"];
+
+/// Whether a device takes files pushed to it through the bridge, from whether it has a method of
+/// each name (`has`): `accept` (a file put in a directory the device reads, after `accept` says it
+/// fits), or every one of [`STREAM_FILE_METHODS`]. The bridge reads it from a description and
+/// `lemnos-ctl` from a driver's manifest, so the two never disagree on which devices take files.
+pub fn takes_files(has: impl Fn(&str) -> bool) -> bool {
+    has("accept") || STREAM_FILE_METHODS.iter().all(|name| has(name))
+}
+
 pub fn find_method<'a>(
     description: &'a DeviceDescription,
     wanted: &str,

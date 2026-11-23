@@ -49,6 +49,7 @@ packaging/systemd/lemnosd.service.d/gadget.conf  /etc/systemd/system/lemnosd.ser
 packaging/systemd/lemnosd.service.d/health-tcp.conf  /etc/systemd/system/lemnosd.service.d/health-tcp.conf 0644 systemd,health-tcp
 packaging/systemd/lemnosd.service.d/slots.conf   /etc/systemd/system/lemnosd.service.d/slots.conf 0644 systemd,slots
 packaging/systemd/lemnosd.service.d/security.conf  /etc/systemd/system/lemnosd.service.d/security.conf 0644 systemd,security
+packaging/systemd/lemnos-orion.service.d/files.conf  /etc/systemd/system/lemnos-orion.service.d/files.conf 0644 systemd,orion,slots
 packaging/udev/70-lemnos.rules                   /usr/lib/udev/rules.d/70-lemnos.rules          0644  udev
 packaging/init/S49lemnos-restart                 /etc/init.d/S49lemnos-restart                  0755  busybox
 packaging/init/S50lemnosd                        /etc/init.d/S50lemnosd                         0755  busybox

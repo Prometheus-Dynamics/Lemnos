@@ -399,7 +399,16 @@ The bridge writes files only into the directories `LEMNOS_ORION_FILES` names (`s
 files sent through Orion to a device that takes them (see [docs/daemon.md](../docs/daemon.md#lemnos-orion)).
 The group `lemnos` gives it a slot device's `.incoming`, which the driver keeps mode 0770. Under systemd,
 `ProtectSystem=strict` makes the filesystem read-only, so each directory goes into a drop-in as
-`ReadWritePaths=<dir>`. The bridge writes nothing else, and its unit is hardened to `AF_UNIX` only, with no capability. Widen the address families only if the node is reached
+`ReadWritePaths=<dir>`. Both come from the board file: `lemnos-ctl tree BOARD --bridge-env FILE` writes
+the `LEMNOS_ORION_FILES` and `LEMNOS_ORION_STREAMS` lines (with `LEMNOS_ORION_LINKS`) for
+`/etc/lemnos/lemnos-orion.env`, and `--bridge-dropin FILE` writes
+`/etc/systemd/system/lemnos-orion.service.d/files.conf`, granting exactly those directories, each
+optional (`-`). `packaging/systemd/lemnos-orion.service.d/files.conf` is that drop-in for the reference
+board (a slot device, `/data/slots/.incoming`); its test checks it against the generator. A flash device's
+files go to `/run/lemnos-flash`, and its images stream. A board whose bridge has no entry for a device
+that takes files gets a refusal on each push to it, naming the missing entry, and a line in the log at
+start, never a file kept by the node ([docs/daemon.md](../docs/daemon.md), "A device that takes files and
+has no place"). The bridge writes nothing else, and its unit is hardened to `AF_UNIX` only, with no capability. Widen the address families only if the node is reached
 over TCP.
 
 ## The security view (the image's part)

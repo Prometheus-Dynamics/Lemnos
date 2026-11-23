@@ -720,7 +720,7 @@ keep the reason.
 | a device | the resource `lemnos.<device>`, of the kind `lemnos.device`, with the labels `lemnos.driver`, `lemnos.tag` (one per tag) and `lemnos.control.<item>` (the shapes a control or action item takes) |
 | its state and health | the resource's state: `Ready` while it runs, `Failed` while it retries or reports failed health, `Pending` while it is off |
 | its value items | the topic `lemnos.<device>.values`: a field per item that is a number (a float in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes |
-| its events | the topic `lemnos.<device>.status`: `state`, `health`, `reason` and `refusal` as text, as `lemnos-ctl list` names them |
+| its events | the topic `lemnos.<device>.status`: `state`, `health`, `reason` and `refusal` as text, as `lemnos-ctl list` names them, and the bridge's own `pushes` |
 | `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. `.call describe` with no arguments gives the device's description (below). Programs on the board and operators granted them may run them |
 
 **Topics and how each is read.** Every topic the bridge publishes is a state: its newest sample is what
@@ -733,7 +733,7 @@ state is a latest-value topic (history 2). The table is in code as `publish::CLA
 | topic | kind | expiry | history | what it says, and why it is current until changed |
 |---|---|---|---|---|
 | `lemnos.<device>.values` | state | zero | 2 | a device's readings: published as each changes; withdrawn with the device |
-| `lemnos.<device>.status` | state | zero | 2 | `state`, `health`, `reason`, `refusal`: published as each changes; `gone` when lemnosd stops listing the device. `refusal` is why a device waits, in decimal: `0` none, `1` absent, `2` failed, and any other number as lemnosd sent it: the bridge passes a number it does not name on unchanged, so a reader can show it as an unknown reason with its code |
+| `lemnos.<device>.status` | state | zero | 2 | `state`, `health`, `reason`, `refusal`: published as each changes; `gone` when lemnosd stops listing the device. `pushes` is the bridge's own, added after `refusal`: whether it takes files pushed to the device (empty for a device that takes none, `accepted`, or `refused: <why>`; see "A device that takes files and has no place"). `refusal` is why a device waits, in decimal: `0` none, `1` absent, `2` failed, and any other number as lemnosd sent it: the bridge passes a number it does not name on unchanged, so a reader can show it as an unknown reason with its code |
 | `lemnos.<device>.description` | state, a generation | zero | 2 | the device's description generation (an `int`): it moves when what `describe` says of the device changes (its state or reason, which the description carries). A client that sees it move asks `describe` again |
 | `lemnos.devices` | state, a generation | zero | 2 | the device set's generation (an `int`): it moves when a device comes or goes |
 | `hello.<fact>` | state | zero | 2 | a board fact: published when it changes; withdrawn when it goes or the session ends |
@@ -1130,6 +1130,30 @@ Orion, and the directory those files go into, for example
 - **Deleted** are a file that fails the check, one with a bad name (one part of
   `[A-Za-z0-9._-]`, not starting with a dot), one that stops arriving for 10 minutes, and what an
   earlier run left half-written.
+
+**A device that takes files and has no place.** A device takes files when its description has the
+files protocol's methods: `accept`, or `manifest`, `write`, `data` and `info` together
+(`lemnos_wire::text::takes_files`, the one rule the bridge and `lemnos-ctl` share). When
+`LEMNOS_ORION_FILES` does not name such a device, a push to it would otherwise go into the node's own
+store and nothing would ever read it. So at start the bridge asks lemnosd for every device's
+description (until it answers), and for each such device:
+
+- it logs once, by name: `files: <device> takes no pushes on this board: the bridge has no
+  LEMNOS_ORION_FILES entry for it`;
+- it is the receiver of `lemnos/<device>/` all the same, and refuses each push at its start with
+  that sentence, so nothing is written and the node keeps nothing;
+- the device's status topic says `refused: <that sentence>` in `pushes`.
+
+A device the bridge takes files for says `accepted` there, and any other device says nothing. `pushes`
+is set once the receiver is Orion's, so a push sent after it reads `accepted` or `refused` reaches the
+bridge. Each receiver has its own Orion session: a session hands each kind of file frame to its first
+receiver, so two receivers on one session would leave the second unanswered (the pinned Orion
+172054f4, `crates/client/connect/src/client.rs`). Tests: `service/orion/tests/pushes.rs`.
+
+`lemnos-ctl tree BOARD --bridge-env FILE` writes the `LEMNOS_ORION_FILES` and `LEMNOS_ORION_STREAMS`
+lines from the board file, and `--bridge-dropin FILE` the unit drop-in that grants those directories
+(see [building](building.md)), so an image that generates both from its board file can't leave one
+out.
 
 **Streams for a device.** `LEMNOS_ORION_STREAMS` names files a device takes as a stream, for example
 `flash=image.img.xz+image.img` (each name must also be a name the device's directory takes). A transfer

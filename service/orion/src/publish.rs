@@ -9,9 +9,11 @@
 //! - the topic `lemnos.<device>.values` has a field per value item that is a number (a float,
 //!   in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes,
 //!   each sample at the time the driver read it;
-//! - the topic `lemnos.<device>.status` has the fields `state`, `health`, `reason` and `refusal`, as
+//! - the topic `lemnos.<device>.status` has the fields `state`, `health`, `reason`, `refusal` and `pushes`, as
 //!   `lemnos-ctl list` names them, published as they change. `refusal` is the number the wire gives
-//!   the refusal kind in decimal: 0 none, 1 absent, 2 failed, and any other number as it came;
+//!   the refusal kind in decimal: 0 none, 1 absent, 2 failed, and any other number as it came.
+//!   `pushes` is the bridge's own: whether it takes files pushed to the device (see
+//!   [`crate::pushes`]);
 //! - the actions `set`, `call` and `power` (see [`crate::calls`]) drive it.
 //!
 //! The board's facts (`hello.<fact>`, see [`crate::hello`]) are topics of the same session, one
@@ -245,11 +247,12 @@ const GENERATION_FIELDS: [Field<'static>; 1] = [Field {
 }];
 
 /// The status topic's fields.
-const STATUS_FIELDS: [Field<'static>; 4] = [
+const STATUS_FIELDS: [Field<'static>; 5] = [
     text_field("state"),
     text_field("health"),
     text_field("reason"),
     text_field("refusal"),
+    text_field("pushes"),
 ];
 
 /// A refusal kind's number as the status topic says it, in decimal, written into `buf`. A `u8`
@@ -1055,6 +1058,7 @@ impl Session {
                 health_name(status.health),
                 cut(&status.reason, STATUS_MAX),
                 refusal_text(status.refusal, &mut refusal),
+                cut(&status.pushes, STATUS_MAX),
             ];
             for (field, text) in texts.iter().enumerate() {
                 sample(&mut device.status, field, time, text.as_bytes())?;
@@ -1586,6 +1590,7 @@ mod tests {
             health,
             reason: String::new(),
             refusal: 0,
+            pushes: String::new(),
         }
     }
 

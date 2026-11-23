@@ -35,8 +35,10 @@ lemnos-linux = { path = "../../backends/linux" }
 lemnos-wire = { path = "../../engine/wire" }
 # For the slot layout contract (`contracts/slot-layout.toml`), read by `tree --boot-dir`.
 toml = { workspace = true }
-# For `tree --bridge-env`: the gadget's composition parser, which names the link.
+# For `tree --bridge-env`: the gadget's composition parser, which names the link, and where a flash
+# device's pushed files go and which of them stream.
 lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget", features = ["std"] }
+lemnos-driver-system-flash = { path = "../../drivers/system-flash" }
 # For `bundle`: the Ed25519 key and signature (both already in the tree through the drivers), the SHA-256, and the
 # slot driver's own signature check and key-file reader, so a bundle is verified as it is installed.
 ed25519-dalek = { version = "2.2", default-features = false }

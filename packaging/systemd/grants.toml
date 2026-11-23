@@ -173,6 +173,7 @@ grant = [
   # The restart helper's socket: the daemon connects to it to ask for a restart, as its own user in group lemnos. The
   # socket is root's, group lemnos, mode 0660 (packaging/systemd/lemnos-restart.socket); a connect is a write under /run,
   # which the base unit allows. The helper answers only root and the daemon's user (service/restart-helper/src/serve.rs).
+  {path = "/run/lemnos-flash", kind = "path", access = "ro", how = "none", drivers = ["drivers/system-flash"], reason = "not reached by lemnosd: the Orion bridge's directory for a flash device's pushed manifest (PUSHED_FILES_DIR), kept in the driver so lemnos-ctl tree --bridge-env writes it; the bridge's own unit drop-in grants it"},
   {path = "/run/lemnos-restart.sock", kind = "file", access = "rw", how = "none", drivers = ["service/restart-helper"], reason = "the restart helper's socket: the daemon connects to it as group lemnos; /run is writable under the base unit"},
   # The service manager's private socket: reached by the helper's own unit (lemnos-restart.service, root), never by lemnosd.
   # The daemon links the helper's client, not this path. /run is writable under the base unit.

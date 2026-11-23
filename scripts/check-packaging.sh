@@ -7,7 +7,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # The units' security exposure, from `systemd-analyze security --offline=true`. A unit stays at or
 # below max_exposure (the baseline, as Orion's node unit does), in tenths of a point. The one
-# exception is a board's optional fragment (the files in packaging/systemd/lemnosd.service.d/), each
+# exception is a board's optional fragment (the files in packaging/systemd/<unit>.service.d/), each
 # checked with the base unit it extends: it may add exactly its items in `additions`, each at the
 # score systemd-analyze gives it. An addition the unit no longer has fails the check, so the list
 # cannot outlive what it names, and any other exposure fails it.
@@ -19,6 +19,7 @@ fragments=(
   "packaging/systemd/lemnosd.service.d/health-tcp.conf|lemnosd-health-tcp.service"
   "packaging/systemd/lemnosd.service.d/slots.conf|lemnosd-slots.service"
   "packaging/systemd/lemnosd.service.d/security.conf|lemnosd-security.service"
+  "packaging/systemd/lemnos-orion.service.d/files.conf|lemnos-orion-files.service"
 )
 # the unit it is in ; name as systemd-analyze prints it ; score in tenths ; reason
 # (a semicolon between the fields: a name may hold a bar)
@@ -93,6 +94,9 @@ if [[ "$systemd_major" -ge 254 ]]; then
   for entry in "${fragments[@]}"; do
     fragment="${entry%%|*}"
     combined="${entry#*|}"
+    # The base unit is the one whose drop-in directory holds the fragment: lemnosd.service.d/ extends
+    # lemnosd.service, lemnos-orion.service.d/ extends lemnos-orion.service.
+    base="$(basename "$(dirname "$fragment")" .d)"
     [[ -f "$fragment" ]] || { echo "packaging: $fragment is missing"; exit 1; }
     awk -v frag="$fragment" '
       function emit(   line) {
@@ -106,7 +110,7 @@ if [[ "$systemd_major" -ge 254 ]]; then
       /^\[Install\]/ && !done { emit(); done = 1 }
       { print }
       END { if (!done) emit() }
-    ' "$work/lemnosd.service" >"$work/$combined"
+    ' "$work/$base" >"$work/$combined"
     sed -i '/^$/d' "$work/$combined"
   done
   verified="$(cd "$work" && systemd-analyze verify --man=no ./*.service 2>&1)" || {

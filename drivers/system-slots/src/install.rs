@@ -562,6 +562,15 @@ pub struct Source {
 
 /// The directory a sender puts a bundle in for `install_file`, under the images directory.
 pub const INCOMING: &str = ".incoming";
+
+/// Where files pushed to a slot device go: `.incoming` under its images, `<data>/slots/.incoming`,
+/// with `data` the device's `data` setting (`/data` when unset). `lemnos-ctl tree --bridge-env`
+/// writes it into the bridge's `LEMNOS_ORION_FILES`.
+pub fn pushed_files_dir(data: Option<&str>) -> std::path::PathBuf {
+    std::path::Path::new(data.unwrap_or("/data"))
+        .join("slots")
+        .join(INCOMING)
+}
 /// How much of a file one tick reads: small enough that a tick stays far inside a call's
 /// deadline.
 pub const READ_EVERY_TICK: usize = 1 << 20;

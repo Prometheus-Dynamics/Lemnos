@@ -27,6 +27,7 @@ pub mod mirror;
 pub mod named;
 pub mod privilege;
 pub mod publish;
+pub mod pushes;
 pub mod source;
 pub mod stream;
 pub mod values;

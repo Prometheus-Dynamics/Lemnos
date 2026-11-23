@@ -1446,6 +1446,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-devtree",
  "lemnos-driver-named-files",
+ "lemnos-driver-system-flash",
  "lemnos-driver-system-slots",
  "lemnos-driver-usb-gadget",
  "lemnos-fake-devices",

@@ -164,9 +164,24 @@ fn watched(check: &mut impl FnMut(bool, &str) -> bool) -> bool {
             return false;
         }
     };
-    if let Err(error) = usb.claim_interface(0) {
-        check(false, &format!("claim the vendor interface: {error}"));
-        return false;
+    // The device is on the bus as soon as it enumerates, a moment before the host sets its
+    // configuration: until then usbfs has no interface 0 and a claim gets ENOENT. Only that
+    // answer is asked again, for a bounded time; any other is the check's failure at once.
+    let configured_by = Instant::now() + Duration::from_secs(10);
+    loop {
+        match usb.claim_interface(0) {
+            Ok(()) => break,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && Instant::now() < configured_by =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                check(false, &format!("claim the vendor interface: {error}"));
+                return false;
+            }
+        }
     }
     let client = match Client::connect(SOCKET, "stage-check") {
         Ok(client) => client,

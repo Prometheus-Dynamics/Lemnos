@@ -320,6 +320,7 @@ fn status_of(entry: &DeviceEntry) -> Status {
         health: entry.health,
         reason: entry.reason.clone(),
         refusal: entry.refusal.code(),
+        pushes: String::new(),
     }
 }
 
@@ -441,6 +442,7 @@ mod tests {
                     health: DeviceHealth::Ok,
                     reason: String::new(),
                     refusal: 0,
+                    pushes: String::new(),
                 },
                 items: Vec::new(),
                 controls: Vec::new(),

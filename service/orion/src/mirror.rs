@@ -64,6 +64,10 @@ pub struct Status {
     /// Why the device waits, as the wire numbers it (`lemnos_wire::refusal`): 0 none, 1 absent, 2
     /// failed, and any other number as the service sent it.
     pub refusal: u8,
+    /// Whether the bridge takes files pushed to the device, in words: empty for a device that
+    /// takes none, `accepted`, or `refused: <why>` for one that takes files on a board that gave
+    /// the bridge no place for them. The bridge's, not lemnosd's: see [`Mirror::set_pushes`].
+    pub pushes: String,
 }
 
 /// The devices with their slots, and the facts, as [`Mirror::snapshot`] gives them.
@@ -152,6 +156,8 @@ pub struct Mirror {
     lease_seconds: Option<u64>,
     /// How many callers' leases have ended (their connections dropped): `hello.leases.ended`.
     leases_ended: u64,
+    /// What each device's `pushes` says, by name, as the files thread found it.
+    pushes: Vec<(String, String)>,
 }
 
 /// Whether a change of status changes what `describe` says: its state or its reason. Health is
@@ -192,7 +198,8 @@ impl Mirror {
         // Whether a device came into the set by name. A device with the same name and a new shape
         // is updated in its own slot and is not a change of the set (see the set generation).
         let mut came = false;
-        for spec in specs {
+        for mut spec in specs {
+            spec.status.pushes = self.pushes_of(&spec.name);
             let same = held
                 .iter()
                 .position(|d| d.spec.name == spec.name && same_shape(&d.spec, &spec));
@@ -260,6 +267,29 @@ impl Mirror {
         self.devices = kept;
         self.identity = identity;
         self.rebuild_hello();
+    }
+
+    /// What the device named `name` says of pushes now: empty until the files thread says.
+    fn pushes_of(&self, name: &str) -> String {
+        self.pushes
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether the bridge takes files pushed to `name`, in words (see [`Status::pushes`]). Kept for
+    /// a device that comes later, and its status is due again when the words change.
+    pub fn set_pushes(&mut self, name: &str, text: &str) {
+        match self.pushes.iter_mut().find(|(n, _)| n == name) {
+            Some((_, held)) if held == text => return,
+            Some((_, held)) => text.clone_into(held),
+            None => self.pushes.push((name.to_owned(), text.to_owned())),
+        }
+        for device in self.devices.iter_mut().filter(|d| d.spec.name == name) {
+            text.clone_into(&mut device.spec.status.pushes);
+            device.status_dirty = true;
+        }
     }
 
     /// The identity device's facts as the source has just read them, or `None` when it could not
@@ -365,6 +395,7 @@ impl Mirror {
                 health,
                 reason: reason.to_owned(),
                 refusal,
+                pushes: status.pushes.clone(),
             },
         ) {
             device.generation += 1;
@@ -515,6 +546,7 @@ mod tests {
             health: DeviceHealth::Ok,
             reason: String::new(),
             refusal: 0,
+            pushes: String::new(),
         }
     }
 
@@ -671,6 +703,7 @@ mod tests {
             health: DeviceHealth::Failed,
             reason: "read: timeout".to_owned(),
             refusal: 0,
+            pushes: String::new(),
         };
         assert_eq!(take(&mut mirror).status, [(0, moved)]);
         mirror.set_status(
@@ -829,6 +862,7 @@ mod tests {
             health: DeviceHealth::Failed,
             reason: "manual".to_owned(),
             refusal: 0,
+            pushes: String::new(),
         };
         mirror.set_devices(vec![listed], None);
         assert_eq!(

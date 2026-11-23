@@ -179,7 +179,9 @@ use lemnos_core::{
 
 use attempt::{Attempt, Ended};
 use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
-pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys, signature_check};
+pub use install::{
+    Admit, SIGNATURE_LEN, TrustedKey, parse_keys, pushed_files_dir, signature_check,
+};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 use json::quoted;
 use lemnos_slot_store::boot_node;
@@ -3004,5 +3006,21 @@ impl SystemSlots {
             .watch
             .waiting()
             .then(|| now_ns.saturating_add(EVERY_NS))
+    }
+}
+
+#[cfg(test)]
+mod pushed_files_dir_tests {
+    use super::*;
+
+    #[test]
+    fn pushed_files_go_where_install_file_reads_them() {
+        for data in [None, Some("/srv/data")] {
+            let layout = Layout::new(
+                PathBuf::from(data.unwrap_or("/data")),
+                PathBuf::from("/boot"),
+            );
+            assert_eq!(pushed_files_dir(data), layout.images().join(INCOMING));
+        }
     }
 }

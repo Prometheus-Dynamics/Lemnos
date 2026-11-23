@@ -55,6 +55,16 @@
 //! The driver is ticked after each call. A verify reads one chunk per tick and asks for another
 //! tick while it has more to read; nothing else is timed.
 
+/// Where the bridge keeps what is pushed to a flash device that is not streamed: the image's
+/// transport manifest (`<name>.json`), pushed before the image. A tmpfs directory: a flasher runs
+/// from RAM. `lemnos-ctl tree --bridge-env` writes it into the bridge's `LEMNOS_ORION_FILES`.
+pub const PUSHED_FILES_DIR: &str = "/run/lemnos-flash";
+
+/// The image names a flash device takes as a stream, fed to its `write` job as they arrive: an xz
+/// image and a raw one (`docs/slots.md`, "First flash"). `lemnos-ctl tree --bridge-env` writes them
+/// into the bridge's `LEMNOS_ORION_STREAMS`.
+pub const PUSHED_STREAMS: [&str; 2] = ["image.img.xz", "image.img"];
+
 pub mod crc;
 pub mod lzma;
 pub mod manifest;

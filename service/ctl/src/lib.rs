@@ -103,7 +103,7 @@ lemnos-ctl [--socket PATH] COMMAND
   tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE] [--uboot FILE]
                                  [--uboot-config FILE]
                                  [--modprobe FILE] [--cmdline FILE] [--udev FILE] [--mdev FILE]
-                                 [--bridge-env FILE]
+                                 [--bridge-env FILE] [--bridge-dropin FILE]
                                  [--security-unit FILE] [--good-boot-unit FILE]
                                  [--manifest-boot FILE] [--cmdline-slot FILE --slot ID]
                                  write the device-tree overlay for a board (stdout by default),
@@ -115,8 +115,11 @@ lemnos-ctl [--socket PATH] COMMAND
                                  the same parameters as kernel command-line words, and the udev
                                  rules that give the daemon's nodes to its group, the same
                                  permissions as mdev.conf lines for a BusyBox image (--mdev FILE),
-                                 and the bridge's `LEMNOS_ORION_LINKS=<gadget>=<link>` line for
-                                 the board's USB link (--bridge-env FILE), with no daemon";
+                                 and the bridge's settings (--bridge-env FILE): its
+                                 `LEMNOS_ORION_LINKS` line for the board's USB link and its
+                                 `LEMNOS_ORION_FILES` and `LEMNOS_ORION_STREAMS` lines for the
+                                 devices that take files, with the unit drop-in that lets it write
+                                 their directories (--bridge-dropin FILE), with no daemon";
 
 pub mod bridge_env;
 #[cfg(test)]
@@ -520,7 +523,7 @@ fn unstable_name(name: &str) -> bool {
 
 /// The kernel drivers the tool knows, by their manifests: the built-in list `lemnosd` runs, so
 /// what a driver needs is what the driver declares, never a list kept here.
-fn driver_manifests() -> Vec<lemnos_core::Manifest> {
+pub fn driver_manifests() -> Vec<lemnos_core::Manifest> {
     lemnosd::builtin::drivers()
         .iter()
         .map(|entry| *entry.manifest())
@@ -582,6 +585,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut udev_out = None;
     let mut mdev_out = None;
     let mut bridge_env_out = None;
+    let mut bridge_dropin_out = None;
     let mut security_out = None;
     let mut good_boot_out = None;
     let mut manifest_boot_out = None;
@@ -603,6 +607,7 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
             ("--udev", Some(file)) => udev_out = Some(file),
             ("--mdev", Some(file)) => mdev_out = Some(file),
             ("--bridge-env", Some(file)) => bridge_env_out = Some(file),
+            ("--bridge-dropin", Some(file)) => bridge_dropin_out = Some(file),
             ("--security-unit", Some(file)) => security_out = Some(file),
             ("--good-boot-unit", Some(file)) => good_boot_out = Some(file),
             ("--manifest-boot", Some(file)) => manifest_boot_out = Some(file),
@@ -667,7 +672,13 @@ fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
         std::fs::write(&file, line).map_err(|e| format!("{file}: {e}"))?;
     }
     if let Some(file) = bridge_env_out {
-        let text = bridge_env::text(&board).map_err(|e| format!("{path}: --bridge-env: {e}"))?;
+        let text = bridge_env::text(&board, &driver_manifests())
+            .map_err(|e| format!("{path}: --bridge-env: {e}"))?;
+        std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
+    }
+    if let Some(file) = bridge_dropin_out {
+        let text = bridge_env::dropin(&board, &driver_manifests())
+            .map_err(|e| format!("{path}: --bridge-dropin: {e}"))?;
         std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))?;
     }
     if let Some(file) = good_boot_out {

@@ -167,7 +167,7 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
 
     // The setting an image gets from `tree --bridge-env`, made here from the same board file.
     let board = lemnos_host::board::parse(BOARD).map_err(|error| format!("the board: {error}"))?;
-    let written = lemnos_ctl::bridge_env::text(&board)?;
+    let written = lemnos_ctl::bridge_env::text(&board, &lemnos_ctl::driver_manifests())?;
     let setting = written
         .lines()
         .find(|line| line.starts_with(lemnos_ctl::bridge_env::VARIABLE))

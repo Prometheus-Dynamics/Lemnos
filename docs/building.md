@@ -237,9 +237,14 @@ every refusal are in [Slots](slots.md#writing-one-with-lemnos-ctl).
 A board file that cannot be built is refused naming the file, the device and the key, for example
 `BOARD.toml: system-slots device "slots": uboot_env_size is needed for the "uboot" record (an integer)`.
 
-`--bridge-env FILE` writes the bridge's USB link setting, the one line `LEMNOS_ORION_LINKS=<gadget device
-id>=<link name>` (a comment only for a board with no gadget; [Boards](boards.md#serving-the-link-at-boot)). It was
-not part of the run above: its golden test is `service/ctl/tests/bridge_env.rs`.
+`--bridge-env FILE` writes the bridge's settings from the board file: its USB link line,
+`LEMNOS_ORION_LINKS=<gadget device id>=<link name>` (a comment only for a board with no gadget;
+[Boards](boards.md#serving-the-link-at-boot)), and for the devices that take files the
+`LEMNOS_ORION_FILES=<device>=<dir>` line (a slot device's `<data>/slots/.incoming`, a flash device's
+`/run/lemnos-flash`) and the `LEMNOS_ORION_STREAMS=<device>=<name>+<name>` line (a flash device's
+`image.img.xz+image.img`). `--bridge-dropin FILE` writes the bridge unit's drop-in from the same list:
+`ReadWritePaths=-<dir> ...`. A device whose driver takes files and has no place here is refused by name.
+Neither was part of the run above: their golden test is `service/ctl/tests/bridge_env.rs`.
 
 **The SoC map.** A board with `soc = NAME` reads `DIR/NAME.toml`, where `DIR` is `--socs DIR`, or the relative
 directory `socs` in the working directory when `--socs` is absent (`load_map` in `service/ctl/src/lib.rs`).
