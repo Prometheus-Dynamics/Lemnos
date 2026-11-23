@@ -222,19 +222,29 @@ for unit in packaging/systemd/*.service; do
 done
 
 # lemnosd's unit keeps its watchdog descriptor in the service manager's store, and orders itself minimally: the
-# store is what a restart takes back (a store kept across a stop, or a runtime directory that marks a restart,
-# would change that), and no ordering waits for local-fs.target, since a filesystem check must not run in the
-# unfed gap (docs/slots.md, "The watchdog chain", window 4; packaging/README.md, "The hardware watchdog").
+# store is what a restart takes back (a store kept across a stop would change that), and no ordering waits for
+# local-fs.target, since a filesystem check must not run in the unfed gap (docs/slots.md, "The watchdog chain",
+# window 4; packaging/README.md, "The hardware watchdog"). The runtime directory is kept across restarts only
+# (`RuntimeDirectoryPreserve=restart`), for the slots driver's boot-good mark, which is keyed by the boot id and
+# never read as a restart marker; kept across a stop (`yes`) it would outlive the daemon.
 echo "==> watchdog store and ordering"
 lemnosd_unit=packaging/systemd/lemnosd.service
 grep -Eq '^FileDescriptorStoreMax=[1-9][0-9]*$' "$lemnosd_unit" || {
   echo "packaging: lemnosd.service keeps no file descriptor store (FileDescriptorStoreMax)" >&2
   exit 1
 }
-if grep -Eq '^(FileDescriptorStorePreserve|RuntimeDirectoryPreserve)=' "$lemnosd_unit"; then
-  echo "packaging: lemnosd.service sets FileDescriptorStorePreserve or RuntimeDirectoryPreserve; a restart is told by the store" >&2
+if grep -Eq '^FileDescriptorStorePreserve=' "$lemnosd_unit"; then
+  echo "packaging: lemnosd.service sets FileDescriptorStorePreserve; a restart is told by the store" >&2
   exit 1
 fi
+if grep -E '^RuntimeDirectoryPreserve=' "$lemnosd_unit" | grep -vxq 'RuntimeDirectoryPreserve=restart'; then
+  echo "packaging: lemnosd.service keeps its runtime directory past a stop; only RuntimeDirectoryPreserve=restart is allowed" >&2
+  exit 1
+fi
+grep -Eq '^RuntimeDirectoryPreserve=restart$' "$lemnosd_unit" || {
+  echo "packaging: lemnosd.service drops its runtime directory on a restart; the boot-good mark needs RuntimeDirectoryPreserve=restart" >&2
+  exit 1
+}
 grep -Eq '^DefaultDependencies=no$' "$lemnosd_unit" || {
   echo "packaging: lemnosd.service keeps the implicit dependencies (DefaultDependencies=no is missing)" >&2
   exit 1

@@ -40,6 +40,9 @@ pub fn read_raw(node: &Node, path: &str) -> Result<Option<Vec<u8>>, String> {
 /// # Errors
 ///
 /// The manifest is missing or not readable, or a boot file does not match.
+// The driver verifies off the tick ([`prepare`], then [`Prepared::run_raw`] on a thread of its own);
+// the read in one go is the tests'.
+#[cfg(test)]
 pub fn verified(
     layout: &Layout,
     node: &Node,
@@ -60,6 +63,25 @@ pub fn verified_with(
     id: &str,
     read: Read<'_>,
 ) -> Result<(), String> {
+    prepare(layout, record, id)?.run(read)
+}
+
+/// What a boot-file verify of one slot needs, gathered without reading a boot file: the slot's
+/// manifest and its bay (the set its record is in, and each payload's stored length). Small reads only,
+/// so it is made on a tick; [`Prepared::run`], which reads and hashes the boot files, runs off it.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    dir: String,
+    boot_files: Vec<(String, String)>,
+    lengths: Vec<(String, u64)>,
+}
+
+/// The slot's manifest and bay, for [`Prepared::run`].
+///
+/// # Errors
+///
+/// The id is not a slot's, its manifest can't be read or parsed, or its boot files have no bay.
+pub fn prepare(layout: &Layout, record: &dyn BootRecord, id: &str) -> Result<Prepared, String> {
     if !valid_id(id) {
         return Err(format!("{id:?} isn't a slot id"));
     }
@@ -70,14 +92,43 @@ pub fn verified_with(
     let (dir, lengths) = record
         .slot_bay(id)
         .map_err(|e| format!("{id}'s boot files have no bay: {e}"))?;
-    let found = bootcheck::check(&dir, &manifest.boot_files, &lengths, |path| read(path));
-    let uboot = bootcheck::uboot_check(&dir, &manifest.boot_files, &lengths, |path| read(path));
-    if found.is_empty() && uboot.is_none() {
-        return Ok(());
+    Ok(Prepared {
+        dir,
+        boot_files: manifest.boot_files,
+        lengths,
+    })
+}
+
+impl Prepared {
+    /// Reads and hashes the slot's boot files through `read`: `Ok` when every one matches its manifest,
+    /// else what does not.
+    ///
+    /// # Errors
+    ///
+    /// A boot file does not match.
+    pub fn run(&self, read: Read<'_>) -> Result<(), String> {
+        let found = bootcheck::check(&self.dir, &self.boot_files, &self.lengths, |path| {
+            read(path)
+        });
+        let uboot = bootcheck::uboot_check(&self.dir, &self.boot_files, &self.lengths, |path| {
+            read(path)
+        });
+        if found.is_empty() && uboot.is_none() {
+            return Ok(());
+        }
+        let mut list: Vec<String> = found.iter().map(|m| m.to_string()).collect();
+        list.extend(uboot);
+        Err(list.join("; "))
     }
-    let mut list: Vec<String> = found.iter().map(|m| m.to_string()).collect();
-    list.extend(uboot);
-    Err(list.join("; "))
+
+    /// [`Prepared::run`], reading raw from `node`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Prepared::run`].
+    pub fn run_raw(&self, node: &Node) -> Result<(), String> {
+        self.run(&mut |path| read_raw(node, path))
+    }
 }
 
 /// The check, reading the boot files raw from `node`. Returns a note when it changed the default,

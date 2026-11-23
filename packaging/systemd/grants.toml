@@ -35,7 +35,7 @@
 
 grant = [
   # --- the unit: the runtime directory, capabilities, syscalls, families
-  {path = "/run/lemnos", kind = "path", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "RuntimeDirectory:lemnos", drivers = ["service/lemnosd"], reason = "the socket directory; systemd makes it, the root phase hands it to lemnos"},
+  {path = "/run/lemnos", kind = "path", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "RuntimeDirectory:lemnos", drivers = ["drivers/system-slots", "service/lemnosd"], reason = "the socket directory; systemd makes it, the root phase hands it to lemnos; kept across restarts (RuntimeDirectoryPreserve=restart) for the slot driver's boot-good mark (/run/lemnos/boot-good)"},
   {path = "CAP_CHOWN", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_CHOWN", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_CHOWN", reason = "the root phase changes the owner of the runtime directory before the drop"},
   {path = "CAP_SETGID", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SETGID", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_SETGID", reason = "the root phase's group change, and the gadget supervisor's"},
   {path = "CAP_SETUID", kind = "cap", access = "rw", how = "unit", via = "packaging/systemd/lemnosd.service", token = "CapabilityBoundingSet:CAP_SETUID", drivers = ["backends/linux-sys", "service/lemnosd"], needle = "CAP_SETUID", reason = "the root phase's change of user (`--user lemnos`)"},

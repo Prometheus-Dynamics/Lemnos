@@ -46,10 +46,14 @@ EnvironmentFile=-/etc/lemnos/lemnosd.env
 
 # /run/lemnos: systemd makes it (root-owned, as the unit has no User=); the root phase hands it to
 # lemnos:lemnos before the drop. lemnosd makes the socket at start and removes it at stop. Clients in
-# group lemnos may open the directory and connect to the socket. The directory is removed at every stop
-# and start, as RuntimeDirectory= does by default.
+# group lemnos may open the directory and connect to the socket. The directory is kept across the
+# daemon's restarts (automatic or `systemctl restart`) and removed by a stop: it holds the slots driver's
+# boot-good mark (docs/slots.md, "Boot good once a boot"), which names the kernel's boot id, so a restarted
+# daemon doesn't verify and clear again what this boot already did. The mark does not tell a restart from a
+# first start; the descriptor store below is still the only marker of a restart.
 RuntimeDirectory=lemnos
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
 # The file descriptor store keeps the hardware watchdog's descriptor across a restart (docs/slots.md,
 # "The watchdog chain", window 5). lemnosd stores the one its root phase opened and fed, and the next start
 # takes it back and feeds nothing: opening a running watchdog feeds it. The store is emptied by a stop, so

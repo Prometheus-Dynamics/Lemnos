@@ -83,6 +83,7 @@ fn started(dir: &TempDir, layout: &Layout) -> (SystemSlots, PathBuf, TestRoots) 
     let data = layout.data.display().to_string();
     let boot = layout.boot.display().to_string();
     let missing = dir.0.join("no-such-node").display().to_string();
+    let mark = dir.0.join("boot-good").display().to_string();
     let entries = [
         ("data", ConfigValue::Str(&data)),
         ("boot", ConfigValue::Str(&boot)),
@@ -95,6 +96,7 @@ fn started(dir: &TempDir, layout: &Layout) -> (SystemSlots, PathBuf, TestRoots) 
         ("reserve_mb", ConfigValue::Int(0)),
         ("device_tree", ConfigValue::Str(&missing)),
         ("vcio", ConfigValue::Str(&missing)),
+        ("boot_good_mark", ConfigValue::Str(&mark)),
     ];
     let lists: [(&str, &[&str]); 1] = [("boot_sources", &["/soc/mmc@7e202000=/soc/mmc@7e202000"])];
     let cfg = Config::new(&entries).with_lists(&lists);

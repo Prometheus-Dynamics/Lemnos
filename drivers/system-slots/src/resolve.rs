@@ -199,6 +199,15 @@ impl SystemSlots {
             if self.snapshot_written {
                 return None;
             }
+            // An earlier daemon of this boot finished this slot's boot good: not done again.
+            if self
+                .boot_good
+                .as_ref()
+                .is_some_and(|done| done.slot == running)
+            {
+                self.snapshot_written = true;
+                return None;
+            }
             if elapsed < self.policy.uptime || !self.looked || !valid_id(&running) {
                 return Some(now_ns + LOOK_EVERY);
             }

@@ -268,8 +268,9 @@ The unit keeps that descriptor in systemd's file descriptor store (`FileDescript
 `FDSTORE=1`). A restart takes it back and feeds nothing, since opening a running watchdog feeds it. The store is
 emptied by a stop, so an operator's `systemctl restart` is a first start, and it is not kept across a failed unit.
 Do not set `FileDescriptorStorePreserve=` on the unit: a store kept across a stop would hold a watchdog descriptor
-for a daemon that is down. The unit's `RuntimeDirectoryPreserve=` is not set, and nothing depends on the directory
-surviving a restart.
+for a daemon that is down. The unit's `RuntimeDirectoryPreserve=restart` keeps `/run/lemnos` across a restart (not a
+stop) for one thing only: the slots driver's boot-good mark, keyed by the kernel's boot id (`docs/slots.md`, "Boot good
+once a boot"). Nothing reads the directory to tell a restart from a first start.
 
 **Ordering.** `lemnosd.service` has `DefaultDependencies=no`, with `After=systemd-sysusers.service`,
 `Before=shutdown.target` and `Conflicts=shutdown.target` in place of the implicit ones. It does not wait for

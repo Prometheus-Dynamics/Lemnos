@@ -260,6 +260,7 @@ count does. They apply only to the `tryboot` record.
 | Driver | Key | Default | Range | Meaning |
 |---|---|---|---|---|
 | `system-slots` | `demote_after_episodes` | `2` | at least 1, at most 255 | The episodes against a default that demote it: an arrival on the previous slot by the boot count, with the boot files matching and a warm reset (`rsts` `0x20` or `0x1020`), counts one. A power-on reset (`0x1000`) and any other `rsts` value count none; an unknown value is recorded in the boot history with its raw value. A value below 1 is refused by name |
+| `system-slots` | `boot_good_mark` | `/run/lemnos/boot-good` | a file path | Where a finished boot good leaves its mark, so a restarted daemon of the same boot doesn't verify the boot files and clear the count again (`docs/slots.md`, "Boot good once a boot"). The mark names the kernel's boot id; a mark from another boot is ignored |
 | `system-slots` | `device_tree` | `/proc/device-tree` | an absolute path | The device tree directory the count (`chosen/bootloader/count`) and the reset status (`rsts`) are read from |
 | `system-slots` | `vcio` | `/dev/vcio` | an absolute path | The firmware mailbox device the boot count is cleared through |
 

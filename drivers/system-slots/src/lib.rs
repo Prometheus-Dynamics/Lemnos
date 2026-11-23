@@ -136,6 +136,7 @@ pub mod boot;
 mod boot_guard;
 #[cfg(test)]
 mod boot_guard_tests;
+mod boot_mark;
 #[cfg(test)]
 mod boot_writes_audit;
 pub mod budget;
@@ -280,6 +281,12 @@ pub struct SystemSlots {
     looked: bool,
     /// Whether this boot's device baseline is written.
     snapshot_written: bool,
+    /// Where a finished boot good leaves its mark for a restarted daemon (`[slots] boot_good_mark`,
+    /// see [`boot_mark`]), `None` for none; the boot good of this boot once it finished, by this
+    /// daemon or an earlier one; and why its mark couldn't be written, when it couldn't.
+    boot_good_mark: Option<PathBuf>,
+    boot_good: Option<boot_mark::Done>,
+    boot_good_mark_error: Option<String>,
     /// How many boots the history keeps (`boots_keep`).
     boots_keep: usize,
     /// The declared crash log (`crash_log`) and its tail size (`crash_bytes`), and what the last
@@ -302,6 +309,17 @@ pub struct SystemSlots {
     /// The slow period's look ([`boot::Look`]) and the answer of the one running on its thread.
     look: Option<boot::Look>,
     looking: Option<std::sync::mpsc::Receiver<boot_guard::Seen>>,
+    /// The boot-file verify running off the tick for a judgement (`count::Judge`), and those waiting.
+    verifying: Option<count::Verifying>,
+    verify_queue: std::collections::VecDeque<(String, count::Judge)>,
+    /// When a verify whose thread could not start is tried again.
+    verify_retry_ns: Option<u64>,
+    /// Tests: a delay each verify takes before it reads (storage slower than the call deadline), and
+    /// how many verifies were started.
+    #[cfg(test)]
+    verify_delay: std::time::Duration,
+    #[cfg(test)]
+    verifies_started: u32,
     /// How the board is restarted: asked before a trial is armed, and watched after a restart the
     /// helper accepted, so one that fails after all disarms the trial (see [`boot::Watch`]).
     restarter: Option<Restarter>,
@@ -694,6 +712,13 @@ impl SystemSlots {
             seen: Vec::new(),
             looked: false,
             snapshot_written: false,
+            #[cfg(test)]
+            verify_delay: std::time::Duration::ZERO,
+            #[cfg(test)]
+            verifies_started: 0,
+            boot_good_mark: None,
+            boot_good: None,
+            boot_good_mark_error: None,
             boots_keep: boots::DEFAULT_KEEP,
             crash: None,
             crash_bytes: crash::DEFAULT_BYTES,
@@ -709,6 +734,9 @@ impl SystemSlots {
             next_check_ns: 0,
             look: None,
             looking: None,
+            verifying: None,
+            verify_queue: std::collections::VecDeque::new(),
+            verify_retry_ns: None,
             restarter: None,
             offline_free: None,
             uncleared: None,
@@ -1483,6 +1511,16 @@ impl SystemSlots {
                 .unwrap_or_default(),
             &mut out,
         );
+        // Appended last: whether this boot's boot good (verify, baseline, count clear) has run, when,
+        // and by which daemon.
+        out.push_str(",\"boot_good\":");
+        quoted(
+            &boot_mark::words(
+                self.boot_good.as_ref(),
+                self.boot_good_mark_error.as_deref(),
+            ),
+            &mut out,
+        );
         // Appended last, and only for a board that declares a crash log: what the boot's record step said.
         if self.crash.is_some() {
             out.push_str(",\"crash_log\":");
@@ -1816,6 +1854,8 @@ const KEYS: &[Key] = &[
     Key::optional("device_tree", Kind::Str),
     Key::optional("vcio", Kind::Str),
     Key::optional("demote_after_episodes", Kind::Int),
+    // Where a finished boot good leaves its mark for a restarted daemon (default /run/lemnos/boot-good).
+    Key::optional("boot_good_mark", Kind::Str),
     Key::optional("uboot_env_size", Kind::Int),
     Key::optional("uboot_env_device", Kind::Str),
     Key::optional("uboot_env_offset", Kind::Int),
@@ -2130,10 +2170,11 @@ impl Lifecycle for SystemSlots {
         let settle = self.settle(now_ns);
         let slow = self.slow_check(now_ns);
         let count = self.count_tick(now_ns);
+        let verify = self.verify_tick(now_ns);
         let grow = self.grow_tick(now_ns);
         let trial = self.trial_watch(now_ns);
         let restart = self.restart_watch(now_ns);
-        [install, settle, slow, count, grow, trial, restart]
+        [install, settle, slow, count, verify, grow, trial, restart]
             .into_iter()
             .flatten()
             .min()
@@ -2268,6 +2309,9 @@ impl Lifecycle for SystemSlots {
             .map(|_| trial::Probe::default())
             .collect();
         slots.boot = read_boot_id();
+        let mark = PathBuf::from(cfg.str("boot_good_mark").unwrap_or(boot_mark::DEFAULT));
+        slots.boot_good = boot_mark::read(&mark, &slots.boot);
+        slots.boot_good_mark = Some(mark);
         slots.indicator = needs.indicator;
         slots.partuuid = cfg
             .str("partuuid")

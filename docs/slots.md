@@ -1956,6 +1956,38 @@ restart, with a write only when it is not already 0 (so a healthy boot writes no
 - **The rescue's exit.** Download mode at 8 waits for the host flasher, which is also the operator's default
   switch: a default switch clears the count and the episodes.
 
+### Boot good once a boot
+
+A default boot that has run its uptime (`confirm_uptime_s`, 30 s) is judged good once: the driver writes the slot's
+device baseline (`board/slots/<id>.devices`), verifies its boot files against the manifest, and clears the boot
+count (the firmware's through the mailbox, or the U-Boot form's `lemnos_restarts` and episodes). The verify reads
+and hashes every boot file, which on slow storage takes longer than the call deadline, so it runs on a thread of
+its own (`slots-verify`) and a tick only takes its answer (`count::Judge`, `verify_tick`, looked at every 100 ms).
+A tick never waits for it, so a slow verify can't overrun a tick and get the driver abandoned and rebound, which
+would start the boot good again 30 s later, for good.
+
+The boot good runs once per boot, not once per daemon start. When it has finished (the files verified and the count
+cleared, or nothing to clear on a board without a count), the driver writes a mark, `/run/lemnos/boot-good` by
+default (`[slots] boot_good_mark`), with three lines: `boot <the kernel's boot id>`, `slot <id>`, `at <unix
+seconds>`. A daemon that starts in the same boot reads it: when it names this boot and the running slot, the
+baseline, the verify and the clear are not done again. The mark is written only when the boot good finished,
+never when it began: a daemon that dies while the verify runs, or whose verify refuses the files, leaves no mark,
+and the next start does the whole boot good. A count clear the firmware refused is retried from the tick ("the
+boot count is not cleared"), and the mark is written when the retry goes through. A mark from another boot is
+ignored. `/run/lemnos` is the daemon's runtime directory, kept across its restarts and removed by a stop
+(`RuntimeDirectoryPreserve=restart`); the mark is keyed by the boot id, so it never tells a restart from a first
+start (the descriptor store does, "The watchdog chain").
+
+`lemnos-ctl call slots info` says it in `boot_good`: `not yet this boot`, or `ran this boot for <slot> at <unix
+seconds> s, by this daemon` (or `by an earlier daemon of this boot`). When the mark couldn't be written, the words
+say so and that a restarted daemon does it again.
+
+Tests: `a_finished_boot_good_is_marked_and_a_restarted_daemon_of_the_same_boot_does_not_do_it_again`,
+`a_boot_good_that_did_not_finish_leaves_no_mark_and_the_next_daemon_does_it` and
+`a_verify_slower_than_the_call_deadline_neither_overruns_a_tick_nor_loops` (a verify of 2.5 s against the 2 s
+deadline: every tick returns in well under 500 ms, the verify is started once, and a minute of ticks after it
+starts nothing again).
+
 ### The good-boot deadline
 
 Every boot of a slot board is judged, by systemd and not by lemnosd. The unit
@@ -2353,8 +2385,9 @@ it. So the root phase keeps the descriptor it fed in the service manager's file 
 (`FDSTORE=1`, `FDNAME=lemnos-watchdog`, `service/lemnosd/src/privilege.rs`, `keep_in_store`), and the next start
 takes it back from `LISTEN_FDS` and feeds nothing (`lemnos_linux_sys::listen::take`,
 `LinuxBoard::hold_before_drop`). The root phase logs `adopted, not fed` for that start. The store is the only
-marker of a restart: the runtime directory no longer tells a restart from a first start (the unit keeps no
-`RuntimeDirectoryPreserve=`), and nothing else does.
+marker of a restart: the runtime directory does not tell a restart from a first start (the unit keeps it across
+restarts only for the boot-good mark, which names the boot, not the start; see "Boot good once a boot"), and nothing
+else does.
 
 The store's rules, each tested on the lifecycle the service manager gives it:
 

@@ -377,13 +377,29 @@ impl SystemSlots {
             Ok(rsts) => rsts,
             Err(e) => return self.note(format!("the reset status can't be read: {e}")),
         };
-        let files_match = boot_guard::verified(
-            &self.layout,
-            &self.boot_node,
-            self.record.as_ref(),
+        // The default's boot files decide the arrival: read and hashed off the call, then judged
+        // at a tick (`arrive_firmware`).
+        self.ask_verify(
             &state.default,
-        )
-        .is_ok();
+            Judge::Arrival {
+                running,
+                default: state.default.clone(),
+                rsts,
+                uboot: false,
+            },
+        );
+    }
+
+    /// The firmware form's arrival, once the default's boot files were verified (`files_match`).
+    fn arrive_firmware(&mut self, running: &str, default: &str, rsts: u32, files_match: bool) {
+        let Some(firmware) = self.firmware.clone() else {
+            return;
+        };
+        let state = self.state();
+        if state.default != default || state.previous != running {
+            // The state moved while the files were read: this arrival is no longer the one seen.
+            return;
+        }
         let episodes_before = match self.record.episodes() {
             Ok(Some((slot, episodes))) if slot == state.default => episodes,
             Ok(_) => 0,
@@ -391,7 +407,7 @@ impl SystemSlots {
         };
         let seen = arrival::Arrival {
             default: state.default.clone(),
-            previous: running.clone(),
+            previous: running.to_string(),
             files_match,
             rsts,
             episodes_before,
@@ -441,13 +457,30 @@ impl SystemSlots {
     /// Boot good on `slot`: the manifest must match, then the restart baseline is kept (before the
     /// clear, so it stays when the clear fails), then the slot's episodes and the boot count go
     /// (see [`arrival::on_boot_good`]). A boot whose files don't match keeps its count, and says so.
+    ///
+    /// The boot files are read and hashed off the tick ([`SystemSlots::ask_verify`]); what follows the
+    /// answer runs at a tick ([`SystemSlots::boot_good_judged`]). The count is cleared only after a
+    /// matching answer. A restart before then leaves the count uncleared: the next boot is counted
+    /// again, and judged again when it has run its uptime.
     pub(crate) fn boot_good(&mut self, slot: &str) {
+        // Neither the firmware's count nor the U-Boot form's: nothing to clear, so nothing to read.
+        if self.firmware.is_none() && !matches!(self.record.restarts(), Ok(Some(_))) {
+            return self.boot_good_done(slot);
+        }
+        self.ask_verify(
+            slot,
+            Judge::BootGood {
+                slot: slot.to_string(),
+            },
+        );
+    }
+
+    /// Boot good on `slot`, its boot files' verify answered (`verified`).
+    fn boot_good_judged(&mut self, slot: &str, verified: Result<(), String>) {
         let Some(firmware) = self.firmware.clone() else {
-            return self.boot_good_uboot(slot);
+            return self.boot_good_uboot(slot, verified);
         };
-        if let Err(why) =
-            boot_guard::verified(&self.layout, &self.boot_node, self.record.as_ref(), slot)
-        {
+        if let Err(why) = verified {
             return self.note(format!(
                 "{slot} is not good yet: its boot files don't match ({why}); the count is kept"
             ));
@@ -465,10 +498,35 @@ impl SystemSlots {
             restarts: false,
         };
         match arrival::on_boot_good(&mut actions, slot) {
-            Ok(()) => self.count_cleared(),
+            Ok(()) => {
+                self.count_cleared();
+                self.boot_good_done(slot);
+            }
+            // The clear is retried from the tick; the boot good finishes when it goes through.
             Err(why) if why.starts_with(COUNT_UNCLEARED) => self.count_refused(&why),
             Err(why) => self.note(why),
         }
+    }
+
+    /// This boot's boot good finished: verified, baseline written, count cleared. Kept for `info`,
+    /// and marked under `/run` so a restarted daemon of the same boot doesn't do it again
+    /// ([`crate::boot_mark`]). Only a finished boot good is marked: one that died part way is done
+    /// again in full by the next start.
+    pub(crate) fn boot_good_done(&mut self, slot: &str) {
+        let at_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.boot_good_mark_error = match &self.boot_good_mark {
+            Some(path) => crate::boot_mark::write(path, &self.boot, slot, at_s)
+                .err()
+                .map(|e| format!("{}: {e}", path.display())),
+            None => None,
+        };
+        self.boot_good = Some(crate::boot_mark::Done {
+            slot: slot.to_string(),
+            at_s,
+            here: true,
+        });
     }
 
     /// The clear went through. A refused clear that was owed ends here, with its tries named once;
@@ -506,6 +564,11 @@ impl SystemSlots {
         let at = tick_pending(&self.layout, &mut self.uncleared, now_ns, &firmware);
         if self.uncleared.is_none() {
             self.show("idle", NO_PROGRESS);
+            // The owed clear went through: the boot good it was part of has finished.
+            let running = self.running();
+            if valid_id(&running) {
+                self.boot_good_done(&running);
+            }
         }
         at
     }
@@ -534,13 +597,23 @@ impl SystemSlots {
         {
             return;
         }
-        let files_match = boot_guard::verified(
-            &self.layout,
-            &self.boot_node,
-            self.record.as_ref(),
+        self.ask_verify(
             &state.default,
-        )
-        .is_ok();
+            Judge::Arrival {
+                running,
+                default: state.default.clone(),
+                rsts: lemnos_slot_store::fallback::WARM_RESET,
+                uboot: true,
+            },
+        );
+    }
+
+    /// The U-Boot form's arrival, once the default's boot files were verified (`files_match`).
+    fn arrive_uboot_judged(&mut self, running: &str, default: &str, files_match: bool) {
+        let state = self.state();
+        if state.default != default || state.previous != running {
+            return;
+        }
         let episodes_before = match self.record.episodes() {
             Ok(Some((slot, episodes))) if slot == state.default => episodes,
             Ok(_) => 0,
@@ -548,7 +621,7 @@ impl SystemSlots {
         };
         let seen = arrival::Arrival {
             default: state.default.clone(),
-            previous: running.clone(),
+            previous: running.to_string(),
             files_match,
             rsts: lemnos_slot_store::fallback::WARM_RESET,
             episodes_before,
@@ -584,14 +657,12 @@ impl SystemSlots {
 
     /// Boot good on the U-Boot form: the manifest must match, then the episodes and the restart count go
     /// (the count only when it is not already 0).
-    fn boot_good_uboot(&mut self, slot: &str) {
+    fn boot_good_uboot(&mut self, slot: &str, verified: Result<(), String>) {
         // Not the U-Boot form: nothing to clear.
         if !matches!(self.record.restarts(), Ok(Some(_))) {
             return;
         }
-        if let Err(why) =
-            boot_guard::verified(&self.layout, &self.boot_node, self.record.as_ref(), slot)
-        {
+        if let Err(why) = verified {
             return self.note(format!(
                 "{slot} is not good yet: its boot files don't match ({why}); the count is kept"
             ));
@@ -603,8 +674,159 @@ impl SystemSlots {
             boot: &self.boot,
             restarts: true,
         };
-        if let Err(why) = arrival::on_boot_good(&mut actions, slot) {
-            self.note(why);
+        match arrival::on_boot_good(&mut actions, slot) {
+            Ok(()) => self.boot_good_done(slot),
+            Err(why) => self.note(why),
+        }
+    }
+}
+
+/// A judgement that waits on a boot-file verify, which runs off the tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Judge {
+    /// Boot good on the slot ([`SystemSlots::boot_good`]).
+    BootGood { slot: String },
+    /// The count-based arrival at start: the default's files decide it.
+    Arrival {
+        running: String,
+        default: String,
+        rsts: u32,
+        uboot: bool,
+    },
+}
+
+/// The verify running for the first judgement of the queue, and its answer.
+pub(crate) struct Verifying {
+    judge: Judge,
+    answer: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
+/// How soon a tick looks again for a running verify's answer.
+const VERIFY_LOOK_NS: u64 = 100_000_000;
+
+impl SystemSlots {
+    /// Queues `judge`, whose verify reads and hashes slot `slot`'s boot files, and starts it when none
+    /// runs. The slot's manifest and bay are read now (small reads); the boot files are read on the
+    /// verify's own thread, and the judgement is made at the tick that finds the answer.
+    pub(crate) fn ask_verify(&mut self, slot: &str, judge: Judge) {
+        if self.verify_queue.iter().any(|(_, j)| *j == judge)
+            || self.verifying.as_ref().is_some_and(|v| v.judge == judge)
+        {
+            return;
+        }
+        self.verify_queue.push_back((slot.to_string(), judge));
+        self.start_verify(None);
+    }
+
+    /// Starts the queue's first verify when none runs. A thread that can't be started is tried again
+    /// at the failure rule's cap (`now_ns` given) or at the next tick.
+    fn start_verify(&mut self, now_ns: Option<u64>) {
+        while self.verifying.is_none() {
+            let Some((slot, judge)) = self.verify_queue.pop_front() else {
+                return;
+            };
+            let prepared = match boot_guard::prepare(&self.layout, self.record.as_ref(), &slot) {
+                Ok(prepared) => prepared,
+                // Nothing to read: judged at once, with the reason.
+                Err(why) => {
+                    self.judged(judge, Err(why));
+                    continue;
+                }
+            };
+            let node = self.boot_node.clone();
+            let (tell, answer) = std::sync::mpsc::channel();
+            #[cfg(test)]
+            let delay = self.verify_delay;
+            let started = std::thread::Builder::new()
+                .name("slots-verify".into())
+                .spawn(move || {
+                    #[cfg(test)]
+                    std::thread::sleep(delay);
+                    let _ = tell.send(prepared.run_raw(&node));
+                });
+            match started {
+                Ok(_) => {
+                    #[cfg(test)]
+                    {
+                        self.verifies_started += 1;
+                    }
+                    self.verifying = Some(Verifying { judge, answer });
+                }
+                Err(e) => {
+                    self.note(format!(
+                        "the boot-file verify couldn't start its thread ({e}); it is tried again"
+                    ));
+                    self.verify_queue.push_front((slot, judge));
+                    self.verify_retry_ns =
+                        Some(now_ns.unwrap_or(0).saturating_add(crate::OWNER_RETRY_NS));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Judges what a finished verify answered, and starts the next. Returns when to look again.
+    pub(crate) fn verify_tick(&mut self, now_ns: u64) -> Option<u64> {
+        if let Some(verifying) = &self.verifying {
+            let answer = match verifying.answer.try_recv() {
+                Ok(answer) => answer,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    return Some(now_ns.saturating_add(VERIFY_LOOK_NS));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("the boot-file verify ended without an answer".to_string())
+                }
+            };
+            if let Some(Verifying { judge, .. }) = self.verifying.take() {
+                self.judged(judge, answer);
+            }
+        }
+        if self.verify_retry_ns.is_some_and(|at| now_ns < at) {
+            return self.verify_retry_ns;
+        }
+        self.verify_retry_ns = None;
+        self.start_verify(Some(now_ns));
+        if self.verifying.is_some() {
+            Some(now_ns.saturating_add(VERIFY_LOOK_NS))
+        } else {
+            self.verify_retry_ns
+        }
+    }
+
+    /// Waits for every verify that is running or queued and judges each, as the ticks of a running
+    /// driver would in turn. For tests, which have no ticks of their own.
+    #[cfg(test)]
+    pub(crate) fn settle_verifies(&mut self) {
+        loop {
+            if let Some(Verifying { judge, answer }) = self.verifying.take() {
+                let verified = answer
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap_or_else(|_| Err("the boot-file verify did not answer".to_string()));
+                self.judged(judge, verified);
+            }
+            self.start_verify(None);
+            if self.verifying.is_none() && self.verify_queue.is_empty() {
+                return;
+            }
+        }
+    }
+
+    /// The judgement, its verify answered.
+    fn judged(&mut self, judge: Judge, verified: Result<(), String>) {
+        match judge {
+            Judge::BootGood { slot } => self.boot_good_judged(&slot, verified),
+            Judge::Arrival {
+                running,
+                default,
+                rsts,
+                uboot: false,
+            } => self.arrive_firmware(&running, &default, rsts, verified.is_ok()),
+            Judge::Arrival {
+                running,
+                default,
+                uboot: true,
+                ..
+            } => self.arrive_uboot_judged(&running, &default, verified.is_ok()),
         }
     }
 }

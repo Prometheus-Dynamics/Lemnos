@@ -678,6 +678,7 @@ fn a_confirm_on_a_firmware_board_keeps_the_count_when_the_boot_files_cannot_be_r
         vcio: plain,
     });
     board.slots.confirm().unwrap();
+    board.slots.settle_verifies();
     assert_eq!(board.meta("os-2").get("GOOD"), "yes");
     let error = board.state().error;
     assert!(error.contains("os-2 is not good yet"), "{error}");
@@ -1464,7 +1465,7 @@ keys = "{keys}"
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], restart_socket = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0 }}
+config = {{ data = "{data}", boot = "{boot}", boot_sources = ["/soc/mmc@7e202000=/soc/mmc@7e202000"], restart_socket = "{ctl}", partuuid = "abcd-02", boot_args = "board", reserve_mb = 0, boot_good_mark = "{mark}" }}
 
 [[devices]]
 id = "reboot"
@@ -1476,6 +1477,7 @@ config = {{ restart_socket = "{ctl}" }}
         keys = keys.display(),
         record = dir.0.join("security.rec").display(),
         ctl = stand.socket.display(),
+        mark = dir.0.join("boot-good").display(),
     );
     let sim = lemnos_sim::SimBoard::new();
     let clock = sim.clock();
@@ -5013,6 +5015,7 @@ fn attempt_seen(slots: &mut SystemSlots) -> Seen {
             "key_ids",
             "last_attempt",
             "boot_count",
+            "boot_good",
             "trial_updates",
             "trial_block",
             "trial_block_text",
@@ -5767,6 +5770,8 @@ fn uboot_count_board() -> (Board, PathBuf) {
     board.slots.trial("os-2", false, false, false).unwrap();
     board.boot_into("os-2");
     board.slots.confirm().unwrap();
+    // The confirm's boot good runs its verify off the call: judged here, before the test moves on.
+    board.slots.settle_verifies();
     assert_eq!(board.state().default, "os-2");
     assert_eq!(board.state().previous, "os-1");
     (board, node)
@@ -5780,6 +5785,7 @@ fn the_uboot_arrival_on_previous_records_an_episode_in_the_real_environment() {
     board.slots.record.set_restarts(4).unwrap();
     board.boot_into("os-1");
     board.slots.arrive_at_start();
+    board.slots.settle_verifies();
     assert!(
         board.state().error.contains("episode 1 for os-2 recorded"),
         "{:?}",
@@ -5800,6 +5806,7 @@ fn the_uboot_good_boot_clears_the_count_and_the_episodes_in_the_real_environment
     board.slots.record.set_episodes("os-2", 1).unwrap();
     board.boot_into("os-2");
     board.slots.boot_good("os-2");
+    board.slots.settle_verifies();
     assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
     assert_eq!(board.slots.record.episodes().unwrap(), None);
 }
@@ -5815,6 +5822,7 @@ fn a_cut_in_the_uboot_count_clear_leaves_the_real_environment_whole_and_the_next
     board.boot_into("os-2");
     let before = fs::read(&node).unwrap();
     board.slots.boot_good("os-2");
+    board.slots.settle_verifies();
     let after = fs::read(&node).unwrap();
     assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
     // The writer changes one copy only: the first changed byte says which (copies at 0 and 4096, 1024 bytes).
@@ -5838,6 +5846,7 @@ fn a_cut_in_the_uboot_count_clear_leaves_the_real_environment_whole_and_the_next
             "cut {cut}: restarts {count:?}"
         );
         board.slots.boot_good("os-2");
+        board.slots.settle_verifies();
         assert_eq!(
             board.slots.record.restarts().unwrap(),
             Some(0),
@@ -6245,6 +6254,7 @@ fn the_uboot_arrival_records_its_episode_and_refuses_the_demotion_when_the_loade
     let env_before = fs::read(&node).unwrap();
     board.boot_into("os-1");
     board.slots.arrive_at_start();
+    board.slots.settle_verifies();
     assert_eq!(board.state().default, "os-2", "the default did not move");
     assert!(
         board
@@ -6271,9 +6281,185 @@ fn the_uboot_good_boot_clears_the_count_and_the_episodes_when_the_loader_cannot_
     let geometry = lemnos_slot_store::uboot_env::Geometry::new(1024, 0, 4096).unwrap();
     remove_marker(&node, &geometry);
     board.slots.boot_good("os-2");
+    board.slots.settle_verifies();
     assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
     assert_eq!(board.slots.record.episodes().unwrap(), None);
     assert_eq!(board.state().default, "os-2");
+}
+
+// ---- Boot good once a boot: off the tick, and marked under /run when it finished ----
+
+/// The U-Boot count board running its default (os-2), with its boot good still to come this boot
+/// (`boot`), its mark kept in the test's dir.
+fn boot_good_board(boot: &str) -> (Board, PathBuf) {
+    let (mut board, _node) = uboot_count_board();
+    let mark = board.dir.0.join("boot-good");
+    board.slots.boot_good_mark = Some(mark.clone());
+    board.slots.boot = boot.to_string();
+    board.slots.boot_good = None;
+    board.slots.snapshot_written = false;
+    board.slots.started_ns = Some(0);
+    board.slots.verifies_started = 0;
+    (board, mark)
+}
+
+/// A daemon restarted within the same boot: it reads the mark as `start` does, and its uptime begins
+/// again.
+fn restart_daemon(board: &mut Board, mark: &Path) {
+    board.slots.boot_good = crate::boot_mark::read(mark, &board.slots.boot);
+    board.slots.boot_good_mark_error = None;
+    board.slots.snapshot_written = false;
+    board.slots.started_ns = Some(0);
+    board.slots.looked = false;
+}
+
+/// A boot good that finished (files verified, count cleared) writes its mark; a daemon restarted in
+/// the same boot reads it and neither verifies nor clears again, and `info` says which daemon ran it.
+/// A later boot's daemon does it again.
+#[test]
+fn a_finished_boot_good_is_marked_and_a_restarted_daemon_of_the_same_boot_does_not_do_it_again() {
+    let (mut board, mark) = boot_good_board("boot-1");
+    board.slots.record.set_restarts(3).unwrap();
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    assert!(board.settle_at(0, &view).is_some(), "waits for the uptime");
+    assert!(
+        board
+            .slots
+            .info_json()
+            .contains("\"boot_good\":\"not yet this boot\"")
+    );
+    board.settle_at(31, &view);
+    assert!(!mark.exists(), "no mark while the verify has not answered");
+    board.slots.settle_verifies();
+    assert_eq!(
+        board.slots.record.restarts().unwrap(),
+        Some(0),
+        "the count is cleared"
+    );
+    let text = fs::read_to_string(&mark).unwrap();
+    assert!(text.starts_with("boot boot-1\nslot os-2\nat "), "{text}");
+    let info = board.slots.info_json();
+    assert!(info.contains("ran this boot for os-2 at "), "{info}");
+    assert!(info.contains("by this daemon"), "{info}");
+    let started = board.slots.verifies_started;
+
+    // The daemon restarts in the same boot. The count was raised since (it stands for any write the
+    // boot good would make): the restarted daemon leaves it alone.
+    board.slots.record.set_restarts(2).unwrap();
+    restart_daemon(&mut board, &mark);
+    assert!(board.settle_at(0, &view).is_none(), "nothing to wait for");
+    assert_eq!(board.settle_at(31, &view), None);
+    board.slots.settle_verifies();
+    assert_eq!(board.slots.verifies_started, started, "no verify again");
+    assert_eq!(
+        board.slots.record.restarts().unwrap(),
+        Some(2),
+        "no clear again"
+    );
+    let info = board.slots.info_json();
+    assert!(info.contains("by an earlier daemon of this boot"), "{info}");
+
+    // The next boot: the mark is the last boot's, and the boot good runs again.
+    board.slots.boot = "boot-2".to_string();
+    restart_daemon(&mut board, &mark);
+    assert!(board.slots.info_json().contains("not yet this boot"));
+    board.settle_at(31, &view);
+    board.slots.settle_verifies();
+    assert_eq!(board.slots.verifies_started, started + 1);
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
+    assert!(
+        fs::read_to_string(&mark)
+            .unwrap()
+            .starts_with("boot boot-2\n")
+    );
+}
+
+/// The mark is written when the boot good finished, never when it began: a daemon that dies while
+/// the verify runs, or whose verify refuses the files, leaves no mark, and the next daemon of the
+/// same boot does the whole boot good.
+#[test]
+fn a_boot_good_that_did_not_finish_leaves_no_mark_and_the_next_daemon_does_it() {
+    let (mut board, mark) = boot_good_board("boot-1");
+    board.slots.record.set_restarts(3).unwrap();
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    board.slots.verify_delay = std::time::Duration::from_millis(300);
+    board.settle_at(31, &view);
+    assert_eq!(board.slots.verifies_started, 1);
+    // The daemon dies with the verify running: its answer is never judged.
+    board.slots.verifying = None;
+    board.slots.verify_queue.clear();
+    assert!(!mark.exists(), "begun is not finished");
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(3));
+
+    board.slots.verify_delay = std::time::Duration::ZERO;
+    restart_daemon(&mut board, &mark);
+    assert_eq!(board.slots.boot_good, None);
+    board.settle_at(31, &view);
+    board.slots.settle_verifies();
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
+    assert!(mark.exists());
+
+    // A verify that refuses the files: not good, the count is kept, and there is no mark.
+    let (mut board, mark) = boot_good_board("boot-1");
+    board.slots.record.set_restarts(3).unwrap();
+    board.slots.boot_node = Err("the boot partition can't be opened".to_string());
+    board.settle_at(31, &view);
+    board.slots.settle_verifies();
+    assert!(
+        board.state().error.contains("is not good yet"),
+        "{}",
+        board.state().error
+    );
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(3));
+    assert!(!mark.exists());
+    assert!(board.slots.info_json().contains("not yet this boot"));
+}
+
+/// A verify slower than the call deadline (2 s) on the boot good's tick: no tick waits for it, it is
+/// started once, judged once, and the ticks after it start nothing again.
+#[test]
+fn a_verify_slower_than_the_call_deadline_neither_overruns_a_tick_nor_loops() {
+    let (mut board, mark) = boot_good_board("boot-1");
+    board.slots.record.set_restarts(3).unwrap();
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    board.slots.watch(&view);
+    board.slots.verify_delay = std::time::Duration::from_millis(2_500);
+    let began = std::time::Instant::now();
+    let mut longest = std::time::Duration::ZERO;
+    let mut ticks = 0u32;
+    while board.slots.boot_good.is_none() {
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(30),
+            "the verify never answered"
+        );
+        let now = 31_000_000_000 + began.elapsed().as_nanos() as u64;
+        let tick = std::time::Instant::now();
+        let next = board.slots.tick(now);
+        longest = longest.max(tick.elapsed());
+        ticks += 1;
+        // The tick asks to be woken while the verify runs; sleep to that, as the host would.
+        let wait = next
+            .map_or(100_000_000, |at| at.saturating_sub(now))
+            .min(100_000_000);
+        std::thread::sleep(std::time::Duration::from_nanos(wait));
+    }
+    assert!(began.elapsed() >= std::time::Duration::from_millis(2_500));
+    assert!(
+        ticks > 5,
+        "the ticks went on while the verify ran ({ticks})"
+    );
+    assert!(
+        longest < std::time::Duration::from_millis(500),
+        "a tick took {longest:?}"
+    );
+    assert_eq!(board.slots.verifies_started, 1);
+    assert_eq!(board.slots.record.restarts().unwrap(), Some(0));
+    assert!(mark.exists());
+    // A minute of ticks after it: nothing starts again.
+    for s in 0..60u64 {
+        board.slots.tick(40_000_000_000 + s * 1_000_000_000);
+    }
+    assert_eq!(board.slots.verifies_started, 1, "the boot good ran once");
 }
 
 /// A driver built the way `start` builds one, over a boot partition whose config.txt the board owns and
