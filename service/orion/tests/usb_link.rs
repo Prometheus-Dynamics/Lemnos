@@ -131,6 +131,7 @@ impl Drop for CommThread {
 fn bridge_config(lemnosd_socket: &Path, orion: &Path) -> Config {
     Config {
         lemnosd_socket: lemnosd_socket.to_path_buf(),
+        period: lemnos_orion::config::PERIOD,
         orion: Address::Local(orion.to_path_buf()),
         node_id: None,
         run_as: None,

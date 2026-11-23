@@ -983,10 +983,11 @@ fn validate_settings(
     line(
         out,
         format_args!(
-            "host: call deadline {} ms, first retry {} ms, retry cap {} ms",
+            "host: call deadline {} ms, first retry {} ms, retry cap {} ms, read floor {} ms",
             options.call_deadline.as_millis(),
             options.retry_first.as_millis(),
             options.retry_cap.as_millis(),
+            options.read_floor().as_millis(),
         ),
     )?;
     let opted: Vec<String> = board

@@ -33,6 +33,9 @@ pub struct Config {
     /// The files each device takes as a stream, fed to its long job as they arrive
     /// (`LEMNOS_ORION_STREAMS`).
     pub streams: Vec<(String, Vec<String>)>,
+    /// How often each published reading is asked of lemnosd (`LEMNOS_ORION_PERIOD_MS`). A value is
+    /// sent on only when it changed.
+    pub period: Duration,
 }
 
 /// A device's bulk endpoints offered to the comm core as a link.
@@ -80,6 +83,7 @@ impl Config {
             streams: streams(std::env::var("LEMNOS_ORION_STREAMS").ok().as_deref())?,
             lease: lease(std::env::var("LEMNOS_ORION_LEASE").ok().as_deref())?,
             stall: crate::files::IDLE,
+            period: period(std::env::var("LEMNOS_ORION_PERIOD_MS").ok().as_deref())?,
         })
     }
 }
@@ -219,6 +223,32 @@ pub fn streams(value: Option<&str>) -> Result<Vec<(String, Vec<String>)>, String
 /// The lease when `LEMNOS_ORION_LEASE` is unset: a caller's holds last a minute after its last request.
 pub const LEASE: Duration = Duration::from_secs(60);
 
+/// How often a published reading is asked of lemnosd when `LEMNOS_ORION_PERIOD_MS` is unset: four
+/// times a second. The topics carry status for a person or a dashboard; a consumer that needs a
+/// fast series takes the device's stream from lemnosd.
+pub const PERIOD: Duration = Duration::from_millis(250);
+/// The longest `LEMNOS_ORION_PERIOD_MS`.
+pub const MAX_PERIOD_MS: u64 = 60_000;
+
+/// `LEMNOS_ORION_PERIOD_MS`: whole milliseconds, 1 to [`MAX_PERIOD_MS`]. Unset is [`PERIOD`].
+/// lemnosd grants no reading faster than its board's read floor (10 ms unless the board file sets
+/// it), so a period under that is read at the floor.
+///
+/// # Errors
+///
+/// When the value is not a whole number of milliseconds in that range.
+pub fn period(value: Option<&str>) -> Result<Duration, String> {
+    let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
+        return Ok(PERIOD);
+    };
+    match text.trim().parse::<u64>() {
+        Ok(ms) if (1..=MAX_PERIOD_MS).contains(&ms) => Ok(Duration::from_millis(ms)),
+        _ => Err(format!(
+            "LEMNOS_ORION_PERIOD_MS {text:?}: want whole milliseconds, 1 to {MAX_PERIOD_MS}"
+        )),
+    }
+}
+
 /// `LEMNOS_ORION_LEASE`: whole seconds. Unset is [`LEASE`]; `0` turns the lease off (`None`).
 ///
 /// # Errors
@@ -259,6 +289,17 @@ pub fn links(value: Option<&str>) -> Result<Vec<Link>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_period_is_whole_milliseconds_in_range_with_a_quarter_second_by_default() {
+        assert_eq!(period(None), Ok(Duration::from_millis(250)));
+        assert_eq!(period(Some(" ")), Ok(PERIOD));
+        assert_eq!(period(Some("1")), Ok(Duration::from_millis(1)));
+        assert_eq!(period(Some("60000")), Ok(Duration::from_secs(60)));
+        for bad in ["0", "60001", "0.5", "fast", "-1"] {
+            assert!(period(Some(bad)).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn the_lease_is_whole_seconds_with_a_minute_by_default() {

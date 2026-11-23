@@ -42,9 +42,10 @@ fn main() -> ExitCode {
         {
             let socket = config.lemnosd_socket.clone();
             let shared = Arc::clone(&shared);
+            let period = config.period;
             std::thread::Builder::new()
                 .name("lemnosd".to_owned())
-                .spawn(move || source::run(&socket, &shared))
+                .spawn(move || source::run(&socket, &shared, period))
         },
         {
             let socket = config.lemnosd_socket.clone();

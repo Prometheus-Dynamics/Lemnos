@@ -618,7 +618,7 @@ impl Client {
             period_us,
             only_changes,
             now,
-            crate::readers::pace_for(found.reading),
+            self.core.readers.pace_for(found.reading),
             |subscription, period_us| {
                 crate::lock(&self.conn.subscriptions).push(subscription);
                 self.conn.answer(&Frame::Subscribed {

@@ -174,6 +174,7 @@ fn start_bridge_opt(
     let shared = Arc::new(Shared::new().expect("shared"));
     let config = Config {
         lemnosd_socket: lemnosd.to_path_buf(),
+        period: lemnos_orion::config::PERIOD,
         orion: Address::Local(orion.to_path_buf()),
         node_id: node.map(str::to_owned),
         run_as: None,
@@ -187,7 +188,7 @@ fn start_bridge_opt(
     let threads = vec![
         {
             let (socket, shared) = (lemnosd.to_path_buf(), Arc::clone(&shared));
-            std::thread::spawn(move || source::run(&socket, &shared))
+            std::thread::spawn(move || source::run(&socket, &shared, lemnos_orion::config::PERIOD))
         },
         {
             let (socket, shared) = (lemnosd.to_path_buf(), Arc::clone(&shared));
@@ -398,6 +399,42 @@ fn devices_are_resources_their_values_and_status_are_topics() {
 /// A device's topics are state, so each is declared `OnSubscribe::Latest`: a subscriber sent samples as
 /// messages (one on another board, or a browser) is given the newest value when it starts. The bridge
 /// declares them through the resource's shorthand, which starts from now unless it is told otherwise.
+/// READ-FLOOR: the bridge asks lemnosd for each reading at its period (250 ms unless
+/// `LEMNOS_ORION_PERIOD_MS` sets it), not "as fast as it can be read". The fake counter counts the
+/// reads of its `count`: over a second the bridge makes about four, where it made thousands.
+#[test]
+fn the_bridge_reads_each_published_value_at_its_period_and_no_faster() {
+    use lemnos_fake_devices::Counter;
+    let dir = dir("paced");
+    let lemnosd = lemnos_socket_dir::socket(&dir, "lemnosd.sock").unwrap();
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd(&lemnosd);
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the counter's resource", || {
+        resource(&dashboard, "lemnos.thing")
+    });
+    let client = lemnos_client::Client::connect(&lemnosd, "test").expect("lemnosd");
+    let mut counter = client.open::<dyn Counter>("thing").expect("the counter");
+    // The bridge's subscription is under way once the count moves; `peek` reads without counting.
+    let start = counter.peek().expect("peek");
+    wait_for("the bridge's first reads", || {
+        (counter.peek().ok()? > start + 1).then_some(())
+    });
+    let before = counter.peek().expect("peek");
+    let started = Instant::now();
+    std::thread::sleep(Duration::from_secs(1));
+    let reads = counter.peek().expect("peek") - before;
+    let elapsed = started.elapsed();
+    let period = lemnos_orion::config::PERIOD.as_millis();
+    let most = u32::try_from(elapsed.as_millis() / period).unwrap() + 2;
+    assert!(
+        (2..=most).contains(&reads),
+        "{reads} reads in {elapsed:?}: want about one each {period} ms, at most {most}"
+    );
+}
+
 #[test]
 fn a_device_state_topic_is_declared_latest_so_a_late_subscriber_is_given_it() {
     let dir = dir("latest");

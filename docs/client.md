@@ -104,8 +104,15 @@ What a client can do:
   refused for good. Refusals are remembered up to 64, the oldest going first.
 
   A subscription to a method with no arguments, or with an out buffer and a reading (a colour array,
-  such as a light's `current`, or events, such as a raw device's `read_edges`), is served. A colour array is granted no faster than 20 ms, whatever
-  period is asked. Its values are the newest reading each time, so a slow subscriber gets the latest
+  such as a light's `current`, or events, such as a raw device's `read_edges`), is served. No
+  reading is read faster than the board's read floor: 10 ms unless the board file's `[host]`
+  `read_floor_ms` sets it, and never under 1 ms. A subscriber that asks for less is granted the
+  floor, and `Subscription::period_us` says what it was granted. A reading nobody subscribes to is
+  not read at all. A colour array is granted no faster than 20 ms, whatever period is asked.
+  A subscription is for a value that is looked at: a state, a temperature, a level. A consumer that
+  needs every sample of a fast series takes it another way: a device's [stream](streams.md), or a
+  call that hands over a batch (an inertial sensor's `read_batch` gives every sample its FIFO held,
+  each with its time). Neither is held to the floor. Its values are the newest reading each time, so a slow subscriber gets the latest
   frame, and a method that changes often is never queued.
 
   Channel subsets are one method per subset: `next` subscribes a method at a period, with no

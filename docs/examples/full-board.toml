@@ -13,6 +13,7 @@ id = "example"                 # the name the service gives itself to clients
 call_deadline_ms = 2000        # how long one driver call may run: 1 to 60000
 retry_first_ms = 1000          # the first wait before a failed device is bound again
 retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
+read_floor_ms = 10             # the fastest a subscribed reading is read: 1 to 60000
 dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by name: [] for none
 
 # `[boot]`: the payload bays on the boot partition, for `lemnos-ctl boot-partition`. One size per role

@@ -27,7 +27,16 @@ pub struct Options {
     /// The least time between two binds of one device that hints from the backend can bring
     /// about, however many arrive.
     pub hint_gap: Duration,
+    /// The shortest period at which a polled reading is read for its subscribers, whatever period
+    /// they ask for. A reading with nobody subscribed is not read at all. Held to
+    /// [`MIN_READ_FLOOR`]: a shorter one counts as that. See [`Options::read_floor`].
+    pub read_floor: Duration,
 }
+
+/// The shortest [`Options::read_floor`]: 1 ms, at most a thousand reads a second of one reading.
+/// Without a floor a subscriber that asks for the fastest period has the reading read again the
+/// moment its last read ended, which spins a thread of the service and the device's bus.
+pub const MIN_READ_FLOOR: Duration = Duration::from_millis(1);
 
 impl Default for Options {
     fn default() -> Self {
@@ -38,11 +47,19 @@ impl Default for Options {
             error_limit: 5,
             lane_stack: 256 * 1024,
             hint_gap: Duration::from_millis(250),
+            read_floor: Duration::from_millis(10),
         }
     }
 }
 
 impl Options {
+    /// The read floor in force: [`read_floor`](Self::read_floor), never less than
+    /// [`MIN_READ_FLOOR`].
+    #[must_use]
+    pub fn read_floor(&self) -> Duration {
+        self.read_floor.max(MIN_READ_FLOOR)
+    }
+
     /// The cap in force: [`retry_cap`](Self::retry_cap), never more than [`MAX_RETRY_CAP`].
     pub(crate) fn cap(&self) -> Duration {
         self.retry_cap.min(MAX_RETRY_CAP)

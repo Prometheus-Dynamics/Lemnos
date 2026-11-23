@@ -123,6 +123,7 @@ In `[host]`, every key optional. Each one left out keeps the default:
 | `call_deadline_ms` | 2000 | 1 to 60000 | How long one driver call may run before it is `TIMED_OUT` and the device is retried once the call lets go |
 | `retry_first_ms` | 1000 | 1 to the cap | The wait before a device that failed is bound again. It doubles with each failure in a row |
 | `retry_cap_ms` | 8000 | 1 to 8000 | The longest wait, and how long a driver must stay up before its wait starts again from the first |
+| `read_floor_ms` | 10 | 1 to 60000 | The shortest period at which a polled reading is read for its subscribers. A subscriber that asks for less is granted this, and is told so. Under 1 ms is refused: a subscriber could then make the service read in a loop |
 | `dma_heaps` | `["linux,cma"]` | heap names | The dma-heaps the daemon's own drivers allocate from, by name under `/dev/dma_heap`: each is one file name. Each dma-buf stream's heap is added to them. Gives `lemnos-ctl tree --udev` and `--mdev` their lines, and the daemon's start check its nodes. `[]` names none |
 
 The cap can be shorter than 8 s but never longer: that is [the failure rule](concepts.md#the-failure-rule),
@@ -664,6 +665,7 @@ id = "example"                 # the name the service gives itself to clients
 call_deadline_ms = 2000        # how long one driver call may run: 1 to 60000
 retry_first_ms = 1000          # the first wait before a failed device is bound again
 retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
+read_floor_ms = 10             # the fastest a subscribed reading is read: 1 to 60000
 dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by name: [] for none
 
 # `[boot]`: the payload bays on the boot partition, for `lemnos-ctl boot-partition`. One size per role

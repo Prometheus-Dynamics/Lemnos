@@ -226,6 +226,62 @@ fn values_arrive_at_about_the_period_asked_for() {
     }
 }
 
+/// How many times device `a`'s counter was read while a subscriber that asked for the fastest
+/// period (1 us) sat for `window`, and the period it was granted. The fake counter counts its own
+/// `get` calls: its value is the number of them, so the difference is the calls into the driver.
+fn reads_in(running: &common::Running, window: Duration) -> (u64, u32, Duration) {
+    let client = Client::connect(&running.socket, "greedy").unwrap();
+    let mut handle = client.open_tag("a", COUNTER).unwrap();
+    let sub = client.subscribe(&mut handle, GET, 1, true).unwrap();
+    let probe = Client::connect(&running.socket, "probe").unwrap();
+    let mut counter = probe.open::<dyn Counter>("a").unwrap();
+    let before = counter.get().unwrap();
+    let started = Instant::now();
+    std::thread::sleep(window);
+    let after = counter.get().unwrap();
+    // The probe's own second call is one of them.
+    (sub.period_us, after - before - 1, started.elapsed())
+}
+
+/// READ-FLOOR: no client can make the daemon read in a loop. A subscriber that asks for 1 us is
+/// granted the board's read floor (10 ms unless the board file sets it), and the calls into the
+/// device over a window are bounded by the window over the floor. Before the floor, the reading
+/// was read again the moment its last read ended: thousands of calls in this window.
+#[test]
+fn a_subscriber_asking_for_the_fastest_period_is_read_at_the_floor_and_no_faster() {
+    let running = start();
+    let (granted, reads, elapsed) = reads_in(&running, Duration::from_millis(500));
+    assert_eq!(granted, 10_000, "1 us is granted the 10 ms floor");
+    let most = u32::try_from(elapsed.as_millis() / 10).unwrap() + 2;
+    assert!(
+        (10..=most).contains(&reads),
+        "{reads} reads in {elapsed:?}: want some, and at most {most} (one each 10 ms)"
+    );
+}
+
+/// The floor is the board's: `[host] read_floor_ms` moves it, down to 1 ms and no lower.
+#[test]
+fn the_board_file_sets_the_read_floor() {
+    let devices = "[[devices]]\nid = \"a\"\ndriver = \"fake-counter\"\n";
+    let slow = start_with(&format!("[host]\nread_floor_ms = 100\n{devices}"));
+    let (granted, reads, elapsed) = reads_in(&slow, Duration::from_millis(500));
+    assert_eq!(granted, 100_000);
+    let most = u32::try_from(elapsed.as_millis() / 100).unwrap() + 2;
+    assert!(
+        (2..=most).contains(&reads),
+        "{reads} reads in {elapsed:?} at a 100 ms floor: at most {most}"
+    );
+
+    let fast = start_with(&format!("[host]\nread_floor_ms = 1\n{devices}"));
+    let (granted, reads, elapsed) = reads_in(&fast, Duration::from_millis(200));
+    assert_eq!(granted, 1_000);
+    let most = u32::try_from(elapsed.as_millis()).unwrap() + 2;
+    assert!(
+        reads <= most,
+        "{reads} reads in {elapsed:?} at a 1 ms floor"
+    );
+}
+
 #[test]
 fn only_changes_stays_quiet_until_something_changes() {
     let running = start();

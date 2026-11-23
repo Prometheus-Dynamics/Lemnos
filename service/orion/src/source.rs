@@ -21,9 +21,6 @@ use crate::{LEMNOSD_NAME, Shared, log};
 /// How long one wait for a value lasts. The loop checks for stop and for a lost connection
 /// between waits.
 const WAIT: Duration = Duration::from_millis(200);
-/// Asks for the fastest period the service grants for an item (its cost floor). With
-/// `only_changes`, the service then sends a reply only when its bytes differ from the last.
-const PERIOD_US: u64 = 1;
 /// The largest reply lemnos-ctl reads. Items reply with a few bytes.
 const REPLY_MAX: usize = 64 * 1024;
 /// How long a `BUSY` description is asked again: `BUSY_TRIES` times, `BUSY_WAIT` apart.
@@ -109,11 +106,11 @@ impl IdentityRead {
 
 /// Keeps the mirror in step with lemnosd until the shared state is stopped. Each time the
 /// connection is lost, the devices are removed from the mirror and the connection is made again.
-pub fn run(socket: &Path, shared: &Shared) {
+pub fn run(socket: &Path, shared: &Shared, period: Duration) {
     let mut backoff = Backoff::new();
     while !shared.stopping() {
         let client = Client::connecting(socket, LEMNOSD_NAME);
-        match session(&client, shared, &mut backoff) {
+        match session(&client, shared, &mut backoff, period) {
             // A device that could not be described is running now: read every device again
             // on a fresh connection. The list the mirror holds stays until the new one
             // replaces it.
@@ -143,8 +140,13 @@ enum Ended {
 }
 
 /// One connection's life: discover, then forward values and events until the connection ends.
-fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<Ended, Error> {
-    let (specs, mut routes, undescribed, identity_device) = discover(client)?;
+fn session(
+    client: &Client,
+    shared: &Shared,
+    backoff: &mut Backoff,
+    period: Duration,
+) -> Result<Ended, Error> {
+    let (specs, mut routes, undescribed, identity_device) = discover(client, period)?;
     let mut reply = vec![0; REPLY_MAX];
     // The identity device's facts are read before the list is published, so the first list
     // Orion sees already carries them.
@@ -217,6 +219,7 @@ fn session(client: &Client, shared: &Shared, backoff: &mut Backoff) -> Result<En
 #[allow(clippy::type_complexity)]
 fn discover(
     client: &Client,
+    period: Duration,
 ) -> Result<
     (
         Vec<DeviceSpec>,
@@ -254,7 +257,7 @@ fn discover(
                         ));
                         continue;
                     };
-                    match subscribe(client, &entry, tag, method) {
+                    match subscribe(client, &entry, tag, method, period) {
                         Ok(subscription) => {
                             routes.insert(
                                 subscription,
@@ -405,9 +408,14 @@ fn subscribe(
     entry: &DeviceEntry,
     tag: &str,
     method: &OwnedMethod,
+    period: Duration,
 ) -> Result<u64, Error> {
     let mut handle = client.open_tag(&entry.name, tag)?;
-    let subscription = client.subscribe(&mut handle, method.id, PERIOD_US, true)?;
+    // The reading is read every `period`, and with `only_changes` the service sends a value only
+    // when its bytes differ from the last. Never "as fast as it can be read": that has the
+    // service read every published reading of the board in a loop.
+    let period_us = u64::try_from(period.as_micros()).unwrap_or(u64::MAX).max(1);
+    let subscription = client.subscribe(&mut handle, method.id, period_us, true)?;
     Ok(subscription.id)
 }
 

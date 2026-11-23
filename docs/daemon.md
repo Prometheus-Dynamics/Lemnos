@@ -917,6 +917,13 @@ by its number (the number the starter last ran under that caller; an earlier run
 revision. `the_program_is_told_which_runs_are_detached_and_how_each_one_ends` in `service/orion/tests/orion_bridge.rs`
 pins the order Orion sends an attached run's cancel in, and what each run's `detached` says.
 
+**How often a reading is read.** The bridge subscribes to each value it publishes at one period,
+`LEMNOS_ORION_PERIOD_MS` milliseconds (default 250, from 1 to 60000), and a value goes to its topic
+only when it changed. So a value on a topic can be that old. lemnosd reads no reading faster than
+its board's read floor (`[host]` `read_floor_ms`, 10 ms by default), so a period under the floor is
+read at the floor. The topics carry status for a person or a dashboard; a consumer that needs a
+fast series takes the device's stream, or its batch call, from lemnosd.
+
 **Leases.** The bridge also bounds the holds of a caller by a lease, for the case no session end reaches it
 (a caller that holds and then says nothing). When a caller has been silent for the lease, the bridge drops
 that caller's lemnosd connection, its jobs end with it, and lemnosd tells the drivers the caller is gone

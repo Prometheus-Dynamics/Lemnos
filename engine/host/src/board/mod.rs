@@ -108,7 +108,14 @@ pub struct HostSpec {
     /// udev fragment and the daemon's start check read the set with [`BoardFile::dma_heaps`].
     #[serde(default)]
     pub dma_heaps: Option<Vec<String>>,
+    /// The shortest period at which a polled reading is read for its subscribers, in
+    /// milliseconds: 1 to [`MAX_READ_FLOOR_MS`]. A subscriber that asks for less is granted this.
+    #[serde(default)]
+    pub read_floor_ms: Option<u64>,
 }
+
+/// The longest `read_floor_ms` a board file may set.
+pub const MAX_READ_FLOOR_MS: u64 = 60_000;
 
 /// The dma-heap a board's drivers allocate from when its `[host]` section names none: the CMA heap.
 pub const DEFAULT_HOST_HEAP: &str = "linux,cma";
@@ -122,6 +129,7 @@ impl HostSpec {
             call_deadline: self.call_deadline_ms.map_or(options.call_deadline, ms),
             retry_first: self.retry_first_ms.map_or(options.retry_first, ms),
             retry_cap: self.retry_cap_ms.map_or(options.retry_cap, ms),
+            read_floor: self.read_floor_ms.map_or(options.read_floor, ms),
             ..options
         }
     }
@@ -145,6 +153,17 @@ impl HostSpec {
                 "retry_cap_ms",
                 &format!(
                     "{cap} is not from 1 to {MAX_RETRY_CAP_MS}: the failure rule caps the wait at 8 s"
+                ),
+            );
+        }
+        if let Some(floor) = self.read_floor_ms
+            && !(1..=MAX_READ_FLOOR_MS).contains(&floor)
+        {
+            return out(
+                "read_floor_ms",
+                &format!(
+                    "{floor} is not from 1 to {MAX_READ_FLOOR_MS}: under 1 ms a subscriber could \
+                     make the service read in a loop"
                 ),
             );
         }
@@ -1897,6 +1916,27 @@ mod tests {
         }
         // Negative and too large for the type are not numbers of milliseconds at all.
         assert!(host("retry_cap_ms = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_read_floor_is_in_range_and_left_out_keeps_the_default() {
+        assert_eq!(
+            host("").unwrap().host.apply(Options::default()).read_floor,
+            Duration::from_millis(10)
+        );
+        let set = host("read_floor_ms = 1\n").unwrap();
+        assert_eq!(
+            set.host.apply(Options::default()).read_floor,
+            Duration::from_millis(1)
+        );
+        assert!(host(&format!("read_floor_ms = {MAX_READ_FLOOR_MS}\n")).is_ok());
+        for bad in [0, MAX_READ_FLOOR_MS + 1] {
+            let error = host(&format!("read_floor_ms = {bad}\n")).unwrap_err();
+            assert!(
+                matches!(error, BoardError::Host("read_floor_ms", _)),
+                "{bad}: {error}"
+            );
+        }
     }
 
     #[test]

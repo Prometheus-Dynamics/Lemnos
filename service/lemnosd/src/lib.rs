@@ -269,6 +269,8 @@ impl Service {
         }
         listener.set_nonblocking(true).map_err(StartError::Socket)?;
         let clock = Arc::new(MonotonicClock::new());
+        // What the board file's `[host]` sets wins, as the host itself applies it.
+        let read_floor = config.board.host.apply(config.options).read_floor();
         let host = Host::start_versioned(
             env!("CARGO_PKG_VERSION"),
             &config.board,
@@ -291,7 +293,7 @@ impl Service {
             host,
             liveness: Arc::clone(&liveness),
             clock,
-            readers: Readers::new(),
+            readers: Readers::new(read_floor),
             outcomes: Arc::new(outcomes::Outcomes::new()),
             clients: Mutex::new(Vec::new()),
             waker: Arc::new(Waker::new(wake_tx)),

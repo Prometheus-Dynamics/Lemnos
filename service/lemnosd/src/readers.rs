@@ -16,12 +16,15 @@ use crate::conn::Conn;
 /// changes at most this often, so the daemon never reads it faster. 20 ms is 50 values a second.
 const FRAME_PERIOD_US: u64 = 20_000;
 
-/// How a subscribed method's values come: a colour array is capped at [`FRAME_PERIOD_US`], and any
-/// other reading has no cap.
-pub(crate) fn pace_for(reading: Option<Reading>) -> DevicePace {
+/// How a subscribed method's values come: no reading is read more often than the board's read
+/// floor (`floor_us`, [`lemnos_host::Options::read_floor`]), whatever a subscriber asks for, and a
+/// colour array no more often than [`FRAME_PERIOD_US`]. Without the floor a subscriber asking for
+/// the fastest period has the reading read again the moment its last read ended: a thread of the
+/// service, the device's lane and its bus, all spinning for values that seldom change.
+pub(crate) fn pace_for(reading: Option<Reading>, floor_us: u64) -> DevicePace {
     let sample_period_us = match reading {
-        Some(Reading::ColourArray) => FRAME_PERIOD_US,
-        _ => 0,
+        Some(Reading::ColourArray) => FRAME_PERIOD_US.max(floor_us),
+        _ => floor_us,
     };
     DevicePace {
         sample_period_us,
@@ -49,6 +52,8 @@ struct State {
 pub(crate) struct Readers {
     state: Mutex<State>,
     wake: Condvar,
+    /// The board's read floor, in microseconds.
+    floor_us: u64,
 }
 
 const fn refusal_status(refusal: Refusal) -> Status {
@@ -59,8 +64,9 @@ const fn refusal_status(refusal: Refusal) -> Status {
 }
 
 impl Readers {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(floor: Duration) -> Self {
         Self {
+            floor_us: u64::try_from(floor.as_micros()).unwrap_or(u64::MAX),
             state: Mutex::new(State {
                 scheduler: Scheduler::new(),
                 points: Vec::new(),
@@ -119,6 +125,11 @@ impl Readers {
         state.owners.remove(&id);
         state.scheduler.unsubscribe(id, now_us);
         true
+    }
+
+    /// The pace of a subscribed method with that reading, on this board.
+    pub(crate) fn pace_for(&self, reading: Option<Reading>) -> DevicePace {
+        pace_for(reading, self.floor_us)
     }
 
     pub(crate) fn stop(&self) {
@@ -192,29 +203,43 @@ impl Readers {
 mod tests {
     use super::*;
 
+    const FLOOR_US: u64 = 10_000;
+
     #[test]
-    fn a_colour_array_is_granted_no_faster_than_the_frame_period_and_other_readings_are_not_capped()
-    {
+    fn no_reading_is_granted_faster_than_the_floor_and_a_colour_array_no_faster_than_a_frame() {
         assert_eq!(
-            pace_for(Some(Reading::ColourArray)).sample_period_us,
+            pace_for(Some(Reading::ColourArray), FLOOR_US).sample_period_us,
             FRAME_PERIOD_US
         );
-        assert_eq!(pace_for(Some(Reading::Number)).sample_period_us, 0);
-        assert_eq!(pace_for(None).sample_period_us, 0);
+        assert_eq!(
+            pace_for(Some(Reading::ColourArray), 50_000).sample_period_us,
+            50_000,
+            "a floor above the frame period holds the colour array too"
+        );
+        assert_eq!(
+            pace_for(Some(Reading::Number), FLOOR_US).sample_period_us,
+            FLOOR_US
+        );
+        assert_eq!(pace_for(None, FLOOR_US).sample_period_us, FLOOR_US);
 
         let mut capped = Scheduler::new();
-        capped.add_device(0, pace_for(Some(Reading::ColourArray)));
+        capped.add_device(0, pace_for(Some(Reading::ColourArray), FLOOR_US));
         let grant = capped.subscribe(0, 1, 1_000, true, 0).unwrap();
         assert_eq!(
             grant.period_us, 20_000,
             "a request for 1 ms is granted 20 ms"
         );
 
-        let mut free = Scheduler::new();
-        free.add_device(0, pace_for(Some(Reading::Number)));
+        // The fastest a client can ask for, 1 us, is granted the floor; a slower ask is kept.
+        let mut floored = Scheduler::new();
+        floored.add_device(0, pace_for(Some(Reading::Number), FLOOR_US));
         assert_eq!(
-            free.subscribe(0, 1, 1_000, true, 0).unwrap().period_us,
-            1_000
+            floored.subscribe(0, 1, 1, true, 0).unwrap().period_us,
+            FLOOR_US
+        );
+        assert_eq!(
+            floored.subscribe(0, 1, 250_000, true, 0).unwrap().period_us,
+            250_000
         );
     }
 }

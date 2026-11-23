@@ -150,6 +150,7 @@ pub fn start_bridge_to(lemnosd: &Path, orion: Address) -> Bridge {
     let shared = Arc::new(Shared::new().expect("shared"));
     let config = Config {
         lemnosd_socket: lemnosd.to_path_buf(),
+        period: lemnos_orion::config::PERIOD,
         orion,
         node_id: None,
         run_as: None,
@@ -163,7 +164,7 @@ pub fn start_bridge_to(lemnosd: &Path, orion: Address) -> Bridge {
     let threads = vec![
         {
             let (socket, shared) = (lemnosd.to_path_buf(), Arc::clone(&shared));
-            std::thread::spawn(move || source::run(&socket, &shared))
+            std::thread::spawn(move || source::run(&socket, &shared, lemnos_orion::config::PERIOD))
         },
         {
             let (socket, shared) = (lemnosd.to_path_buf(), Arc::clone(&shared));
