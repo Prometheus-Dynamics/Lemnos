@@ -999,10 +999,39 @@ fn validate_settings(
         line(
             out,
             format_args!("auto-off: none, every device is retried forever"),
-        )
+        )?;
     } else {
-        line(out, format_args!("auto-off: {}", opted.join(", ")))
+        line(out, format_args!("auto-off: {}", opted.join(", ")))?;
     }
+    // Who alone may drive each device that says `callers = "users"`. More than one user is said,
+    // not refused: a shared device has several by design, but two writers of one strip is a
+    // mistake the key can't see.
+    for device in board
+        .devices
+        .iter()
+        .filter(|d| d.callers == lemnos_host::board::Callers::Users)
+    {
+        let users: Vec<&str> = board
+            .devices
+            .iter()
+            .filter(|d| d.uses.values().any(|used| *used == device.id))
+            .map(|d| d.id.as_str())
+            .collect();
+        let note = if users.len() > 1 {
+            ": more than one device drives it, and nothing arbitrates between them"
+        } else {
+            ""
+        };
+        line(
+            out,
+            format_args!(
+                "callers: {} is driven only by {}{note}",
+                device.id,
+                users.join(", ")
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 impl Tool<'_> {

@@ -224,14 +224,26 @@ mod tests {
     /// itself, so it holds however many other tests open and close descriptors meanwhile,
     /// and reuse the same numbers.
     fn pipe_writers_all_closed(reader: BorrowedFd<'_>) -> bool {
+        pipe_hangs_up_within(reader, 0)
+    }
+
+    /// Whether the pipe behind `reader` hangs up (its last write end closes) within `wait_ms`:
+    /// one `poll`, which returns as soon as it does.
+    ///
+    /// This process's copy closing is not always the last one at that instant. Other tests of
+    /// this binary fork (`privilege`, `seccomp`), and a forked child holds a copy of every
+    /// descriptor the process had, close-on-exec or not, until it exits or execs. Such a child
+    /// forked between the receive and the drop keeps the write end open for its short life, so
+    /// the hangup is waited for, not sampled once.
+    fn pipe_hangs_up_within(reader: BorrowedFd<'_>, wait_ms: i32) -> bool {
         let mut poll = libc::pollfd {
             fd: reader.as_raw_fd(),
             events: 0,
             revents: 0,
         };
-        // SAFETY: `poll` is one live, writable `pollfd` and the count is 1; a zero timeout
-        // returns at once.
-        let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
+        // SAFETY: `poll` is one live, writable `pollfd` and the count is 1; it waits at most
+        // `wait_ms` (a zero timeout returns at once).
+        let ready = unsafe { libc::poll(&raw mut poll, 1, wait_ms) };
         assert!(ready >= 0, "poll failed");
         poll.revents & libc::POLLHUP != 0
     }
@@ -255,8 +267,8 @@ mod tests {
         );
         drop(fds);
         assert!(
-            pipe_writers_all_closed(reader.as_fd()),
-            "the write end is still open"
+            pipe_hangs_up_within(reader.as_fd(), 10_000),
+            "the write end is still open 10 s after the received descriptor was dropped"
         );
     }
 

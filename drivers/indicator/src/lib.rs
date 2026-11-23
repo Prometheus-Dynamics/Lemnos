@@ -11,8 +11,10 @@
 //! 2. The application's frames. The driver also serves `pixels/1`: an application drives the
 //!    *indicator* as it would a strip (`pixel_count`, `set`, `show`) and never the strip itself.
 //!    The first caller to `set` or `show` owns the layer; another caller is refused `BUSY` until
-//!    the owner goes, and then the layer is gone and what is under it shows. A frame is taken
-//!    whole at `show`, so a frame sent in several `set` calls is never shown half way.
+//!    the owner goes or gives it up (`indicator/1` `release`), and then the layer is gone and
+//!    what is under it shows. An application that only pauses shows a dark frame and stays the
+//!    owner; one that is done releases, so another program can draw. A frame is taken whole at
+//!    `show`, so a frame sent in several `set` calls is never shown half way.
 //! 3. A state set through `indicator/1`: `receiving`, `writing`, `verifying`, `failed`, and `done`
 //!    for `done_ms` after it is set, when it drops to `idle`. `failed` stays until another state
 //!    is set.
@@ -374,10 +376,7 @@ impl Lifecycle for Indicator {
         self.runner.caller_gone(caller);
         // The application's layer goes with its owner, and what is under it shows.
         if self.app_owner == Some(caller) {
-            self.app_owner = None;
-            self.app_live = false;
-            self.app.fill(0);
-            self.app_shown.fill(0);
+            self.drop_app();
         }
         // So does a locate with the caller that asked for it.
         if self.locate_owner == caller
@@ -558,6 +557,15 @@ impl Indicator {
         .min()
     }
 
+    /// The application's layer is gone: no owner, no frame. What is under it shows at the next
+    /// tick, and nothing of the last owner's frame is left for the next.
+    fn drop_app(&mut self) {
+        self.app_owner = None;
+        self.app_live = false;
+        self.app.fill(0);
+        self.app_shown.fill(0);
+    }
+
     /// Whether the method being run may drive the application's layer: its owner, or the first
     /// caller to try while it has none.
     fn app_caller(&mut self) -> Result<()> {
@@ -627,6 +635,17 @@ impl IndicatorContract for Indicator {
         self.locate_asked = Some(seconds);
         self.locate_owner = self.calling;
         Ok(())
+    }
+
+    fn release(&mut self) -> Result<()> {
+        match self.app_owner {
+            Some(owner) if owner != self.calling => Err(Status::BUSY),
+            Some(_) => {
+                self.drop_app();
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     fn locating(&mut self) -> Result<bool> {

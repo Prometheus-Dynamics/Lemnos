@@ -386,6 +386,35 @@ fn validate_refuses_a_tryboot_board_without_its_firmware_keys_by_name() {
     validate(&board(&format!("{names}{files}"), eeprom)).unwrap();
 }
 
+/// `validate` says which devices only their users may drive, and by whom; more than one user is
+/// said, since two writers of one device is a mistake the key can't see.
+#[test]
+fn validate_lists_the_devices_only_their_users_may_drive() {
+    let strip = "[[devices]]\nid = \"light\"\ndriver = \"x\"\ncallers = \"users\"\n";
+    let one = "[[devices]]\nid = \"indicator\"\ndriver = \"y\"\nuses = { pixels = \"light\" }\n";
+    let two = "[[devices]]\nid = \"status\"\ndriver = \"z\"\nuses = { pixels = \"light\" }\n";
+    let text = validate(&format!("{HEAD}{strip}{one}")).unwrap();
+    assert!(
+        text.contains("callers: light is driven only by indicator\n"),
+        "{text}"
+    );
+    let text = validate(&format!("{HEAD}{strip}{one}{two}")).unwrap();
+    assert!(
+        text.contains(
+            "callers: light is driven only by indicator, status: more than one device drives it, \
+             and nothing arbitrates between them"
+        ),
+        "{text}"
+    );
+    let error = validate(&format!("{HEAD}{strip}")).unwrap_err();
+    assert!(error.contains("no device uses it"), "{error}");
+    let plain = validate(&format!(
+        "{HEAD}{one}[[devices]]\nid = \"light\"\ndriver = \"x\"\n"
+    ))
+    .unwrap();
+    assert!(!plain.contains("callers:"), "{plain}");
+}
+
 #[test]
 fn validate_shows_the_defaults_with_no_host_section() {
     let text = validate(&format!("{HEAD}[[devices]]\nid = \"a\"\ndriver = \"x\"\n")).unwrap();

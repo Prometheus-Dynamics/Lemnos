@@ -1,7 +1,7 @@
 # READ-FLOOR: the daemon reads a subscribed reading at a period, never in a loop
 
-Status: **untested on board.** The measurement that found it is below; the same measurement on a
-build with this change is the check.
+Status: **run on board, passed** (Raze #2, Lemnos e199fcb9, by Atlas; results at the end). The
+measurement that found it is below; the same measurement on a build with this change was the check.
 
 ## What was measured (Raze #2, Lemnos bbb3c420, 2026-11-23, by Atlas)
 Three 60 s windows from /proc (per-thread utime+stime and voluntary switches). lemnosd used 50.2 %
@@ -28,7 +28,7 @@ ended. On change only stopped the value being sent. Each read is a call on the d
    second in all and well under 1 % of a core; no lane above that; `pio-i2c-tx` at the I2C devices'
    own rate (4 a second for each readable method of the IMU, the magnetometer and the power
    monitor, plus what their drivers' own ticks read).
-4. `lemnos-ctl check --board <file>` prints `read floor 10 ms`.
+4. `lemnos-ctl validate <file>` prints `read floor 10 ms`.
 5. Atlas's readings page still shows every value it showed, each at most 250 ms old.
 
 ## Which readings on this board have a fast path
@@ -53,4 +53,20 @@ tick rearms itself at once without work having moved. What polls on a timer:
 - lemnosd's event thread sleeps until the next driver tick is due, never less than 1 ms.
 
 ## Results
-(none yet)
+Raze #2, image with Lemnos e199fcb9 (READ-FLOOR is 16a5c7d1, under it), the same script and three
+60 s windows. Files: `pm14-board/cpu-pm14/` in Atlas's session directory (report.txt, w1 to w3).
+
+| Window | lemnosd before | lemnosd after |
+|---|---|---|
+| No session | 50.2 % of a core, 117,057 wakes/s | 1.05 %, 592 wakes/s |
+| A session idle | 47.6 %, 107,790 | 1.08 %, 593 |
+| During pushes | 41.4 %, 83,818 | 2.73 %, 676 |
+
+The board's idle went from 89.2 % to 99.8 %. lemnos-orion idle: 1.2 % and 946 wakes/s to 0.10 % and
+85. Threads in the first window: `lemnosd-readers` 104/s (was 38,272); `pio-i2c-tx` 48/s (was
+1,245); the IMU, magnetometer and power lanes 20 to 27/s each; five lanes 8/s each (were 11,600 to
+14,300); `lemnosd-events` 100/s; `lemnosd-serve` 80/s. Nothing in lemnosd is over 300/s in any
+window. The gadget's lane is 129/s (was 6,402): its 20 ms poll is 50 calls a second at about two
+wakes a call, and the bridge reads its state 14 times a second; the poll is the row
+GADGET-WAIT-NOT-POLL. Under pushes lemnos-orion's files thread is 447 wakes/s at 13.6 % of a core
+for about 12 MB/s (the stream's SHA-256, a copy and a write per chunk).

@@ -26,6 +26,10 @@ pub enum BoardError {
     Duplicate(String),
     #[error("device {0:?} uses itself")]
     SelfUse(String),
+    #[error(
+        "device {0:?}: `callers = \"users\"` and no device uses it: nothing could ever drive it"
+    )]
+    NoUsers(String),
     #[error("device {0:?}: its `uses` lead back to itself through device {1:?}")]
     Loop(String, String),
     /// A loop that goes through at least one `link`. The text names every device of the loop and
@@ -585,6 +589,20 @@ pub enum Owner {
     Host,
 }
 
+/// Who may drive a device: make the calls that change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Callers {
+    /// Anyone: a client, the devices that use it.
+    #[default]
+    Any,
+    /// Only the devices that name it in their `uses`. Any other caller is a guest on it: a call
+    /// reaches the driver only when the device's description says the method only reads. For a
+    /// device another one drives on everyone's behalf (LEDs behind an indicator, a supply behind
+    /// the chain that sequences it), so nothing can write it behind that device's back.
+    Users,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoardInfo {
@@ -704,6 +722,9 @@ pub struct DeviceSpec {
     /// `"lemnos"` when left out.
     #[serde(default)]
     pub owner: Owner,
+    /// Who may drive it: `"any"` when left out. See [`Callers`].
+    #[serde(default)]
+    pub callers: Callers,
     /// The frame streams this device offers, by the name a consumer asks for and a driver needs.
     #[serde(default)]
     pub streams: BTreeMap<String, StreamSpec>,
@@ -797,6 +818,8 @@ impl EachSpec {
             config: self.config.clone(),
             disabled: false,
             owner: self.owner,
+            // A device a rule makes is driven by anyone: a rule names no users.
+            callers: Callers::Any,
             streams: self.streams.clone(),
             auto_off_after: self.auto_off_after,
             keepalive: false,
@@ -1156,6 +1179,22 @@ fn parse_checked(text: &str) -> Result<(BoardFile, Vec<BoardError>), BoardError>
     let mut seen = BTreeSet::new();
     for device in &mut board.devices {
         if let Some(error) = device_problem(device, &mut seen) {
+            device.refused = Some(error.to_string());
+            problems.push(error);
+        }
+    }
+    // A device only its users may drive needs a user.
+    let used: BTreeSet<String> = board
+        .devices
+        .iter()
+        .flat_map(|device| device.uses.values().cloned())
+        .collect();
+    for device in &mut board.devices {
+        if device.callers == Callers::Users
+            && device.refused.is_none()
+            && !used.contains(&device.id)
+        {
+            let error = BoardError::NoUsers(device.id.clone());
             device.refused = Some(error.to_string());
             problems.push(error);
         }

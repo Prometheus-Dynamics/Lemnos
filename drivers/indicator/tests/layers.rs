@@ -349,3 +349,51 @@ fn the_application_layer_takes_frames_as_a_strip_does() {
     want[15] = [1, 2, 3, 0];
     assert_eq!(fake.last(), want);
 }
+
+/// An application that is done with the LEDs but keeps its session releases the layer: what is
+/// under it shows, and the next program to draw owns it. Only the owner can.
+#[test]
+fn the_owner_releases_the_application_layer_and_the_next_to_draw_owns_it() {
+    let fake = FakePixels::leak(LEDS);
+    let mut indicator = indicator(fake);
+    tick(&mut indicator, 0);
+    // Nothing to give up is not an error.
+    assert_eq!(as_caller(&mut indicator, APP).release(), Ok(()));
+    app_shows(&mut indicator, 10).unwrap();
+    tick(&mut indicator, 10);
+    assert_eq!(fake.last(), frame(10));
+
+    assert_eq!(
+        as_caller(&mut indicator, OTHER).release(),
+        Err(Status::BUSY)
+    );
+    tick(&mut indicator, 20);
+    assert_eq!(
+        fake.last(),
+        frame(10),
+        "another caller's release changes nothing"
+    );
+
+    assert_eq!(as_caller(&mut indicator, APP).release(), Ok(()));
+    tick(&mut indicator, 30);
+    assert_eq!(fake.last(), all(DARK), "idle shows once the owner let go");
+
+    // The layer is free: another program draws, and the first is now the one refused.
+    let other = as_caller(&mut indicator, OTHER);
+    Pixels::set(other, 0, &[9, 9, 9, 0]).unwrap();
+    Pixels::show(other).unwrap();
+    tick(&mut indicator, 40);
+    let mut want = all(DARK);
+    want[0] = [9, 9, 9, 0];
+    assert_eq!(
+        fake.last(),
+        want,
+        "nothing of the first owner's frame is left"
+    );
+    assert_eq!(app_shows(&mut indicator, 20), Err(Status::BUSY));
+    // And the first can claim again once the second lets go.
+    as_caller(&mut indicator, OTHER).release().unwrap();
+    app_shows(&mut indicator, 30).unwrap();
+    tick(&mut indicator, 50);
+    assert_eq!(fake.last(), frame(30));
+}

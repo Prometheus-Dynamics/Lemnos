@@ -10,6 +10,10 @@
 //! showing now. The look is the board's. It ends at its time, on `locate(0)`, or when the caller
 //! that asked goes; what was under it is shown again at once.
 //!
+//! The application's layer. A device that also serves `pixels/1` takes an application's frames
+//! there, from one owner at a time (see the indicator driver). `release` gives that ownership up
+//! without ending the session.
+//!
 //! Progress is a fraction of the job the state belongs to, in per mille (0 to 1000), or
 //! [`NO_PROGRESS`] when the state has none.
 
@@ -56,4 +60,11 @@ pub trait Indicator {
     #[added]
     #[method(4, reading = switch)]
     fn locating(&mut self) -> Result<bool>;
+    /// Gives up the application's layer: the caller's frames go, what is under them shows, and
+    /// the next caller to draw owns the layer. For an application that is done with the LEDs but
+    /// keeps its session; one that only pauses shows a dark frame and stays the owner. Nothing
+    /// to give up is not an error; `BUSY` when another caller owns the layer.
+    #[added]
+    #[method(5)]
+    fn release(&mut self) -> Result<()>;
 }

@@ -89,6 +89,7 @@ In a device:
 | `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own; a key it does not read is refused by name (above). A device's I2C address is one of these, as `config = { address = 0x40 }`: `address` as a device key of its own is refused, and the refusal says so |
 | `disabled` | `true` starts the device off. `lemnos-ctl on` turns it on |
 | `auto_off_after` | Opts this device in to being turned off after this many failed binds in a row, at least 1. Left out, it is retried forever. `lemnos-ctl on` brings it back |
+| `callers` | `"any"` (the default) or `"users"`. With `"users"` only the devices that name this one in their `uses` may drive it: a call from anyone else (a client, the bridge) reaches the driver only when the device's description says the method only reads, and any other is refused `NOT_PERMITTED` with words that name those devices. For a device another one drives on everyone's behalf, such as the LEDs behind an `indicator`, so nothing writes it behind that device's back. A device with `callers = "users"` that no device uses is refused when the file is read. `lemnos-ctl show` says who drives it, and `lemnos-ctl validate` lists each such device and says when it has more than one user |
 | `owner` | `"lemnos"` (the default) or `"host"`. With `"host"` the operating system owns the hardware and Lemnos only reads it. See [Concepts](concepts.md#who-owns-the-hardware) |
 | `[devices.streams.NAME]` | A frame stream this device offers, by the name its driver needs and a consumer asks for |
 
@@ -773,6 +774,9 @@ config = { default_on = true }
 id = "ring-pixels"
 driver = "ws2812"
 bus = "spidev0.0"
+# Only the devices that use this strip may drive it (the indicator below): a client's `set` or
+# `show` here is refused and told to call that device. Left out, anyone may.
+callers = "users"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
 # The same strip on the RP1 PIO block: a `pio-out` name instead of an SPI device. Needs the PIO

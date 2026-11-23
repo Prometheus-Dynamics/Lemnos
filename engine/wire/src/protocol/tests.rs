@@ -661,6 +661,7 @@ mod description {
             streams: "",
             refusal: crate::refusal::Refusal::NONE,
             stream_layouts: "",
+            driven_by: "",
         }
     }
 

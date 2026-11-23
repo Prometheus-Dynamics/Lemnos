@@ -121,6 +121,9 @@ config = { default_on = true }
 id = "ring-pixels"
 driver = "ws2812"
 bus = "spidev0.0"
+# Only the devices that use this strip may drive it (the indicator below): a client's `set` or
+# `show` here is refused and told to call that device. Left out, anyone may.
+callers = "users"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
 # The same strip on the RP1 PIO block: a `pio-out` name instead of an SPI device. Needs the PIO

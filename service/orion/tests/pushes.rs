@@ -264,7 +264,9 @@ impl Setup {
         }
     }
 
-    /// What `lemnos.<device>.status` says in `pushes`, once it says anything.
+    /// What `lemnos.<device>.status` says in `pushes` once it has settled: a device the bridge
+    /// takes files for reads `not ready` from the bridge's start until its sink is accepted, so
+    /// that is waited past.
     fn pushes(&self, device: &str) -> String {
         let topic = format!("lemnos.{device}.status");
         let mut subscriber: Subscriber =
@@ -273,7 +275,7 @@ impl Setup {
             let _ = subscriber.wait(Duration::from_millis(50));
             let bytes = subscriber.latest(FieldId(PUSHES))?.payload.to_vec();
             let text = String::from_utf8(bytes).ok()?;
-            (!text.is_empty()).then_some(text)
+            (!text.is_empty() && text != pushes::NOT_READY).then_some(text)
         })
     }
 }

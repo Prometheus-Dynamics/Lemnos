@@ -418,6 +418,7 @@ impl Client {
                     .map(|(name, buffers, bytes)| (name.as_str(), *buffers, *bytes))
                     .collect::<Vec<_>>(),
             ),
+            driven_by: &self.core.host.driven_by(device).join(","),
         };
         let mut bytes = vec![0; DESCRIPTION_MAX];
         match encode_description(&manifest, &description, &identity, &mut bytes) {

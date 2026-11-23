@@ -33,6 +33,12 @@ pub fn panel(description: &DeviceDescription, health: Option<&str>) -> Vec<Strin
     if let Some(health) = health {
         lines.push(format!("  health   {health}"));
     }
+    if !description.driven_by.is_empty() {
+        lines.push(format!(
+            "  driven   only by {} (reads answer; a call that changes it is refused)",
+            description.driven_by.join(", ")
+        ));
+    }
     for job in &description.jobs {
         lines.push(format!("  {}", job.words()));
     }

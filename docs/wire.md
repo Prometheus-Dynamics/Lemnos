@@ -695,7 +695,10 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
   field, so it is left out of the core hash, as the rest of the identity is. Then `stream_layouts`
   (a `Tail` str: `NAME BUFFERS BUFFER_BYTES` for each stream the board declares, joined by a
   space; a host from before it sends none, which reads as empty). It is beside `streams`, not in
-  it, so a reader of `streams` from before it reads that text as it did; it moves no hash.
+  it, so a reader of `streams` from before it reads that text as it did; it moves no hash. Then
+  `driven_by` (a `Tail` str: the ids of the devices that alone may drive this one, joined by
+  commas, when its board entry says `callers = "users"`; empty when anyone may, and a host from
+  before it sends none, which reads as empty). It moves no hash.
 - A `u16` contract count, then one block per contract: its `kind` str (`sensor`, `actuator`, ...,
   `other`).
 - A `u16` item count, then one block per item, in the order of the items above: `reading` u8 (0

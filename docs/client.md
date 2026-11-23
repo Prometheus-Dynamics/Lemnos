@@ -168,6 +168,10 @@ what a generic panel shows, with no code for the device:
   starts, and it is there whether or not anything is attached or allocated, and whether or not the
   device runs: a consumer sizes the hold it declares to `open_stream_held` from it, with one attach.
   Empty from a host from before it;
+- `driven_by`: the devices that alone may drive this one, by id, when the board says
+  `callers = "users"` on it. A call that changes the device from anyone else is refused
+  `NOT_PERMITTED`, with words that name them; reads still answer. Empty when anyone may, and from
+  a host from before it;
 - for each item, `unit_state` (`UnitState`: known, dimensionless or unknown; an empty unit is unknown
   from a host that sends no state), `reading` (`Option<Reading>`), `step`, `warn_low`, `warn_high` and `group`, next to
   its `unit`, `exponent`, `min` and `max`, and `real_min`, `real_max` and `real_step` (`Option<f64>`:

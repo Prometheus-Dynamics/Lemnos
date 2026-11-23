@@ -19,7 +19,8 @@ use lemnos_core::{
 };
 
 use crate::board::{
-    BoardError, BoardFile, DeviceSpec, EACH_SEPARATOR, EachSpec, OwnedValue, Owner, resolve_kinds,
+    BoardError, BoardFile, Callers, DeviceSpec, EACH_SEPARATOR, EachSpec, OwnedValue, Owner,
+    resolve_kinds,
 };
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
@@ -1393,16 +1394,25 @@ pub(crate) struct CallWork {
 
 impl CallWork {
     pub(crate) fn run(self, args: &[u8], reply: &mut [u8]) -> Result<usize> {
+        // This is the way in for every call that is not a driver calling a device it uses (those
+        // go through `Routes` and `Reading`). On a device only its users may drive, such a caller
+        // is a guest: its call reaches the driver only when the method only reads.
+        let guest = self.slot.spec.callers == Callers::Users;
         let result = self.inner.call_from(
             &self.slot,
             self.caller,
-            false,
+            guest,
             self.as_job,
             self.method,
             args,
             reply,
             self.trace.as_ref(),
         );
+        if guest && result == Err(NOT_OURS) {
+            // Said in words, so the caller learns where to go: the refusal is kept for it.
+            self.slot
+                .keep_refusal(self.caller, self.inner.users_only_words(&self.slot));
+        }
         if let Some(trace) = &self.trace {
             trace.sink.finished(trace.ticket, status_of(&result));
         }
@@ -2639,6 +2649,24 @@ impl Inner {
         let lane = Arc::new(Lane::spawn(name, self.options.lane_stack)?);
         lanes.insert(slot.lane_key.clone(), Arc::clone(&lane));
         Ok(lane)
+    }
+
+    /// The ids of the devices that name `slot`'s device in their `uses`, in board order.
+    fn users_of(&self, slot: &Slot) -> Vec<String> {
+        self.all()
+            .iter()
+            .filter(|other| other.spec.uses.values().any(|used| *used == slot.spec.id))
+            .map(|other| other.spec.id.clone())
+            .collect()
+    }
+
+    /// What a caller that may not drive `slot`'s device is told.
+    fn users_only_words(&self, slot: &Slot) -> String {
+        format!(
+            "{} is driven only by the devices that use it ({}): call one of those",
+            slot.spec.id,
+            self.users_of(slot).join(", ")
+        )
     }
 
     fn abandon_lane(&self, slot: &Slot) {
@@ -3945,6 +3973,18 @@ impl Host {
                 (name.clone(), standby, held)
             })
             .collect()
+    }
+
+    /// The devices that alone may drive `device`, by id, when its board entry says
+    /// `callers = "users"`: the ones that name it in their `uses`. Empty when anyone may (and
+    /// when there is no such device). A caller that is none of them is refused any call that
+    /// changes the device, with these names in the refusal's words.
+    #[must_use]
+    pub fn driven_by(&self, device: u32) -> Vec<String> {
+        match self.inner.slot(device) {
+            Some(slot) if slot.spec.callers == Callers::Users => self.inner.users_of(&slot),
+            _ => Vec::new(),
+        }
     }
 
     /// Each stream the board declares for `device`: its name, buffer count and buffer size, as the

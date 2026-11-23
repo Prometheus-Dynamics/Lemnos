@@ -188,6 +188,10 @@ pub struct DeviceDescription {
     /// holds before it opens the stream. Empty when the device has none, and from a host from
     /// before it. See [`DeviceDescription::stream_layout`].
     pub stream_layouts: Vec<StreamLayout>,
+    /// The devices that alone may drive this one, by id (its board entry says
+    /// `callers = "users"`): a call that changes it from anyone else is refused, and reads still
+    /// answer. Empty when anyone may, and from a host from before it.
+    pub driven_by: Vec<String>,
     pub contracts: Vec<OwnedContract>,
     pub items: Vec<OwnedItem>,
 }
@@ -379,6 +383,9 @@ pub struct Identity<'a> {
     /// The device's streams as the board declares them, as [`stream_layout_text`] writes them.
     /// Empty when there are none.
     pub stream_layouts: &'a str,
+    /// The devices that alone may drive this one, by id, comma-separated (see
+    /// [`DeviceDescription::driven_by`]). Empty when anyone may.
+    pub driven_by: &'a str,
 }
 
 /// A contract's header: its tag, its hash and how many methods follow.
@@ -455,6 +462,9 @@ struct DescIdentity<'a> {
     /// Appended after `refusal`: the streams' buffer counts and sizes, as [`stream_layout_text`].
     /// Absent reads as none.
     stream_layouts: Tail<&'a str>,
+    /// Appended after `stream_layouts`: the ids of the devices that alone may drive this one,
+    /// comma-separated. Absent, and empty, read as anyone.
+    driven_by: Tail<&'a str>,
 }
 
 /// One contract's kind, appended after the identity: one per contract, in order.
@@ -801,6 +811,7 @@ pub(crate) fn encode_trailer(
         streams: identity.streams,
         refusal: Tail(identity.refusal.code()),
         stream_layouts: Tail(identity.stream_layouts),
+        driven_by: Tail(identity.driven_by),
     }
     .encode(out)?;
     (manifest.provides.len() as u16).encode(out)?;
@@ -942,6 +953,13 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
         out.streams = parse_stream_standby(identity.streams);
         out.refusal = Refusal::from_code(identity.refusal.0);
         out.stream_layouts = parse_stream_layouts(identity.stream_layouts.0);
+        out.driven_by = identity
+            .driven_by
+            .0
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
         for index in 0..usize::from(u16::decode(from)?) {
             let kind = DescContractKind::decode(from)?.kind.to_string();
             if let Some(contract) = out.contracts.get_mut(index) {
