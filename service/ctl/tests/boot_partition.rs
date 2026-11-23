@@ -123,6 +123,8 @@ fn every_board_with_a_slot_device_builds_a_real_size_image_that_verifies_and_loc
         ]);
         r.unwrap_or_else(|e| panic!("{name}: build at {size} bytes: {e}"));
         assert!(out.contains(&format!("{} bytes", size)), "{out}");
+        assert!(out.contains("label \"LEMNOS-BOOT\""), "{out}");
+        assert_labelled(&std::fs::read(&image).unwrap(), b"LEMNOS-BOOT", &name);
         let (r, report) = run(&[
             "boot-partition",
             "--layout-of",
@@ -145,6 +147,99 @@ fn every_board_with_a_slot_device_builds_a_real_size_image_that_verifies_and_loc
             report.contains("default.txt: names bay0"),
             "{name}: {report}"
         );
+    }
+}
+
+/// The volume label in both places a reader looks: the boot sector's label field (bytes 43 to 53, after
+/// the extended signature 0x29) and the root directory's first entry, a volume-label entry
+/// (attribute 0x08, no cluster, no size).
+fn assert_labelled(image: &[u8], label: &[u8; 11], name: &str) {
+    assert_eq!(image[38], 0x29, "{name}: the extended boot signature");
+    assert_eq!(&image[43..54], label, "{name}: the boot sector's label");
+    let sector = |at: usize| u64::from(u16::from_le_bytes([image[at], image[at + 1]]));
+    let reserved = sector(14);
+    let fats = u64::from(image[16]);
+    let fat_sectors = sector(22);
+    let root = ((reserved + fats * fat_sectors) * 512) as usize;
+    let entry = &image[root..root + 32];
+    assert_eq!(
+        &entry[0..11],
+        label,
+        "{name}: the root's volume-label entry"
+    );
+    assert_eq!(entry[11], 0x08, "{name}: the entry is a volume label");
+    assert_eq!(&entry[26..32], &[0u8; 6], "{name}: no cluster and no size");
+}
+
+/// The board names its boot partition's label (`[slots] boot_label`): the image carries it, and a
+/// label that is not a FAT label (lower case, too long) is refused by name with nothing written.
+#[test]
+fn the_boot_label_of_the_board_file_is_the_volumes_label_and_a_bad_one_is_refused() {
+    let board_path = slot_boards()
+        .into_iter()
+        .find(|p| {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .contains("record = \"tryboot\"")
+        })
+        .expect("a tryboot board");
+    let text = std::fs::read_to_string(&board_path).unwrap();
+    let dir = scratch("boot-label");
+    let labelled = |label: &str| {
+        let path = dir.join(format!("board-{}.toml", label.len()));
+        let edited = text.replacen(
+            "driver = \"system-slots\"\nconfig = { ",
+            &format!("driver = \"system-slots\"\nconfig = {{ boot_label = \"{label}\", "),
+            1,
+        );
+        assert_ne!(edited, text, "the board's slot device has an inline config");
+        std::fs::write(&path, edited).unwrap();
+        path
+    };
+    let board = board_of(&board_path);
+    let payload = payloads(&dir, &board);
+    let size = minimum(&board_path).div_ceil(1024 * 1024) * 1024 * 1024;
+    let build = |path: &Path, image: &Path| {
+        run(&[
+            "boot-partition",
+            "--layout-of",
+            path.to_str().unwrap(),
+            "--socs",
+            &socs(),
+            "--slot",
+            "a",
+            "--payload",
+            payload.to_str().unwrap(),
+            "--size",
+            &size.to_string(),
+            "--out",
+            image.to_str().unwrap(),
+        ])
+    };
+
+    let good = labelled("OS-BOOT");
+    let image = dir.join("labelled.img");
+    let (r, out) = build(&good, &image);
+    let _ = std::fs::remove_file(&good);
+    r.unwrap_or_else(|e| panic!("build: {e}"));
+    assert!(out.contains("label \"OS-BOOT\""), "{out}");
+    assert_labelled(&std::fs::read(&image).unwrap(), b"OS-BOOT    ", "OS-BOOT");
+
+    for (bad, words) in [
+        ("os-boot", "holds 'o'"),
+        ("TWELVE-CHARS", "not 1 to 11 characters"),
+        (" BOOT", "starts with a space"),
+    ] {
+        let path = labelled(bad);
+        let image = dir.join(format!("bad-{}.img", bad.len()));
+        let (r, _) = build(&path, &image);
+        let _ = std::fs::remove_file(&path);
+        let error = r.expect_err(bad);
+        assert!(
+            error.contains("system-slots") && error.contains("boot label") && error.contains(words),
+            "{bad}: {error}"
+        );
+        assert!(!image.exists(), "{bad}: nothing is written");
     }
 }
 

@@ -1569,6 +1569,25 @@ lemnos-good-boot and lemnos-orion, together with a licence allow-list for the ch
 Layout version 6 (each file at its exact size, above) is the layout that passes this check; version 5
 padded each file to its bay's size and failed it.
 
+**The volume label.** The boot FAT that `lemnos-ctl boot-partition` writes is labelled by the board file:
+`[slots] boot_label` on the `system-slots` device, `LEMNOS-BOOT` when it says none. A label is 1 to 11
+characters: upper-case letters, digits, a space (not the first) or one of `-_!#$%&'()@^{}~`. Anything else is
+refused by name (a lower-case letter is refused, not changed), by `boot-partition` and by `lemnos-ctl validate`.
+The label is written in both places a reader looks: the boot sector's label field (bytes 43 to 53, after the
+extended signature `0x29`) and a volume-label entry (attribute `0x08`, no cluster, no size), the root
+directory's first. The two always agree (`blkid` shows `LABEL` and `LABEL_FATBOOT` the same). The label is the
+volume's interface: an OS image mounts its boot partition by it (`LABEL=LEMNOS-BOOT`). The OEM name (`LEMNOS  `)
+and the volume serial (`4C45-4D4E`) are fixed bytes that keep images identical for the same inputs; they are not
+an interface and may change. `--add-to` keeps the dump's own label: it adds files to another system's volume.
+
+Readers skip the label entry: the driver's and slot-init's directory reader (`bootfat::each_entry`) and the
+Pi firmware-layout check run on every Pi-form image, so the firmware's own read is covered on the host
+(`the_boot_label_of_the_board_file_is_the_volumes_label_and_a_bad_one_is_refused`,
+`the_label_is_in_the_boot_sector_and_the_roots_first_entry_and_readers_skip_it`). `fsck.fat -n` finds the
+labelled image clean and `mdir` lists its files. Untested on board: the Pi 5 firmware booting a labelled image,
+and U-Boot's `load` from one (`testing/board-runs/BOOT-FAT-LABEL.md`). A volume-label entry is standard FAT:
+every reader of the format, U-Boot's included, skips entries with the volume bit when it walks a directory.
+
 ### Adding to an existing boot partition
 
 `lemnos-ctl boot-partition --add-to DUMP` is for a board that runs another system from a FAT16 boot

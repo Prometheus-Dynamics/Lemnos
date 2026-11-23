@@ -1863,6 +1863,8 @@ const KEYS: &[Key] = &[
     // Read by `lemnos-ctl tree --uboot-config` and `--boot-dir` for the image's U-Boot, not by the
     // driver: the MMC index and the fastboot USB controller (U-Boot's numbering), the download-mode
     // LED's label, the fastboot gadget's VID and PID, and the watchdog's timeout in ms.
+    // Read by `lemnos-ctl boot-partition`, not by the driver: the boot partition's FAT volume label.
+    Key::optional("boot_label", Kind::Str),
     Key::optional("uboot_env_mmc_index", Kind::Int),
     Key::optional("uboot_fastboot_usb", Kind::Int),
     Key::optional("uboot_led", Kind::Str),

@@ -263,6 +263,22 @@ pub fn min_size(parts: &Parts) -> Result<u64, String> {
 /// size is not whole sectors, is below [`min_size`], a payload is larger than its bay, the kernel is
 /// compressed on the U-Boot form, or the composed image does not verify.
 pub fn build(parts: &Parts, size: u64, slot: &str, payloads: &[&[u8]]) -> Result<Vec<u8>, String> {
+    let label = fatimage::label(fatimage::DEFAULT_LABEL)?;
+    build_labelled(parts, size, slot, payloads, &label)
+}
+
+/// [`build`], the volume labelled `label` ([`fatimage::label`]): the board's `[slots] boot_label`.
+///
+/// # Errors
+///
+/// As [`build`].
+pub fn build_labelled(
+    parts: &Parts,
+    size: u64,
+    slot: &str,
+    payloads: &[&[u8]],
+    label: &[u8; 11],
+) -> Result<Vec<u8>, String> {
     if !size.is_multiple_of(SECTOR as u64) {
         return Err(format!(
             "--size {size} is not a whole number of {SECTOR}-byte sectors"
@@ -283,7 +299,11 @@ pub fn build(parts: &Parts, size: u64, slot: &str, payloads: &[&[u8]]) -> Result
         refuse_compressed_kernel(payloads[0])?;
     }
     let root = tree(parts);
-    let mut mem = Mem(fatimage::volume(&root, size / SECTOR as u64));
+    let mut mem = Mem(fatimage::volume_labelled(
+        &root,
+        size / SECTOR as u64,
+        label,
+    ));
     bays::write_empty_records(&mut mem)?;
     bays::lay_out_empty_sets(&mut mem, &parts.layout)?;
     install_first(&mut mem, parts, slot, payloads)?;

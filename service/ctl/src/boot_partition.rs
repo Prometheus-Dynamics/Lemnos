@@ -226,9 +226,10 @@ pub(crate) fn read_firmware(dir: Option<&str>, layout: &Layout) -> Result<Vec<Ve
 
 /// The board's boot family, with every `[boot]` key rule that needs no payload checked, each refused
 /// by name: the firmware lines, the EEPROM keys, the count fallback, the device tree's default names
-/// and the firmware's own files. `lemnos-ctl validate` runs it on a board with a slot device, and the
-/// image, bundle and data-partition builders through [`board_parts`].
+/// and the firmware's own files, and the volume label (`boot_label`). `lemnos-ctl validate` runs it on a
+/// board with a slot device, and the image, bundle and data-partition builders through [`board_parts`].
 pub(crate) fn check_board_boot(board: &BoardFile) -> Result<Family, String> {
+    boot_label(board)?;
     let record = boot_dir::record_of(board)?;
     let family = match record.as_str() {
         "tryboot" => Family::Tryboot,
@@ -574,7 +575,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
         .chain(firmware.iter())
         .map(Vec::as_slice)
         .collect();
-    let image = bootimage::build(&parts, size, slot, &refs)?;
+    let label = boot_label(&board)?;
+    let image = bootimage::build_labelled(&parts, size, slot, &refs, &label)?;
     // The image is read as the board's firmware reads it before it is written: an image the
     // firmware would load a short or wrong file from is never made.
     if parts.family == Family::Tryboot {
@@ -590,11 +592,29 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     std::fs::write(file, &image).map_err(|e| format!("{file}: {e}"))?;
     writeln!(
         out,
-        "wrote {file}: {} bytes, slot {slot}, minimum {} bytes",
+        "wrote {file}: {} bytes, slot {slot}, label {:?}, minimum {} bytes",
         image.len(),
+        String::from_utf8_lossy(&label).trim_end(),
         bootimage::min_size(&parts)?
     )
     .map_err(|e| e.to_string())
+}
+
+/// The boot partition's volume label: the `system-slots` device's `boot_label`, or
+/// [`fatimage::DEFAULT_LABEL`]. Refused by name when it is not a FAT label.
+pub(crate) fn boot_label(board: &BoardFile) -> Result<[u8; 11], String> {
+    let text = match board
+        .devices
+        .iter()
+        .find(|device| device.driver == "system-slots")
+        .and_then(|device| device.config.get("boot_label"))
+    {
+        None => lemnos_slot_store::fatimage::DEFAULT_LABEL,
+        Some(value) => value
+            .as_str()
+            .ok_or("system-slots: boot_label must be a string")?,
+    };
+    lemnos_slot_store::fatimage::label(text).map_err(|e| format!("system-slots: {e}"))
 }
 
 /// `--min-size`: the minimum in bytes, one line (decimal digits only); with `--payload`, that line

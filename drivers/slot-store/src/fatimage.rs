@@ -430,11 +430,62 @@ impl Filler {
     }
 }
 
-/// Builds a FAT16 volume of `total` sectors, the cluster size from [`cluster_sectors`], holding
-/// `root`. Files are contiguous, in the order given, so their placement is deterministic. The boot
-/// sector carries no timestamp, serial or label that depends on the host: the same tree gives the
-/// same bytes. Panics when the root holds more than 512 entries or a directory more than its cluster.
+/// The volume label a boot partition gets when the board names none (`[slots] boot_label`).
+pub const DEFAULT_LABEL: &str = "LEMNOS-BOOT";
+
+/// The characters a label may hold besides upper-case letters and digits: those FAT allows in a
+/// short name, and the space (not first).
+const LABEL_MARKS: &[u8] = b" -_!#$%&'()@^{}~";
+
+/// `text` as a FAT volume label: 1 to 11 characters, upper-case letters, digits, a space (not the
+/// first) or one of `-_!#$%&'()@^{}~`, padded with spaces to 11. Refused by name otherwise: a lower-case
+/// letter is refused, not changed, so the label on the volume is the one the board file says.
+///
+/// # Errors
+///
+/// The text is empty, longer than 11 characters, starts with a space or holds another character.
+pub fn label(text: &str) -> Result<[u8; 11], String> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > 11 {
+        return Err(format!("the boot label {text:?} is not 1 to 11 characters"));
+    }
+    if bytes[0] == b' ' {
+        return Err(format!("the boot label {text:?} starts with a space"));
+    }
+    if let Some(&bad) = bytes
+        .iter()
+        .find(|&&b| !(b.is_ascii_uppercase() || b.is_ascii_digit() || LABEL_MARKS.contains(&b)))
+    {
+        return Err(format!(
+            "the boot label {text:?} holds {:?}: a label is upper-case letters, digits, a space or one of -_!#$%&'()@^{{}}~",
+            char::from(bad)
+        ));
+    }
+    let mut out = [b' '; 11];
+    out[..bytes.len()].copy_from_slice(bytes);
+    Ok(out)
+}
+
+/// Builds a FAT16 volume of `total` sectors with no label (the label field zero, no label entry), as
+/// [`volume_labelled`] otherwise: the volumes tests stand another system's for, whose root may hold
+/// 512 entries of its own.
 pub fn volume(root: &[Node], total: u64) -> Vec<u8> {
+    build_volume(root, total, None)
+}
+
+/// Builds a FAT16 volume of `total` sectors, the cluster size from [`cluster_sectors`], holding
+/// `root`. Files are contiguous, in the order given, so their placement is deterministic. The volume
+/// is labelled `label` (from [`label`]) in both places a reader looks: the boot sector's label field
+/// and a volume-label entry, the root directory's first. The boot sector carries no timestamp,
+/// serial or label that depends on the host: the same tree and label give the same bytes. The label
+/// is the volume's interface (an OS mounts the partition by it); the OEM name and the serial are
+/// fixed and are not. Panics when the root holds more than 511 entries besides the label or a
+/// directory more than its cluster.
+pub fn volume_labelled(root: &[Node], total: u64, label: &[u8; 11]) -> Vec<u8> {
+    build_volume(root, total, Some(label))
+}
+
+fn build_volume(root: &[Node], total: u64, label: Option<&[u8; 11]>) -> Vec<u8> {
     let spc = cluster_sectors(total);
     let (fat, _clusters, data_start) = geometry(total, spc);
     let mut image = vec![0u8; (total * 512) as usize];
@@ -452,6 +503,9 @@ pub fn volume(root: &[Node], total: u64) -> Vec<u8> {
     image[32..36].copy_from_slice(&(total as u32).to_le_bytes());
     image[38] = 0x29;
     image[39..43].copy_from_slice(&0x4C45_4D4Eu32.to_le_bytes());
+    if let Some(label) = label {
+        image[43..54].copy_from_slice(label);
+    }
     image[54..62].copy_from_slice(b"FAT16   ");
     image[510..512].copy_from_slice(&[0x55, 0xAA]);
     let fat_start = RESERVED * 512;
@@ -464,10 +518,15 @@ pub fn volume(root: &[Node], total: u64) -> Vec<u8> {
         fat_start,
         dir_entries: (spc * 16) as usize,
     };
-    let entries = f.fill(root, None, 0);
+    // The volume-label entry first (attribute 0x08, no cluster, no size), then the tree.
+    let mut entries: Vec<[u8; 32]> = label
+        .map(|label| short_entry(label, 0x08, 0, 0))
+        .into_iter()
+        .collect();
+    entries.extend(f.fill(root, None, 0));
     assert!(
         entries.len() <= ROOT_ENTRIES as usize,
-        "root directory holds at most 512 entries"
+        "root directory holds at most 512 entries, the label's among them"
     );
     let root_at = ((RESERVED + FATS * fat) * 512) as usize;
     for (i, e) in entries.iter().enumerate() {
@@ -634,4 +693,53 @@ pub fn foreign_system() -> Vec<u8> {
         },
     ];
     volume(&root, 161_792)
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn a_label_is_padded_to_eleven_and_anything_but_a_fat_label_is_refused_by_name() {
+        assert_eq!(label("LEMNOS-BOOT").unwrap(), *b"LEMNOS-BOOT");
+        assert_eq!(label("OS BOOT").unwrap(), *b"OS BOOT    ");
+        assert_eq!(label("A").unwrap(), *b"A          ");
+        for (bad, words) in [
+            ("", "not 1 to 11"),
+            ("TWELVE-CHARS", "not 1 to 11"),
+            (" BOOT", "starts with a space"),
+            ("boot", "holds 'b'"),
+            ("BOOT.FS", "holds '.'"),
+            ("BÖOT", "holds"),
+        ] {
+            let error = label(bad).expect_err(bad);
+            assert!(error.contains(words), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_label_is_in_the_boot_sector_and_the_roots_first_entry_and_readers_skip_it() {
+        let root = [Node::File {
+            name: "config.txt",
+            data: b"x".to_vec(),
+        }];
+        let image = volume_labelled(&root, 16_384, &label("OS-BOOT").unwrap());
+        assert_eq!(&image[43..54], b"OS-BOOT    ");
+        let spc = cluster_sectors(16_384);
+        let (fat, _, _) = geometry(16_384, spc);
+        let root_at = ((RESERVED + FATS * fat) * 512) as usize;
+        assert_eq!(&image[root_at..root_at + 11], b"OS-BOOT    ");
+        assert_eq!(image[root_at + 11], 0x08);
+        // The directory reader lists the file and not the label.
+        let mut names = Vec::new();
+        crate::bootfat::each_entry(&image[root_at..root_at + 512 * 32], |e| {
+            names.push(e.short.clone());
+            false
+        });
+        assert_eq!(names, ["CONFIG.TXT"]);
+        // The plain builder writes no label: the field is zero and the root's first entry is the file.
+        let plain = volume(&root, 16_384);
+        assert_eq!(&plain[43..54], &[0u8; 11]);
+        assert_eq!(&plain[root_at..root_at + 11], b"CONFIG  TXT");
+    }
 }
