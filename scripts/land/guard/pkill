@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "guard: pkill is not allowed here (kill by recorded PID only)" >&2
+exit 2

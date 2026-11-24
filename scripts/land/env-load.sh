@@ -7,7 +7,7 @@ if [ -z "${LEMNOS_LAND_ENV:-}" ]; then
   return 2
 fi
 if [ ! -r "$LEMNOS_LAND_ENV" ]; then
-  echo "LEMNOS_LAND_ENV=$LEMNOS_LAND_ENV: no such file (copy scripts/land/env.example there and fill it in)" >&2
+  echo "LEMNOS_LAND_ENV=$LEMNOS_LAND_ENV: no such file (scripts/land/setup writes it; or copy scripts/land/env.example there and fill it in)" >&2
   return 2
 fi
 . "$LEMNOS_LAND_ENV" || return 2
