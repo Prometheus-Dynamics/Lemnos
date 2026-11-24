@@ -65,8 +65,7 @@ PY
 start_competitors() {
   local i n="${1:-$CONTEND}"
   for i in $(seq "$n"); do
-    python3 -c "import time,sys; t=time.time()
-while time.time()-t < float(sys.argv[1]): pass" "$CONTEND_SECONDS" &
+    python3 "$repo/testing/gate-bounds/spin.py" "$CONTEND_SECONDS" &
     competitor_pids+=($!)
   done
 }
@@ -125,7 +124,7 @@ echo "== stand-ins (core $CORE, $CONTEND competitors on it)"
 case_run slow-progressing pass "CPU-s" 60 python3 "$TMP/burn.py" 6
 case_run pulsed-progressing pass "CPU-s" 60 python3 "$TMP/pulse.py"
 case_run hang fail "stalled: no CPU progress" 600 sleep 600
-case_run spin-over-budget fail "exceeded its CPU budget of 3 CPU-s" 3 python3 -c 'while True: pass'
+case_run spin-over-budget fail "exceeded its CPU budget of 3 CPU-s" 3 python3 "$repo/testing/gate-bounds/spin.py"
 # Short children, each gone before the next look: 20 burns of 0.5 CPU-s are 10 CPU-s in all, over a budget of 5.
 case_run short-children-over-budget fail "exceeded its CPU budget of 5 CPU-s" 5 bash -c 'for i in $(seq 20); do python3 "$1" 0.5; done' _ "$TMP/burn.py"
 starved_case

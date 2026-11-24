@@ -5,3 +5,6 @@ target-docker/
 # Process records the gates' tracked start/stop scripts keep in a worktree.
 .worker-pids
 .worker-logs/
+
+# Python byte code.
+__pycache__/

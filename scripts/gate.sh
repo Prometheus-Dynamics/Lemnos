@@ -124,8 +124,8 @@ case "$part" in
     slow=(lemnos-slot-store lemnos-driver-system-slots lemnos-package lemnos-driver-system-flash lemnos-orion
       shm-ring-model lemnos-macros lemnos-driver-system-security shm-ring-doorbell lemnos-camera-proof lemnos-host
       lemnos-linux lemnos-client)
-    mapfile -t packages < <(cargo metadata --locked --no-deps --format-version 1 |
-      python3 -c 'import json,sys; print("\n".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"])))')
+    listing=$(cargo metadata --locked --no-deps --format-version 1 | python3 scripts/cargo-packages.py)
+    mapfile -t packages <<<"$listing"
     declare -A known=()
     for pkg in "${packages[@]}"; do known[$pkg]=1; done
     ordered=()

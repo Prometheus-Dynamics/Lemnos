@@ -35,7 +35,7 @@ mark() {
   [[ -n ${FEATURES_TIMES:-} ]] || return 0
   local now
   now=$(date +%s.%N)
-  echo "$1 $(python3 -c 'import sys; print(round(float(sys.argv[1]) - float(sys.argv[2]), 2))' "$now" "$mark_at")" >>"$FEATURES_TIMES"
+  awk -v p="$1" -v a="$mark_at" -v b="$now" 'BEGIN { printf "%s %.2f\n", p, b - a }' >>"$FEATURES_TIMES"
   mark_at=$now
 }
 
@@ -160,16 +160,7 @@ fi
 # test_unit <crate>: reads a unit graph, prints the crate's library test unit as one line:
 # its features, then each dependency unit (package, mode, features) it is built against.
 test_unit() {
-  python3 -c 'import json,sys
-g=json.load(sys.stdin)["units"]; n=sys.argv[1].replace("-","_")
-(t,)=[u for u in g if u["mode"]=="test" and u["target"]["name"]==n and u["target"]["kind"][0] in ("lib","rlib")]
-seen,todo,deps=set(),[d["index"] for d in t["dependencies"]],[]
-while todo:
-    i=todo.pop()
-    if i in seen: continue
-    seen.add(i); u=g[i]; deps.append(u["pkg_id"]+" "+u["mode"]+" "+",".join(u["features"]))
-    todo+=[d["index"] for d in u["dependencies"]]
-print(",".join(sorted(set(t["features"])-{"default"})) or "-", *sorted(deps), sep=" | ")' "$1"
+  python3 scripts/features-units.py test-unit "$1"
 }
 
 # ir_build <crate> <features> <out.ll>: the crate's library tests compiled to LLVM IR only, with
@@ -193,14 +184,10 @@ test_build() {
   cargo test -q --locked --no-run -p "$1" --lib --no-default-features "${feat[@]}" \
     --message-format json-render-diagnostics </dev/null >"$work/build.json"
   cat "$work/build.json" >>"$work/messages.json"
-  python3 -c 'import json,sys
-for l in open(sys.argv[2]):
-    m=json.loads(l)
-    if m.get("reason")=="compiler-artifact" and m.get("executable") and m["target"]["name"]==sys.argv[1].replace("-","_"): print(m["executable"])' "$1" "$work/build.json"
+  python3 scripts/features-units.py executable "$1" "$work/build.json"
 }
 
-python3 -c 'import json,sys
-for p in json.load(open(sys.argv[1]))["packages"]: print(p["name"], p["manifest_path"].rsplit("/",1)[0])' "$work/meta.json" >"$work/dirs"
+python3 scripts/cargo-packages.py --dirs <"$work/meta.json" >"$work/dirs"
 
 # Every lookup key at once (one process reads the metadata and hashes the files once).
 : >"$work/requests"

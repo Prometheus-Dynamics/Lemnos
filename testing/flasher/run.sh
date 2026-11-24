@@ -57,7 +57,8 @@ echo "$raw $sha 12288" >"$work/image.facts"
 
 # The eMMC: 64 MiB of user area behind two 1 MiB boot areas, all 0xa5. The copy is what the run is checked against.
 boot=$((1 << 20)); user=$((64 << 20))
-python3 -c "import sys; open(sys.argv[1],'wb').write(b'\xa5' * int(sys.argv[2]))" "$work/emmc.img" $((2 * boot + user))
+head -c $((2 * boot + user)) /dev/zero | tr '\000' '\245' >"$work/emmc.img"
+[[ $(stat -c %s "$work/emmc.img") -eq $((2 * boot + user)) ]] || { echo "the eMMC image is short" >&2; exit 1; }
 cp "$work/emmc.img" "$work/emmc.orig"
 
 root="$work/root"

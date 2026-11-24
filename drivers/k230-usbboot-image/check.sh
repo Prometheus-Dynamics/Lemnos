@@ -54,13 +54,8 @@ rust-objcopy -O binary "$work/image.elf" "$work/image.bin"
 entry=$(readelf -hW "$work/image.elf" | awk '/Entry point/ {print $NF}')
 # The LOAD segments: VirtAddr (column 3) and MemSiz (column 6). The image's end is the largest
 # VirtAddr + MemSiz; its footprint is that end less the load address.
-read -r load_start end < <(readelf -lW "$work/image.elf" | awk '$1 == "LOAD" {print $3, $6}' | python3 -c '
-import sys
-rows = [l.split() for l in sys.stdin if l.strip()]
-starts = [int(r[0], 16) for r in rows]
-ends = [int(r[0], 16) + int(r[1], 16) for r in rows]
-print(hex(min(starts)), hex(max(ends)))
-')
+segments=$(readelf -lW "$work/image.elf" | awk '$1 == "LOAD" {print $3, $6}' | python3 "$repo/drivers/k230-usbboot-image/segments.py")
+read -r load_start end <<<"$segments"
 bin_size=$(stat -c %s "$work/image.bin")
 relocs=$(readelf -rW "$work/image.elf" | grep -c "R_RISCV" || true)
 footprint=$((end - 0x80360000))

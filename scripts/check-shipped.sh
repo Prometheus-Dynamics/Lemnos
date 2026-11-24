@@ -19,7 +19,7 @@ allowed_sys='^linux-raw-sys$'
 
 # The workspace's own crates: their directories (drivers/*-sys, backends/linux-sys, ...).
 workspace=$(cargo metadata --locked --format-version 1 --no-deps |
-  python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]')
+  python3 scripts/cargo-packages.py)
 
 failed=0
 while read -r package binary targets; do
