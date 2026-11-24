@@ -236,6 +236,14 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
     ) {
         diagnose();
     }
+    if start_only() {
+        // A narrow run of what starts from this one (the poison stanza): the daemon up with the
+        // link's gadget bound is all it needs. It runs on as at the end of a whole check.
+        say!(
+            "     {START_ONLY_WORD}: the daemon is up with the gadget enabled; steps 1 to 8 are not run"
+        );
+        return Ok(());
+    }
     let mut watcher = daemon
         .connect("link-check")
         .map_err(|error| format!("the daemon: {error}"))?;
@@ -256,11 +264,6 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
     check(
         bare.wait_for(NO_LINK, 1, LONG),
         "without LEMNOS_ORION_LINKS the bridge says no USB link is configured",
-    );
-    std::thread::sleep(Duration::from_secs(5));
-    check(
-        bare.count(NO_LINK) == 1 && bare.count(OFFERED) == 0,
-        "it says so once and offers nothing",
     );
     // `pair_lent` gives `None` when the describe or the open is refused. Until M28 a describe was
     // answered `BUSY` while the driver was in a tick or a call, and `.ok()?` turned that into "no
@@ -290,6 +293,13 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
         bridge.wait_for(OFFERED, 1, LONG),
         "the bridge logs: link orion-link: offered the endpoints",
     );
+    // No fixed wait for an absence: the bridge without the setting starts no link at all (it has
+    // nothing that runs later), and by now the daemon has served a whole offer from the other one,
+    // so a second notice or an offer of its own would be in its log.
+    check(
+        bare.count(NO_LINK) == 1 && bare.count(OFFERED) == 0,
+        "the bridge without the setting says so once and offers nothing",
+    );
     check(
         enabled() && bridge.count(NO_LINK) == 0,
         "the gadget was enabled when the offer was made, and the bridge has a link configured",
@@ -318,12 +328,9 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
         "the daemon enables the gadget again",
     );
     // The controller let go and took the gadget back on the same endpoints: the bridge keeps its offer
-    // (no second offer). A new host's HELLO begins a session on the kept stream (C57).
-    std::thread::sleep(Duration::from_secs(3));
-    check(
-        bridge.count(OFFERED) == 1,
-        "the bridge keeps its offer across the controller's let-go: the endpoints did not change",
-    );
+    // (no second offer). A new host's HELLO begins a session on the kept stream (C57). The offer count
+    // is read once that session is up, not after a fixed wait: a bridge that offered again would
+    // have done so before a session could begin.
     check(
         wait_until(Duration::from_secs(10), || lent() == Some(true)),
         "the gadget's description says the pair is lent again",
@@ -331,6 +338,10 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
     check(
         host_session(&me, 2, 0),
         "host session 2: up again over the emulated bus, and the round trips with the node",
+    );
+    check(
+        bridge.count(OFFERED) == 1,
+        "the bridge keeps its offer across the controller's let-go: the endpoints did not change",
     );
 
     // 4. The hello sweep: each bounce, with the host's first HELLO sent a set time after it claims the
@@ -482,6 +493,45 @@ fn restarts_asked() -> u32 {
         .max(1)
 }
 
+/// `lemnos-qemu.link_start_only` on the kernel command line: only the start (the comm core and the
+/// daemon with its gadget enabled), for a narrow run of a stanza that starts from this one. Never
+/// in a whole run.
+fn start_only() -> bool {
+    fs::read_to_string("/proc/cmdline")
+        .is_ok_and(|line| line.split_whitespace().any(|word| word == START_ONLY_WORD))
+}
+
+const START_ONLY_WORD: &str = "lemnos-qemu.link_start_only";
+
+/// Which kill steps step 8 makes: `lemnos-qemu.link_kills=<step>,...` on the kernel command line
+/// (the names of [`KillAt`], or `none`), else every one. A name that is no step leaves the word
+/// unread and every step runs, and says so: a narrow run never passes on fewer steps than it asked.
+fn kills_asked() -> Vec<KillAt> {
+    let word = fs::read_to_string("/proc/cmdline").ok().and_then(|line| {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix(KILLS_WORD).map(str::to_owned))
+    });
+    let Some(word) = word else {
+        return KillAt::ALL.to_vec();
+    };
+    if word == "none" {
+        return Vec::new();
+    }
+    let picked: Option<Vec<KillAt>> = word
+        .split(',')
+        .map(|name| KillAt::ALL.into_iter().find(|at| format!("{at:?}") == name))
+        .collect();
+    picked.unwrap_or_else(|| {
+        say!(
+            "     {KILLS_WORD}{word}: not a list of kill steps ({:?}); every step runs",
+            KillAt::ALL
+        );
+        KillAt::ALL.to_vec()
+    })
+}
+
+/// The kernel command line's word for the kill steps step 8 makes.
+const KILLS_WORD: &str = "lemnos-qemu.link_kills=";
 /// The kernel command line's word for the restarts step 7 makes.
 const RESTARTS_WORD: &str = "lemnos-qemu.link_restarts=";
 const RESTARTS: u32 = 10;
@@ -725,7 +775,8 @@ fn keep_through_restarts(
     }
 
     // 8. A kill while it runs, then a kill at each step of the next start.
-    for at in KillAt::ALL {
+    let kills = kills_asked();
+    for &at in &kills {
         let named = format!("kill at {at:?}");
         let watch = UdcWatch::start();
         let before = session.count(host::ROUND);
@@ -747,9 +798,10 @@ fn keep_through_restarts(
     check(
         session.finish(),
         &format!(
-            "one Orion session through {} restarts and {} SIGKILLs (each of the running daemon, then of the next start at one of its {} steps): never lost, {trips} round trips; the longest stall the host saw was {} ms",
+            "one Orion session through {} restarts and {} SIGKILLs (each of the running daemon, then of the next start at one of {} of its {} steps): never lost, {trips} round trips; the longest stall the host saw was {} ms",
             restarts_asked(),
-            2 * KillAt::ALL.len(),
+            2 * kills.len(),
+            kills.len(),
             KillAt::ALL.len(),
             stall.as_millis()
         ),
@@ -890,8 +942,24 @@ fn came_back(
             "{named}: the daemon that came up took up the bridge's hold, and the pair is lent: {dropped:?}"
         ),
     );
-    // The connection, a second past the daemon's ready.
-    std::thread::sleep(Duration::from_secs(1));
+    // The connection past the daemon's ready, with no fixed wait: its first echo after the pair read
+    // lent, then the fresh connections and both indexes over the link. The window the gap is judged
+    // over ends after all of them, so it covers the link's first use by the new daemon.
+    let lent_at = Instant::now();
+    let _ = wait_until(LONG, || link.stream.echoes_since(lent_at) >= 1);
+    check(
+        net::connects(3) == 3,
+        &format!("{named}: fresh connections over the link are answered"),
+    );
+    let board = net::index(net::BOARD_IF).ok();
+    let host = peer.host_index();
+    check(
+        board == Some(link.board_index) && host == Some(link.host_index),
+        &format!(
+            "{named}: both interfaces kept their index: the board's {board:?} (was {}), the host's {host:?} (was {})",
+            link.board_index, link.host_index
+        ),
+    );
     let now = Instant::now();
     let cleared = watch.end();
     check(
@@ -921,19 +989,6 @@ fn came_back(
                 .failed()
                 .or_else(|| link.reference.failed())
                 .map_or_else(String::new, |why| format!(", ended: {why}"))
-        ),
-    );
-    check(
-        net::connects(3) == 3,
-        &format!("{named}: fresh connections over the link are answered"),
-    );
-    let board = net::index(net::BOARD_IF).ok();
-    let host = peer.host_index();
-    check(
-        board == Some(link.board_index) && host == Some(link.host_index),
-        &format!(
-            "{named}: both interfaces kept their index: the board's {board:?} (was {}), the host's {host:?} (was {})",
-            link.board_index, link.host_index
         ),
     );
     let ran_past = daemon.lines_since(since, RAN_PAST);
