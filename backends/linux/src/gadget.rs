@@ -1452,6 +1452,9 @@ struct Wired {
     unbound_at: Arc<Mutex<Option<Instant>>>,
     /// [`REBIND_GAP`]; shorter in this crate's tests, which rebind hundreds of times.
     rebind_gap: Duration,
+    /// How many times the gap was waited out: what says which step waited it, where a time would
+    /// depend on the machine's load.
+    gap_waits: Arc<std::sync::atomic::AtomicUsize>,
     /// The tree has had its network function in this daemon's view. A bind the kernel refuses the
     /// network device for loses the function (`Trees::bind`), and that may happen in an attempt
     /// that then fails for another reason (seen: the controller busy): the attempt that binds
@@ -1853,9 +1856,15 @@ impl Wired {
         if let Some(since) = since {
             let left = self.rebind_gap.saturating_sub(since.elapsed());
             if !left.is_zero() {
-                std::thread::sleep(left);
+                self.gap_wait(left);
             }
         }
+    }
+    /// Sleeps `for_` as (part of) the gap, and counts it.
+    fn gap_wait(&self, for_: Duration) {
+        self.gap_waits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(for_);
     }
     /// The bind, made so a host that may still hold the gadget configured sees the device go and
     /// enumerates it again: `host_may_hold` (see `enable`), or the gadget was taken off its
@@ -1893,7 +1902,7 @@ impl Wired {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        std::thread::sleep(self.rebind_gap);
+        self.gap_wait(self.rebind_gap);
         self.soft_connect_now(true)?;
         // `disconnect` stopped the controller (`udc_stop`), and `connect` starts it again without
         // the bind's own steps: a controller whose stop turns off its event callbacks (dummy_hcd)
@@ -2306,6 +2315,7 @@ impl FunctionFsGadget {
                 } else {
                     REBIND_GAP
                 },
+                gap_waits: Arc::default(),
                 network_seen: Arc::default(),
             },
             work: Work::default(),
