@@ -214,17 +214,34 @@ and the held copies fail from then on. With the 8 s cap on retries, the link is 
 hand-over. The gadget check runs the daemon under `lemnos-unit-check exec`, and its hub moves into the
 daemon's namespace (`ns PID`) for the mounts it makes and removes.
 
-**A rebind the host can see.** A gadget the host may still hold configured is never bound again at
-once. Every enable unbinds and then binds, and on a tree that was still bound that is a clear and a
-set of `UDC` a few milliseconds apart: a host may not register it, keeps the configuration it had
-against endpoints that are fresh and unconfigured, and every function of the link goes silent with
-the device still enumerated. So the bind waits until `UDC` has been clear for
-`lemnos_linux::REBIND_GAP` (500 ms) since the gadget was let go: unbound while it was bound, or
-found there by a setup (adopted, remade or taken over). A tree made fresh has no host to tell and
-is bound at once. The wait is the daemon's, before it asks for the bind: the helper's system-call
-filter has no sleep and gets none for this. The helper says each such bind in one line: `gadget
-<udc>: bound again after it was <adopted | taken over | remade | unbound>: UDC was clear for N ms
-first`. A daemon with no helper keeps the same gap around its own unbind and bind.
+**A rebind the host can see.** A gadget the host may still hold configured is never bound again
+without the host seeing the device go. Every enable unbinds and then binds, and on a tree that was
+still bound that is a clear and a set of `UDC` a few milliseconds apart: a host may not register it,
+keeps the configuration it had against endpoints that are fresh and unconfigured, and every function
+of the link goes silent with the device still enumerated. A clear `UDC` is not always enough either:
+the core's disconnect is skipped while the gadget is deactivated or its controller stopped, and dwc2
+ignores a pullup change outside its peripheral state, so `D+` can stay up across an unbind with every
+endpoint stopped (the case a daemon finds when the UDC reads bound, or clear, with its functions
+dead). So when the gadget was let go since its last bind (unbound while bound, or found there by a
+setup: adopted, remade or taken over), the daemon binds it and then takes the controller's pullup off
+for `lemnos_linux::REBIND_GAP` (500 ms) and puts it back, through `/sys/class/udc/<udc>/soft_connect`
+(`disconnect`, then `connect`). With a driver bound that goes through `usb_gadget_disconnect` to the
+pullup, so the host sees the device go and enumerates it again, once. The daemon says each one:
+`gadget <udc>: bound, then off the bus for 500 ms (soft_connect), so a host that held the gadget
+enumerates it again`. Where the pullup cannot be taken off (the write is refused), it says so, clears
+`UDC` and keeps it clear for the gap before binding again. A pullup taken off that cannot be put back
+fails the bind, and the next attempt makes it again. A tree made fresh has no host to tell and is
+bound at once; a gadget taken up from the store is not touched. The wait is the daemon's: the helper's
+system-call filter has no sleep and gets none for this. The helper's verbs `disconnect` and `connect`
+write the attribute, and it finds the controller's directory by reading the class entry's link, never
+following it: only a link that climbs out of `/sys/class/udc` and then names plain entries down to
+the controller's own name is taken. The helper says each bind after a let-go in one line: `gadget
+<udc>: bound again after it was <adopted | taken over | remade | unbound> (UDC clear for N ms)`. A
+daemon with no helper writes `soft_connect` itself, which needs the attribute granted to its user;
+without it the write is refused and the daemon keeps the gap with `UDC` clear. On dwc2 the pulse
+needs the controller in its peripheral state: a `dr_mode` of `peripheral` puts it there at the
+gadget's init (`drivers/usb/dwc2/gadget.c`, rpi-6.12); with `otg` it follows the OTG state machine.
+The board check reads it after the pulse (`testing/board-runs/GADGET-KEEP.md`).
 
 **Every file it touches is an entry of a directory it opened once.** It opens configfs
 (`/sys/kernel/config`, which must be a mounted configfs: the directory of an unmounted configfs is "not
@@ -261,9 +278,9 @@ it.
 
 **Their lifetime.** The parent and the helper end when the daemon stops or dies: the helper when the
 daemon's end of its socket closes, the parent when its own parent dies (`PR_SET_PDEATHSIG`) or when the
-helper ends with status 0. When the daemon stops it takes every gadget down first: unbound, the tree
-removed, the mount unmounted (`teardown`); a daemon that crashes takes nothing down, so the tree stays
-and the helper of the next daemon adopts it.
+helper ends with status 0. A daemon that stops or dies takes no gadget down: the tree stays, and a bound
+gadget stays on the bus while the service manager keeps its files ([The USB gadget across a
+restart](#the-usb-gadget-across-a-restart)). The helper of the next daemon adopts the tree.
 
 **When the helper dies.** The parent says so on the error output (`lemnosd: the gadget helper (pid N) was
 killed by signal 31; starting it again in 1000 ms (restart 1)`), throws away the requests the dead helper
@@ -271,20 +288,28 @@ never read, waits 1, 2, 4 and then 8 seconds (the failure rule's cap; the wait s
 has run for 30 s), and forks a new helper, for as long as the daemon runs. The parent never gives up and
 never turns anything off. The new helper adopts the tree the old one left (below). The daemon keeps its end
 of the socket for life, and the parent keeps the helper's end across forks, so nothing about the socket
-changes: a call that was in flight fails after its 10 s wait, or at once if the helper's end closed, and the
-gadget's driver retries it on its backoff. A call that failed is not latched: the next one is served by the
-new helper. Only a socket whose other end is gone for good (the parent was killed from outside) fails every
+changes. A request the dead helper had taken (below) fails when the new helper says it started, and the
+gadget's driver retries it on its backoff; one it had not read yet is still in the socket and is answered by
+the new helper. A call that failed is not latched: the next one is served by the new helper. Only a socket whose other end is gone for good (the parent was killed from outside) fails every
 call after it, with the reason, until the daemon restarts.
 
 **The vocabulary.** A request is one line, `VERB INDEX SEQ`. `VERB` is `setup` (read the board serial, make
 the gadget's tree and mount, or adopt the one that is there), `bind` (write the controller's name to `UDC`),
-`unbind` (write an empty line to it), or `teardown` (unbind, remove the tree, unmount). `INDEX` is the
+`unbind` (write an empty line to it), or `teardown` (unbind, remove the tree, unmount; the daemon does not
+send it when it stops, as the gadget is kept for the next one). `INDEX` is the
 gadget's index in the fixed list and `SEQ` the daemon's count of its requests, each as canonical decimal: no
 sign and no leading zero, a line of at most 32 bytes. Any other line is answered `0 refused ...` and runs
 nothing; a fuzz test checks this against the canonical spelling of every line it accepts. The reply starts
 with the request's `SEQ`: `SEQ ok`, `SEQ fail ERRNO REASON` (the errno is the step's and the reason is one
-line of text the daemon writes to its error output) or `SEQ refused REASON`. The daemon reads until it finds
-its own number, so a late answer to a request it gave up on is dropped. No file descriptor passes: the
+line of text the daemon writes to its error output) or `SEQ refused REASON`. Two lines answer nothing: a
+helper says `0 started` when it starts, and `SEQ taken` just before it acts on a request (a refused request
+gets only its refusal). The daemon waits for its answer however long the helper takes, with one line on its
+error output every 10 s it waits (`gadget NAME: the gadget helper has not answered setup for 20 s: still waiting (it may
+still carry it out, so it is not asked again)`): a request sent again while the first may still run would be a second setup or bind
+behind it. It gives a request up only when a helper says `started` after one said `taken` for it, as the
+request went with the helper that ended. The call runs on the gadget's own thread (below), never on a
+driver's tick, so the wait holds nobody else. The daemon reads until it finds its own number, so a late
+answer to a request it gave up on is dropped. No file descriptor passes: the
 daemon opens `ep0` and the endpoint files itself, through the mount it owns, as before.
 
 **The board serial.** A gadget that derives its NCM addresses from the board serial names an `identity`
@@ -328,6 +353,87 @@ beside the health text. The helper's own errno reason is not in that line: it is
 then device-role, configfs not mounted at start) is untested on board: [`testing/board-runs/V1g.md`](../testing/board-runs/V1g.md).
 The QEMU check (`testing/crates/gadget-check`) takes `dummy_udc.0` away before the daemon starts, shows the
 gadget retrying while the daemon serves its other devices, and gives the controller back.
+
+## The USB gadget across a restart
+
+FunctionFS takes a gadget off its controller when the last open file of its instance closes
+(`ffs_data_closed` → `ffs_closed` → `unregister_gadget_item`). The `no_disconnect` mount option does not
+save it: the next open of `ep0` finds the instance deactivated and resets it the same way. The mount goes
+with the unit's mount namespace, and its superblock's end resets the instance too. So a daemon that closes
+its files, by stopping or by dying, takes every function of the gadget off the bus, the board's network
+link with it.
+
+**What is kept.** Each bound gadget gives the service manager's file descriptor store (`FDSTORE=1`) copies of
+its FunctionFS files under `lemnos-ffs.CONTROLLER.PART`: a `record` (a memfd with the descriptor set, what
+the setup said, the endpoints and the lent pair, and the host's state as the daemon last saw it), `ep0` and
+each `epN`. The store keeps them across a restart and across a crash of the main process
+(`FileDescriptorStorePreserve=restart`, the default), so the instance never closes: the gadget stays bound,
+the host keeps its configuration, and the network function carries traffic all through. The next daemon
+gets them back (`LISTEN_FDS`, `LISTEN_FDNAMES`) and takes the gadget up by them: it mounts nothing, writes no
+descriptors and does not touch `UDC`, and the host's state is told again from the record. It logs one line
+per gadget: `lemnosd: gadget NAME: network usb0 ifindex 4 → usb0 ifindex 4 (taken up as it was)`. A set of
+files that is not whole, or not the board's, is let go and the gadget is set up again. A stop empties the
+store: the gadget goes off the bus, as a stop is for shutdown only.
+
+**The restart window.** Between the old daemon's exit and the new one's take-up (the unit's `RestartSec=1s`
+and the start) the store holds the files open, but nothing reads them. The kernel's own functions and the
+gadget's own requests go on: the host's descriptor reads and its configuration are answered by the
+composite layer, and the network function (`f_ncm`, in the kernel) carries traffic all through. A
+FunctionFS function's bulk endpoints lent to a holder go on too: the Orion bridge keeps its copies, and the
+lend's `END` stays open, as the store keeps its write end (`lemnos-end.<device>`) with the gadget's files.
+The bridge's hold is not ended, it offers nothing again, and an Orion session's round trips go on (QEMU: the
+longest gap between round trips paced 100 ms apart was 137 ms across a restart). The new daemon takes the
+hold up before any bind, says `the hold the daemon before lent is taken up: the holder's link goes on`, and
+lends to that holder as before. A hold whose holder went (its `END` has no reader left) is ended when the
+endpoints are next asked for, so the next caller gets them, with no polling in between; a hold kept for a device the board no longer has is let go at the
+start, in one line. A control request to a FunctionFS interface stays pending, as FunctionFS queues it on
+`ep0` as a setup event for the daemon. Other events
+(the host configuring, suspending, resuming) queue the same way. The new daemon drains `ep0` as it takes the
+gadget up, before it serves anything: a request the daemon before had read and not answered (the record
+notes it) is stalled; a request pending that it never recorded has its data stage ended on the gadget's own
+thread (the read can wait on the kernel); then every queued event is read, the host's state taken from them,
+and each queued request stalled. The host gets a stall for each request it made in the window, never its
+own timeout. Each is one line, `the request 0xc1 0x4c value 0x0000 index 0 length 8 the host made while no
+daemon ran was refused (stalled)`, and the events one line, `N event(s) of the host's from
+while no daemon ran taken (host configured)`.
+
+**Without a service manager.** A BusyBox init (the flasher image's `S50lemnosd`) gives no `NOTIFY_SOCKET`,
+so there is no store: the daemon makes no parking, keeps nothing, and its stop takes the gadget off its
+controller as before. A restart there is a first start: the gadget is set up and bound again, and the host
+sees the device leave and come back. That image is never restarted in normal use. A `NOTIFY_SOCKET` that
+can't be reached is the same as none.
+
+**Taken down on purpose.** A gadget the daemon takes down (its device let go, a set that changed) is taken
+out of the store first (`FDSTOREREMOVE=1`), and the next enable on that controller waits for the store's
+barrier (`BARRIER=1`) before it describes a fresh instance, so the old one is never still open somewhere.
+While it waits the gadget's state reads `waiting for the service manager to close the files it kept for the
+gadget before`.
+
+**The network function.** A remake of the tree keeps the board's NCM function when it is already what the
+board file asks for (the same addresses and interface name): the kernel registers its network device at the
+first bind and keeps it until the function's directory is removed, so the interface keeps its name and
+index through any remake that keeps the directory. A bind waits while another network device has the name
+the interface is meant to have, with the state `the network interface's name is held by another network
+device: not binding until it is free` and one line (`not binding: usb0, the network interface's name, is
+held by another network device`). A gadget whose interface comes up under another name runs degraded with
+`the network interface came up under another name than the board's`, and one line names both. Each change
+of the interface is one line: `network usb0 ifindex 4 → usb0 ifindex 7 (remade)`.
+
+**Off the tick.** Setting a gadget up and taking it down (the helper's answers, the bind, the rebind gap, the
+close of a session's files, which can wait on the kernel) run on the gadget's own thread. An enable that is
+under way answers `Busy` and says so (`UsbFunction::enable_pending`), and the driver asks again every 100 ms
+with its state `being set up and bound, off the caller's thread`, and after 10 s `still being set up: the
+gadget helper or the kernel has not finished for over 10 s; waiting for it, not asking again`. Neither is a
+failure: nothing is taken down and the backoff does not start.
+
+**Not on the board.** QEMU (`testing/qemu`, the `orion-link` check) restarts the daemon with traffic on the
+link, under a stand-in service manager, and checks the interface index and the connections, a control
+request sent while no daemon runs, one Orion session held through every restart and SIGKILL (never
+lost), and a SIGKILL at each step of the
+start. `testing/qemu/run-gadget-keep.sh` checks the store under a real systemd, with the packaged unit and
+gadget drop-in: `systemctl restart`, a SIGKILL, a stop and a start, the store read by `systemd-analyze
+fdstore`. On a board: untested,
+[`testing/board-runs/GADGET-KEEP.md`](../testing/board-runs/GADGET-KEEP.md).
 
 ## Running under systemd
 

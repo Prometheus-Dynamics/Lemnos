@@ -9,6 +9,7 @@
 pub mod builtin;
 mod clock;
 mod conn;
+pub mod ends;
 mod events;
 pub mod gadget;
 pub mod helper;
@@ -230,7 +231,23 @@ impl Service {
         config: Config,
         packages: PackageReport,
     ) -> Result<Self, StartError> {
-        Self::start_whole(config, Arc::new(DmaHeaps::default()), packages, None)
+        Self::start_keeping_ends(config, packages, None)
+    }
+
+    /// [`Service::start_with_packages`], with `end_keeper` keeping the lends' END holds across a
+    /// restart ([`ends::EndStore`]): the daemon's own start under a service manager's store.
+    pub fn start_keeping_ends(
+        config: Config,
+        packages: PackageReport,
+        end_keeper: Option<Arc<dyn lemnos_host::EndKeeper>>,
+    ) -> Result<Self, StartError> {
+        Self::start_whole(
+            config,
+            Arc::new(DmaHeaps::default()),
+            packages,
+            None,
+            end_keeper,
+        )
     }
 
     /// [`Service::start`], with `buffers` giving the buffers of every stream the board file
@@ -239,7 +256,7 @@ impl Service {
         config: Config,
         buffers: Arc<dyn BufferSource>,
     ) -> Result<Self, StartError> {
-        Self::start_whole(config, buffers, PackageReport::default(), None)
+        Self::start_whole(config, buffers, PackageReport::default(), None, None)
     }
 
     /// [`Service::start_with_buffers`], with the daemon's log lines going to `log` instead of
@@ -249,7 +266,7 @@ impl Service {
         buffers: Arc<dyn BufferSource>,
         log: LogSink,
     ) -> Result<Self, StartError> {
-        Self::start_whole(config, buffers, PackageReport::default(), Some(log))
+        Self::start_whole(config, buffers, PackageReport::default(), Some(log), None)
     }
 
     fn start_whole(
@@ -257,6 +274,7 @@ impl Service {
         buffers: Arc<dyn BufferSource>,
         packages: PackageReport,
         log: Option<LogSink>,
+        end_keeper: Option<Arc<dyn lemnos_host::EndKeeper>>,
     ) -> Result<Self, StartError> {
         let listener = bind(&config.socket).map_err(StartError::Socket)?;
         // A board with a keep-alive device (a hardware watchdog) needs the daemon's liveness.
@@ -271,14 +289,17 @@ impl Service {
         let clock = Arc::new(MonotonicClock::new());
         // What the board file's `[host]` sets wins, as the host itself applies it.
         let read_floor = config.board.host.apply(config.options).read_floor();
-        let host = Host::start_versioned(
+        let host = Host::start_keeping(
             env!("CARGO_PKG_VERSION"),
             &config.board,
             &config.drivers,
             config.backend,
-            Arc::clone(&clock) as Arc<dyn lemnos_core::HostClock>,
-            config.options,
+            (
+                Arc::clone(&clock) as Arc<dyn lemnos_core::HostClock>,
+                config.options,
+            ),
             Arc::new(ServiceStreams { source: buffers }),
+            end_keeper,
         )
         .map_err(StartError::Host)?;
         if keeps_alive {
@@ -420,6 +441,16 @@ impl Drop for Service {
 
 /// Whether the start trace is on (`LEMNOSD_START_TRACE`).
 static TRACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The service manager's descriptor store for the USB gadgets' files, when there is a manager to
+/// keep them (`NOTIFY_SOCKET`). `None` under a BusyBox init or a run by hand: nothing is kept.
+#[must_use]
+pub fn notify_for_gadgets() -> Option<Arc<dyn lemnos_linux::FdStore>> {
+    let notifier = Notifier::from_env();
+    notifier
+        .has_manager()
+        .then(|| Arc::new(notifier) as Arc<dyn lemnos_linux::FdStore>)
+}
 
 /// A host warning as a journal line at warning priority: systemd reads a leading `<4>` as the
 /// level when the unit's stderr is the journal (`SyslogLevelPrefix`, on by default).

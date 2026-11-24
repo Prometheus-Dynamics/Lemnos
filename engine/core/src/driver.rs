@@ -122,6 +122,12 @@ impl CallerId {
     /// A caller in the same process: another driver, or the host itself. It never goes away.
     pub const LOCAL: Self = Self(0);
 
+    /// The holder of a lend the process before this one made, taken up across a restart (the
+    /// daemon kept the lend's END): it has no connection here, and its hold ends when every copy
+    /// of END has closed or the lend ends for good. In a range the daemon never numbers its
+    /// connections from, apart from the devices'.
+    pub const BEFORE: Self = Self(1 << 61);
+
     /// The caller a device is when it calls another device it uses (see [`crate::LocalCaller::by`]):
     /// its slot's index, in a range the daemon never numbers its connections from.
     pub const fn device(index: u32) -> Self {

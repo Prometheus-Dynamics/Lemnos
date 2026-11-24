@@ -558,6 +558,9 @@ mod tests {
         fn unbind(&mut self, _: &Gadget) -> io::Result<()> {
             Ok(())
         }
+        fn soft_connect(&mut self, _: &Gadget, _: bool) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     struct Anyone;
@@ -626,7 +629,7 @@ mod tests {
         );
         let mut reply = String::new();
         daemon.read_to_string(&mut reply).unwrap();
-        assert_eq!(reply, "1 ok\n");
+        assert_eq!(reply, "1 taken\n1 ok\n");
     }
 
     #[test]

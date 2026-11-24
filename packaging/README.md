@@ -264,8 +264,11 @@ lemnosd's root phase opens a keep-alive device's watchdog (the node its `uses` n
 and feeds it at once, so the node's owner does not matter to the watchdog: root 0600 from devtmpfs is enough,
 and nothing waits on udev for it (`docs/slots.md`, "The watchdog chain", window 4).
 
-The unit keeps that descriptor in systemd's file descriptor store (`FileDescriptorStoreMax=4`, and lemnosd sends
-`FDSTORE=1`). A restart takes it back and feeds nothing, since opening a running watchdog feeds it. The store is
+The unit keeps that descriptor in systemd's file descriptor store (`FileDescriptorStoreMax=64`, and lemnosd sends
+`FDSTORE=1`). A restart takes it back and feeds nothing, since opening a running watchdog feeds it. The same store
+keeps each bound USB gadget's FunctionFS files (`lemnos-ffs.*`), so a restart leaves the gadget bound and its network
+link carrying traffic (`docs/daemon.md`, "The USB gadget across a restart"); 64 holds the watchdogs and one gadget's record,
+`ep0` and the 30 endpoint files FunctionFS allows, with room to spare. The store is
 emptied by a stop, so an operator's `systemctl restart` is a first start, and it is not kept across a failed unit.
 Do not set `FileDescriptorStorePreserve=` on the unit: a store kept across a stop would hold a watchdog descriptor
 for a daemon that is down. The unit's `RuntimeDirectoryPreserve=restart` keeps `/run/lemnos` across a restart (not a

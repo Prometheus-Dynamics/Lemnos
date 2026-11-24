@@ -145,6 +145,9 @@ use serve::Serve;
 const NS_PER_MS: u64 = 1_000_000;
 /// How often an enabled function is asked for events.
 pub const POLL_NS: u64 = 20 * NS_PER_MS;
+/// How often a function whose enable is under way off the tick is asked whether it is done
+/// ([`UsbFunction::enable_pending`](lemnos_hal::UsbFunction::enable_pending)).
+pub const PENDING_POLL_NS: u64 = 100 * NS_PER_MS;
 /// The first wait after a failure when the board file gives no `retry_first_ms`. Each further
 /// failure doubles it.
 pub const BACKOFF_FIRST_NS: u64 = 1_000 * NS_PER_MS;
@@ -315,6 +318,8 @@ pub struct UsbGadget {
     up_since_ns: u64,
     /// Failures since the gadget last stayed up.
     attempts: u32,
+    /// The function's enable is under way off the tick.
+    pending: bool,
     fault: &'static str,
 }
 
@@ -361,6 +366,7 @@ impl UsbGadget {
         match self.function.enable(self.set.bytes()) {
             Ok(()) => {
                 self.up = true;
+                self.pending = false;
                 self.enabled_without = self.function.enable_note();
                 if self.function.took_up() == Some(TookUp::Adopted) {
                     self.notes.push(Note::new(LINK_TAKEN_UP));
@@ -371,7 +377,16 @@ impl UsbGadget {
                 self.next_ns = now_ns.saturating_add(POLL_NS);
                 self.next_ns
             }
+            Err(_) if self.function.enable_pending() => {
+                // Under way off the tick (the helper's answer, the bind, the gap): asked again
+                // soon, neither a failure nor a reason to take anything down.
+                self.pending = true;
+                self.fault = self.function.enable_note().unwrap_or(STARTING);
+                self.next_ns = now_ns.saturating_add(PENDING_POLL_NS);
+                self.next_ns
+            }
             Err(kind) => {
+                self.pending = false;
                 // After a failed enable nothing is left, but a function that says it is
                 // already enabled is: take it down so the next attempt starts clean.
                 let reason = self
@@ -852,6 +867,7 @@ impl Lifecycle for UsbGadget {
             up_since_ns: 0,
             attempts: 0,
             fault: STARTING,
+            pending: false,
         })
     }
 
@@ -866,6 +882,7 @@ impl Lifecycle for UsbGadget {
                 .or(self.note)
                 .map_or(Health::Ok, Health::Degraded),
             (false, STARTING) => Health::Degraded(STARTING),
+            (false, fault) if self.pending => Health::Degraded(fault),
             (false, fault) => Health::Failed(fault),
         }
     }

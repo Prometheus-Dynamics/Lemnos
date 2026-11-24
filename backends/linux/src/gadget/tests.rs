@@ -18,6 +18,44 @@ const WAIT: Duration = Duration::from_millis(200);
 /// A data stage begun and only looked at: the driver's way.
 const NOW: Duration = Duration::ZERO;
 
+/// Enables `gadget` and waits for its bring-up off the caller's thread: what a driver's ticks do,
+/// in one call.
+fn up<F: UsbFunction<Error = ErrorKind> + ?Sized>(
+    gadget: &mut F,
+    set: &[u8],
+) -> Result<(), ErrorKind> {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        match gadget.enable(set) {
+            Err(ErrorKind::Busy) if gadget.enable_pending() && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Waits until `done` holds, for what a gadget's own thread does after the caller has gone on.
+fn eventually(done: impl Fn() -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < until, "never came");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Waits until the gadget's own thread has done what it was given: a disable's unbind and close.
+fn settled(gadget: &FunctionFsGadget) {
+    Work::wait_idle(&gadget.work.shared);
+}
+
+/// Drops `gadget` and waits until its thread has unbound and closed what it had.
+fn gone(gadget: FunctionFsGadget) {
+    let shared = Arc::clone(&gadget.work.shared);
+    drop(gadget);
+    Work::wait_idle(&shared);
+}
+
 fn string(text: &str) -> Vec<u8> {
     let mut bytes = vec![0, 3];
     for unit in text.encode_utf16() {
@@ -372,7 +410,7 @@ fn enable_writes_descriptors_to_ep0_then_binds_and_touches_no_configfs_directory
     setup(&tree);
     let configs_before = tree.entries("configs");
     let mut gadget = tree.gadget();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
 
     // `ep0` got the descriptors of both speeds without their configuration headers, then
     // every string of the table.
@@ -422,14 +460,14 @@ fn enable_writes_descriptors_to_ep0_then_binds_and_touches_no_configfs_directory
     );
     assert_eq!(tree.entries("configs"), configs_before);
 
-    assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
 }
 
 #[test]
 fn enable_before_setup_is_not_found_and_touches_nothing() {
     let tree = Tree::new();
     let mut gadget = tree.gadget();
-    assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound));
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::NotFound));
     assert_eq!(tree.attribute("UDC"), "", "not even an unbind");
     assert!(tree.entries("configs").is_empty());
 }
@@ -439,7 +477,7 @@ fn a_controller_that_let_go_keeps_ep0_for_the_bind_again() {
     let tree = Tree::new();
     setup(&tree);
     let mut gadget = tree.gadget();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(tree.attribute("UDC"), "udc0\n");
     // The controller let go: the kernel unbound the function, and the session saw the unbind.
     fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
@@ -452,7 +490,7 @@ fn a_controller_that_let_go_keeps_ep0_for_the_bind_again() {
     assert!(gadget.session.is_some(), "ep0 stays open across the let-go");
     assert_eq!(tree.attribute("UDC"), "\n");
     assert_eq!(
-        gadget.enable(&set()),
+        up(&mut gadget, &set()),
         Ok(()),
         "bound again with the attribute"
     );
@@ -468,16 +506,17 @@ fn disable_and_drop_unbind_and_leave_the_setup_as_it_made_it() {
     let mut gadget = tree.gadget();
     assert_eq!(gadget.disable(), Ok(()), "never enabled");
     assert_eq!(tree.attribute("UDC"), "\n", "as the setup left it: unbound");
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(tree.attribute("UDC"), "udc0\n");
     gadget.disable().unwrap();
+    settled(&gadget);
     assert_eq!(tree.attribute("UDC"), "\n", "unbound");
     assert_eq!(tree.entries("configs"), ["c.1"], "the configuration stays");
     assert_eq!(gadget.next_event(), Err(ErrorKind::Unavailable));
     assert_eq!(gadget.disable(), Ok(()));
 
-    gadget.enable(&set()).unwrap();
-    drop(gadget);
+    up(&mut gadget, &set()).unwrap();
+    gone(gadget);
     assert_eq!(tree.attribute("UDC"), "\n", "drop unbinds");
     assert_eq!(tree.entries("configs"), ["c.1"]);
 }
@@ -507,7 +546,7 @@ fn a_missing_piece_is_not_found_and_nothing_is_made() {
         remove(&tree);
         let had_ep0 = tree.mount().join("ep0").exists();
         let mut gadget = tree.gadget();
-        assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound), "{what}");
+        assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::NotFound), "{what}");
         if tree.gadget_dir().exists() {
             assert!(tree.entries("configs").is_empty(), "{what}");
             assert!(tree.entries("strings").is_empty(), "{what}");
@@ -541,7 +580,7 @@ fn a_failure_part_way_undoes_the_steps_before_it() {
     // The second endpoint file is not there: everything up to it has been done by then.
     fs::remove_file(tree.mount().join("ep2")).unwrap();
     let mut gadget = tree.gadget();
-    assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound));
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::NotFound));
     assert_eq!(tree.attribute("UDC"), "\n", "no half-built gadget: unbound");
     assert_eq!(
         tree.entries("configs"),
@@ -552,7 +591,7 @@ fn a_failure_part_way_undoes_the_steps_before_it() {
 
     // Once the piece is there the same call goes through.
     fs::write(tree.mount().join("ep2"), "").unwrap();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(tree.attribute("UDC"), "udc0\n");
 }
 
@@ -601,7 +640,7 @@ fn what_an_earlier_setup_left_is_removed_before_the_gadget_is_made() {
 fn a_set_linux_cannot_carry_is_refused_before_anything_is_touched() {
     let tree = Tree::new();
     let mut gadget = tree.gadget();
-    assert_eq!(gadget.enable(&[1, 2, 3]), Err(ErrorKind::InvalidInput));
+    assert_eq!(up(&mut gadget, &[1, 2, 3]), Err(ErrorKind::InvalidInput));
 
     // A fourth alternate setting: FunctionFS takes three.
     let mut body = function(64);
@@ -610,7 +649,7 @@ fn a_set_linux_cannot_carry_is_refused_before_anything_is_touched() {
     }
     let alternates = [&DEVICE[..], &configuration(&body), &table()].concat();
     assert!(UsbDescriptors::parse(&alternates).is_ok());
-    assert_eq!(gadget.enable(&alternates), Err(ErrorKind::Unsupported));
+    assert_eq!(up(&mut gadget, &alternates), Err(ErrorKind::Unsupported));
 
     // An endpoint address in two settings.
     let mut body = function(64);
@@ -618,13 +657,13 @@ fn a_set_linux_cannot_carry_is_refused_before_anything_is_touched() {
     body.extend_from_slice(&[7, 5, 0x81, 1, 0, 1, 1]);
     let twice = [&DEVICE[..], &configuration(&body), &table()].concat();
     assert!(UsbDescriptors::parse(&twice).is_ok());
-    assert_eq!(gadget.enable(&twice), Err(ErrorKind::Unsupported));
+    assert_eq!(up(&mut gadget, &twice), Err(ErrorKind::Unsupported));
 
     // No interface at all.
     let mut empty = configuration(&[]);
     empty[4] = 0;
     let empty = [&DEVICE[..], &empty, &table()].concat();
-    assert_eq!(gadget.enable(&empty), Err(ErrorKind::Unsupported));
+    assert_eq!(up(&mut gadget, &empty), Err(ErrorKind::Unsupported));
 
     // A product string configfs has no room for.
     let long = "x".repeat(126);
@@ -633,7 +672,7 @@ fn a_set_linux_cannot_carry_is_refused_before_anything_is_touched() {
         strings.extend(string(text));
     }
     let long = [&DEVICE[..], &configuration(&function(64)), &strings].concat();
-    assert_eq!(gadget.enable(&long), Err(ErrorKind::Unsupported));
+    assert_eq!(up(&mut gadget, &long), Err(ErrorKind::Unsupported));
 
     assert!(tree.is_bare());
     assert!(!tree.gadget_dir().join("idVendor").exists());
@@ -668,7 +707,7 @@ fn alternate_settings_and_isochronous_endpoints_are_carried() {
     }
     let mut gadget = tree.gadget();
     // 1023 bytes a frame at full speed, three transactions of 1024 a microframe at high speed.
-    gadget.enable(&streaming(1023, 1024 | 2 << 11)).unwrap();
+    up(&mut gadget, &streaming(1023, 1024 | 2 << 11)).unwrap();
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
     assert!(
         ep0.windows(7)
@@ -722,7 +761,7 @@ fn an_isochronous_out_endpoint_reads_one_interval_at_a_time() {
         fs::write(tree.mount().join(file), "").unwrap();
     }
     let mut gadget = tree.gadget();
-    gadget.enable(&set).unwrap();
+    up(&mut gadget, &set).unwrap();
     tree.event(ENABLE);
     gadget.next_event().unwrap();
     fs::write(tree.mount().join("ep5"), [5u8; 64]).unwrap();
@@ -768,7 +807,7 @@ fn one_speed_and_no_strings_writes_only_what_the_set_has() {
         "an attribute the kernel lacks is not made"
     );
     let mut gadget = tree.gadget();
-    gadget.enable(&descriptors).unwrap();
+    up(&mut gadget, &descriptors).unwrap();
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
     assert_eq!(
         ep0[8..16],
@@ -839,11 +878,11 @@ fn the_board_provides_a_controller_that_is_there_to_one_owner() {
 
     let mut function = board.usb_function("udc:udc0").map_err(|_| ()).unwrap();
     assert_eq!(status(&mut board, "udc:udc0"), Status::BUSY);
-    function.enable(&set()).unwrap();
+    up(&mut *function, &set()).unwrap();
     let gadget = sys.join("kernel/config/usb_gadget/lemnos-udc0");
     assert_eq!(fs::read_to_string(gadget.join("UDC")).unwrap(), "udc0\n");
     drop(function);
-    assert_eq!(fs::read_to_string(gadget.join("UDC")).unwrap(), "\n");
+    eventually(|| fs::read_to_string(gadget.join("UDC")).unwrap() == "\n");
     assert!(board.usb_function("udc:udc0").is_ok());
 }
 
@@ -852,7 +891,7 @@ fn events_requests_and_endpoint_bytes_go_through_the_files() {
     let tree = Tree::new();
     setup(&tree);
     let mut gadget = tree.gadget();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     let mut data = [0u8; 8];
     assert_eq!(gadget.next_event(), Ok(None));
     assert_eq!(gadget.read(2, &mut data, WAIT), Err(ErrorKind::Unavailable));
@@ -916,8 +955,9 @@ fn events_requests_and_endpoint_bytes_go_through_the_files() {
     assert_eq!(gadget.next_event(), Err(ErrorKind::Unavailable));
     assert_eq!(gadget.write(0x81, &[1], WAIT), Err(ErrorKind::Unavailable));
     gadget.disable().unwrap();
+    settled(&gadget);
     fs::write(tree.mount().join("ep0"), "").unwrap();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(gadget.next_event(), Ok(None));
 }
 
@@ -926,7 +966,7 @@ fn nothing_allocates_once_the_function_is_enabled() {
     let tree = Tree::new();
     setup(&tree);
     let mut gadget = tree.gadget();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     tree.event(ENABLE);
     tree.kernel_says(&[0xc0, 8, 0, 0, 0, 0, 2, 0, 4, 0, 0, 0]);
     fs::write(tree.mount().join("ep2"), [1, 2, 3]).unwrap();
@@ -983,6 +1023,8 @@ struct FakeWire {
     under_way: bool,
     /// How it ended, once the host ended it.
     ended: Option<io::Result<usize>>,
+    /// A request read from `ep0` is unanswered: until a stall or a data stage ends it.
+    request_pending: bool,
 }
 
 impl FakeWire {
@@ -990,6 +1032,7 @@ impl FakeWire {
     fn end_stage(&mut self, len: usize) {
         if self.under_way && self.ended.is_none() {
             self.ended = Some(self.answer(len));
+            self.request_pending = false;
         }
     }
 
@@ -1041,7 +1084,12 @@ impl Wire for FakeWire {
 
     fn stall(&mut self, request_is_in: bool) -> io::Result<()> {
         self.did.push(Did::Stall { request_is_in });
+        self.request_pending = false;
         self.answer(())
+    }
+
+    fn request_pending(&self) -> io::Result<bool> {
+        Ok(self.request_pending)
     }
 
     fn halt(&mut self, endpoint: usize, endpoint_is_in: bool) -> io::Result<()> {
@@ -1091,6 +1139,99 @@ fn session() -> Session<FakeWire> {
             (0x04, Some(8)),
         ],
     )
+}
+
+#[test]
+fn a_request_the_daemon_before_read_and_did_not_answer_is_stalled_before_anything_is_served() {
+    let mut session = session();
+    session.wire.request_pending = true;
+    let setup = request(0xc1, 64);
+    let said = session.drain(Some(setup_bytes(&setup)));
+    assert_eq!(
+        session.wire.did,
+        [Did::Stall {
+            request_is_in: true
+        }]
+    );
+    assert!(
+        said[0].contains("did not answer was refused (stalled)"),
+        "{said:?}"
+    );
+    assert!(said[0].contains("0xc1 0x01"), "{said:?}");
+    // Nothing more to tell: the driver starts from the recorded state with nothing pending.
+    assert_eq!(session.next_event(), Ok(None));
+    // A request whose data comes from the host is stalled the other way.
+    let mut session = session_out_pending();
+    let said = session.drain(Some(setup_bytes(&request(0x41, 8))));
+    assert_eq!(
+        session.wire.did,
+        [Did::Stall {
+            request_is_in: false
+        }]
+    );
+    assert_eq!(said.len(), 1);
+}
+
+fn session_out_pending() -> Session<FakeWire> {
+    let mut session = session();
+    session.wire.request_pending = true;
+    session
+}
+
+#[test]
+fn what_the_host_did_while_no_daemon_ran_is_taken_and_its_request_stalled() {
+    let mut session = session();
+    session.wire.events.extend([
+        Event::Enable,
+        Event::Suspend,
+        Event::Setup(request(0xc1, 4)),
+        Event::Resume,
+    ]);
+    let said = session.drain(None);
+    assert!(session.configured && !session.suspended);
+    assert_eq!(
+        session.wire.did,
+        [
+            Did::Forget,
+            Did::Stall {
+                request_is_in: true
+            }
+        ]
+    );
+    assert!(
+        said.iter()
+            .any(|l| l.contains("the host made while no daemon ran was refused (stalled)")),
+        "{said:?}"
+    );
+    assert!(
+        said.iter()
+            .any(|l| l.contains("3 event(s)") && l.contains("host configured")),
+        "{said:?}"
+    );
+    // The request is not handed on: the driver is told nothing it would answer late.
+    assert_eq!(session.next_event(), Ok(None));
+}
+
+#[test]
+fn an_unrecorded_pending_request_is_ended_off_the_tick_and_nothing_is_read_until_it_has() {
+    let mut session = session();
+    session.wire.request_pending = true;
+    session.wire.holds = true;
+    session.wire.events.push_back(Event::Disable);
+    let said = session.drain(None);
+    assert_eq!(session.wire.did, [Did::Receive(STALE_READ)]);
+    assert!(said[0].contains("did not record is pending"), "{said:?}");
+    // While it runs, no event is read: a read now would be the request's data stage.
+    assert_eq!(session.next_event(), Ok(None));
+    assert_eq!(session.wire.events.len(), 1);
+    // The host ends it; then the events come, and the end is nobody's answer.
+    session.wire.end_stage(0);
+    session.configured = true;
+    assert_eq!(
+        session.next_event(),
+        Ok(Some(UsbFunctionEvent::Deconfigured))
+    );
+    assert!(session.stage.is_none());
 }
 
 fn configured() -> Session<FakeWire> {
@@ -1504,7 +1645,7 @@ fn the_interface_name_is_read_back_once_bound_and_not_before() {
         "lemnos0\n",
     )
     .unwrap();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(gadget.interface_name(&mut buffer), Ok(Some(7)));
     assert_eq!(&buffer[..7], b"lemnos0");
     assert_eq!(
@@ -1513,6 +1654,7 @@ fn the_interface_name_is_read_back_once_bound_and_not_before() {
         "a buffer too small for the name"
     );
     gadget.disable().unwrap();
+    settled(&gadget);
     assert_eq!(gadget.interface_name(&mut buffer), Ok(None), "down again");
 }
 
@@ -1681,6 +1823,13 @@ impl GadgetHelper for Helped {
         self.calls.push("unbind");
         unbind(&self.roots(), UDC)
     }
+
+    fn soft_connect(&mut self, index: u32, connect: bool) -> io::Result<()> {
+        assert_eq!(index, 0);
+        self.calls
+            .push(if connect { "connect" } else { "disconnect" });
+        Trees::new(&self.roots()).soft_connect(UDC, connect)
+    }
 }
 
 /// The helper as the gadget holds it, and the shared handle the test reads its calls through.
@@ -1706,9 +1855,14 @@ fn with_a_helper_the_gadget_is_made_and_bound_through_it_and_the_daemon_writes_n
     let tree = Tree::new();
     let helper = helped(&tree, 0);
     let mut gadget = with_helper(&tree, &helper);
-    // Nothing made yet: the helper is asked to make it, then to bind, in that order.
-    gadget.enable(&set()).unwrap();
-    assert_eq!(helper.lock().unwrap().calls, ["setup", "unbind", "bind"]);
+    // The helper is asked to make it (here: adopt the stand-in's), then to bind, in that order;
+    // a tree that was there before this daemon may be held by a host, so the bind is followed by
+    // the pullup's pulse.
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(
+        helper.lock().unwrap().calls,
+        ["setup", "unbind", "bind", "disconnect", "connect"]
+    );
     assert_eq!(tree.attribute("UDC"), "udc0\n");
     // The helper's setup leaves UDC as root's: the owner hand-over (mode 0600) is not made.
     let mode = fs::metadata(tree.gadget_dir().join("UDC"))
@@ -1716,7 +1870,79 @@ fn with_a_helper_the_gadget_is_made_and_bound_through_it_and_the_daemon_writes_n
         .permissions()
         .mode();
     assert_ne!(mode & 0o777, 0o600);
-    assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
+}
+
+/// A tree a daemon before this one left (a host may still hold it configured) is bound, then taken
+/// off the bus by the controller's pullup for the gap and put back, so the host enumerates it
+/// again.
+#[test]
+fn a_gadget_a_host_may_hold_is_pulsed_off_the_bus_after_its_bind() {
+    let tree = Tree::new();
+    let first = helped(&tree, 0);
+    let mut gadget = with_helper(&tree, &first);
+    up(&mut gadget, &set()).unwrap();
+    gone(gadget);
+    // The next daemon finds the tree there: when it came off its controller is not known.
+    let next = helped(&tree, 0);
+    let mut gadget = with_helper(&tree, &next);
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(
+        next.lock().unwrap().calls,
+        ["setup", "unbind", "bind", "disconnect", "connect"]
+    );
+    assert_eq!(
+        fs::read_to_string(tree.udc_root.join(UDC).join("soft_connect")).unwrap(),
+        "connect"
+    );
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+}
+
+/// The controller's directory is found from the class entry's link, read and not followed: only
+/// a link that climbs, then names plain entries down to the controller's own name, is taken.
+#[test]
+fn the_controllers_directory_is_found_only_through_a_link_of_the_kernels_shape() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!("lemnos-udc-link-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let class = root.join("class/udc");
+    let device = root.join("devices/platform/c.usb/udc/c.usb");
+    fs::create_dir_all(&class).unwrap();
+    fs::create_dir_all(&device).unwrap();
+    fs::write(device.join("marker"), "here").unwrap();
+    for target in ["elsewhere/late", "elsewhere/abs", "devices/gap"] {
+        fs::create_dir_all(root.join(target)).unwrap();
+    }
+    symlink(
+        "../../devices/platform/c.usb/udc/c.usb",
+        class.join("c.usb"),
+    )
+    .unwrap();
+    symlink(
+        "../../devices/platform/c.usb/udc/other",
+        class.join("named-wrong"),
+    )
+    .unwrap();
+    // Each of these ends in its own entry's name, so only its shape refuses it.
+    symlink("../../devices/../elsewhere/late", class.join("late")).unwrap();
+    symlink(root.join("elsewhere/abs"), class.join("abs")).unwrap();
+    symlink("../../devices//gap", class.join("gap")).unwrap();
+    let dir = lemnos_linux_sys::confined::Dir::open_path(&class).unwrap();
+    let found = super::tree::controller_dir(&dir, &class, "c.usb").unwrap();
+    assert_eq!(found.read("marker").unwrap(), b"here");
+    for name in ["named-wrong", "late", "abs", "gap"] {
+        assert!(
+            super::tree::controller_dir(&dir, &class, name).is_err(),
+            "{name} is refused"
+        );
+    }
+    assert_eq!(
+        super::tree::controller_dir(&dir, &class, "missing")
+            .err()
+            .and_then(|e| e.raw_os_error()),
+        Some(libc::ENOENT)
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -1728,12 +1954,12 @@ fn a_controller_absent_at_start_is_retried_and_comes_up_without_a_restart() {
     // fails with the missing controller, and nothing is bound.
     let udc = tree.udc_root.join(UDC);
     fs::remove_dir_all(&udc).unwrap();
-    assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound));
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::NotFound));
     assert_eq!(helper.lock().unwrap().calls, ["setup"]);
     // The controller appears (what its uevent says): the next attempt, by the same gadget and
     // the same helper, brings it up. No restart of anything.
     fs::create_dir_all(&udc).unwrap();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(
         helper.lock().unwrap().calls,
         ["setup", "setup", "unbind", "bind"]
@@ -1748,12 +1974,12 @@ fn a_setup_that_fails_n_times_then_succeeds_is_retried_each_time() {
     let mut gadget = with_helper(&tree, &helper);
     for attempt in 0..3 {
         assert_eq!(
-            gadget.enable(&set()),
+            up(&mut gadget, &set()),
             Err(ErrorKind::NotFound),
             "attempt {attempt} fails"
         );
     }
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(
         helper.lock().unwrap().calls,
         ["setup", "setup", "setup", "setup", "unbind", "bind"]
@@ -1765,11 +1991,12 @@ fn teardown_then_setup_again_makes_the_gadget_again_and_binds_it() {
     let tree = Tree::new();
     let helper = helped(&tree, 0);
     let mut gadget = with_helper(&tree, &helper);
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     gadget.disable().unwrap();
+    settled(&gadget);
     assert_eq!(
         helper.lock().unwrap().calls,
-        ["setup", "unbind", "bind", "unbind"]
+        ["setup", "unbind", "bind", "disconnect", "connect", "unbind"]
     );
     // unbind wrote the empty line: nothing is bound.
     assert_eq!(tree.attribute("UDC").trim(), "");
@@ -1779,11 +2006,21 @@ fn teardown_then_setup_again_makes_the_gadget_again_and_binds_it() {
     // The stand-in unmount does nothing, so the mount's ep0 stays; a real unmount takes it with
     // the mount. Remove it as the unmount would, so the setup makes the mount again.
     fs::remove_file(tree.mount().join("ep0")).unwrap();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(
         helper.lock().unwrap().calls,
         [
-            "setup", "unbind", "bind", "unbind", "setup", "unbind", "bind"
+            "setup",
+            "unbind",
+            "bind",
+            "disconnect",
+            "connect",
+            "unbind",
+            "setup",
+            "unbind",
+            "bind",
+            "disconnect",
+            "connect"
         ]
     );
 }
@@ -2122,6 +2359,71 @@ fn network_setup(trees: &mut Trees, recorder: &mut Recorder) -> io::Result<Outco
     trees.setup_for_helper(UDC, own(), &set(), &functions, recorder)
 }
 
+/// A remake keeps a network function that is the board file's: the kernel's network device goes
+/// only with the function's directory, so the interface keeps its name and index. One whose
+/// addresses differ from the board file's is made anew.
+#[test]
+fn a_remake_keeps_the_boards_network_function_and_renews_only_one_that_differs() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    network_setup(&mut trees, &mut recorder).unwrap();
+    mark_network(&tree);
+    // Something else of the tree differs, unbound: remade, the network function kept and linked.
+    fs::write(tree.gadget_dir().join("idVendor"), "0x1d6b\n").unwrap();
+    assert_eq!(
+        network_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Remade
+    );
+    assert!(network_marked(&tree), "the network function was kept");
+    assert!(linked(&tree, true));
+    assert_ne!(
+        tree.attribute("idVendor"),
+        "0x1d6b\n",
+        "the rest made again"
+    );
+    // Its addresses differ from the board file's: a new function, a new device.
+    fs::write(
+        tree.gadget_dir().join("functions/ncm.usb0/host_addr"),
+        "02:00:00:00:00:99\n",
+    )
+    .unwrap();
+    assert_eq!(
+        network_setup(&mut trees, &mut recorder).unwrap(),
+        Outcome::Remade
+    );
+    assert!(
+        !network_marked(&tree),
+        "a network function that differs is made anew"
+    );
+    assert!(linked(&tree, true));
+}
+
+/// A takeover (a FunctionFS instance held past the limit) makes the FunctionFS function again and
+/// keeps the board's network function, so the interface stays what it was.
+#[test]
+fn a_takeover_keeps_the_boards_network_function() {
+    let tree = Tree::new();
+    let mut trees = Trees::new(&tree.roots());
+    let mut recorder = Recorder::default();
+    network_setup(&mut trees, &mut recorder).unwrap();
+    mark_network(&tree);
+    fs::write(tree.gadget_dir().join("UDC"), "udc0\n").unwrap();
+    let _ = fs::remove_file(tree.mount().join("ep0"));
+    let mut past = Trees::new(&tree.roots()).with_held_limit(std::time::Duration::ZERO);
+    let mut held = Recorder {
+        busy: 1,
+        ..Recorder::default()
+    };
+    assert_eq!(
+        network_setup(&mut past, &mut held).unwrap(),
+        Outcome::TakenOver
+    );
+    assert!(network_marked(&tree), "the network function was kept");
+    assert!(linked(&tree, true));
+    assert_eq!(held.mounts.len(), 1, "a fresh instance mounted");
+}
+
 #[test]
 fn a_bind_the_kernel_refuses_with_a_network_function_is_tried_on_a_fresh_one_then_without() {
     let tree = Tree::new();
@@ -2227,10 +2529,10 @@ fn a_gadget_bound_without_its_network_function_says_so_and_keeps_its_session_thr
     let mut gadget = with_helper(&tree, &helper);
     // A refused bind is its kind, with no note.
     helper.lock().unwrap().bind_errno = Some(libc::EBUSY);
-    assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
     assert_eq!(gadget.enable_note(), None);
     helper.lock().unwrap().bind_errno = None;
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(gadget.enable_note(), None);
 
     // The controller let go; the helper's bind works without the network function: the note
@@ -2238,11 +2540,12 @@ fn a_gadget_bound_without_its_network_function_says_so_and_keeps_its_session_thr
     fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
     gadget.session.as_mut().unwrap().released = true;
     gadget.disable().unwrap();
+    settled(&gadget);
     let network = tree.gadget_dir().join("functions/ncm.usb0");
     fs::create_dir(&network).unwrap();
     helper.lock().unwrap().binds_without_network = true;
     helper.lock().unwrap().calls.clear();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(helper.lock().unwrap().calls, ["bind"]);
     assert_eq!(gadget.enable_note(), Some(NETWORK_REFUSED));
     assert!(gadget.session.as_ref().is_some_and(|s| !s.released));
@@ -2250,8 +2553,9 @@ fn a_gadget_bound_without_its_network_function_says_so_and_keeps_its_session_thr
     fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
     gadget.session.as_mut().unwrap().released = true;
     gadget.disable().unwrap();
+    settled(&gadget);
     helper.lock().unwrap().bind_errno = Some(libc::EBUSY);
-    assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
     assert!(gadget.session.is_some());
 }
 
@@ -2268,7 +2572,7 @@ fn a_parked_session_is_taken_up_by_the_next_function_with_nothing_written_and_it
     let helper = helped(&tree, 0);
     let parking = Parking::default();
     let mut old = parked_gadget(&tree, &helper, &parking);
-    old.enable(&set()).unwrap();
+    up(&mut old, &set()).unwrap();
     {
         let session = old.session.as_mut().unwrap();
         session.configured = true;
@@ -2280,7 +2584,7 @@ fn a_parked_session_is_taken_up_by_the_next_function_with_nothing_written_and_it
     helper.lock().unwrap().calls.clear();
 
     let mut new = parked_gadget(&tree, &helper, &parking);
-    new.enable(&set()).unwrap();
+    up(&mut new, &set()).unwrap();
     assert_eq!(new.took_up(), Some(TookUp::Adopted));
     assert!(
         helper.lock().unwrap().calls.is_empty(),
@@ -2289,7 +2593,7 @@ fn a_parked_session_is_taken_up_by_the_next_function_with_nothing_written_and_it
     assert_eq!(new.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
     assert_eq!(new.next_event(), Ok(Some(UsbFunctionEvent::Suspended)));
     // The old function's drop leaves the session the new one took up.
-    drop(old);
+    gone(old);
     assert!(helper.lock().unwrap().calls.is_empty());
     assert!(new.session.is_some());
 }
@@ -2300,12 +2604,12 @@ fn a_parked_session_with_other_descriptors_is_taken_down_and_the_next_function_s
     let helper = helped(&tree, 0);
     let parking = Parking::default();
     let mut old = parked_gadget(&tree, &helper, &parking);
-    old.enable(&set()).unwrap();
+    up(&mut old, &set()).unwrap();
     assert!(old.park());
     helper.lock().unwrap().calls.clear();
 
     let mut new = parked_gadget(&tree, &helper, &parking);
-    new.enable(&set_without_serial()).unwrap();
+    up(&mut new, &set_without_serial()).unwrap();
     assert_eq!(new.took_up(), Some(TookUp::Replaced));
     let calls = helper.lock().unwrap().calls.clone();
     assert_eq!(
@@ -2317,7 +2621,7 @@ fn a_parked_session_with_other_descriptors_is_taken_down_and_the_next_function_s
         calls.contains(&"setup") && calls.contains(&"bind"),
         "{calls:?}"
     );
-    drop(old);
+    gone(old);
     assert!(new.session.is_some());
 }
 
@@ -2327,14 +2631,14 @@ fn a_parked_session_nothing_took_up_is_taken_down_by_the_drop_of_the_function_th
     let helper = helped(&tree, 0);
     let parking = Parking::default();
     let mut old = parked_gadget(&tree, &helper, &parking);
-    old.enable(&set()).unwrap();
+    up(&mut old, &set()).unwrap();
     assert!(old.park());
     helper.lock().unwrap().calls.clear();
-    drop(old);
+    gone(old);
     assert_eq!(helper.lock().unwrap().calls, ["unbind"], "never orphaned");
     // Nothing is left to take up: the next function enables as any does.
     let mut new = parked_gadget(&tree, &helper, &parking);
-    new.enable(&set()).unwrap();
+    up(&mut new, &set()).unwrap();
     assert_eq!(new.took_up(), None);
 }
 
@@ -2345,14 +2649,14 @@ fn a_function_with_no_session_or_one_the_controller_let_go_parks_nothing() {
     let parking = Parking::default();
     let mut gadget = parked_gadget(&tree, &helper, &parking);
     assert!(!gadget.park(), "not enabled");
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     gadget.session.as_mut().unwrap().released = true;
     assert!(!gadget.park(), "let go by the controller");
     // Without the daemon's parking, nothing is parked either.
     let mut alone = with_helper(&tree, &helper);
     fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
-    drop(gadget);
-    alone.enable(&set()).unwrap();
+    gone(gadget);
+    up(&mut alone, &set()).unwrap();
     assert!(!alone.park());
 }
 
@@ -2405,28 +2709,34 @@ fn the_trees_tell_a_bind_after_a_let_go_and_how_long_udc_was_clear() {
 }
 
 /// GADGET-REBIND-VISIBLE, the daemon's side: a gadget taken off a controller it was bound to is
-/// bound again only after the gap, so a host that held it configured sees it go. An unbind long
-/// enough ago costs nothing. (The gap is [`REBIND_GAP`]; 300 ms here, and 20 ms in this crate's
-/// other tests, which rebind hundreds of times.)
+/// bound, then kept off the bus by the controller's pullup for the gap, so a host that held it
+/// configured sees it go even where the controller kept its pullup through the unbind. Each such
+/// bind is pulsed once, with no wait before it; a stand-in controller that has no `soft_connect`
+/// (a write the kernel refuses) gets the gap with `UDC` clear instead. (The gap is
+/// [`REBIND_GAP`]; 300 ms here, and 20 ms in this crate's other tests, which rebind hundreds of
+/// times.)
 #[test]
-fn a_gadget_that_was_bound_is_bound_again_only_after_the_gap() {
+fn a_gadget_that_was_bound_is_kept_off_the_bus_for_the_gap_at_its_next_bind() {
     let gap = std::time::Duration::from_millis(300);
     let tree = Tree::new();
     setup(&tree);
+    let soft_connect = tree.udc_root.join(UDC).join("soft_connect");
     let mut gadget = tree.gadget().with_rebind_gap(gap);
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert_eq!(tree.attribute("UDC").trim(), UDC);
+    assert_eq!(fs::read_to_string(&soft_connect).unwrap(), "connect\n");
 
-    // Off and on again at once, as a driver that lets go and brings the function up does. The
-    // gap runs from the unbind, which is the first thing `disable` does.
+    // Off and on again at once, as a driver that lets go and brings the function up does.
+    fs::remove_file(&soft_connect).unwrap();
     let before = std::time::Instant::now();
     gadget.disable().unwrap();
+    settled(&gadget);
     assert_eq!(tree.attribute("UDC").trim(), "");
     let disabled = before.elapsed();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert!(
         before.elapsed() >= gap,
-        "bound again {:?} after the unbind began",
+        "on the bus again {:?} after the unbind began",
         before.elapsed()
     );
     assert!(
@@ -2434,15 +2744,387 @@ fn a_gadget_that_was_bound_is_bound_again_only_after_the_gap() {
         "the disable alone took {disabled:?}: the wait was the bind's"
     );
     assert_eq!(tree.attribute("UDC").trim(), UDC);
+    assert_eq!(fs::read_to_string(&soft_connect).unwrap(), "connect\n");
 
-    // Let go long enough ago: the bind waits for nothing more.
+    // A controller whose pullup cannot be taken off: `UDC` is kept clear for the gap instead.
     gadget.disable().unwrap();
-    std::thread::sleep(gap + std::time::Duration::from_millis(50));
+    settled(&gadget);
+    fs::remove_file(&soft_connect).unwrap();
+    fs::create_dir(&soft_connect).unwrap();
     let began = std::time::Instant::now();
-    gadget.enable(&set()).unwrap();
+    up(&mut gadget, &set()).unwrap();
     assert!(
-        began.elapsed() < gap / 2,
-        "waited {:?} again",
+        began.elapsed() >= gap,
+        "bound again after {:?}",
         began.elapsed()
     );
+    assert_eq!(tree.attribute("UDC").trim(), UDC);
+    fs::remove_dir(&soft_connect).unwrap();
+}
+
+/// A stand-in for the service manager's descriptor store, failing as systemd does: it keeps a copy
+/// of each descriptor by name, closes every copy of a name it is told to let go, answers a barrier
+/// only once it has acted on what came before (here: when the test says), and past its
+/// `FileDescriptorStoreMax` drops what it is given without telling the sender (systemd logs it and
+/// closes it; `sd_notify` still says it was sent).
+struct Store {
+    kept: Mutex<Vec<(String, std::os::fd::OwnedFd)>>,
+    let_gone: Mutex<Vec<String>>,
+    held_barriers: Mutex<Vec<std::io::PipeWriter>>,
+    answer_at_once: std::sync::atomic::AtomicBool,
+    max: usize,
+}
+
+impl Store {
+    fn new(max: usize) -> Arc<Self> {
+        Arc::new(Self {
+            kept: Mutex::new(Vec::new()),
+            let_gone: Mutex::new(Vec::new()),
+            held_barriers: Mutex::new(Vec::new()),
+            answer_at_once: std::sync::atomic::AtomicBool::new(true),
+            max,
+        })
+    }
+
+    fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .kept
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// What the store passes the next start: a copy of each, with its name.
+    fn given(&self) -> Vec<(String, std::os::fd::OwnedFd)> {
+        self.kept
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, fd)| (n.clone(), fd.try_clone().unwrap()))
+            .collect()
+    }
+
+    fn hold_barriers(&self) {
+        self.answer_at_once.store(false, Ordering::SeqCst);
+    }
+
+    fn answer_barriers(&self) {
+        self.held_barriers.lock().unwrap().clear();
+        self.answer_at_once.store(true, Ordering::SeqCst);
+    }
+}
+
+impl FdStore for Store {
+    fn keep(&self, name: &str, fd: std::os::fd::BorrowedFd<'_>) -> io::Result<bool> {
+        let mut kept = self.kept.lock().unwrap();
+        if kept.len() < self.max {
+            kept.push((name.to_string(), fd.try_clone_to_owned()?));
+        }
+        Ok(true)
+    }
+
+    fn let_go(&self, name: &str) {
+        self.kept.lock().unwrap().retain(|(n, _)| n != name);
+        self.let_gone.lock().unwrap().push(name.to_string());
+    }
+
+    fn barrier(&self) -> Option<std::os::fd::OwnedFd> {
+        let (reader, writer) = std::io::pipe().ok()?;
+        if self.answer_at_once.load(Ordering::SeqCst) {
+            drop(writer);
+        } else {
+            self.held_barriers.lock().unwrap().push(writer);
+        }
+        Some(std::os::fd::OwnedFd::from(reader))
+    }
+}
+
+fn kept_names() -> Vec<String> {
+    let mut names: Vec<String> = keep::names(UDC, 2).collect();
+    names.sort();
+    names
+}
+
+/// A daemon's gadget, its parking keeping files in `store`.
+fn keeping_gadget(tree: &Tree, store: &Arc<Store>) -> (FunctionFsGadget, Parking) {
+    let parking = Parking::default();
+    parking.keep_in(store.clone());
+    (tree.gadget().parking(parking.clone()), parking)
+}
+
+#[test]
+fn a_kept_gadget_stays_bound_through_a_stop_and_the_next_daemon_takes_it_up_as_it_was() {
+    let tree = Tree::new();
+    setup(&tree);
+    let store = Store::new(64);
+    let (mut gadget, parking) = keeping_gadget(&tree, &store);
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(
+        store.names(),
+        kept_names(),
+        "the record, ep0 and both endpoints"
+    );
+    tree.event(ENABLE);
+    assert_eq!(gadget.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
+    // The daemon stops: nothing is unbound, nothing let go.
+    parking.stopping();
+    gone(gadget);
+    assert_eq!(tree.attribute("UDC"), "udc0\n", "still bound");
+    assert!(store.let_gone.lock().unwrap().is_empty());
+    assert_eq!(store.names(), kept_names());
+    // The next daemon: its parking takes the kept files up.
+    let ep0_before = fs::read(tree.mount().join("ep0")).unwrap();
+    let next = Parking::default();
+    next.keep_in(store.clone());
+    let lines = next.adopt_kept(store.given(), Some(&[UDC.to_string()]));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("host configured"), "{lines:?}");
+    let mut gadget = tree.gadget().parking(next.clone());
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(gadget.took_up(), Some(TookUp::Adopted));
+    assert_eq!(
+        fs::read(tree.mount().join("ep0")).unwrap(),
+        ep0_before,
+        "no descriptors written again"
+    );
+    assert_eq!(tree.attribute("UDC"), "udc0\n", "UDC untouched");
+    assert_eq!(
+        gadget.next_event(),
+        Ok(Some(UsbFunctionEvent::Configured)),
+        "the host's state as the daemon before saw it"
+    );
+    assert!(gadget.endpoint_handles().is_ok(), "the pair is lent again");
+    // Taken down on purpose now: let go of in the store, and unbound.
+    gadget.disable().unwrap();
+    settled(&gadget);
+    assert_eq!(tree.attribute("UDC"), "\n");
+    assert!(store.names().is_empty(), "{:?}", store.names());
+}
+
+#[test]
+fn without_a_service_manager_a_stop_takes_the_gadget_off_and_the_next_start_sets_it_up_again() {
+    // A BusyBox init gives no store (no NOTIFY_SOCKET): the daemon makes no parking at all
+    // (service/lemnosd/src/main.rs), so a stop keeps nothing and takes the gadget down, and the
+    // next start is a first start.
+    let tree = Tree::new();
+    setup(&tree);
+    let mut gadget = tree.gadget();
+    up(&mut gadget, &set()).unwrap();
+    tree.event(ENABLE);
+    assert_eq!(gadget.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
+    gone(gadget);
+    assert_eq!(tree.attribute("UDC"), "\n", "off the bus at the stop");
+    let mut gadget = tree.gadget();
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(gadget.took_up(), None, "nothing was kept to take up");
+    assert_eq!(tree.attribute("UDC"), "udc0\n", "set up and bound again");
+}
+
+#[test]
+fn a_gadget_taken_down_on_purpose_leaves_the_store_and_the_next_enable_waits_for_it() {
+    let tree = Tree::new();
+    setup(&tree);
+    let store = Store::new(64);
+    let (mut gadget, _parking) = keeping_gadget(&tree, &store);
+    up(&mut gadget, &set()).unwrap();
+    store.hold_barriers();
+    gadget.disable().unwrap();
+    settled(&gadget);
+    assert_eq!(tree.attribute("UDC"), "\n");
+    let mut gone = store.let_gone.lock().unwrap().clone();
+    gone.sort();
+    assert_eq!(gone, kept_names());
+    // The store has not yet closed its copies: no fresh instance is described.
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
+    assert_eq!(gadget.enable_note(), Some(KEPT_CLOSING));
+    assert_eq!(tree.attribute("UDC"), "\n");
+    store.answer_barriers();
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    assert_eq!(store.names(), kept_names(), "kept again");
+}
+
+#[test]
+fn kept_files_that_are_not_whole_or_not_the_boards_are_let_go_and_the_gadget_set_up_again() {
+    // The store was full: it kept the record and ep0 only, and said nothing.
+    let tree = Tree::new();
+    setup(&tree);
+    let store = Store::new(2);
+    let (mut gadget, parking) = keeping_gadget(&tree, &store);
+    up(&mut gadget, &set()).unwrap();
+    parking.stopping();
+    gone(gadget);
+    let next = Parking::default();
+    next.keep_in(store.clone());
+    let lines = next.adopt_kept(store.given(), Some(&[UDC.to_string()]));
+    assert!(lines[0].contains("not whole"), "{lines:?}");
+    assert!(store.names().is_empty(), "let go: {:?}", store.names());
+    let mut gadget = tree.gadget().parking(next);
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(gadget.took_up(), None, "set up afresh");
+    gone(gadget);
+    // Kept for a controller the board has no gadget on: let go.
+    let store = Store::new(64);
+    let (mut gadget, parking) = keeping_gadget(&tree, &store);
+    up(&mut gadget, &set()).unwrap();
+    parking.stopping();
+    gone(gadget);
+    let next = Parking::default();
+    next.keep_in(store.clone());
+    let lines = next.adopt_kept(store.given(), Some(&["other.usb".to_string()]));
+    assert!(
+        lines[0].contains("no gadget on that controller"),
+        "{lines:?}"
+    );
+    assert!(store.names().is_empty());
+}
+
+#[test]
+fn a_kept_session_whose_set_changed_is_replaced_and_let_go() {
+    let tree = Tree::new();
+    setup(&tree);
+    let store = Store::new(64);
+    let (mut gadget, parking) = keeping_gadget(&tree, &store);
+    up(&mut gadget, &set()).unwrap();
+    parking.stopping();
+    gone(gadget);
+    let next = Parking::default();
+    next.keep_in(store.clone());
+    next.adopt_kept(store.given(), Some(&[UDC.to_string()]));
+    let mut gadget = tree.gadget().parking(next);
+    // Another set (no serial string): the kept session is not this one's.
+    assert_eq!(up(&mut gadget, &set_without_serial()), Ok(()));
+    assert_eq!(gadget.took_up(), Some(TookUp::Replaced));
+    assert!(
+        store.let_gone.lock().unwrap().len() >= kept_names().len(),
+        "the old files let go"
+    );
+}
+
+#[test]
+fn a_bind_waits_while_another_network_device_has_the_interfaces_name() {
+    let tree = Tree::new();
+    setup_with(&tree, own(), &[GadgetFunction::Ffs, ncm()]).unwrap();
+    fs::write(
+        tree.gadget_dir().join("functions/ncm.usb0/ifname"),
+        "lemnos%d\n",
+    )
+    .unwrap();
+    let net = tree.root.join("net");
+    fs::create_dir_all(net.join("lemnos0")).unwrap();
+    let mut gadget = tree.gadget();
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
+    assert_eq!(gadget.enable_note(), Some(NETWORK_NAME_HELD));
+    assert_eq!(tree.attribute("UDC"), "\n", "not bound");
+    fs::remove_dir_all(net.join("lemnos0")).unwrap();
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    // The kernel named it another than the board's first: said, and kept as the note.
+    fs::write(
+        tree.gadget_dir().join("functions/ncm.usb0/ifname"),
+        "lemnos1\n",
+    )
+    .unwrap();
+    fs::create_dir_all(net.join("lemnos1")).unwrap();
+    fs::write(net.join("lemnos1/ifindex"), "7\n").unwrap();
+    assert_eq!(gadget.wired.network_now(), Some(("lemnos1".to_string(), 7)));
+    gadget.check_name(Some("lemnos%d"));
+    assert_eq!(gadget.enable_note(), Some(NETWORK_NAME_OTHER));
+}
+
+/// A helper whose setup does not answer until the test lets it: one stuck in a write the kernel
+/// does not finish (the vudc bind that waited 80 s on a board), or one that never answers.
+struct Stalled {
+    inner: Helped,
+    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    setups: Arc<AtomicU32>,
+}
+
+impl GadgetHelper for Stalled {
+    fn setup(&mut self, index: u32) -> io::Result<SerialString> {
+        self.setups.fetch_add(1, Ordering::SeqCst);
+        let (open, opened) = &*self.gate;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = opened.wait(open).unwrap();
+        }
+        drop(open);
+        self.inner.setup(index)
+    }
+
+    fn bind(&mut self, index: u32) -> io::Result<()> {
+        self.inner.bind(index)
+    }
+
+    fn unbind(&mut self, index: u32) -> io::Result<()> {
+        self.inner.unbind(index)
+    }
+    fn soft_connect(&mut self, index: u32, connect: bool) -> io::Result<()> {
+        self.inner.soft_connect(index, connect)
+    }
+}
+
+/// A helper that does not answer never holds the caller: every enable returns at once, says it is
+/// under way (and, past the slow mark, that it is still waiting), and the helper is asked once,
+/// never again while that request may still be carried out. Once it answers, the gadget comes up.
+#[test]
+fn a_helper_that_does_not_answer_never_holds_the_caller_and_is_never_asked_again() {
+    let tree = Tree::new();
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let setups = Arc::new(AtomicU32::new(0));
+    let stalled: SharedHelper = Arc::new(Mutex::new(Stalled {
+        inner: Helped {
+            configfs: tree.config_root.clone(),
+            mounts: tree.mounts_root.clone(),
+            udc: tree.udc_root.clone(),
+            failing: 0,
+            bind_errno: None,
+            binds_without_network: false,
+            calls: Vec::new(),
+        },
+        gate: Arc::clone(&gate),
+        setups: Arc::clone(&setups),
+    }));
+    let mut gadget = tree.gadget().with_helper(stalled, 0);
+    let began = Instant::now();
+    let mut slowest = Duration::ZERO;
+    while began.elapsed() < Duration::from_millis(400) {
+        let call = Instant::now();
+        assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
+        slowest = slowest.max(call.elapsed());
+        assert!(gadget.enable_pending());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        slowest < Duration::from_millis(50),
+        "an enable took {slowest:?}"
+    );
+    assert_eq!(
+        setups.load(Ordering::SeqCst),
+        1,
+        "asked once, and not again"
+    );
+    assert_eq!(gadget.enable_note(), Some(SETTING_UP_SLOW));
+    assert_eq!(tree.attribute("UDC"), "", "nothing bound meanwhile");
+    // A disable while it waits undoes it when it ends: never bound behind the caller's back.
+    gadget.disable().unwrap();
+    {
+        let (open, opened) = &*gate;
+        *open.lock().unwrap() = true;
+        opened.notify_all();
+    }
+    settled(&gadget);
+    assert_ne!(
+        tree.attribute("UDC"),
+        "udc0\n",
+        "the late answer bound nothing"
+    );
+    // Asked again now, it comes up.
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    assert_eq!(setups.load(Ordering::SeqCst), 2);
 }

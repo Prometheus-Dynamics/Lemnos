@@ -15,7 +15,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -404,6 +404,28 @@ impl Ep0 {
         Ok(())
     }
 
+    /// Whether a control request is pending on the instance: read from `ep0` and not yet answered,
+    /// stalled or ended (`ffs_ep0_poll` says `POLLOUT` only then, or when the host has cancelled
+    /// it and the next read is to say so). Never waits.
+    /// A file that is not on FunctionFS (a stand-in) never has one.
+    pub fn request_pending(&self) -> io::Result<bool> {
+        // SAFETY: `statfs` is plain data, all zeros is a valid value of it.
+        let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `fs` is writable for the call; the descriptor is open.
+        if unsafe { libc::fstatfs(std::os::fd::AsRawFd::as_raw_fd(&self.file), &mut fs) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if fs.f_type as i64 != crate::confined::FUNCTIONFS_MAGIC {
+            return Ok(false);
+        }
+        let revents = crate::poll::poll_one(
+            self.file.as_fd(),
+            libc::POLLOUT,
+            Some(std::time::Duration::ZERO),
+        )?;
+        Ok(revents & libc::POLLOUT != 0)
+    }
+
     /// The next event, or `None` when there is none. Only to be called when no control request
     /// is pending: with one pending, a read is its data stage or its stall.
     pub fn next_event(&self) -> io::Result<Option<Event>> {
@@ -474,6 +496,33 @@ impl Endpoint {
 impl AsFd for Endpoint {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.file.as_fd()
+    }
+}
+
+/// The open `ep0`, to keep it in a service manager's file descriptor store: while any copy is open
+/// the function stays on its controller.
+impl AsFd for Ep0 {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+}
+
+/// An `ep0` opened before and kept (a service manager's file descriptor store gave it back): the same
+/// open file, with the flags it was opened with.
+impl From<OwnedFd> for Ep0 {
+    fn from(fd: OwnedFd) -> Self {
+        Self {
+            file: File::from(fd),
+        }
+    }
+}
+
+/// An endpoint file opened before and kept, as [`Ep0`]'s.
+impl From<OwnedFd> for Endpoint {
+    fn from(fd: OwnedFd) -> Self {
+        Self {
+            file: File::from(fd),
+        }
     }
 }
 
