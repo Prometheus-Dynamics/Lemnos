@@ -2,6 +2,11 @@
 # The check every PR into next must pass. CI runs exactly this.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# All heavy work on this machine runs at one nice level, 10, so no run is starved by another's
+# lower level and timings compare. A gate started below it starts again at it (nice only adds); one
+# started above it cannot come down unprivileged and runs where it is.
+GATE_NICE=${GATE_NICE:-10}
+if [ "$(nice)" -lt "$GATE_NICE" ]; then exec nice -n "$((GATE_NICE - $(nice)))" "$0" "$@"; fi
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 # Every step has a CPU budget, written beside it in CPU-seconds, and no step has a wall-clock bound. A budget is
