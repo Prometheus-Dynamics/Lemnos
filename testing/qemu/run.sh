@@ -70,7 +70,7 @@ built_modules() {
 # they are built from: every source file copied above, this script, the kernel tree they are built
 # against and the compilers. A run whose hash is there takes those modules and builds none: the
 # same sources against the same kernel, built before. A changed source file is another hash, and
-# is built. Left unset (the whole run a landing uses leaves it unset), every run builds its modules.
+# is built. The lander sets it. Left unset, every run builds its modules.
 kept=""
 if [[ -n "${LEMNOS_QEMU_MODULES:-}" ]]; then
   key="$({
@@ -234,6 +234,15 @@ extra=""
 if [[ -n "${LINK_CHECK_RESTARTS:-}" ]]; then
   [[ "$LINK_CHECK_RESTARTS" =~ ^[1-9][0-9]*$ ]] || { echo "LINK_CHECK_RESTARTS must be a positive number" >&2; exit 2; }
   extra=" lemnos-qemu.link_restarts=$LINK_CHECK_RESTARTS"
+fi
+# LINK_CHECK_START_ONLY=1: the link check only starts the daemon and its gadget, for a narrow run of
+# the poison stanza (ncm-after-controller), which starts from there.
+if [[ "${LINK_CHECK_START_ONLY:-}" == 1 ]]; then extra+=" lemnos-qemu.link_start_only"; fi
+# And its kill steps (step 8): all seven in every run, or LINK_CHECK_KILLS=<step>,... (the names in
+# testing/crates/orion-link-check/src/daemon.rs, KillAt) or LINK_CHECK_KILLS=none.
+if [[ -n "${LINK_CHECK_KILLS:-}" ]]; then
+  [[ "$LINK_CHECK_KILLS" =~ ^(none|[A-Za-z]+(,[A-Za-z]+)*)$ ]] || { echo "LINK_CHECK_KILLS must be none or step names separated by commas" >&2; exit 2; }
+  extra+=" lemnos-qemu.link_kills=$LINK_CHECK_KILLS"
 fi
 
 # boot [<word for the kernel command line>]: one guest, its console on standard output.
