@@ -10,9 +10,23 @@ use lemnos_hal::raw::{Polarity, PwmConfig, RawPwm};
 
 use crate::{Claim, kind_of};
 
-/// How long a freshly exported channel gets to appear.
-const EXPORT_TRIES: u32 = 50;
+/// How long a freshly exported channel gets to appear, by the clock: the kernel makes it during the
+/// export write, so the bound is met at once on a board, and a count of looks would run out early on a
+/// loaded machine where whatever makes the directory is slower (a test's stand-in thread).
+const EXPORT_BOUND: Duration = Duration::from_secs(1);
 const EXPORT_WAIT: Duration = Duration::from_millis(2);
+
+/// Waits for `root` to appear after an export, up to [`EXPORT_BOUND`].
+fn wait_exported(root: &Path) -> io::Result<()> {
+    let until = std::time::Instant::now() + EXPORT_BOUND;
+    while !root.exists() {
+        if std::time::Instant::now() >= until {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        std::thread::sleep(EXPORT_WAIT);
+    }
+    Ok(())
+}
 
 /// What applying a configuration needs of a channel.
 trait Channel {
@@ -109,14 +123,7 @@ impl SysfsPwm {
         if !root.exists() {
             fs::write(chip.join("export"), channel.to_string())?;
             unexport = Some((chip.join("unexport"), channel));
-            let mut tries = 0;
-            while !root.exists() {
-                tries += 1;
-                if tries == EXPORT_TRIES {
-                    return Err(io::ErrorKind::NotFound.into());
-                }
-                std::thread::sleep(EXPORT_WAIT);
-            }
+            wait_exported(&root)?;
         }
         let pwm = Self {
             period: root.join("period"),
@@ -226,14 +233,7 @@ pub(crate) fn grant(chip: &Path, channel: u32, owner: (u32, u32)) -> io::Result<
     let root = chip.join(format!("pwm{channel}"));
     if !root.exists() {
         fs::write(chip.join("export"), channel.to_string())?;
-        let mut tries = 0;
-        while !root.exists() {
-            tries += 1;
-            if tries == EXPORT_TRIES {
-                return Err(io::ErrorKind::NotFound.into());
-            }
-            std::thread::sleep(EXPORT_WAIT);
-        }
+        wait_exported(&root)?;
     }
     for name in GRANTED {
         let path = root.join(name);

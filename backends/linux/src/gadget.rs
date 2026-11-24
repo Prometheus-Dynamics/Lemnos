@@ -793,9 +793,10 @@ impl StageShared {
     }
 }
 
-/// How often a stage that finds ep0 busy (another file operation holds the function's lock for
-/// a moment) tries again, a millisecond apart, before it gives up as the busy file said.
-const STAGE_BUSY_TRIES: u32 = 20;
+/// How long a stage that finds ep0 busy (another file operation holds the function's lock for
+/// a moment) tries again, a millisecond apart, before it gives up as the busy file said: by the
+/// clock, since the holder is another thread that a loaded machine can keep off the CPU.
+const STAGE_BUSY_BOUND: Duration = Duration::from_millis(500);
 
 impl Ep0Stage {
     fn spawn() -> io::Result<Self> {
@@ -877,7 +878,7 @@ fn serve_stages(shared: &StageShared) {
         state.running = true;
         let mut buf = std::mem::take(&mut state.buf);
         drop(state);
-        let mut tries = 0;
+        let until = Instant::now() + STAGE_BUSY_BOUND;
         let done = loop {
             let done = if send {
                 ep0.send(&buf[..len])
@@ -886,9 +887,8 @@ fn serve_stages(shared: &StageShared) {
             };
             match done {
                 Err(error)
-                    if error.raw_os_error() == Some(libc::EAGAIN) && tries < STAGE_BUSY_TRIES =>
+                    if error.raw_os_error() == Some(libc::EAGAIN) && Instant::now() < until =>
                 {
-                    tries += 1;
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 done => break done,

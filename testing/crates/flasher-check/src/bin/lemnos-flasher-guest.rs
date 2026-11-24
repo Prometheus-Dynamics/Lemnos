@@ -26,7 +26,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, ExitCode};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_contract_system_flash::Flash;
 
@@ -82,13 +82,14 @@ fn mount(source: &str, at: &str, fs_type: &str) {
 
 /// Waits for `path` to appear, for a bounded time: the eMMC is scanned after the init starts.
 fn wait_for(path: &str) -> bool {
-    for _ in 0..400 {
+    let until = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < until {
         if Path::new(path).exists() {
             return true;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    false
+    Path::new(path).exists()
 }
 
 fn sha256_of(path: &str, limit: Option<u64>) -> Result<String, String> {

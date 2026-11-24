@@ -5,7 +5,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long a node devtmpfs makes is waited for, by the clock (not by a count of looks).
+const NODE_WAIT: Duration = Duration::from_secs(1);
 
 use lemnos_linux_sys::rootfs::{self, Loop, MountFlags};
 use lemnos_slot_store::manifest::{BLOCK, Verity};
@@ -131,10 +134,8 @@ impl System {
     /// firmware driver is built in or loaded; it is waited for as the UBI block node's wait does.
     fn vcio(&self) -> std::path::PathBuf {
         let node = self.dev.join("vcio");
-        for _ in 0..50 {
-            if node.exists() {
-                break;
-            }
+        let until = Instant::now() + NODE_WAIT;
+        while !node.exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
         node
@@ -211,13 +212,16 @@ impl Ops for System {
             .block(name)
             .map_err(|e| e.to_string())?;
         // udev isn't running: devtmpfs makes the node, a moment after the ioctl.
-        for _ in 0..50 {
+        let until = Instant::now() + NODE_WAIT;
+        loop {
             if node.exists() {
                 return Ok(node);
             }
+            if Instant::now() >= until {
+                return Err(format!("{} didn't appear", node.display()));
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
-        Err(format!("{} didn't appear", node.display()))
     }
 
     fn ubi_replace(&self, ubi: &Ubi, name: &str, bytes: &[u8]) -> Result<(), String> {

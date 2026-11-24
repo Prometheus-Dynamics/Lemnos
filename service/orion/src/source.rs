@@ -23,9 +23,10 @@ use crate::{LEMNOSD_NAME, Shared, log};
 const WAIT: Duration = Duration::from_millis(200);
 /// The largest reply lemnos-ctl reads. Items reply with a few bytes.
 const REPLY_MAX: usize = 64 * 1024;
-/// How long a `BUSY` description is asked again: `BUSY_TRIES` times, `BUSY_WAIT` apart.
+/// How long a `BUSY` description is asked again, `BUSY_WAIT` apart: by the clock, so a daemon
+/// slowed by a loaded machine gets the same time as an idle one.
 const BUSY_WAIT: Duration = Duration::from_millis(2);
-const BUSY_TRIES: u32 = 500;
+const BUSY_BOUND: Duration = Duration::from_secs(1);
 /// How often the identity device's facts are read again. Its slot files are read on each read,
 /// so a change of the running slot reaches Orion within this time.
 const FACTS_EVERY: Duration = Duration::from_secs(2);
@@ -339,13 +340,12 @@ pub fn describe(client: &Client, device: u32) -> Result<DeviceDescription, Error
 pub fn describe_when_free(
     mut ask: impl FnMut() -> Result<DeviceDescription, Error>,
 ) -> Result<DeviceDescription, Error> {
-    let mut tries = 0;
+    let until = std::time::Instant::now() + BUSY_BOUND;
     loop {
         match ask() {
             Err(Error::Refused { status, .. })
-                if status == lemnos_core::Status::BUSY && tries < BUSY_TRIES =>
+                if status == lemnos_core::Status::BUSY && std::time::Instant::now() < until =>
             {
-                tries += 1;
                 std::thread::sleep(BUSY_WAIT);
             }
             answer => return answer,
@@ -628,15 +628,17 @@ mod tests {
         );
 
         let asked = Cell::new(0);
+        let started = std::time::Instant::now();
         let answer = describe_when_free(|| {
             asked.set(asked.get() + 1);
             Err(busy())
         });
+        let took = started.elapsed();
         assert!(answer.is_err());
-        assert_eq!(
-            asked.get(),
-            BUSY_TRIES + 1,
-            "a BUSY that lasts is given up at the bound"
+        assert!(asked.get() > 1, "a BUSY is asked again");
+        assert!(
+            took >= BUSY_BOUND && took < BUSY_BOUND * 10,
+            "a BUSY that lasts is given up at the bound: {took:?}"
         );
     }
 }

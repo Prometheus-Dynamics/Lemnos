@@ -23,7 +23,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::guest;
 
@@ -78,10 +78,8 @@ fn main() {
         }
     }
     // The state disk: the device appears once the driver is up, so wait for it.
-    for _ in 0..200 {
-        if Path::new(STATE_DISK).exists() {
-            break;
-        }
+    let until = Instant::now() + Duration::from_secs(20);
+    while !Path::new(STATE_DISK).exists() && Instant::now() < until {
         thread::sleep(Duration::from_millis(100));
     }
     let _ = fs::create_dir("/state");
