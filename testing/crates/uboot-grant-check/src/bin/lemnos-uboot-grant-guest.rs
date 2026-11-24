@@ -19,7 +19,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_driver_system_slots::boot::{BootRecord, Restarter};
 use lemnos_driver_system_slots::uboot::{self, UbootEnv};
@@ -239,13 +239,14 @@ fn run_as_unit(me: &str, args: &[&str]) -> Result<String, String> {
 
 /// Waits for a node to appear (the kernel makes it when the disk is scanned), for a bounded time.
 fn wait_for(node: &str) -> bool {
-    for _ in 0..200 {
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
         if Path::new(node).exists() {
             return true;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    false
+    Path::new(node).exists()
 }
 
 fn finish(checks: u32, failed: Vec<String>) -> ExitCode {

@@ -558,18 +558,24 @@ impl SlowTree {
     }
 
     /// Lets every blocked read finish with `value` (the lock released).
-    fn release(&self, path: &std::path::Path, value: &str) {
+    /// Hands `value` to the reader blocked on the FIFO at `path`; `false` when no reader came within
+    /// `wait`, by the clock (a count of tries runs out early on a loaded machine).
+    fn release(&self, path: &std::path::Path, value: &str, wait: Duration) -> bool {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        // Non-blocking open for writing succeeds only while a reader waits; retry briefly.
-        for _ in 0..200 {
+        // Non-blocking open for writing succeeds only while a reader waits.
+        let until = Instant::now() + wait;
+        loop {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .write(true)
                 .custom_flags(0o4000) // O_NONBLOCK
                 .open(path)
             {
                 let _ = f.write_all(value.as_bytes());
-                return;
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -579,7 +585,8 @@ impl SlowTree {
 impl Drop for SlowTree {
     fn drop(&mut self) {
         for fifo in &self.fifos {
-            self.release(fifo, "\n");
+            // Only a reader still blocked needs letting go: a short wait, and none is fine.
+            let _ = self.release(fifo, "\n", Duration::from_secs(2));
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -638,8 +645,12 @@ fn a_stage_whose_attributes_block_for_a_while_is_taken_once_they_read() {
         let _ = tx.send((outcome, lines, started.elapsed()));
     });
     std::thread::sleep(Duration::from_millis(1000));
-    tree.release(&product, "Lemnos flash stage\n");
-    tree.release(&config, "1\n");
+    assert!(
+        tree.release(&product, "Lemnos flash stage\n", Duration::from_secs(30)),
+        "the scan never read the product string"
+    );
+    // The scan does not read the configuration on this path; let a reader go if one is there.
+    let _ = tree.release(&config, "1\n", Duration::from_secs(2));
     let (outcome, lines, took) = rx
         .recv_timeout(Duration::from_secs(10))
         .expect("the host check did not end");

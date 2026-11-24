@@ -584,7 +584,8 @@ fn wait_for_headers(index: u32, good: &[u64]) -> bool {
         return false;
     };
     let mut chip = Device::new(file);
-    for _ in 0..100 {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < until {
         let all = good
             .iter()
             .all(|offset| matches!(header_of(&mut chip, *offset), Ok(Some(_))));

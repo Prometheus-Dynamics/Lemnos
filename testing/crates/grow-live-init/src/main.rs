@@ -15,7 +15,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::rootfs::{self, MountFlags};
 
@@ -57,10 +57,8 @@ fn main() {
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let wd = cmdline_value(&cmdline, "lemnos.wd=").unwrap_or_else(|| "15".into());
     let max = cmdline_value(&cmdline, "lemnos.max=").unwrap_or_else(|| "120".into());
-    for _ in 0..300 {
-        if Path::new("/dev/nvme0n1p2").exists() {
-            break;
-        }
+    let until = Instant::now() + Duration::from_secs(30);
+    while !Path::new("/dev/nvme0n1p2").exists() && Instant::now() < until {
         sleep(Duration::from_millis(100));
     }
     if let Err(error) = rootfs::mount(

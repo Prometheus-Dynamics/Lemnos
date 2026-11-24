@@ -32,7 +32,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::{dma_buf, dma_heap, guest, ioc, ior, iow, iowr, module};
@@ -483,7 +483,9 @@ fn shm_frame_read(ring: &[AtomicU64], frame_slots: usize, seq: u64) -> FrameRead
 /// The next frame's buffer, and its identity, or -1 if none arrives in time. A buffer needs no
 /// giving back here: the module reuses a buffer only when no reader marks it.
 fn wait_frame(st: &mut Stream) -> (i32, u64) {
-    for _ in 0..1000 {
+    // By the clock, not by a count of looks: a loaded guest can take longer than the looks did.
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
         match shm_frame_read(words(&st.ring), FRAME_SLOTS as usize, st.frames_tail) {
             FrameRead::Frame { buffer, identity } => {
                 st.frames_tail += 1;

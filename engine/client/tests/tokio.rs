@@ -3,7 +3,7 @@
 mod common;
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{FakeHost, StreamHost, StreamScript};
 use lemnos_client::{AsyncClient, Error, StreamPlatform};
@@ -88,7 +88,10 @@ fn the_async_form_comes_back_after_a_restart() {
         client.open("", "example.counter/1").await.unwrap();
         host.restart();
         let mut opened = false;
-        for _ in 0..200 {
+        // By the clock, not by a count of tries: a try that finds the old connection gone returns
+        // at once, so a count could be spent before the restarted host accepts.
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until {
             if host.control.connections.load(Ordering::SeqCst) >= 2
                 && client.open("", "a/1").await.is_ok()
             {
@@ -100,7 +103,8 @@ fn the_async_form_comes_back_after_a_restart() {
                 .next_value(&mut into, Duration::from_millis(50))
                 .await
             {
-                Ok(_) | Err(Error::Disconnected) => {}
+                Ok(_) => {}
+                Err(Error::Disconnected) => std::thread::sleep(Duration::from_millis(5)),
                 Err(other) => panic!("{other}"),
             }
         }
