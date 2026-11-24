@@ -16,6 +16,11 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    /// Its lines, shared: read when the host's session is lost.
+    pub fn shared_lines(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.lines)
+    }
+
     /// Starts `program` with the daemon's socket, the comm core's socket and, when given, the
     /// `LEMNOS_ORION_LINKS` line (the `NAME=value` text `tree --bridge-env` wrote).
     pub fn start(

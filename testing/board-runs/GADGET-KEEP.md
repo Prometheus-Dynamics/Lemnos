@@ -34,7 +34,7 @@ What only a board can show:
 - that a restart the store covers logs no `bound, then off the bus` line and no `bound again` line from
   the helper (the bind is not touched), and that a start that finds the tree there without the store's
   files (after a stop, or a store that was let go) logs one `bound, then off the bus for 500 ms
-  (soft_connect)` line, and the host shows one disconnect and one enumeration;
+  (soft_connect), then bound again` line, and the host shows one disconnect and one enumeration;
 - after that pulse, the dwc2's own state, read-only, from its debugfs
   (`/sys/kernel/debug/usb/<udc>/`): `dr_mode` reads `peripheral` (Raze #2 read it so on 2026-11-23,
   before the fix: no `Configuration mismatch` line at probe, so the controller is in its peripheral

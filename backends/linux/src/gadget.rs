@@ -539,8 +539,10 @@ impl Paths {
 
     /// Whether the controller and what the setup made are all there: the FunctionFS function,
     /// linked into configuration `configuration`, and `ep0` in the mount. A link only the setup
-    /// makes is what says the setup ran.
-    fn ready(&self, configuration: &str) -> bool {
+    /// makes is what says the setup ran. `held_ep0`: the session holds ep0 open already (a let-go
+    /// it kept), so the mount is not asked for: a session taken up from the service manager's store
+    /// was mounted by a daemon before this one, in a mount namespace this one does not see.
+    fn ready(&self, configuration: &str, held_ep0: bool) -> bool {
         let link = self
             .gadget
             .join("configs")
@@ -549,7 +551,7 @@ impl Paths {
         self.udc.exists()
             && self.function().is_dir()
             && fs::symlink_metadata(link).is_ok()
-            && self.mount.join("ep0").exists()
+            && (held_ep0 || self.mount.join("ep0").exists())
     }
 
     /// Takes the gadget off its controller. The attribute exists in configfs; it is not made
@@ -1737,7 +1739,7 @@ impl Wired {
             serial = Some(asked.map_err(|e| setup_kind(&e))? == SerialString::Set);
         }
         // Checked before anything is written, so a board that is not set up stays as it is.
-        if !self.paths.ready(&plan.configuration) {
+        if !self.paths.ready(&plan.configuration, released) {
             return Err(ErrorKind::NotFound.into());
         }
         // A bind that worked without the tree's network function: the kernel refused it for the
@@ -1886,10 +1888,21 @@ impl Wired {
             .take();
         std::thread::sleep(self.rebind_gap);
         self.soft_connect_now(true)?;
+        // `disconnect` stopped the controller (`udc_stop`), and `connect` starts it again without
+        // the bind's own steps: a controller whose stop turns off its event callbacks (dummy_hcd)
+        // keeps them off, and every transfer of the next enumeration fails (`EPROTO`). A bind runs
+        // all of the start, so the gadget is bound once more. The host is still settling the
+        // connect (its debounce is 100 ms or more), so it sees one device come.
+        self.unbind_now();
+        self.bind_now()?;
+        self.unbound_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         say(
             &self.paths.name,
             &format!(
-                "bound, then off the bus for {} ms (soft_connect), so a host that held the gadget enumerates it again",
+                "bound, then off the bus for {} ms (soft_connect), then bound again, so a host that held the gadget enumerates it again",
                 self.rebind_gap.as_millis()
             ),
         );

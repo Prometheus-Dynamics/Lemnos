@@ -226,9 +226,15 @@ dead). So when the gadget was let go since its last bind (unbound while bound, o
 setup: adopted, remade or taken over), the daemon binds it and then takes the controller's pullup off
 for `lemnos_linux::REBIND_GAP` (500 ms) and puts it back, through `/sys/class/udc/<udc>/soft_connect`
 (`disconnect`, then `connect`). With a driver bound that goes through `usb_gadget_disconnect` to the
-pullup, so the host sees the device go and enumerates it again, once. The daemon says each one:
-`gadget <udc>: bound, then off the bus for 500 ms (soft_connect), so a host that held the gadget
-enumerates it again`. Where the pullup cannot be taken off (the write is refused), it says so, clears
+pullup, so the host sees the device go. `disconnect` also stops the controller (`udc_stop`), and
+`connect` starts it again without the rest of a bind: a controller whose stop turns its event
+callbacks off keeps them off (dummy_hcd does; every transfer of the host's next enumeration then
+fails with `EPROTO` and the hub gives up). So the gadget is then unbound and bound once more, which
+runs the whole start, while the host is still settling the connect (its debounce is 100 ms or more):
+it enumerates the device again, once. The daemon says each one: `gadget <udc>: bound, then off the
+bus for 500 ms (soft_connect), then bound again, so a host that held the gadget enumerates it
+again`, and the helper's line for that last bind reads `bound again after it was unbound (UDC clear
+for N ms)` with N a few milliseconds. Where the pullup cannot be taken off (the write is refused), it says so, clears
 `UDC` and keeps it clear for the gap before binding again. A pullup taken off that cannot be put back
 fails the bind, and the next attempt makes it again. A tree made fresh has no host to tell and is
 bound at once; a gadget taken up from the store is not touched. The wait is the daemon's: the helper's

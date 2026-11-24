@@ -129,6 +129,18 @@ pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
     );
 
     let mut done = 0;
+    // When the last pong came and the last ping went: said with any failure of the session, so
+    // a loss tells whether the node went silent or the link refused a write.
+    let mut last_pong = Instant::now();
+    let mut last_ping = Instant::now();
+    let at_loss = |last_pong: Instant, last_ping: Instant| {
+        say!(
+            "     host: at the loss: the last pong came {} ms before, the last ping went {} ms before, heartbeat {:?}",
+            last_pong.elapsed().as_millis(),
+            last_ping.elapsed().as_millis(),
+            welcomed.heartbeat
+        );
+    };
     for round in 0..rounds {
         if ended.load(std::sync::atomic::Ordering::Relaxed) {
             break;
@@ -137,13 +149,16 @@ pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
         let now_ms = BASE + round;
         if let Err(error) = session.send(&Ping { now_ms }) {
             say!("FAIL host: ping {round} not sent: {error:?}");
+            at_loss(last_pong, last_ping);
             return false;
         }
+        last_ping = Instant::now();
         let until = Instant::now() + Duration::from_secs(10);
         loop {
             // The session reads the link too: it answers the node's pings and keeps the heartbeat.
             if let Err(error) = session.next(Duration::from_millis(10)) {
                 say!("FAIL host: the session failed at round {round}: {error:?}");
+                at_loss(last_pong, last_ping);
                 return false;
             }
             if pongs
@@ -152,10 +167,12 @@ pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
                 .unwrap_or_else(PoisonError::into_inner)
                 .contains(&now_ms)
             {
+                last_pong = Instant::now();
                 break;
             }
             if Instant::now() >= until {
                 say!("FAIL host: no pong for ping {round}");
+                at_loss(last_pong, last_ping);
                 return false;
             }
         }
@@ -165,6 +182,7 @@ pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
             while Instant::now() < next {
                 if let Err(error) = session.next(Duration::from_millis(10)) {
                     say!("FAIL host: the session failed after round {round}: {error:?}");
+                    at_loss(last_pong, last_ping);
                     return false;
                 }
             }
