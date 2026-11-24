@@ -473,12 +473,16 @@ mod grant_tests {
         }
     }
 
+    /// Makes channel `n` as the kernel's export does: the directory appears with its attributes
+    /// already in it (built under another name, then renamed into place), never empty first.
     fn channel(chip: &Path, n: u32) {
         let root = chip.join(format!("pwm{n}"));
-        fs::create_dir_all(&root).unwrap();
+        let building = chip.join(format!(".pwm{n}.building"));
+        fs::create_dir_all(&building).unwrap();
         for name in ["period", "duty_cycle", "polarity", "enable", "capture"] {
-            fs::write(root.join(name), "0").unwrap();
+            fs::write(building.join(name), "0").unwrap();
         }
+        fs::rename(&building, &root).unwrap();
     }
 
     fn mode(path: &Path) -> u32 {

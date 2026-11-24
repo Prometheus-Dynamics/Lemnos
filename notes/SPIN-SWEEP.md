@@ -33,15 +33,22 @@ A sleep loop's count times its sleep is a floor on its wall time, never less, so
 false reds waiting to happen like the spins were. They are converted anyway so that every wait in
 the tree reads as a time.
 
-## The fourth one (t4) and a second, wider scan
+## The PWM red (t4, t6): a stand-in that was not like the kernel, and a second, wider scan
 
-t4 went red on `backends/linux/src/pwm.rs`: `an_absent_channel_is_exported_then_granted`.
-The grant waited for the exported channel's directory 50 times, 2 ms apart (about 100 ms). The
-test's stand-in thread, which makes the directory, was kept off the CPU longer than that. The first
-scan missed it because its bound was a named constant (`tries == EXPORT_TRIES`). Both export waits
-in pwm.rs now wait by the clock for up to 1 s (`EXPORT_BOUND`). On a board the kernel makes the
-directory during the export write, so the bound is met at once. With the stand-in made 300 ms late,
-the old wait fails as t4 did and the new one passes.
+t4 and t6 went red on `backends/linux/src/pwm.rs` `an_absent_channel_is_exported_then_granted`:
+NotFound at the test's unwrap, 0.05 s and 0.13 s in. The cause was the test's stand-in for the
+kernel's export. It made `pwmN` empty and wrote the attributes after, so the grant, finding the
+directory, could reach `chown` of an attribute not yet written. The kernel's export makes the
+directory with its attributes in it. The stand-in now builds it under another name and renames it
+into place. With 50 ms planted between the directory and its files, the old stand-in fails as t4 and
+t6 did (same line, same error, 0.05 s in) and the new one passes.
+
+After t4 I named the wait's count bound (50 looks, 2 ms apart, about 100 ms) as the cause, and a
+planted 300 ms delay failed the old code by that bound. That was not the failure the gate saw (it
+failed well inside 100 ms), and t6 went red again with the clock bound in place. The count bound was
+still a wait on another party bounded by a count, so it stays converted (both export waits: 1 s by
+the clock, `EXPORT_BOUND`). The first scan missed it because its bound was a named constant
+(`tries == EXPORT_TRIES`).
 
 The second scan also matched counts held in named constants and in variables (`0..count`,
 `tries < X`, `left -= …`): 26 more loops.
