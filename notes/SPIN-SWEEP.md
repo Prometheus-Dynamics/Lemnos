@@ -1,7 +1,7 @@
 # SPIN-SWEEP: waits bounded by a count, swept on 2026-11-24
 
 Why: three install tests in drivers/system-slots bounded a wait on the flush worker by a count of
-ticks, and twice the count ran out first under the gate's load (t2, t3). Helios asked for the whole
+ticks, and twice the count ran out first under the gate's load (t2, t3). The coordinator asked for the whole
 tree to be swept in the same batch.
 
 How: a scanner listed every `for _ in 0..N`, `while` and `loop` whose body polls something (tick,
