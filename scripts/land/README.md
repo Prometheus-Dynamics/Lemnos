@@ -28,16 +28,31 @@ closed on landing.
 
 ## Consumer data
 
-Some consumers of the Lemnos crates are compiled by the lander. Their data is kept out of the repository in the
-directory named by `LAND_CC_DATA`:
+Some consumers of the Lemnos crates are compiled by the lander. Their data is in git under `consumers/`, by
+label (no consumer is named in the repository), and `setup` writes the machine's copy to the directory named
+by `LAND_CC_DATA`:
 
-- `consumers.tsv`: one line per consumer, with its name, repository path, pinned rev, workspace directory,
-  lockfile path and an optional status. A status of `excluded: pre-port pin` means the consumer is not checked.
+- `consumers.tsv`: one line per consumer, with its label, repository path (found by setup), pinned rev,
+  workspace directory, lockfile path and an optional status. A status of `excluded: pre-port pin` means the
+  consumer is not checked.
 - `shims.tsv`: Lemnos packages and features added to the tree copy when the tree lacks them.
 - `fields.tsv`: scratch values for E0063 "missing field" errors that the compile may fill.
 - `fixes/<consumer>-<rev8>.json`: scratch edits for one consumer at one pinned rev.
 
-The code finds each consumer's files by name from that directory. Nothing in the scripts names a consumer.
+The code finds each consumer's files by label from that directory. Nothing in the scripts names a consumer.
+
+## Setup
+
+Everything the lander needs outside git is made from git by one command, `scripts/land/setup [--base DIR]
+[--repo PATH] [--pin REV]` (DIR defaults to `/mnt/nvme-wd/lemnos-land`). It writes the env file from
+`machine.env`, the guard wrappers from `guard/`, `tools/slot-run.sh`, and the consumer data from
+`consumers/` (each consumer's checkout found by its pinned commit), and with `--pin` copies the lander
+scripts at REV to `bin/land-<rev8>`, which trains run from. Run again, it rewrites only what differs and
+names it. The caches (`cache/qk`, `cache/tarballs`, `cache/busybox`, and the consumer compile's) start
+empty and fill as trains run: a missing cache costs time, never a different result.
+
+The consumer fixes (`consumers/fixes/`) are gate inputs and live in git: one file per consumer pin, each
+entry with a one-line reason that names what it bridges at that pin (`consumers/fixes/README.md`).
 
 ## Lanes
 

@@ -1,0 +1,97 @@
+#!/bin/bash
+# setup [--base DIR] [--repo PATH] [--pin REV]: makes everything the lander needs outside git, from git, and
+# says what it changed. Run it again at any time: it rewrites only what differs from what git says.
+#
+#   DIR/land.env         from machine.env and the paths below (LEMNOS_LAND_ENV points here)
+#   DIR/guard-bin/       the guard wrappers (guard/): kill by PID only; no pkill, killall or pgrep
+#   DIR/tools/slot-run.sh
+#   DIR/cc-data/         the consumer data (consumers/), each consumer's checkout found by its pinned commit
+#   DIR/bin/land-<rev8>  with --pin: the lander scripts at REV, which land.sh is run from
+#   DIR/state, scratch, tmp, cc-work, and the caches under DIR/cache: qk (QEMU kernels), tarballs, busybox.
+#
+# The caches start empty and fill as trains run: a missing cache costs time (a kernel or BusyBox build,
+# a download checked against its hash), never a different result. DIR defaults to /mnt/nvme-wd/lemnos-land.
+# The repo is --repo, else LAND_REPO from DIR/land.env, else the checkout this script is in.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+B=/mnt/nvme-wd/lemnos-land repo="" pin=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) B=${2:?}; shift 2 ;;
+    --repo) repo=${2:?}; shift 2 ;;
+    --pin) pin=${2:?}; shift 2 ;;
+    *) echo "usage: setup [--base DIR] [--repo PATH] [--pin REV]" >&2; exit 2 ;;
+  esac
+done
+if [ -z "$repo" ] && [ -r "$B/land.env" ]; then repo=$(sed -n 's/^LAND_REPO=//p' "$B/land.env" | tail -1); fi
+if [ -z "$repo" ]; then
+  common=$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { echo "setup: no --repo, no $B/land.env, and $HERE is not in a checkout" >&2; exit 2; }
+  repo=$(dirname "$common")
+fi
+git -C "$repo" rev-parse -q --verify HEAD >/dev/null || { echo "setup: $repo is not a Lemnos checkout" >&2; exit 2; }
+changed=0
+# put <source file or -> <dest> [mode]: writes dest when its content differs; - reads standard input.
+put() {
+  local src=$1 dst=$2 mode=${3:-0644} tmp
+  tmp=$(mktemp "$dst.XXXXXX"); if [ "$src" = - ]; then cat > "$tmp"; else cat "$src" > "$tmp"; fi
+  chmod "$mode" "$tmp"
+  if [ -f "$dst" ] && cmp -s "$tmp" "$dst" && [ "$(stat -c %a "$dst")" = "${mode#0}" ]; then rm -f -- "$tmp"; return; fi
+  [ -f "$dst" ] && echo "setup: $dst changed:" && { diff -u "$dst" "$tmp" | sed -n '3,40p'; } || echo "setup: $dst written"
+  mv -f -- "$tmp" "$dst"; changed=$((changed + 1))
+}
+mkdir -p "$B"/{state,scratch,tmp,cc-work,guard-bin,tools,bin,cc-data/fixes,cache/qk,cache/tarballs,cache/busybox}
+
+# The env file.
+{ echo "# Written by scripts/land/setup from scripts/land/machine.env: run setup again instead of editing it."
+  echo "LAND_REPO=$repo"
+  echo "LAND_WORKTREE=$B/wt"
+  echo "LAND_STATE_DIR=$B/state"
+  echo "LAND_UNIT_DIR=$B/state"
+  echo "LAND_LOCK_FILE=$B/state/lock.stack"
+  echo "LAND_SCRATCH=$B/scratch"
+  echo "LAND_TMP=$B/tmp"
+  echo "LAND_GUARD_BIN=$B/guard-bin"
+  echo "LAND_QK_DIR=$B/cache/qk"
+  echo "LAND_KERNEL_TARBALLS=$B/cache/tarballs"
+  echo "LAND_BUSYBOX_DIR=$B/cache/busybox"
+  echo "LAND_CC_WORK=$B/cc-work"
+  echo "LAND_CC_CACHE=$B/state/cc-cache"
+  echo "LAND_CC_DATA=$B/cc-data"
+  grep -E '^LAND_[A-Z_]+=' "$HERE/machine.env"
+} | put - "$B/land.env"
+
+# The guards and the slot pool's wrapper.
+for g in "$HERE"/guard/*; do put "$g" "$B/guard-bin/$(basename "$g")" 0755; done
+for f in "$B"/guard-bin/*; do [ -e "$HERE/guard/$(basename "$f")" ] || { rm -f -- "$f"; echo "setup: $f removed (not in guard/)"; changed=$((changed + 1)); }; done
+put "$HERE/slot-run.sh" "$B/tools/slot-run.sh" 0755
+
+# The consumer data. Each consumer's checkout: the first directory beside the Lemnos checkout, in name
+# order, whose repository has the pinned commit (any one will do: the lane reads only that commit).
+search=$(dirname "$repo")
+table=$(while IFS=$'\t' read -r label rev mdir lockf note; do
+  case "$label" in ''|\#*) continue ;; esac
+  found=""
+  for d in "$search"/*/; do
+    d=${d%/}; [ -e "$d/.git" ] || continue
+    git -C "$d" cat-file -e "$rev^{commit}" 2>/dev/null && { found=$d; break; }
+  done
+  [ -n "$found" ] || { echo "setup: consumer $label: no checkout under $search has $rev" >&2; exit 3; }
+  echo "setup: consumer $label: $found" >&2
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$found" "$rev" "$mdir" "$lockf" "$note"
+done < "$HERE/consumers/consumers.tsv")
+printf '%s\n' "$table" | put - "$B/cc-data/consumers.tsv"
+put "$HERE/consumers/shims.tsv" "$B/cc-data/shims.tsv"
+put "$HERE/consumers/fields.tsv" "$B/cc-data/fields.tsv"
+for f in "$HERE"/consumers/fixes/*.json; do put "$f" "$B/cc-data/fixes/$(basename "$f")"; done
+for f in "$B"/cc-data/fixes/*.json; do [ -e "$HERE/consumers/fixes/$(basename "$f")" ] || { rm -f -- "$f"; echo "setup: $f removed (not in consumers/fixes/)"; changed=$((changed + 1)); }; done
+
+# The lander scripts at a commit, copied whole and moved into place (a running train keeps its own copy).
+if [ -n "$pin" ]; then
+  full=$(git -C "$repo" rev-parse --verify "$pin^{commit}"); dst=$B/bin/land-${full:0:8}
+  if [ -d "$dst" ]; then echo "setup: $dst is there already"; else
+    part=$(mktemp -d "$B/bin/.part.XXXXXX")
+    git -C "$repo" archive "$full" scripts/land | tar -x -C "$part"
+    mv -- "$part/scripts/land" "$dst"; rm -rf -- "${part:?}"; echo "setup: $dst pinned"; changed=$((changed + 1))
+  fi
+fi
+echo "setup: $B: $changed changed; run trains with LEMNOS_LAND_ENV=$B/land.env $B/bin/land-<rev8>/land.sh"

@@ -1,0 +1,21 @@
+#!/bin/bash
+# guard: kill by PID only. Refuses -1, 0, negative ids (process groups) and anything that is not a PID.
+for a in "$@"; do
+  case "$a" in
+    -[0-9]*|-[A-Z]*|-s|-l|-L) ;;        # a signal spec
+    --) ;;
+    -*) echo "guard: kill: option $a refused" >&2; exit 2 ;;
+    0|1) echo "guard: kill: target $a refused" >&2; exit 2 ;;
+    *[!0-9]*) [[ "$a" =~ ^[A-Z0-9]+$ ]] || { echo "guard: kill: target $a is not a PID" >&2; exit 2; } ;;
+  esac
+done
+# A negative number after the signal is a process group: refused.
+seen_sig=0
+for a in "$@"; do
+  if [[ $seen_sig = 1 && "$a" =~ ^-[0-9]+$ ]]; then echo "guard: kill: process group $a refused" >&2; exit 2; fi
+  [[ "$a" =~ ^- ]] && seen_sig=1
+done
+# At least one plain PID (2 or more), and no other target.
+pids=0; for a in "$@"; do [[ "$a" =~ ^[0-9]+$ ]] && (( a >= 2 )) && pids=$((pids + 1)); done
+[ $pids -gt 0 ] || { echo "guard: kill: no PID given" >&2; exit 2; }
+exec /usr/bin/kill "$@"

@@ -1,0 +1,9 @@
+# The consumers the ccomp lane compiles, by label (no names here: scripts/check-boundaries.sh). Columns, tab
+# separated: label, pinned commit, the directory of its workspace, its lock file, and a note that leaves the
+# consumer out (empty: compiled). setup finds each consumer's checkout by its pinned commit, beside LAND_REPO,
+# and writes the machine's table to LAND_CC_DATA. Moving a pin: change the commit here and give the new pin
+# its fixes file (fixes/<label>-<commit8>.json, an empty list when it needs none).
+c1	f50137ffb32b38c055f9c1aad30dfa972d6b2962	.	Cargo.lock	
+c2	cb963d79e11ef2ca9a60ed469d5cdcaedf3cec57	.	Cargo.lock	
+c3	89d9005de53aa81eb205be3651d271bf5adc564b	.	Cargo.lock	
+c4	7e60d2150e835f4cc57fd820b4815bda6d81d3d1	backend	backend/Cargo.lock	excluded: pre-port pin
