@@ -80,3 +80,36 @@ asserts or panics.
 | service/orion/src/source.rs `describe_when_free` (BUSY re-ask) | 500 asks, 2 ms apart (at least about 1 s) | 1 s by the clock (`BUSY_BOUND`) | the last `Refused { BUSY }`, as before: the same answer reaches the same caller | The same 1 s budget. A daemon that answers BUSY is doing a short exclusive step. A loaded board slows the asks themselves, so a count stretched the budget unevenly; a time keeps it at 1 s. |
 | backends/linux/src/gadget.rs `serve_stages` (ep0 EAGAIN) | 20 tries, 1 ms apart (at least about 20 ms) | 500 ms by the clock (`STAGE_BUSY_BOUND`) | the `EAGAIN` itself, as before: the same error reaches the same caller | EAGAIN on ep0 means another file operation of the daemon's own holds the FunctionFS lock for a moment. On a board under camera load that thread can be off the CPU for longer than 20 ms, and the stage then failed a setup the host had sent correctly. 500 ms is still well inside the host's control-transfer timeout (USB 2.0: 5 s for the data stage), so the host never sees a slower answer than a failure would give it. |
 | service/slot-init/src/sys.rs `vcio`, `ubi_block` (devtmpfs node) | 50 looks, 20 ms apart (at least about 1 s) | 1 s by the clock (`NODE_WAIT`) | `vcio`: the path, as before (its caller's handling of a missing node is unchanged); `ubi_block`: `Err("<node> didn't appear")`, as before | The budget is unchanged at 1 s. devtmpfs makes the node within milliseconds of the ioctl or the driver's probe, and slot-init is the only process running at that point of the boot. |
+
+## The t7 red: daemon calls unwrapped inside a wait
+
+Three tests in `service/lemnosd/tests/controller_on_fakes.rs` failed in t7 at load 169. They had
+passed in every earlier train, so the code under test was not the cause:
+
+- `case_3` got `Status(-19)` (`NO_DEVICE`) at its first wait: it asked for the controller's state
+  before the controller had bound.
+- Two others got `Status(-110)` (`TIMED_OUT`) about 8.5 s in: under that load one `state()` call
+  went past its call bound.
+
+Each wait called `control.state().unwrap()` inside the loop. A "not yet" answer panicked the
+test where it should have meant look again. The three `fan-control-*` entries left in TMPDIR
+were a consequence: the panics skipped the scratch directory's removal.
+
+The fixes:
+
+- `state()` now treats `NO_DEVICE` and `TIMED_OUT` as "not yet". It keeps asking for up to 20 s,
+  20 ms apart, and fails the test on any other status.
+- The scratch directory is a guard that removes itself on drop, panic or not.
+- The same pattern, a daemon `list()` unwrapped inside a wait, was in `late_events.rs` and
+  `service.rs`. Both now treat `Error::TimedOut` as "not yet" and fail on any other error.
+- `keepalive.rs` reads the metadata of a file the test made before the daemon started. It cannot
+  be missing, so it is left as it is.
+
+How each fix was proven:
+
+- `TIMED_OUT`: a one-off 5 s delay planted in the fake controller's `state` reproduced the t7
+  failure in the old test, the same `Status(-110)` from the same `unwrap`. The new test passes
+  with the plant in place.
+- `NO_DEVICE`: a planted bind delay did not reproduce it here. The new helper handles it by
+  construction.
+- The scratch guard: a planted panic left nothing in TMPDIR.
