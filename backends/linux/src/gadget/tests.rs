@@ -1832,15 +1832,16 @@ impl GadgetHelper for Helped {
     fn bind(&mut self, index: u32) -> io::Result<()> {
         assert_eq!(index, 0);
         self.calls.push("bind");
-        if let Some(errno) = self.bind_errno {
-            return Err(io::Error::from_raw_os_error(errno));
-        }
         if self.binds_without_network {
-            // As `Trees::bind` does once the kernel refused the network device for the boot.
+            // As `Trees::bind` does once the kernel refused the network device for the boot, before
+            // the bind without it, which may then fail on its own (the controller busy).
             let _ = fs::remove_dir(
                 self.configfs
                     .join("usb_gadget/lemnos-udc0/functions/ncm.usb0"),
             );
+        }
+        if let Some(errno) = self.bind_errno {
+            return Err(io::Error::from_raw_os_error(errno));
         }
         bind(&self.roots(), UDC)
     }
@@ -2614,6 +2615,29 @@ fn a_gadget_bound_without_its_network_function_says_so_and_keeps_its_session_thr
     helper.lock().unwrap().bind_errno = Some(libc::EBUSY);
     assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
     assert!(gadget.session.is_some());
+}
+
+#[test]
+fn a_network_function_lost_in_an_attempt_that_failed_is_still_named_by_the_bind_after_it() {
+    let tree = Tree::new();
+    let helper = helped(&tree, 0);
+    let mut gadget = with_helper(&tree, &helper);
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(gadget.enable_note(), None);
+    // The controller let go. The first bind after it loses the network function (the kernel
+    // refused it) and then fails busy; the next one binds without it, and the note must say so.
+    fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
+    gadget.session.as_mut().unwrap().released = true;
+    gadget.disable().unwrap();
+    settled(&gadget);
+    fs::create_dir(tree.gadget_dir().join("functions/ncm.usb0")).unwrap();
+    helper.lock().unwrap().binds_without_network = true;
+    helper.lock().unwrap().bind_errno = Some(libc::EBUSY);
+    assert_eq!(up(&mut gadget, &set()), Err(ErrorKind::Busy));
+    assert!(!tree.gadget_dir().join("functions/ncm.usb0").exists());
+    helper.lock().unwrap().bind_errno = None;
+    up(&mut gadget, &set()).unwrap();
+    assert_eq!(gadget.enable_note(), Some(NETWORK_REFUSED));
 }
 
 // ---- A session parked for the next function on the controller (`UsbFunction::park`) ----
