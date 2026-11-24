@@ -1452,6 +1452,11 @@ struct Wired {
     unbound_at: Arc<Mutex<Option<Instant>>>,
     /// [`REBIND_GAP`]; shorter in this crate's tests, which rebind hundreds of times.
     rebind_gap: Duration,
+    /// The tree has had its network function in this daemon's view. A bind the kernel refuses the
+    /// network device for loses the function (`Trees::bind`), and that may happen in an attempt
+    /// that then fails for another reason (seen: the controller busy): the attempt that binds
+    /// finds no network function, and would report nothing missing without this.
+    network_seen: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What a gadget's own thread does: everything that waits, so no caller of the function waits on
@@ -1720,6 +1725,7 @@ impl Wired {
         host_may_hold: bool,
     ) -> Result<Brought, Failed> {
         let network_before = self.network_now();
+        self.note_network();
         let mut serial = None;
         if !released && let Some((helper, index)) = &self.helper {
             let mut asked = helper
@@ -1745,7 +1751,8 @@ impl Wired {
         // A bind that worked without the tree's network function: the kernel refused it for the
         // boot (`Trees::bind`), and the rest of the gadget is up.
         let network = self.paths.gadget.join("functions").join(NCM_DIR);
-        let had_network = network.is_dir();
+        self.note_network();
+        let had_network = self.network_seen.load(std::sync::atomic::Ordering::Relaxed);
         if let Err(held) = self.name_free() {
             say(
                 &self.paths.name,
@@ -1986,6 +1993,14 @@ impl Wired {
         Ok(())
     }
     /// The board's template for the network interface's name, while the kernel has not named it.
+    /// Notes that the tree has its network function now (see `network_seen`).
+    fn note_network(&self) {
+        if self.paths.gadget.join("functions").join(NCM_DIR).is_dir() {
+            self.network_seen
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn name_template(&self) -> Option<String> {
         let text = fs::read_to_string(
             self.paths
@@ -2291,6 +2306,7 @@ impl FunctionFsGadget {
                 } else {
                     REBIND_GAP
                 },
+                network_seen: Arc::default(),
             },
             work: Work::default(),
             session: None,
