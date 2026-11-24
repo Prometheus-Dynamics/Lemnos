@@ -24,6 +24,16 @@ fn eventually(mut done: impl FnMut() -> bool) {
     }
 }
 
+/// The first device's state, or `None` when the list call timed out: under load the daemon can
+/// answer past the call's bound, which is "not yet" to a wait. Any other error fails the test.
+fn state_of(client: &Client) -> Option<DeviceState> {
+    match client.list() {
+        Ok(list) => Some(list[0].state),
+        Err(Error::TimedOut) => None,
+        Err(e) => panic!("list: {e:?}"),
+    }
+}
+
 /// A client that sends whatever it is told to.
 struct Raw {
     stream: UnixStream,
@@ -165,7 +175,7 @@ fn a_panicking_driver_is_reported_and_the_service_carries_on() {
     assert_eq!(good.get().unwrap(), 101);
     assert_eq!(client.list().unwrap()[0].state, DeviceState::BackingOff);
     // It comes back by itself.
-    eventually(|| client.list().unwrap()[0].state == DeviceState::Running);
+    eventually(|| state_of(&client) == Some(DeviceState::Running));
     bad.get().unwrap();
 }
 

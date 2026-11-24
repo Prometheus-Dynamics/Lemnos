@@ -48,12 +48,35 @@ fn board(zone: &Path, fan_extra: &str, zone_extra: &str, max_age_ms: u32) -> Str
     )
 }
 
+/// A test's scratch directory, removed when it goes out of scope, so a test that fails leaves
+/// nothing behind either. It is the first thing a test makes, so it goes after the daemon.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A scratch directory for one test's zone, with its name.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("fan-control-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("zone")).unwrap();
-    dir
+    Scratch(dir)
 }
 
 /// Sets the zone's temperature the way a sysfs zone's `temp` reads it: millidegrees.
@@ -110,7 +133,7 @@ fn the_controller_binds_to_the_fakes_and_follows_its_curve() {
     assert_eq!(health_of(&client, "fan-control"), DeviceHealth::Ok);
 
     // 45 °C is halfway up the first segment: 300 + (15 / 30) * 300.
-    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    wait_for("45 C at 450", || state(&mut control).duty == 450);
     assert_eq!(
         fan.duty().unwrap(),
         450,
@@ -118,25 +141,25 @@ fn the_controller_binds_to_the_fakes_and_follows_its_curve() {
     );
 
     set_temp(&zone, 60_000);
-    wait_for("60 C at 600", || control.state().unwrap().duty == 600);
+    wait_for("60 C at 600", || state(&mut control).duty == 600);
     assert_eq!(fan.duty().unwrap(), 600);
 
     // 70 °C is two thirds up the last segment: 600 + (10 / 15) * 400, which is 866.67.
     set_temp(&zone, 70_000);
     wait_for("70 C near 867", || {
-        let duty = control.state().unwrap().duty;
+        let duty = state(&mut control).duty;
         (866..=867).contains(&duty)
     });
-    assert_eq!(fan.duty().unwrap(), control.state().unwrap().duty as u16);
+    assert_eq!(fan.duty().unwrap(), state(&mut control).duty as u16);
 
     // Cooling: the duty falls, and never by more than the slew limit per second. Each reading is
     // taken a little after the one before, so the bound is 50 per second of the gap, with one
     // second of slack for the step that may fall between two readings.
     set_temp(&zone, 30_000);
-    let mut last = (Instant::now(), control.state().unwrap().duty);
+    let mut last = (Instant::now(), state(&mut control).duty);
     wait_for("cooled to the floor of 300", || {
         let now = Instant::now();
-        let duty = control.state().unwrap().duty;
+        let duty = state(&mut control).duty;
         let gap = now.duration_since(last.0).as_secs_f64();
         assert!(
             duty <= last.1 && f64::from(last.1 - duty) <= 50.0 * (gap + 1.0),
@@ -166,7 +189,7 @@ fn a_zone_that_fails_as_the_real_one_does_drops_the_fan_to_full_duty() {
     let mut fan = client.open::<dyn Fan>("fan").unwrap();
 
     wait_for("the stale input takes the fan to full duty", || {
-        let state = control.state().unwrap();
+        let state = state(&mut control);
         state.degraded && state.duty == 1000
     });
     assert_eq!(fan.duty().unwrap(), 1000);
@@ -184,13 +207,13 @@ fn a_zone_with_no_temp_file_fails_as_a_missing_zone_and_recovers() {
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
 
     wait_for("a missing zone takes the fan to full duty", || {
-        let state = control.state().unwrap();
+        let state = state(&mut control);
         state.degraded && state.duty == 1000
     });
     // The zone appears, and the curves take over again.
     set_temp(&zone, 45_000);
     wait_for("the zone comes back on its curve", || {
-        let state = control.state().unwrap();
+        let state = state(&mut control);
         !state.degraded && state.duty == 450
     });
     let _ = fs::remove_dir_all(&dir);
@@ -204,18 +227,18 @@ fn switching_the_zone_off_on_the_host_is_a_failed_sensor_until_it_is_back() {
     let running = start_board(&board(&zone, "", "", 500), drivers(), SimBoard::new(), None);
     let client = Client::connect(&running.socket, "t").unwrap();
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
-    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    wait_for("45 C at 450", || state(&mut control).duty == 450);
 
     let zone_index = index_of(&client, "cpu-thermal");
     client.set_power(zone_index, false).unwrap();
     wait_for("the zone off takes the fan to full duty", || {
-        let state = control.state().unwrap();
+        let state = state(&mut control);
         state.degraded && state.duty == 1000
     });
 
     client.set_power(zone_index, true).unwrap();
     wait_for("the zone on comes back on its curve", || {
-        let state = control.state().unwrap();
+        let state = state(&mut control);
         !state.degraded && state.duty == 450
     });
     let _ = fs::remove_dir_all(&dir);
@@ -257,6 +280,29 @@ fn wait_up_to(secs: u64, what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// The controller's state, read as a test that waits on it must: a call the daemon answers with
+/// NO_DEVICE (the controller not bound yet) or TIMED_OUT (the daemon slowed past the call's
+/// deadline, as on a loaded machine) is read again, for up to 20 s. Any other refusal fails here.
+fn state(control: &mut dyn FanControl) -> lemnos_contract_fan_control::State {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match control.state() {
+            Ok(state) => return state,
+            Err(status)
+                if status == lemnos_core::Status::NO_DEVICE
+                    || status == lemnos_core::Status::TIMED_OUT =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "the controller's state: still {status:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(status) => panic!("the controller's state: {status:?}"),
+        }
+    }
+}
+
 /// The state the controller reports, or `None` when its duty is unknown (the state read fails).
 fn state_duty(control: &mut dyn FanControl) -> Option<i32> {
     control.state().ok().map(|state| state.duty)
@@ -281,7 +327,7 @@ fn case_1_writes_refused_and_the_drop_lands_the_duty_is_read_back_then_unknown_t
     );
     let client = Client::connect(&running.socket, "t").unwrap();
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
-    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    wait_for("45 C at 450", || state(&mut control).duty == 450);
 
     fs::write(&refusal, "").unwrap();
     wait_up_to(20, "the refused writes degrade the controller", || {
@@ -347,7 +393,7 @@ fn case_2_writes_refused_and_the_drop_refused_too_the_duty_is_the_last_duty_and_
     );
     let client = Client::connect(&running.socket, "t").unwrap();
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
-    wait_for("60 C at 600", || control.state().unwrap().duty == 600);
+    wait_for("60 C at 600", || state(&mut control).duty == 600);
 
     fs::write(&refusal, "").unwrap();
     fs::write(&drop_refusal, "").unwrap();
@@ -409,7 +455,7 @@ fn case_3_writes_and_reads_both_fail_the_duty_is_absent_and_control_resumes_when
     );
     let client = Client::connect(&running.socket, "t").unwrap();
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
-    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    wait_for("45 C at 450", || state(&mut control).duty == 450);
 
     fs::write(&refusal, "").unwrap();
     fs::write(&drop_refusal, "").unwrap();
@@ -491,7 +537,7 @@ fn a_refused_fan_is_bound_again_while_its_writes_are_still_refused_and_the_backo
     );
     let client = Client::connect(&running.socket, "t").unwrap();
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
-    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    wait_for("45 C at 450", || state(&mut control).duty == 450);
 
     fs::write(&refusal, "").unwrap();
     fs::write(&drop_refusal, "").unwrap();
@@ -558,7 +604,7 @@ fn disabling_the_controller_hands_the_fan_back_to_its_baseline() {
     let client = Client::connect(&running.socket, "t").unwrap();
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
     let mut fan = client.open::<dyn Fan>("fan").unwrap();
-    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    wait_for("45 C at 450", || state(&mut control).duty == 450);
     assert_eq!(fan.duty().unwrap(), 450);
 
     control.set_enabled(false).unwrap();
@@ -591,7 +637,7 @@ fn stopping_the_daemon_hands_the_fan_back_to_its_baseline() {
     );
     let client = Client::connect(&running.socket, "t").unwrap();
     let mut control = client.open::<dyn FanControl>("fan-control").unwrap();
-    wait_for("45 C at 450", || control.state().unwrap().duty == 450);
+    wait_for("45 C at 450", || state(&mut control).duty == 450);
 
     // A SIGTERM does one thing in lemnosd: `Service::stop`, after which the host drops every
     // driver. The fan's duty is then read from its file, as the daemon is gone.

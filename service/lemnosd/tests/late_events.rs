@@ -9,7 +9,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{start_board, start_with};
-use lemnos_client::{Client, DeviceState};
+use lemnos_client::{Client, DeviceState, Error};
 use lemnos_core::{Config as DriverConfig, Lifecycle, Line, Result, contract, driver};
 use lemnos_host::entry;
 use lemnos_sim::SimBoard;
@@ -81,6 +81,16 @@ fn eventually(mut done: impl FnMut() -> bool) {
     }
 }
 
+/// The first device's state, or `None` when the list call timed out: under load the daemon can
+/// answer past the call's bound, which is "not yet" to a wait. Any other error fails the test.
+fn state_of(client: &Client) -> Option<DeviceState> {
+    match client.list() {
+        Ok(list) => Some(list[0].state),
+        Err(Error::TimedOut) => None,
+        Err(e) => panic!("list: {e:?}"),
+    }
+}
+
 #[test]
 fn a_device_that_is_retrying_then_binds_at_a_hint_is_announced() {
     let board = SimBoard::new();
@@ -99,7 +109,7 @@ fn a_device_that_is_retrying_then_binds_at_a_hint_is_announced() {
     let watcher = Client::connect(&running.socket, "w").unwrap();
     // Its bus is missing: the device fails to bind and waits to retry. The watcher reads that from
     // the list, which is what a client holds when the device then comes up.
-    eventually(|| watcher.list().unwrap()[0].state == DeviceState::BackingOff);
+    eventually(|| state_of(&watcher) == Some(DeviceState::BackingOff));
     board.add_line("port-a");
     assert!(
         an_event_for(&watcher, 0, DeviceState::Running),
