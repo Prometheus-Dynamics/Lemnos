@@ -112,6 +112,9 @@ struct Tree {
     config_root: PathBuf,
     mounts_root: PathBuf,
     udc_root: PathBuf,
+    /// The work threads of the gadgets made on this tree: a dropped gadget's thread still unbinds
+    /// and closes in the tree, so the tree waits for each before it is removed.
+    made: std::cell::RefCell<Vec<Arc<WorkShared>>>,
 }
 
 impl Tree {
@@ -127,6 +130,7 @@ impl Tree {
             mounts_root: root.join("ffs"),
             udc_root: root.join("udc"),
             root,
+            made: std::cell::RefCell::default(),
         };
         fs::create_dir_all(tree.gadget_dir().join("functions/ffs.udc0")).unwrap();
         fs::create_dir_all(tree.gadget_dir().join("configs")).unwrap();
@@ -159,13 +163,15 @@ impl Tree {
     }
 
     fn gadget(&self) -> FunctionFsGadget {
-        FunctionFsGadget::new(
+        let gadget = FunctionFsGadget::new(
             &self.root.join("config"),
             &self.root.join("ffs"),
             &self.root.join("udc"),
             UDC,
         )
-        .unwrap()
+        .unwrap();
+        self.made.borrow_mut().push(Arc::clone(&gadget.work.shared));
+        gadget
     }
 
     /// An attribute of the gadget, by its path inside the gadget directory.
@@ -207,6 +213,9 @@ impl Tree {
 
 impl Drop for Tree {
     fn drop(&mut self) {
+        for shared in self.made.get_mut().drain(..) {
+            Work::wait_idle(&shared);
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
