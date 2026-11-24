@@ -1,0 +1,15 @@
+# The gadget keep checks (testing/qemu/gadget-keep/checks.sh), run once systemd has started the packaged daemon. The
+# guest's console is where the host reads their lines. DefaultDependencies=no: nothing stops them before they end.
+[Unit]
+Description=Gadget keep guest: the checks
+DefaultDependencies=no
+Wants=lemnosd.service
+After=lemnosd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/lemnos-guest/checks.sh
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

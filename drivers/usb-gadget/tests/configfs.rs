@@ -15,7 +15,9 @@ use lemnos_core::{
     Config, ConfigValue, Driver, Health, LocalCaller, Provider, Resources, Result, Status, Tag,
     UsbFunctionHandle,
 };
-use lemnos_driver_usb_gadget::{BACKOFF_FIRST_NS, NOT_THERE, POLL_NS, UsbGadget, settings};
+use lemnos_driver_usb_gadget::{
+    BACKOFF_FIRST_NS, NOT_THERE, PENDING_POLL_NS, POLL_NS, UsbGadget, settings,
+};
 use lemnos_linux::{FunctionFsGadget, Mounts, Owner, Roots, prepare_gadget};
 
 const UDC: &str = "fe980000.usb";
@@ -156,6 +158,31 @@ impl Provider for Tree {
     }
 }
 
+/// Ticks from `now` while the backend sets the gadget up off the tick (each tick asks again
+/// [`PENDING_POLL_NS`] later), and returns the time of the tick that settled and the time it
+/// asked for next.
+fn settle(driver: &mut UsbGadget, mut now: u64) -> (u64, Option<u64>) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let next = driver.tick(now);
+        if next != Some(now + PENDING_POLL_NS) {
+            return (now, next);
+        }
+        assert!(std::time::Instant::now() < until, "never settled");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        now += PENDING_POLL_NS;
+    }
+}
+
+/// Waits until the gadget's own thread has unbound it, after the driver went.
+fn unbound(tree: &Tree) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tree.attribute("UDC") != "\n" {
+        assert!(std::time::Instant::now() < until, "never unbound");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 fn bind(tree: &mut Tree) -> UsbGadget {
     let entries = entries();
     let mut resources = Resources::new(tree, None);
@@ -172,7 +199,8 @@ fn the_driver_builds_the_gadget_in_configfs_and_takes_it_down_when_it_goes() {
     assert_eq!(tree.entries("configs"), ["c.1"], "binding touches nothing");
     assert_eq!(tree.attribute("UDC"), "\n", "the setup left it unbound");
 
-    assert_eq!(driver.tick(0), Some(POLL_NS));
+    let (at, next) = settle(&mut driver, 0);
+    assert_eq!(next, Some(at + POLL_NS));
     assert_eq!(driver.health(), Health::Ok);
     let expected = [
         ("idVendor", "0x1209\n"),
@@ -215,11 +243,12 @@ fn the_driver_builds_the_gadget_in_configfs_and_takes_it_down_when_it_goes() {
     kernel
         .write_all(&[0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0])
         .unwrap();
-    assert_eq!(driver.tick(POLL_NS), Some(2 * POLL_NS));
+    assert_eq!(driver.tick(at + POLL_NS), Some(at + 2 * POLL_NS));
     assert!(driver.configured());
     assert_eq!(driver.health(), Health::Ok);
 
     drop(driver);
+    unbound(&tree);
     assert_eq!(
         tree.entries("configs"),
         ["c.1"],
@@ -234,17 +263,17 @@ fn a_board_without_the_mount_is_retried_and_comes_up_once_it_is_there() {
     let mut tree = Tree::new("late");
     tree.unmount_functionfs();
     let mut driver = bind(&mut tree);
-    assert_eq!(driver.tick(0), Some(BACKOFF_FIRST_NS));
+    let (at, next) = settle(&mut driver, 0);
+    assert_eq!(next, Some(at + BACKOFF_FIRST_NS));
     assert_eq!(driver.health(), Health::Failed(NOT_THERE));
     assert_eq!(tree.entries("configs"), ["c.1"], "nothing more is built");
     assert_eq!(tree.attribute("UDC"), "\n", "not bound");
 
-    assert_eq!(driver.tick(BACKOFF_FIRST_NS), Some(3 * BACKOFF_FIRST_NS));
+    let (at, next) = settle(&mut driver, at + BACKOFF_FIRST_NS);
+    assert_eq!(next, Some(at + 2 * BACKOFF_FIRST_NS));
     tree.mount_functionfs();
-    assert_eq!(
-        driver.tick(3 * BACKOFF_FIRST_NS),
-        Some(3 * BACKOFF_FIRST_NS + POLL_NS)
-    );
+    let (at, next) = settle(&mut driver, at + 2 * BACKOFF_FIRST_NS);
+    assert_eq!(next, Some(at + POLL_NS));
     assert_eq!(driver.health(), Health::Ok);
     assert_eq!(tree.attribute("UDC"), "fe980000.usb\n");
 }

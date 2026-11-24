@@ -21,10 +21,25 @@
 //!      kept: `UDC` stays set, the bridge keeps its offer and the session never breaks; twice in a
 //!      row;
 //!   6. the controller lets go after the rebinds: the instance that took the session up sees it,
-//!      enables the gadget again, and a host session comes up.
+//!      enables the gadget again, and a host session comes up;
+//!   7. the board's network link (the gadget's NCM function, to the host's `cdc_ncm` moved into a
+//!      network namespace of its own) carries a TCP connection, and the daemon restarts as
+//!      `systemctl restart` does, ten times (`lemnos-qemu.link_restarts=N` asks for N), under a
+//!      stand-in service manager that keeps the gadget's files in its store: `UDC` is never clear,
+//!      the connection never goes a second without an echo, fresh connections are answered, both
+//!      interfaces keep their index, and the daemon that comes up takes the gadget up as it was;
+//!      Then with the host at work: a restart with a control request to the link's interface sent
+//!      while no daemon runs (the next daemon stalls it before it serves anything: the host sees a
+//!      stall, not its timeout), and a restart under a paced Orion session (its round trips stall
+//!      while no daemon runs and go on after; the longest stall is said);
+//!   8. the same through a SIGKILL while the daemon runs and a SIGKILL at each step of the start
+//!      that follows (the root phase, its end, the host's start, the gadget's bind, its end, every
+//!      bind made, ready), then a host session over the Orion link.
 //! - `comm`: the comm core. `host N [HELLO_MS [PACE_MS]]`: the host session, with N round trips.
+//!   `netpeer NAME`: the host's end of the network link, in its own namespace.
 //!
-//! Nothing here stops a process: the guest powers off when the checks end. Prints one `ok` or
+//! Nothing here stops a process but the daemon in steps 7 and 8, by its PID: the guest powers off
+//! when the checks end. Prints one `ok` or
 //! `FAIL` line per check and exits non-zero if any failed.
 
 use std::fs;
@@ -45,11 +60,14 @@ mod bridge;
 mod comm;
 mod daemon;
 mod host;
+mod manager;
+mod net;
 #[cfg(feature = "trace")]
 mod trace;
 
 use bridge::Bridge;
-use daemon::{Lemnosd, enabled, wait_until};
+use daemon::{KillAt, Lemnosd, enabled, wait_until};
+use manager::Manager;
 
 /// The board: the gadget with the default composition (no `interfaces` key), deriving its addresses
 /// from the identity device, whose serial the kernel command line carries as `lemnos.serial=`.
@@ -80,7 +98,11 @@ config = { manufacturer = "Lemnos", product_name = "Gadget check", identity = "i
 "#;
 
 const DIR: &str = "/run/lemnos-link";
-const BOARD_PATH: &str = "/run/lemnos-link/board.toml";
+/// The board file sits outside the socket's directory, as /etc/lemnos/board.toml does on a board: the
+/// first daemon hands that directory to its user (mode 0750), and a restarted daemon's root phase,
+/// which has no `CAP_DAC_OVERRIDE`, could not read a board file inside it.
+const BOARD_DIR: &str = "/run/lemnos-link-board";
+const BOARD_PATH: &str = "/run/lemnos-link-board/board.toml";
 const LEMNOSD_SOCKET: &str = "/run/lemnos-link/lemnosd.sock";
 const COMM_SOCKET: &str = "/run/lemnos-link/orion.sock";
 
@@ -124,6 +146,7 @@ fn main() -> ExitCode {
             comm::run(Path::new(&socket), &links);
             return ExitCode::SUCCESS;
         }
+        Some("netpeer") => net::run_peer(&args.next().unwrap_or_default()),
         Some("host") => {
             let rounds = args.next().and_then(|n| n.parse().ok()).unwrap_or(ROUNDS);
             let hello_after_ms: u64 = args.next().and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -158,6 +181,7 @@ fn main() -> ExitCode {
 /// The checks, in order. An `Err` is a step that could not be set up at all.
 fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
     fs::create_dir_all(DIR)
+        .and_then(|()| fs::create_dir_all(BOARD_DIR))
         .and_then(|()| fs::write(BOARD_PATH, BOARD))
         .map_err(|error| format!("the board file is written: {error}"))?;
     let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/lemnos-orion-link-check"));
@@ -198,10 +222,13 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
     let _ = lemnos_linux_sys::mount::unmount(Path::new("/dev/usb-ffs/dummy_udc.0"));
 
     // The daemon: its privileged start makes the gadget, and its driver enables it.
-    let daemon = Lemnosd::start(
+    // The service manager the daemon runs under: its notify socket and file descriptor store.
+    let manager = Manager::start()?;
+    let mut daemon = Lemnosd::start(
         &here.join("lemnosd"),
         Path::new(BOARD_PATH),
         Path::new(LEMNOSD_SOCKET),
+        Arc::clone(&manager),
     )?;
     if !check(
         wait_until(LONG, enabled),
@@ -373,7 +400,522 @@ fn check_link(check: &mut dyn FnMut(bool, &str) -> bool) -> Result<(), String> {
         host_session(&me, 12, 0),
         "after the rebinds: a host session comes up again, and the round trips with the node",
     );
+
+    // 7 and 8. The daemon restarts, and is killed at each step of its start, while the board's
+    // network link carries a TCP connection.
+    keep_through_restarts(check, &me, &mut daemon, &bridge, &manager);
     Ok(())
+}
+
+/// What a stopped daemon left of its gadget, said between the stop and the next start: the
+/// FunctionFS mounts, every open descriptor of any process into one (its pid, name and path), the
+/// gadget's `UDC` and functions, and the USB network devices. Read only.
+fn say_left_behind() {
+    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let ffs: Vec<&str> = mounts
+        .lines()
+        .filter(|line| line.split(' ').nth(2) == Some("functionfs"))
+        .filter_map(|line| line.split(' ').nth(1))
+        .collect();
+    say!("     left behind: functionfs mounts {ffs:?}");
+    let Ok(procs) = fs::read_dir("/proc") else {
+        return;
+    };
+    for proc_entry in procs.flatten() {
+        let pid = proc_entry.file_name().to_string_lossy().into_owned();
+        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(target) = fs::read_link(fd.path()) else {
+                continue;
+            };
+            let target = target.to_string_lossy().into_owned();
+            if ffs.iter().any(|mount| target.starts_with(mount)) || target.contains("usb-ffs") {
+                say!(
+                    "     left behind: pid {pid} ({}) fd {} -> {target}",
+                    comm.trim(),
+                    fd.file_name().to_string_lossy()
+                );
+            }
+        }
+    }
+    let udc = fs::read_to_string(format!("{GADGET_DIR}/UDC")).unwrap_or_else(|e| format!("<{e}>"));
+    let functions: Vec<String> = fs::read_dir(format!("{GADGET_DIR}/functions"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let nets: Vec<String> = fs::read_dir("/sys/class/net")
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name != "lo")
+                .collect()
+        })
+        .unwrap_or_default();
+    say!(
+        "     left behind: UDC {:?}, functions {functions:?}, net devices {nets:?}",
+        udc.trim()
+    );
+}
+
+/// How many daemon restarts step 7 makes: `lemnos-qemu.link_restarts=N` on the kernel command line,
+/// else [`RESTARTS`].
+fn restarts_asked() -> u32 {
+    fs::read_to_string("/proc/cmdline")
+        .ok()
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix(RESTARTS_WORD))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or(RESTARTS)
+        .max(1)
+}
+
+/// The kernel command line's word for the restarts step 7 makes.
+const RESTARTS_WORD: &str = "lemnos-qemu.link_restarts=";
+const RESTARTS: u32 = 10;
+/// The longest the running connection may go without an echo across a restart or a kill. It sends
+/// every 50 ms; a link that never went down answers within that, and one that went down and came
+/// back takes the host's enumeration and the daemon's start, seconds.
+const MAX_GAP: Duration = Duration::from_secs(1);
+/// How far past the guest's own longest stall (the loopback reference's longest gap over the
+/// same time) the link's longest gap may go: a guest that stood still for a second (the machine
+/// under it busy) stalls every connection, the link's with it, and that is not the link's.
+const GAP_PAST_STALL: Duration = Duration::from_millis(250);
+
+/// TCP's least retransmission timeout (Linux's `TCP_RTO_MIN`), which doubles at each retry.
+const RTO_MIN: Duration = Duration::from_millis(200);
+
+/// Whether the link's longest gap `gap` is the link carrying traffic: under [`MAX_GAP`], or no
+/// more than [`GAP_PAST_STALL`] past the guest's own longest stall `stalled`. A guest that stood
+/// still past [`MAX_GAP`] can lose a transfer on the link, which loopback never does: TCP sends it
+/// again on its retransmission timeouts (from [`RTO_MIN`], doubling), so the link's gap may run on
+/// to the first of them at or past the stall. Seen in QEMU with the machine under the guest busy:
+/// a 3923 ms stall over loopback, 4976 ms on the link, every other round within 250 ms of loopback.
+fn within_gap(gap: Duration, stalled: Duration) -> bool {
+    if gap <= MAX_GAP || gap <= stalled + GAP_PAST_STALL {
+        return true;
+    }
+    if stalled <= MAX_GAP {
+        return false;
+    }
+    let mut timeout = RTO_MIN;
+    let mut retried = RTO_MIN;
+    while retried < stalled {
+        timeout *= 2;
+        retried += timeout;
+    }
+    gap <= retried + GAP_PAST_STALL
+}
+/// What a daemon that took the kept gadget up says, and what one that set it up says instead.
+const TAKEN_UP: &str = "(taken up as it was)";
+const STORE_KEPT: &str = "kept bound through the restart";
+const SET_UP: &str = "(set up and bound)";
+const STORE_LET_GO: &str = "the files kept for it were let go";
+
+/// Watches the gadget's `UDC` from now on: when it was first seen clear.
+struct UdcWatch {
+    cleared: Arc<Mutex<Option<Instant>>>,
+    watching: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl UdcWatch {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cleared: Arc<Mutex<Option<Instant>>> = Arc::default();
+        let watching = Arc::new(AtomicBool::new(true));
+        let (seen, on) = (Arc::clone(&cleared), Arc::clone(&watching));
+        let thread = std::thread::spawn(move || {
+            while on.load(Ordering::Relaxed) {
+                if !enabled() {
+                    seen.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_or_insert_with(Instant::now);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Self {
+            cleared,
+            watching,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stops watching. When `UDC` was first seen clear, if it was.
+    fn end(mut self) -> Option<Instant> {
+        self.watching
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        *self.cleared.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// What the link must show after the daemon came back: the indexes it had, and the running
+/// connection's echoes.
+struct Link<'a> {
+    board_index: u32,
+    host_index: u32,
+    stream: &'a net::Stream,
+    /// The same echo over loopback: the guest's own stalls, to tell from the link's.
+    reference: &'a net::Stream,
+}
+
+/// Steps 7 and 8. The board's network link (the gadget's NCM function, to the host's `cdc_ncm` in a
+/// namespace of its own) carries a TCP connection that echoes every 50 ms. Step 7: the daemon
+/// restarts as `systemctl restart` does, [`restarts_asked`] times. Step 8: it is killed (SIGKILL),
+/// started again, killed at each step of that start ([`KillAt`]), and started once more. Through
+/// every one the service manager keeps the gadget's files: `UDC` is never cleared, the connection
+/// never goes [`MAX_GAP`] without an echo, fresh connections are answered, both interfaces keep
+/// their index, the daemon that comes up takes the gadget up as it was, and takes up the bridge's
+/// hold, whose END the store keeps too: the bridge never offers again.
+fn keep_through_restarts(
+    check: &mut dyn FnMut(bool, &str) -> bool,
+    me: &Path,
+    daemon: &mut Lemnosd,
+    bridge: &Bridge,
+    manager: &Manager,
+) {
+    let stored = manager.names();
+    check(
+        stored.iter().any(|name| name.ends_with(".record"))
+            && stored.iter().any(|name| name.ends_with(".ep0"))
+            && stored
+                .iter()
+                .filter(|name| name.contains(".ep") && !name.ends_with(".ep0"))
+                .count()
+                >= 2,
+        &format!("the service manager keeps the bound gadget's files: {stored:?}"),
+    );
+    check(
+        stored.iter().any(|name| name.starts_with(END_KEPT)),
+        &format!("the service manager keeps the bridge's lend's END: {stored:?}"),
+    );
+    let offers = bridge.count(OFFERED);
+    let mut peer = match net::Peer::start(me) {
+        Ok(peer) => peer,
+        Err(error) => {
+            check(
+                false,
+                &format!("the host's interface in a namespace of its own: {error}"),
+            );
+            return;
+        }
+    };
+    let (Ok(board_index), Some(host_index)) = (net::index(net::BOARD_IF), peer.host_index()) else {
+        check(false, "the link's interfaces have indexes on both ends");
+        return;
+    };
+    let stream = match net::Stream::start() {
+        Ok(stream) => stream,
+        Err(error) => {
+            check(false, &format!("a TCP connection over the link: {error}"));
+            return;
+        }
+    };
+    let opened = Instant::now();
+    check(
+        wait_until(LONG, || stream.echoes_since(opened) >= 10),
+        &format!(
+            "a TCP connection over the board's {} (index {board_index}) to the host's (index {host_index}): its echoes come back",
+            net::BOARD_IF
+        ),
+    );
+    check(
+        net::connects(3) == 3,
+        "fresh connections over the link are answered",
+    );
+    let reference = match net::Stream::loopback() {
+        Ok(reference) => reference,
+        Err(error) => {
+            check(
+                false,
+                &format!("the reference connection over loopback: {error}"),
+            );
+            return;
+        }
+    };
+    let link = Link {
+        board_index,
+        host_index,
+        stream: &stream,
+        reference: &reference,
+    };
+
+    // 7, with the host at work: a control request while no daemon runs. It goes first: the
+    // request claims the link's interface, which the session below holds from then on.
+    control_while_down(check, daemon, &mut peer, &link);
+
+    // 7 and 8 under one Orion session over the link, its round trips paced 100 ms apart: it
+    // lives through every restart and kill, and never sees its session lost.
+    let Some(session) = HostRun::start(me, 40, 0, 0, PACE_MS) else {
+        check(false, "the Orion session over the link starts");
+        return;
+    };
+    check(
+        wait_until(LONG, || session.count(host::ROUND) >= 3),
+        "an Orion session over the link is up, its round trips under way",
+    );
+    let went_on = |check: &mut dyn FnMut(bool, &str) -> bool, named: &str, before: usize| {
+        check(
+            wait_until(LONG, || session.count(host::ROUND) > before + 3),
+            &format!(
+                "{named}: the Orion session's round trips went on ({} since the stop)",
+                session.count(host::ROUND) - before
+            ),
+        );
+    };
+
+    // 7. Restarts.
+    for round in 1..=restarts_asked() {
+        let named = format!("restart {round}");
+        let watch = UdcWatch::start();
+        let before = session.count(host::ROUND);
+        let stopped = daemon.restart(say_left_behind);
+        let Ok((stopped_at, clean)) = stopped else {
+            check(
+                false,
+                &format!(
+                    "{named}: the daemon restarts: {}",
+                    stopped.err().unwrap_or_default()
+                ),
+            );
+            return;
+        };
+        check(
+            clean,
+            &format!("{named}: the daemon stopped on SIGTERM inside the unit's 5 s stop bound"),
+        );
+        came_back(check, &named, daemon, &mut peer, &link, stopped_at, watch);
+        went_on(check, &named, before);
+    }
+
+    // 8. A kill while it runs, then a kill at each step of the next start.
+    for at in KillAt::ALL {
+        let named = format!("kill at {at:?}");
+        let watch = UdcWatch::start();
+        let before = session.count(host::ROUND);
+        match daemon.kill_at(at) {
+            Ok((killed_at, last)) => {
+                say!("     {named}: the killed start's last line: {last}");
+                came_back(check, &named, daemon, &mut peer, &link, killed_at, watch);
+                went_on(check, &named, before);
+            }
+            Err(error) => {
+                watch.end();
+                check(false, &format!("{named}: {error}"));
+                return;
+            }
+        }
+    }
+    let trips = session.count(host::ROUND);
+    let stall = session.longest_gap(host::ROUND);
+    check(
+        session.finish(),
+        &format!(
+            "one Orion session through {} restarts and {} SIGKILLs (each of the running daemon, then of the next start at one of its {} steps): never lost, {trips} round trips; the longest stall the host saw was {} ms",
+            restarts_asked(),
+            2 * KillAt::ALL.len(),
+            KillAt::ALL.len(),
+            stall.as_millis()
+        ),
+    );
+    check(
+        bridge.count(OFFERED) == offers,
+        &format!(
+            "the bridge's hold went on through every restart and kill: no second offer ({offers} before, {} after)",
+            bridge.count(OFFERED)
+        ),
+    );
+    check(
+        host_session(me, 70, 0),
+        "after the restarts and kills: a host session comes up, and the round trips with the node",
+    );
+}
+
+/// The store's name for a lend's END hold.
+const END_KEPT: &str = "lemnos-end.";
+/// The daemon's line when it takes up the hold its last start lent.
+const HOLD_TAKEN_UP: &str =
+    "the hold the daemon before lent is taken up: the holder's link goes on";
+/// The daemon's line when it could not.
+const HOLD_DROPPED: &str = "the hold the daemon before lent is dropped";
+
+/// How long the host gives the control request sent while no daemon runs: past the restart's
+/// whole span, so a request left unanswered shows as this timeout, not as a stall.
+const CONTROL_WAIT_MS: u32 = 10_000;
+/// Linux's `EPIPE`: the device stalled the request.
+const EPIPE: i32 = 32;
+/// The next daemon's line for a request the host made while no daemon ran.
+const REFUSED_WHILE_DOWN: &str = "the host made while no daemon ran was refused (stalled)";
+
+/// A restart with a control request to the link's interface sent while no daemon runs. FunctionFS
+/// queues it as a setup event on the stored ep0, and the host waits: the next daemon reads it
+/// before it serves anything and stalls it, so the host gets a stall within the restart's span,
+/// never its own timeout.
+fn control_while_down(
+    check: &mut dyn FnMut(bool, &str) -> bool,
+    daemon: &mut Lemnosd,
+    peer: &mut net::Peer,
+    link: &Link,
+) {
+    let named = "restart with a control request";
+    let watch = UdcWatch::start();
+    let mut asked = None;
+    let stopped = daemon.restart(|| {
+        say_left_behind();
+        asked = Some(std::thread::spawn(|| {
+            host::control_request(CONTROL_WAIT_MS)
+        }));
+        // On the bus before the next start begins (the restart's own delay follows).
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    let Ok((stopped_at, clean)) = stopped else {
+        check(
+            false,
+            &format!(
+                "{named}: the daemon restarts: {}",
+                stopped.err().unwrap_or_default()
+            ),
+        );
+        return;
+    };
+    check(clean, &format!("{named}: the daemon stopped on SIGTERM"));
+    came_back(check, named, daemon, peer, link, stopped_at, watch);
+    let answer = asked.map(std::thread::JoinHandle::join);
+    match answer {
+        Some(Ok(Ok((waited, got)))) => {
+            let stalled = matches!(&got, Err(error) if error.raw_os_error() == Some(EPIPE));
+            check(
+                stalled && waited < Duration::from_millis(u64::from(CONTROL_WAIT_MS)),
+                &format!(
+                    "{named}: the host's request, sent while no daemon ran, was stalled once the next daemon drained ep0, {} ms after it was sent (the host's timeout {CONTROL_WAIT_MS} ms): {got:?}",
+                    waited.as_millis()
+                ),
+            );
+        }
+        Some(Ok(Err(error))) => {
+            check(false, &format!("{named}: the host's request: {error}"));
+        }
+        _ => {
+            check(false, &format!("{named}: the host's request was not sent"));
+        }
+    }
+    check(
+        !daemon
+            .lines_since(stopped_at, REFUSED_WHILE_DOWN)
+            .is_empty(),
+        &format!(
+            "{named}: the next daemon says it refused the request the host made while none ran"
+        ),
+    );
+}
+
+/// The checks after one restart or kill (`named`), from `since`, the stop.
+#[allow(clippy::too_many_arguments)]
+fn came_back(
+    check: &mut dyn FnMut(bool, &str) -> bool,
+    named: &str,
+    daemon: &Lemnosd,
+    peer: &mut net::Peer,
+    link: &Link<'_>,
+    since: Instant,
+    watch: UdcWatch,
+) {
+    let up = wait_until(LONG, || !daemon.lines_since(since, TAKEN_UP).is_empty());
+    check(
+        up && !daemon.lines_since(since, STORE_KEPT).is_empty(),
+        &format!("{named}: the daemon that came up took the gadget up from the store, as it was"),
+    );
+    let set_up = daemon.lines_since(since, SET_UP);
+    let let_go = daemon.lines_since(since, STORE_LET_GO);
+    check(
+        set_up.is_empty() && let_go.is_empty(),
+        &format!("{named}: nothing was let go or set up again: {set_up:?} {let_go:?}"),
+    );
+    let lent = wait_until(LONG, || {
+        daemon
+            .connect("restart-check")
+            .ok()
+            .and_then(|mut session| {
+                let device = session.find("usb.function/1").ok()??.index;
+                pair_lent(&mut session, device)
+            })
+            == Some(true)
+    });
+    let taken = daemon.lines_since(since, HOLD_TAKEN_UP);
+    let dropped = daemon.lines_since(since, HOLD_DROPPED);
+    check(
+        lent && !taken.is_empty() && dropped.is_empty(),
+        &format!(
+            "{named}: the daemon that came up took up the bridge's hold, and the pair is lent: {dropped:?}"
+        ),
+    );
+    // The connection, a second past the daemon's ready.
+    std::thread::sleep(Duration::from_secs(1));
+    let now = Instant::now();
+    let cleared = watch.end();
+    check(
+        cleared.is_none(),
+        &format!(
+            "{named}: the gadget stayed bound (UDC never clear){}",
+            cleared.map_or_else(String::new, |at| format!(
+                ": clear {} ms after the stop",
+                at.saturating_duration_since(since).as_millis()
+            ))
+        ),
+    );
+    let gap = link.stream.longest_gap(since, now);
+    let stalled = link.reference.longest_gap(since, now);
+    check(
+        link.stream.failed().is_none()
+            && link.reference.failed().is_none()
+            && within_gap(gap, stalled),
+        &format!(
+            "{named}: the running connection carried traffic throughout: longest gap {} ms (at most {} ms, or {} ms past the guest's own longest stall, {} ms over loopback, or past TCP's retransmission timeout after a stall over {} ms){}",
+            gap.as_millis(),
+            MAX_GAP.as_millis(),
+            GAP_PAST_STALL.as_millis(),
+            stalled.as_millis(),
+            MAX_GAP.as_millis(),
+            link.stream
+                .failed()
+                .or_else(|| link.reference.failed())
+                .map_or_else(String::new, |why| format!(", ended: {why}"))
+        ),
+    );
+    check(
+        net::connects(3) == 3,
+        &format!("{named}: fresh connections over the link are answered"),
+    );
+    let board = net::index(net::BOARD_IF).ok();
+    let host = peer.host_index();
+    check(
+        board == Some(link.board_index) && host == Some(link.host_index),
+        &format!(
+            "{named}: both interfaces kept their index: the board's {board:?} (was {}), the host's {host:?} (was {})",
+            link.board_index, link.host_index
+        ),
+    );
+    let ran_past = daemon.lines_since(since, RAN_PAST);
+    check(
+        ran_past.is_empty(),
+        &format!("{named}: no call of the new daemon ran past its deadline: {ran_past:?}"),
+    );
 }
 
 /// The round trips of the paced host session in step 5, and the time between them.
@@ -716,7 +1258,7 @@ fn host_session(me: &Path, number: u32, hello_after_ms: u64) -> bool {
 /// A host session running as a child, its lines kept as they come.
 struct HostRun {
     child: Child,
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Arc<Mutex<Vec<(Instant, String)>>>,
     reader: std::thread::JoinHandle<()>,
 }
 
@@ -733,13 +1275,18 @@ impl HostRun {
             .arg(rounds.to_string())
             .arg(hello_after_ms.to_string())
             .arg(pace_ms.to_string())
+            .stdin(if rounds == 0 {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .spawn();
         let Ok(mut child) = child else {
             say!("FAIL host session {number}: cannot start");
             return None;
         };
-        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+        let lines: Arc<Mutex<Vec<(Instant, String)>>> = Arc::default();
         let stdout = child.stdout.take();
         let reader = {
             let lines = Arc::clone(&lines);
@@ -750,7 +1297,7 @@ impl HostRun {
                         lines
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .push(line);
+                            .push((Instant::now(), line));
                     }
                 }
             })
@@ -768,20 +1315,37 @@ impl HostRun {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|line| line.contains(text))
+            .filter(|(_, line)| line.contains(text))
             .count()
     }
 
+    /// The longest time between two lines that contain `text`.
+    fn longest_gap(&self, text: &str) -> Duration {
+        let lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let at: Vec<Instant> = lines
+            .iter()
+            .filter(|(_, line)| line.contains(text))
+            .map(|(at, _)| *at)
+            .collect();
+        at.windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]))
+            .max()
+            .unwrap_or_default()
+    }
+
     /// Waits for the child. True when the session came up, the round trips followed, and the
-    /// child exited cleanly.
+    /// child exited cleanly. A session started with no count of rounds is told to end first.
     fn finish(mut self) -> bool {
+        drop(self.child.stdin.take());
         let status = self.child.wait();
         let _ = self.reader.join();
         let lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
-        let up = lines.iter().position(|l| l.contains("host session up"));
+        let up = lines
+            .iter()
+            .position(|(_, l)| l.contains("host session up"));
         let trips = lines
             .iter()
-            .position(|l| l.contains("round trips with the node"));
+            .position(|(_, l)| l.contains("round trips with the node"));
         status.is_ok_and(|status| status.success())
             && matches!((up, trips), (Some(u), Some(t)) if u < t)
     }
@@ -809,5 +1373,32 @@ mod hold_tests {
         ));
         assert!(!in_futex_wait("-1 0x7ffd 0x4011"));
         assert!(!in_futex_wait("running"));
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::{GAP_PAST_STALL, MAX_GAP, within_gap};
+    use std::time::Duration;
+
+    #[test]
+    fn a_link_gap_counts_against_the_link_only_past_the_guests_own_stall() {
+        let ms = Duration::from_millis;
+        assert!(within_gap(MAX_GAP, ms(0)));
+        assert!(
+            !within_gap(MAX_GAP + ms(1), ms(50)),
+            "a stalled link in a guest that ran"
+        );
+        assert!(
+            within_gap(ms(1368), ms(1300)),
+            "the whole guest stood still"
+        );
+        assert!(!within_gap(ms(900) + GAP_PAST_STALL + ms(1), ms(900)));
+        // A guest that stood still past a second: up to the retransmission timeout at or past it
+        // (retries at 200, 600, 1400, 3000, 6200 ms).
+        assert!(within_gap(ms(1400) + GAP_PAST_STALL, ms(1300)));
+        assert!(!within_gap(ms(1400) + GAP_PAST_STALL + ms(1), ms(1300)));
+        assert!(within_gap(ms(4976), ms(3923)), "the QEMU run under load");
+        assert!(!within_gap(ms(6200) + GAP_PAST_STALL + ms(1), ms(3923)));
     }
 }

@@ -562,6 +562,41 @@ fn a_gadget_enabled_without_part_of_it_runs_degraded_with_the_backends_words() {
 }
 
 #[test]
+fn an_enable_under_way_is_asked_again_soon_with_nothing_taken_down_and_no_backoff() {
+    const SETTING_UP: &str = "being set up";
+    let mut rig = Rig::new();
+    rig.host.pend_enables(30);
+    rig.host.set_enable_note(Some(SETTING_UP));
+    for _ in 0..30 {
+        assert_eq!(
+            rig.step(),
+            PENDING_POLL_NS,
+            "asked again soon, never backed off"
+        );
+        assert_eq!(rig.health(), Health::Degraded(SETTING_UP));
+        assert_eq!(Driver::retrying(&rig.driver), None, "not a failure");
+    }
+    assert_eq!(
+        rig.host.disables(),
+        0,
+        "nothing taken down while it is under way"
+    );
+    rig.host.set_enable_note(None);
+    assert_eq!(rig.step(), POLL_NS);
+    assert_eq!(rig.health(), Health::Ok);
+    assert_eq!(rig.host.enables(), 1);
+    // Without the backend's words, the driver's own.
+    let mut rig = Rig::new();
+    rig.host.pend_enables(1);
+    assert_eq!(rig.step(), PENDING_POLL_NS);
+    assert_eq!(rig.health(), Health::Degraded(STARTING));
+    // A real failure after one under way is a failure again, with its backoff.
+    rig.host.refuse_enable(Some(ErrorKind::NotFound));
+    assert_eq!(rig.step(), SECOND);
+    assert_eq!(rig.health(), Health::Failed(NOT_THERE));
+}
+
+#[test]
 fn a_function_left_enabled_is_taken_down_and_enabled_afresh() {
     let mut rig = Rig::new();
     // Whoever held the function before left it enabled with something else.

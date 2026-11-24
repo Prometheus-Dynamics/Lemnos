@@ -397,6 +397,56 @@ pub fn close_on_exec(fd: BorrowedFd<'_>) -> io::Result<bool> {
     Ok(flags & libc::FD_CLOEXEC != 0)
 }
 
+/// Moves this process into a network namespace of its own (`unshare(CLONE_NEWNET)`): from then on it
+/// sees only the interfaces moved into it, and a loopback that is down.
+///
+/// # Errors
+///
+/// `unshare(2)` refuses, for instance `EPERM` without `CAP_SYS_ADMIN`.
+pub fn unshare_net() -> io::Result<()> {
+    // SAFETY: `unshare` reads no memory; the flag is a plain integer.
+    if unsafe { libc::unshare(libc::CLONE_NEWNET) } != 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// A routing netlink socket (`NETLINK_ROUTE`) in this process's network namespace, for a guest that
+/// sets up its network interfaces. Messages go out with [`send`] and answers come in with [`read`].
+///
+/// # Errors
+///
+/// `socket(2)` fails.
+pub fn route_socket() -> io::Result<OwnedFd> {
+    // SAFETY: `socket` reads no memory; its arguments are plain integers.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
+    };
+    if fd < 0 {
+        return Err(last_error());
+    }
+    // SAFETY: `fd` was just made by `socket`, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Sends `message` on the socket `fd` as one datagram. Returns the bytes sent.
+///
+/// # Errors
+///
+/// `send(2)` fails.
+pub fn send(fd: BorrowedFd<'_>, message: &[u8]) -> io::Result<usize> {
+    // SAFETY: `message` is valid for reads of its length for the call; `fd` is open.
+    let sent = unsafe { libc::send(fd.as_raw_fd(), message.as_ptr().cast(), message.len(), 0) };
+    if sent < 0 {
+        return Err(last_error());
+    }
+    Ok(sent as usize)
+}
+
 /// Sends `signal` to process `pid`. Only a positive pid names one process: 0 and negative
 /// values name process groups or every process, and are refused without a call.
 ///

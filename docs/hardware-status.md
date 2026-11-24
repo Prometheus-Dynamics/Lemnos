@@ -226,7 +226,8 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`R1e.md`](../testing/board-runs/R1e.md) | The NCM interface's name (`ifname=`): the kernel takes it from 5.12 on, the setup refuses older kernels by name, and the read-back is reported as `ifname` |
 | [`H4b.md`](../testing/board-runs/H4b.md) | Isochronous streams both ways: `uvc` with several transfers queued, and a gadget's isochronous endpoints in an alternate setting |
 | [`R1f.md`](../testing/board-runs/R1f.md) | What a holder of the lent gadget pair sees on a real controller: the errno of a read in flight at each host or daemon event, and whether the same descriptors work again. QEMU (dummy_hcd, through lemnosd, R1g): cases 1 to 6 and the control request run with END asserted; untested on board |
-| [`V1g.md`](../testing/board-runs/V1g.md) | The USB gadget set up by the privileged helper: a controller that appears late, host role then device role, configfs not mounted at start, the two processes and their capabilities, the helper dying and being forked again, a serial that is not readable yet, and stop taking the gadget down |
+| [`V1g.md`](../testing/board-runs/V1g.md) | The USB gadget set up by the privileged helper: a controller that appears late, host role then device role, configfs not mounted at start, the two processes and their capabilities, the helper dying and being forked again, a serial that is not readable yet, and stop taking the gadget off the bus |
+| [`GADGET-KEEP.md`](../testing/board-runs/GADGET-KEEP.md) | A restart of `lemnosd`, and a kill at each step, with the gadget kept in systemd's file descriptor store: the host never sees the device go, the NCM interface keeps its name and index on both sides, and connections carry traffic throughout. QEMU (dummy_hcd, real systemd for the store): see the file; untested on board |
 
 ### NCM after the controller came back
 

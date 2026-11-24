@@ -53,9 +53,11 @@ The board's gadget is the one `R1` checks. Its board file has a `usb-gadget` dev
    gadget's addresses come from is not readable yet: retrying`, the helper's reason
    (`the board serial is not readable yet: ...`) on the error output; load the nvmem driver; the gadget comes
    up on the next attempt with no restart, and its USB serial and NCM addresses are the derived ones.
-6. **Stop takes the gadget down.** Stop the daemon (`systemctl stop lemnosd`). Expect the host to see the
-   gadget disconnect, and `/sys/kernel/config/usb_gadget/lemnos-NAME` to be gone, with
-   `/dev/usb-ffs/NAME` unmounted. Start again: the tree is made again.
+6. **Stop takes the gadget off the bus.** Stop the daemon (`systemctl stop lemnosd`). The service manager
+   empties its store, the gadget's last FunctionFS files close, and the host sees the gadget disconnect.
+   The tree `/sys/kernel/config/usb_gadget/lemnos-NAME` stays (a stopping daemon tears nothing down), and
+   the mount goes with the unit's namespace. Start again: the tree is adopted, mounted again and bound.
+   A restart (not a stop) keeps the gadget on the bus: [`GADGET-KEEP.md`](GADGET-KEEP.md).
 7. **The unit's filter.** With the drop-in, `systemd-analyze security lemnosd` scores as the packaging
    check expects (`scripts/check-packaging.sh`). The helper runs under the same filter as the daemon:
    confirm the helper's `setup` and `bind` succeed under it (checks 1 to 3 do).

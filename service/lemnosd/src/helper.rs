@@ -33,8 +33,14 @@
 //!   there, or `ENODATA` when the serial cannot be read yet.
 //! - `bind N`: writes the controller's name to the gadget's `UDC`.
 //! - `unbind N`: writes an empty line to it.
-//! - `teardown N`: unbinds, removes the gadget's tree and unmounts its FunctionFS. The daemon sends
-//!   it for every gadget when it stops.
+//! - `teardown N`: unbinds, removes the gadget's tree and unmounts its FunctionFS. The daemon does
+//!   not send it when it stops: a stopping daemon leaves its gadgets bound, their files in the
+//!   service manager's store, for the next one to take up.
+//!
+//! A helper says `0 started` when it starts, and `SEQ taken` when it is about to act on a request
+//! (one it refuses gets only its refusal). The daemon waits for a request's answer however long the helper takes; it
+//! gives the request up only when a helper says `started` after another took it, as the request
+//! went with the one that ended.
 //!
 //! The reply is one line that starts with the request's `SEQ`: `SEQ ok`, `SEQ fail ERRNO REASON` (the
 //! errno and a line of text for the daemon's log), or `SEQ refused REASON`. A successful `setup`
@@ -77,9 +83,16 @@ use lemnos_linux_sys::unix::peer_cred;
 pub const PROCESS_NAME: &str = "lemnosd-gadget";
 /// The most a request line may hold. The longest request is `teardown 999999 4294967295`.
 const MAX_LINE: usize = 32;
-/// How long the daemon waits for an answer before it gives the call up. The helper may be starting
-/// again (the parent waits at most 8 s), so this is more than that.
+/// How often a call that has no answer yet says so in the daemon's log, and how long it waits for
+/// the answer of a helper that started again after the request was sent (the new helper reads a
+/// request still in the socket at once; one the helper before it took went with it).
 const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// What a helper says first, as an answer to nothing (`0`): it has just started, so a request an
+/// earlier helper took and did not answer will never be answered.
+pub const STARTED: &str = "started";
+/// What a helper says of a request just before it acts on it (`SEQ taken`): from
+/// then on the request is this helper's, answered by it or lost with it.
+pub const TAKEN: &str = "taken";
 /// The most of a reply's text the daemon keeps.
 const MAX_REASON: usize = 160;
 /// Signals the helper ignores, so that a signal to the daemon's process group does not take it.
@@ -160,6 +173,10 @@ pub enum Verb {
     Teardown,
     Bind,
     Unbind,
+    /// The controller's pullup back on (`soft_connect`).
+    Connect,
+    /// The controller's pullup off (`soft_connect`), with the gadget still bound.
+    Disconnect,
 }
 
 impl Verb {
@@ -171,6 +188,8 @@ impl Verb {
             Self::Teardown => "teardown",
             Self::Bind => "bind",
             Self::Unbind => "unbind",
+            Self::Connect => "connect",
+            Self::Disconnect => "disconnect",
         }
     }
 }
@@ -217,6 +236,8 @@ pub fn parse(line: &[u8]) -> Option<Request> {
         "teardown" => Verb::Teardown,
         "bind" => Verb::Bind,
         "unbind" => Verb::Unbind,
+        "connect" => Verb::Connect,
+        "disconnect" => Verb::Disconnect,
         _ => return None,
     };
     let index = canonical(parts.next()?, 6)?;
@@ -234,6 +255,7 @@ pub trait Ops {
     fn teardown(&mut self, gadget: &Gadget) -> io::Result<()>;
     fn bind(&mut self, gadget: &Gadget) -> io::Result<()>;
     fn unbind(&mut self, gadget: &Gadget) -> io::Result<()>;
+    fn soft_connect(&mut self, gadget: &Gadget, connect: bool) -> io::Result<()>;
 }
 
 /// The system's gadget operations, on directories opened once (configfs, the FunctionFS mount
@@ -332,8 +354,7 @@ impl<M: Mounts> Ops for System<M> {
         self.trees.bind(&gadget.udc)?;
         if let Some(rebind) = self.trees.take_rebind(&gadget.udc) {
             lemnos_linux_sys::stderr::line(&format!(
-                "lemnosd-gadget: gadget {}: bound again after it was {}: UDC was clear for {} ms \
-                 first, so the host sees the device go and come back",
+                "lemnosd-gadget: gadget {}: bound again after it was {} (UDC clear for {} ms)",
                 gadget.udc,
                 rebind.path,
                 rebind.clear_for.as_millis()
@@ -344,6 +365,10 @@ impl<M: Mounts> Ops for System<M> {
 
     fn unbind(&mut self, gadget: &Gadget) -> io::Result<()> {
         self.trees.unbind(&gadget.udc)
+    }
+
+    fn soft_connect(&mut self, gadget: &Gadget, connect: bool) -> io::Result<()> {
+        self.trees.soft_connect(&gadget.udc, connect)
     }
 }
 
@@ -362,6 +387,8 @@ fn act(verb: Verb, gadget: &Gadget, ops: &mut dyn Ops) -> String {
         Verb::Teardown => ops.teardown(gadget).map(|()| "ok"),
         Verb::Bind => ops.bind(gadget).map(|()| "ok"),
         Verb::Unbind => ops.unbind(gadget).map(|()| "ok"),
+        Verb::Connect => ops.soft_connect(gadget, true).map(|()| "ok"),
+        Verb::Disconnect => ops.soft_connect(gadget, false).map(|()| "ok"),
     };
     match result {
         Ok(reply) => reply.to_owned(),
@@ -455,7 +482,31 @@ impl Holder for Daemon {
 /// # Errors
 ///
 /// The socket fails for a reason other than the daemon's end closing.
+///
+/// The daemon's end closing ends it with `Ok`: a read of nothing, or a reset (the daemon closed
+/// with a line of the helper's still unread, as a stopping daemon does), or a write the daemon's
+/// closed end refuses. Its parent then ends too, rather than starting a helper for a daemon that
+/// is gone.
 pub fn serve(
+    stream: &mut UnixStream,
+    gadgets: &[Gadget],
+    ops: &mut dyn Ops,
+    holder: &dyn Holder,
+) -> io::Result<()> {
+    match serve_requests(stream, gadgets, ops, holder) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn serve_requests(
     stream: &mut UnixStream,
     gadgets: &[Gadget],
     ops: &mut dyn Ops,
@@ -471,7 +522,11 @@ pub fn serve(
                     let reply = match holder.check(stream) {
                         Err(why) => format!("refused {why}"),
                         Ok(()) => match gadgets.get(request.index as usize) {
-                            Some(gadget) => act(request.verb, gadget, ops),
+                            Some(gadget) => {
+                                stream
+                                    .write_all(format!("{} {TAKEN}\n", request.seq).as_bytes())?;
+                                act(request.verb, gadget, ops)
+                            }
                             None => "refused a gadget that is not in the list".to_owned(),
                         },
                     };
@@ -520,6 +575,8 @@ pub fn run_child(mut stream: UnixStream, gadgets: &[Gadget], daemon: Daemon) -> 
         ));
         std::process::exit(1);
     }
+    // Said once, first: a request the helper before this one took is not answered by anybody.
+    let _ = stream.write_all(format!("0 {STARTED}\n").as_bytes());
     let code = match serve(&mut stream, gadgets, &mut ops, &daemon) {
         Ok(()) => 0,
         Err(error) => {
@@ -532,9 +589,10 @@ pub fn run_child(mut stream: UnixStream, gadgets: &[Gadget], daemon: Daemon) -> 
     std::process::exit(code);
 }
 
-/// The daemon's end of the helper: one request at a time, each answered before the next. A call the
-/// helper does not answer in time fails and nothing else changes: the helper may be starting again,
-/// and its parent keeps its end of the socket, so the next call is served by the new one. Only a
+/// The daemon's end of the helper: one request at a time, each answered before the next. A call
+/// waits for its answer however long the helper takes, saying so every [`ANSWER_WAIT`]; it fails
+/// without one only when the helper that took the request ended with it.
+/// The parent keeps its end of the socket, so the next call is served by the new one. Only a
 /// socket whose other end is gone for good (the parent was killed) fails every call after it.
 pub struct Client {
     stream: UnixStream,
@@ -602,11 +660,31 @@ impl Client {
         if let Err(error) = self.stream.write_all(request.as_bytes()) {
             return Err(self.gone(&error));
         }
+        // The call waits for its own answer for as long as the helper may still carry the request
+        // out: a request sent again while the first may still run is a second setup or bind behind
+        // the first. The caller is the gadget's own thread, never a driver's tick, so the wait
+        // holds nobody else. It ends without an answer only when the helper that took the request
+        // (its `taken` line) ended: the next helper's `started` line says so.
+        let mut silent = Duration::ZERO;
+        let mut taken = false;
         let answer = loop {
             match read_answer(&mut self.stream) {
+                Ok((got, text)) if got == seq && text == TAKEN => taken = true,
                 Ok((got, text)) if got == seq => break text,
-                // An answer to a request the daemon gave up on, or the rest of a line cut by a
-                // timeout: not this call's.
+                // A helper that started after one took this request: it never saw the request,
+                // and the one that took it is gone with it. One that started before taking it
+                // reads it from the socket and answers it.
+                Ok((0, text)) if text == STARTED && taken => {
+                    let why = format!(
+                        "the gadget helper ended after it took {} for {} and started again: the request went with it, and is asked again",
+                        verb.word(),
+                        self.name_of(index)
+                    );
+                    let _ = writeln!(io::stderr(), "lemnosd: {why}");
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, why));
+                }
+                // An answer to a request the daemon gave up on, the rest of a line cut by a
+                // timeout, or a helper's start before it took this request: not this call's.
                 Ok(_) => {}
                 Err(error)
                     if matches!(
@@ -614,14 +692,14 @@ impl Client {
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                     ) =>
                 {
-                    let why = format!(
-                        "the gadget helper did not answer {} for {} within {} ms: it may be starting again",
-                        verb.word(),
+                    silent += self.wait;
+                    let _ = writeln!(
+                        io::stderr(),
+                        "lemnosd: gadget {}: the gadget helper has not answered {} for {} s: still waiting (it may still carry it out, so it is not asked again)",
                         self.name_of(index),
-                        self.wait.as_millis()
+                        verb.word(),
+                        silent.as_secs()
                     );
-                    let _ = writeln!(io::stderr(), "lemnosd: {why}");
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, why));
                 }
                 Err(error) => return Err(self.gone(&error)),
             }
@@ -631,7 +709,10 @@ impl Client {
         let accepted = match (verb, answer.as_str()) {
             (Verb::Setup, REPLY_SERIAL) => Some(Reply::Serial(SerialString::Set)),
             (Verb::Setup, REPLY_NO_SERIAL) => Some(Reply::Serial(SerialString::Absent)),
-            (Verb::Teardown | Verb::Bind | Verb::Unbind, "ok") => Some(Reply::Done),
+            (
+                Verb::Teardown | Verb::Bind | Verb::Unbind | Verb::Connect | Verb::Disconnect,
+                "ok",
+            ) => Some(Reply::Done),
             _ => None,
         };
         if let Some(reply) = accepted {
@@ -678,14 +759,6 @@ impl Client {
         let _ = writeln!(io::stderr(), "lemnosd: {why}");
         self.dead = Some(why.clone());
         io::Error::new(io::ErrorKind::BrokenPipe, why)
-    }
-
-    /// Takes every gadget down, for good (the daemon is stopping). Each failure is reported, and
-    /// the rest are still tried.
-    pub fn teardown_all(&mut self) {
-        for index in 0..self.gadgets.len() {
-            let _ = self.call(Verb::Teardown, index as u32);
-        }
     }
 }
 
@@ -736,6 +809,15 @@ impl GadgetHelper for Client {
 
     fn unbind(&mut self, index: u32) -> io::Result<()> {
         self.call(Verb::Unbind, index).map(|_| ())
+    }
+
+    fn soft_connect(&mut self, index: u32, connect: bool) -> io::Result<()> {
+        let verb = if connect {
+            Verb::Connect
+        } else {
+            Verb::Disconnect
+        };
+        self.call(verb, index).map(|_| ())
     }
 }
 
@@ -821,6 +903,16 @@ mod tests {
         fn unbind(&mut self, gadget: &Gadget) -> io::Result<()> {
             self.act(Verb::Unbind, gadget)
         }
+        fn soft_connect(&mut self, gadget: &Gadget, connect: bool) -> io::Result<()> {
+            self.act(
+                if connect {
+                    Verb::Connect
+                } else {
+                    Verb::Disconnect
+                },
+                gadget,
+            )
+        }
     }
 
     #[test]
@@ -830,6 +922,8 @@ mod tests {
             "teardown 12 9",
             "bind 3 4294967295",
             "unbind 0 0",
+            "connect 0 2",
+            "disconnect 1 3",
             "setup 999999 100",
         ] {
             assert!(parse(ok.as_bytes()).is_some(), "{ok}");
@@ -869,6 +963,10 @@ mod tests {
             "setup 1 1\r",
             "unbind - 1",
             "setup 1 -",
+            "connect 0",
+            "disconnect 0 1 connect",
+            "soft_connect 0 1",
+            "Connect 0 1",
         ] {
             assert_eq!(parse(bad.as_bytes()), None, "{bad:?}");
         }
@@ -908,11 +1006,13 @@ mod tests {
     /// Requests from a small alphabet of the words, numbers and bytes the vocabulary and its
     /// near misses are made of, plus raw bytes. A fixed sequence, so every run is the same.
     fn requests(count: usize) -> Vec<Vec<u8>> {
-        const PIECES: [&[u8]; 22] = [
+        const PIECES: [&[u8]; 24] = [
             b"setup",
             b"teardown",
             b"bind",
             b"unbind",
+            b"connect",
+            b"disconnect",
             b"set",
             b" ",
             b" ",
@@ -944,9 +1044,16 @@ mod tests {
                 // Near misses of the vocabulary: a real verb and index with a suffix or a
                 // different spelling of the index, the shapes a path would take.
                 if next() % 3 == 0 {
-                    const VERBS: [&str; 4] = ["setup", "teardown", "bind", "unbind"];
+                    const VERBS: [&str; 6] = [
+                        "setup",
+                        "teardown",
+                        "bind",
+                        "unbind",
+                        "connect",
+                        "disconnect",
+                    ];
                     const SUFFIXES: [&str; 8] = ["", "/x", "/../y", " ", "0", "x", "\r", ".."];
-                    let verb = VERBS[(next() % 4) as usize];
+                    let verb = VERBS[(next() % VERBS.len() as u64) as usize];
                     let index = next() % 4;
                     let suffix = SUFFIXES[(next() % SUFFIXES.len() as u64) as usize];
                     let spelled = if next() % 4 == 0 {
@@ -996,6 +1103,36 @@ mod tests {
     }
 
     #[test]
+    fn a_daemon_that_closes_with_the_helpers_line_unread_ends_it_cleanly() {
+        // A stopping daemon closes its end with the helper's lines still queued to it: the
+        // helper's next read is a reset, not an end of file. That is the daemon's end closing
+        // all the same, so the helper ends with status 0 and its parent starts no other.
+        let gadgets = gadgets(&["udc0"]);
+        let (daemon, mut helper) = UnixStream::pair().unwrap();
+        helper.write_all(b"0 started\n").unwrap();
+        drop(daemon);
+        let mut probe = [0u8; 1];
+        assert_eq!(
+            helper
+                .try_clone()
+                .unwrap()
+                .read(&mut probe)
+                .map_err(|error| error.kind()),
+            Err(io::ErrorKind::ConnectionReset),
+            "the stand-in must fail as the stopping daemon's close does"
+        );
+        let (daemon, mut helper) = UnixStream::pair().unwrap();
+        helper.write_all(b"0 started\n").unwrap();
+        drop(daemon);
+        let mut ops = Recorded::default();
+        assert_eq!(
+            serve(&mut helper, &gadgets, &mut ops, &Anyone).map_err(|error| error.kind()),
+            Ok(())
+        );
+        assert!(ops.calls.is_empty());
+    }
+
+    #[test]
     fn an_index_past_the_list_and_a_long_line_are_refused_and_each_reply_carries_its_sequence() {
         let gadgets = gadgets(&["udc0"]);
         let long = format!("unbind {} 5", "0".repeat(40)).into_bytes();
@@ -1006,10 +1143,11 @@ mod tests {
         );
         assert_eq!(calls, [(Verb::Setup, "udc0".to_owned())]);
         let lines: Vec<&str> = replies.lines().collect();
-        assert_eq!(lines.len(), 3);
+        // Only a request the helper acts on is taken first; a refusal is the only line.
+        assert_eq!(lines.len(), 4, "{lines:?}");
         assert!(lines[0].starts_with("7 refused"), "{lines:?}");
         assert!(lines[1].starts_with("0 refused"), "{lines:?}");
-        assert_eq!(lines[2], "9 ok no-serial");
+        assert_eq!(lines[2..], ["9 taken", "9 ok no-serial"]);
     }
 
     #[test]
@@ -1021,7 +1159,7 @@ mod tests {
         let right = Daemon { pid: me, uid };
         let (calls, replies) = run_with(&[b"setup 0 1".to_vec()], &gadgets, &right);
         assert_eq!(calls.len(), 1);
-        assert_eq!(replies, "1 ok no-serial\n");
+        assert_eq!(replies, "1 taken\n1 ok no-serial\n");
         // Another process id, or another user: nothing runs, and the reply says why.
         for wrong in [
             Daemon { pid: me + 1, uid },
@@ -1137,7 +1275,13 @@ mod tests {
             );
         }
         // The other verbs say `ok` only.
-        for verb in [Verb::Bind, Verb::Unbind, Verb::Teardown] {
+        for verb in [
+            Verb::Bind,
+            Verb::Unbind,
+            Verb::Teardown,
+            Verb::Connect,
+            Verb::Disconnect,
+        ] {
             assert!(matches!(answered(verb, "ok"), Ok(Reply::Done)));
             for bad in ["ok serial", "ok no-serial"] {
                 let error = answered(verb, bad).err().unwrap();
@@ -1164,6 +1308,8 @@ mod tests {
             let mut daemon = daemon;
             daemon.write_all(b"setup 0 1\n").unwrap();
             let (seq, text) = read_answer(&mut daemon).unwrap();
+            assert_eq!((seq, text.as_str()), (1, TAKEN));
+            let (seq, text) = read_answer(&mut daemon).unwrap();
             assert_eq!((seq, text.as_str()), (1, word));
             drop(daemon);
             helper_thread.join().unwrap();
@@ -1171,25 +1317,73 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_to_a_request_given_up_on_is_dropped_and_a_helper_that_is_slow_is_not_dead() {
+    fn a_slow_helper_is_waited_for_and_never_asked_twice() {
         let (daemon, mut helper) = UnixStream::pair().unwrap();
         let mut client =
-            Client::waiting(daemon, vec![("udc0".into(), 0)], Duration::from_millis(100)).unwrap();
-        // Nobody answers the first request in time: the call fails, and nothing is latched.
+            Client::waiting(daemon, vec![("udc0".into(), 0)], Duration::from_millis(50)).unwrap();
+        // The helper takes the request and answers it four waits later: the call waits for it,
+        // and the request is on the socket once.
+        let answering = std::thread::spawn(move || {
+            let mut line = [0u8; 10];
+            helper.read_exact(&mut line).unwrap();
+            assert_eq!(&line, b"setup 0 1\n");
+            helper.write_all(b"1 taken\n").unwrap();
+            std::thread::sleep(Duration::from_millis(220));
+            helper.write_all(b"1 ok no-serial\n").unwrap();
+            helper
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            let mut more = [0u8; 1];
+            assert!(helper.read(&mut more).is_err(), "asked again");
+            helper
+        });
+        assert_eq!(client.setup(0).unwrap(), SerialString::Absent);
+        drop(answering.join().unwrap());
+    }
+
+    #[test]
+    fn a_request_that_went_with_a_helper_that_ended_fails_and_the_next_is_served_by_the_new_one() {
+        let (daemon, mut helper) = UnixStream::pair().unwrap();
+        let mut client =
+            Client::waiting(daemon, vec![("udc0".into(), 0)], Duration::from_millis(50)).unwrap();
+        // The helper took the request and ended; the new one says it started, and never answers
+        // the request it never saw.
+        let restarting = std::thread::spawn(move || {
+            let mut line = [0u8; 10];
+            helper.read_exact(&mut line).unwrap();
+            assert_eq!(&line, b"setup 0 1\n");
+            helper.write_all(b"1 taken\n").unwrap();
+            std::thread::sleep(Duration::from_millis(120));
+            helper.write_all(b"0 started\n").unwrap();
+            helper
+        });
         let first = client.setup(0).unwrap_err();
-        assert_eq!(first.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(first.kind(), io::ErrorKind::Interrupted);
+        assert!(first.to_string().contains("started again"), "{first}");
         assert!(client.dead.is_none());
-        // The restarted helper reads the old request, and answers it late, then the new one.
-        let mut line = [0u8; 10];
-        helper.read_exact(&mut line).unwrap();
-        assert_eq!(&line, b"setup 0 1\n");
+        let mut helper = restarting.join().unwrap();
+        // A late answer to the old request, then the new one's: the call finds its own.
         helper.write_all(b"1 fail 11 late\n").unwrap();
-        // The second call finds its own number past the stale answer.
         let answering = std::thread::spawn(move || {
             let mut request = [0u8; 9];
             helper.read_exact(&mut request).unwrap();
             assert_eq!(&request, b"bind 0 2\n");
             helper.write_all(b"2 ok\n").unwrap();
+            helper
+        });
+        client.bind(0).unwrap();
+        drop(answering.join().unwrap());
+        // A request still in the socket when the helper started again is the new one's to answer.
+        let (daemon, mut helper) = UnixStream::pair().unwrap();
+        let mut client =
+            Client::waiting(daemon, vec![("udc0".into(), 0)], Duration::from_millis(50)).unwrap();
+        let answering = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            helper.write_all(b"0 started\n").unwrap();
+            let mut line = [0u8; 9];
+            helper.read_exact(&mut line).unwrap();
+            assert_eq!(&line, b"bind 0 1\n");
+            helper.write_all(b"1 taken\n1 ok\n").unwrap();
             helper
         });
         client.bind(0).unwrap();
@@ -1237,7 +1431,19 @@ mod tests {
     fn stand_in(dir: &Path, controller: &str) -> (PathBuf, PathBuf, PathBuf) {
         let (configfs, mounts, udc) = (dir.join("config"), dir.join("usb-ffs"), dir.join("udc"));
         std::fs::create_dir_all(&configfs).unwrap();
-        std::fs::create_dir_all(udc.join(controller)).unwrap();
+        // As the kernel lists a controller: a relative link into the devices' tree.
+        let device = dir.join("devices/platform/udc").join(controller);
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(device.join("soft_connect"), b"").unwrap();
+        std::fs::create_dir_all(&udc).unwrap();
+        // A second stand-in over the same folder finds the entry there already.
+        if std::fs::symlink_metadata(udc.join(controller)).is_err() {
+            std::os::unix::fs::symlink(
+                format!("../devices/platform/udc/{controller}"),
+                udc.join(controller),
+            )
+            .unwrap();
+        }
         (configfs, mounts, udc)
     }
 
@@ -1440,6 +1646,8 @@ mod tests {
         for verb in [
             Verb::Setup,
             Verb::Bind,
+            Verb::Disconnect,
+            Verb::Connect,
             Verb::Unbind,
             Verb::Teardown,
             Verb::Setup,
@@ -1461,6 +1669,8 @@ mod tests {
                     Verb::Bind => system.bind(gadget),
                     Verb::Unbind => system.unbind(gadget),
                     Verb::Teardown => system.teardown(gadget),
+                    Verb::Connect => system.soft_connect(gadget, true),
+                    Verb::Disconnect => system.soft_connect(gadget, false),
                 };
                 0
             })
@@ -1491,8 +1701,8 @@ mod tests {
         drop(helper);
         let mut replies = String::new();
         daemon.read_to_string(&mut replies).unwrap();
-        assert_eq!(replies.lines().count(), 2, "{replies}");
-        assert!(replies.starts_with("1 ok\n0 refused"), "{replies}");
+        assert_eq!(replies.lines().count(), 3, "{replies}");
+        assert!(replies.starts_with("1 taken\n1 ok\n0 refused"), "{replies}");
         // A call the list does not allow: the child is killed before it runs.
         let forbidden = seccomp::run_forked(|| {
             // The child dies on purpose: no core dump, so no crash handler starts for it.

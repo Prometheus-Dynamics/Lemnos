@@ -11,7 +11,9 @@
 //! of the gadget and takes it back (`UDC` cleared and set) leaves the pair the same, so the hold and the
 //! comm core's stream on it are kept: the comm core's reader retries an endpoint that is down (its
 //! `ESHUTDOWN` and `EAGAIN`), and a new host's HELLO begins a new session on the same stream (C57). The
-//! gadget's state is still watched and logged. Failures wait at 1 s, doubling, capped at 8 s, and never
+//! gadget's state is still watched and logged. A restart of lemnosd does not end the hold either: the
+//! daemon keeps END's write end in the service manager's store with the gadget's files, so END stays
+//! open, the watch is made again on the next daemon, and the host's session goes on after a stall. Failures wait at 1 s, doubling, capped at 8 s, and never
 //! give up.
 
 use std::os::fd::{AsFd, OwnedFd};
@@ -130,8 +132,10 @@ pub fn hold(config: &Config, link: &Link) -> Result<(), String> {
     lemnos
         .usb_endpoints_release(index)
         .or_else(|error| match error {
-            // Already ended by the service when the hold went.
-            Error::Refused { .. } => Ok(()),
+            // Already ended by the service when the hold went; or the hold was a daemon's before
+            // this one, which this connection never had and the daemon ends itself; or there is
+            // no daemon to tell right now, and the next one ends a hold that is over by itself.
+            Error::Refused { .. } | Error::Disconnected => Ok(()),
             other => Err(format!("releasing the endpoints: {other}")),
         })?;
     if over {

@@ -17,6 +17,10 @@
 //! - the same name and a different content, with every part of a kind this module makes: when it
 //!   is unbound it is taken down and made again; when it is bound it is left, and the setup fails
 //!   with `EBUSY` and says so;
+//! - whatever is made again, a network function that is the board file's (its addresses and its
+//!   name's template) is kept, unlinked and linked again: the kernel's network device lives as long
+//!   as the function's directory, so the interface keeps its name and index for everything on the
+//!   board that matches it. Only a network function that differs from the board file is made anew;
 //! - a part this module never makes (a function other than `ffs.NAME`, `ncm.usb0` or `acm.GS0`, a
 //!   configuration not named `c.N`): the tree is not the helper's. It is left alone and the setup
 //!   fails with `EEXIST`, naming the part.
@@ -571,6 +575,29 @@ impl Trees {
         Ok(())
     }
 
+    /// Writes `connect` or `disconnect` to the controller's `soft_connect`. With a gadget bound
+    /// it goes through the core's `usb_gadget_disconnect` or `usb_gadget_connect` to the
+    /// controller's pullup, so a host that held the gadget sees the device go (see
+    /// [`REBIND_GAP`]).
+    ///
+    /// # Errors
+    ///
+    /// The name is not a controller's, the controller's directory cannot be found from its class
+    /// entry ([`controller_dir`]), or the kernel refuses the write.
+    pub fn soft_connect(&mut self, udc_name: &str, connect: bool) -> io::Result<()> {
+        let root = self.roots.udc_class.clone();
+        let g = self.gadget(udc_name)?;
+        let controller = controller_dir(g.udc_class, &root, &g.name)?;
+        controller.write(
+            "soft_connect",
+            if connect {
+                b"connect".as_slice()
+            } else {
+                b"disconnect".as_slice()
+            },
+        )
+    }
+
     /// Takes the gadget down: unbinds it, removes its configurations and functions, and unmounts
     /// its FunctionFS. A mount that is not there is not an error.
     ///
@@ -582,7 +609,7 @@ impl Trees {
         if let Ok(dir) = g.gadgets.open_dir(&g.dir_name()) {
             let _ = dir.write("UDC", b"\n");
             dismantle(&dir);
-            remove_functions(&dir, &g.function_name(), false);
+            remove_functions(&dir, &g.function_name(), false, false);
         }
         match g.mounts.open_handle(&g.name) {
             Ok(mount) => match system.unmount(&mount.proc_path()) {
@@ -764,26 +791,10 @@ fn classify(
         return different("the functions differ");
     }
     for function in functions {
-        if let GadgetFunction::Ncm {
-            host,
-            device,
-            ifname,
-        } = function
-        {
+        if matches!(function, GadgetFunction::Ncm { .. }) {
             let ncm = function_root.open_dir(NCM_DIR)?;
-            if !holds(&ncm, "host_addr", &mac_text(host))
-                || !holds(&ncm, "dev_addr", &mac_text(device))
-            {
-                return different("the NCM addresses differ");
-            }
-            if let Some(name) = ifname {
-                // An `ifname` the kernel has rewritten (`lemnos%d` became `lemnos0`) is the kernel's.
-                let has = read_text(&ncm, "ifname").unwrap_or_default();
-                let template = name.as_str();
-                let stem = template.split('%').next().unwrap_or(template);
-                if !has.starts_with(stem) {
-                    return different("the NCM interface name differs");
-                }
+            if let Err(why) = network_is(&ncm, function) {
+                return different(why);
             }
         }
     }
@@ -805,6 +816,50 @@ fn classify(
         };
     }
     Ok(Found::Same)
+}
+
+/// Whether the network function `ncm` is the one `network` describes: its addresses, and a name the
+/// template gave or would give (an `ifname` the kernel has rewritten, `lemnos%d` become `lemnos0`, is
+/// the kernel's). Otherwise what differs.
+fn network_is(ncm: &Dir, network: &GadgetFunction) -> Result<(), &'static str> {
+    let GadgetFunction::Ncm {
+        host,
+        device,
+        ifname,
+    } = network
+    else {
+        return Err("the function is not a network function");
+    };
+    if !holds(ncm, "host_addr", &mac_text(host)) || !holds(ncm, "dev_addr", &mac_text(device)) {
+        return Err("the NCM addresses differ");
+    }
+    if let Some(name) = ifname {
+        let has = read_text(ncm, "ifname").unwrap_or_default();
+        let template = name.as_str();
+        let stem = template.split('%').next().unwrap_or(template);
+        if !has.starts_with(stem) {
+            return Err("the NCM interface name differs");
+        }
+    }
+    Ok(())
+}
+
+/// Whether the gadget's tree has the network function `functions` asks for, as it asks for it: a
+/// remake keeps it. The kernel's network device lives as long as the function's directory (f_ncm
+/// registers it at the first bind and unregisters it only when the directory goes), so a function
+/// kept is the same interface, name and index, to everything on the board that matched it; a
+/// function made again is a new device the kernel names afresh.
+fn network_kept(gadget: &Dir, functions: &[GadgetFunction]) -> bool {
+    let Some(network) = functions
+        .iter()
+        .find(|f| matches!(f, GadgetFunction::Ncm { .. }))
+    else {
+        return false;
+    };
+    gadget
+        .open_dir("functions")
+        .and_then(|functions| functions.open_dir(NCM_DIR))
+        .is_ok_and(|ncm| network_is(&ncm, network).is_ok())
 }
 
 /// Removes `name` of `parent` and what is under it: files and links, and directories the setup made
@@ -941,16 +996,19 @@ fn dismantle(gadget: &Dir) {
 }
 
 /// Removes the function directories the setup makes, after the configurations are gone. With
-/// `reuse` the FunctionFS directory stays, with its mount.
-fn remove_functions(gadget: &Dir, ffs: &str, reuse: bool) {
+/// `reuse` the FunctionFS directory stays, with its mount; with `keep_network` the network
+/// function stays, with its network device ([`network_kept`]).
+fn remove_functions(gadget: &Dir, ffs: &str, reuse: bool, keep_network: bool) {
     let Ok(functions) = gadget.open_dir("functions") else {
         return;
     };
-    let names: Vec<&str> = if reuse {
-        vec![NCM_DIR, ACM_DIR]
-    } else {
-        vec![ffs, NCM_DIR, ACM_DIR]
-    };
+    let mut names: Vec<&str> = vec![ACM_DIR];
+    if !reuse {
+        names.push(ffs);
+    }
+    if !keep_network {
+        names.push(NCM_DIR);
+    }
     for name in names {
         remove_dir_of(&functions, name);
     }
@@ -1009,14 +1067,16 @@ fn make(
         .mounts
         .open_handle(&g.name)
         .is_ok_and(|m| system.mounted(&m));
+    let mut keep_network = false;
     if let Ok(dir) = g.gadgets.open_dir(&g.dir_name()) {
         let _ = dir.write("UDC", b"\n");
+        keep_network = network_kept(&dir, functions);
         dismantle(&dir);
         if !reuse && let Ok(mount) = g.mounts.open_handle(&g.name) {
             // `unmount` of a point that isn't mounted fails, which is the state a fresh image is in.
             let _ = system.unmount(&mount.proc_path());
         }
-        remove_functions(&dir, &g.function_name(), reuse);
+        remove_functions(&dir, &g.function_name(), reuse, keep_network);
     }
 
     g.gadgets.ensure_dir(&g.dir_name(), 0o755)?;
@@ -1077,7 +1137,9 @@ fn make(
                 device,
                 ifname,
             } => {
-                make_network(&functions_dir, host, device, ifname.as_ref())?;
+                if !keep_network {
+                    make_network(&functions_dir, host, device, ifname.as_ref())?;
+                }
                 links.push(NCM_DIR.to_string());
             }
             GadgetFunction::Acm => {
@@ -1104,4 +1166,42 @@ fn make(
         gadget.set_mode("UDC", 0o600)?;
     }
     Ok(())
+}
+
+/// The controller `name`'s own directory, from its entry in the controllers' directory (`root`,
+/// opened as `class`). The kernel's entry is a relative link into `/sys/devices`: it is read, not
+/// followed. Only `..` may lead it, every part after is one plain entry name, and the last is the
+/// controller's own name; the directory it names is opened with no link as its last part. An entry
+/// that is a directory (a stand-in tree) is opened as it is.
+///
+/// # Errors
+///
+/// No such entry (`ENOENT`), or a link of another shape (`EINVAL`).
+pub(super) fn controller_dir(class: &Dir, root: &std::path::Path, name: &str) -> io::Result<Dir> {
+    match class.kind(name)? {
+        Kind::Dir => class.open_dir(name),
+        Kind::Symlink => {
+            let link = class.read_link(name)?;
+            let mut path = root.to_path_buf();
+            let mut down = false;
+            let mut last = None;
+            for part in link.split('/') {
+                if part == ".." && !down {
+                    if !path.pop() {
+                        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+                    }
+                    continue;
+                }
+                lemnos_linux_sys::confined::check_name(part)?;
+                down = true;
+                path.push(part);
+                last = Some(part);
+            }
+            if last != Some(name) {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            Dir::open_path(&path)
+        }
+        _ => Err(io::Error::from_raw_os_error(libc::ENOENT)),
+    }
 }

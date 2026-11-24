@@ -319,6 +319,17 @@ fn main() -> ExitCode {
         let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
     }
     privilege::refuse(&mut board_file, &root.refused);
+    // Without a root phase, the gadgets' files the service manager kept are taken here; any other
+    // descriptor it passed stays open as it was.
+    if !dropped {
+        for (name, fd) in lemnos_linux_sys::listen::take() {
+            if lemnos_linux::is_kept_name(&name) || lemnosd::ends::is_end_name(&name) {
+                root.kept_gadgets.push((name, fd));
+            } else {
+                std::mem::forget(fd);
+            }
+        }
+    }
     // The gadget helper the root phase forked, if the board has a gadget: the daemon's end, with the
     // gadgets' indexes in it.
     let gadget_helper: Option<GadgetHelper> = root.helper.take().map(|client| {
@@ -338,6 +349,18 @@ fn main() -> ExitCode {
     for line in packages.lines() {
         let _ = complain(&line);
     }
+    // Where the gadgets park their sessions, when their files are kept in the manager's store.
+    let mut gadget_parking: Option<lemnos_linux::Parking> = None;
+    // The lends' END holds, kept in the same store (the descriptors passed under their names).
+    let (ends_given, gadgets_given) = lemnosd::ends::split(std::mem::take(&mut root.kept_gadgets));
+    let store = if sim {
+        None
+    } else {
+        lemnosd::notify_for_gadgets()
+    };
+    let ends = store
+        .clone()
+        .map(|store| lemnosd::ends::EndStore::new(store, ends_given));
     let config = Config {
         socket: PathBuf::from(socket),
         name: board_file.board.id.clone(),
@@ -346,14 +369,24 @@ fn main() -> ExitCode {
         backend: if sim {
             Box::new(SimBoard::new())
         } else {
-            Box::new(linux_board(gadget_helper.as_ref()))
+            let mut board = linux_board(gadget_helper.as_ref());
+            if let Some(store) = store {
+                for line in board.keep_gadgets(store, gadgets_given) {
+                    let _ = writeln!(std::io::stderr(), "lemnosd: {line}");
+                }
+                gadget_parking = Some(board.gadget_parking());
+            }
+            Box::new(board)
         },
         options: Options::default(),
     };
     if tracing {
         lemnosd::start_trace_line("host start begins: binds in board order");
     }
-    let started = Service::start_with_packages(config, packages);
+    let end_keeper = ends
+        .clone()
+        .map(|ends| ends as Arc<dyn lemnos_host::EndKeeper>);
+    let started = Service::start_keeping_ends(config, packages, end_keeper);
     if tracing {
         lemnosd::start_trace_line("host started: every bind made");
     }
@@ -361,6 +394,13 @@ fn main() -> ExitCode {
         Ok(service) => service,
         Err(error) => return complain(&error.to_string()),
     };
+    // Every board device took up its hold at start; one kept for a device this board no longer
+    // has is let go here, which ends that hold.
+    if let Some(ends) = &ends {
+        for line in ends.let_go_untaken() {
+            let _ = writeln!(std::io::stderr(), "lemnosd: {line}");
+        }
+    }
     // Hints only: without them devices still bind, when their retries come round.
     if !sim
         && let Some(hints) = BoardHints::open(names.iter().map(String::as_str))
@@ -374,13 +414,17 @@ fn main() -> ExitCode {
     if let Err(error) = wait_for_signal(&signals) {
         let _ = complain(&format!("waiting for a signal: {error}"));
     }
-    service.stop();
-    // Stopping takes the gadgets down: unbound, their trees removed, their mounts unmounted. Then
-    // the helper ends with the daemon's end of its socket.
-    if let Some((client, _)) = &gadget_helper
-        && let Ok(mut client) = client.lock()
-    {
-        client.teardown_all();
+    // A gadget whose files the service manager keeps stays bound through the stop, for the next
+    // daemon; the tree is never taken down here. Without a manager (a BusyBox init: no
+    // NOTIFY_SOCKET, so no parking) nothing is kept: the stop takes the gadget off its controller
+    // and closes its files, and the next start sets it up again, as a first start.
+    if let Some(parking) = &gadget_parking {
+        parking.stopping();
     }
+    if let Some(ends) = &ends {
+        ends.stopping();
+    }
+    service.stop();
+    std::mem::drop(gadget_helper);
     ExitCode::SUCCESS
 }

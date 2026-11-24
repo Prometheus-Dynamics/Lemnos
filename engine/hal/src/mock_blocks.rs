@@ -1209,6 +1209,12 @@ struct UsbFunctionState {
     /// The controller let go: `next_event` fails until the function is enabled again.
     released: bool,
     refuse_enable: Option<ErrorKind>,
+    /// How many more `enable` calls answer `Busy` as still under way.
+    pending_enables: u32,
+    /// What [`UsbFunction::enable_pending`] says: the last `enable` was answered as under way.
+    enable_pending: bool,
+    /// How many times `disable` has been called.
+    disables: u32,
     /// What [`UsbFunction::enable_note`] says.
     enable_note: Option<&'static str>,
     /// The NCM interface's name the function reports once enabled.
@@ -1388,6 +1394,18 @@ impl MockUsbFunction {
         with(&self.state, |s| (s.parks, s.parked_dropped))
     }
 
+    /// Makes the next `count` calls to `enable` answer `Busy` with
+    /// [`UsbFunction::enable_pending`] saying the enable is under way, as a backend that sets the
+    /// function up off the caller's thread does.
+    pub fn pend_enables(&self, count: u32) {
+        with(&self.state, |s| s.pending_enables = count);
+    }
+
+    /// How many times `disable` has been called.
+    pub fn disables(&self) -> u32 {
+        with(&self.state, |s| s.disables)
+    }
+
     /// Makes `enable` fail with `kind` until this is called with `None`.
     pub fn refuse_enable(&self, kind: Option<ErrorKind>) {
         with(&self.state, |s| s.refuse_enable = kind);
@@ -1502,6 +1520,10 @@ impl UsbFunction for MockUsbFunction {
         with(&self.state, |s| s.enable_note)
     }
 
+    fn enable_pending(&self) -> bool {
+        with(&self.state, |s| s.enable_pending)
+    }
+
     fn serial_string_set(&mut self) -> Result<Option<bool>, ErrorKind> {
         with(&self.state, |s| {
             Ok(s.serial_string.filter(|_| s.descriptors.is_some()))
@@ -1531,6 +1553,11 @@ impl UsbFunction for MockUsbFunction {
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
         with(&self.state, |s| {
             s.took_up = None;
+            s.enable_pending = s.pending_enables > 0;
+            if s.enable_pending {
+                s.pending_enables -= 1;
+                return Err(ErrorKind::Busy);
+            }
             if s.parked.take().is_some() {
                 if s.descriptors.as_deref() == Some(descriptors) {
                     // Taken up as it is: what the host set up is told again, first.
@@ -1591,6 +1618,7 @@ impl UsbFunction for MockUsbFunction {
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
         let parked_here = self.parked_here.take();
+        with(&self.state, |s| s.disables += 1);
         with(&self.state, |s| match parked_here {
             // Parked by this handle: taken down only if nothing took it up.
             Some(park) => {

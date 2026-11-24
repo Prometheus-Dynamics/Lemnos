@@ -39,10 +39,11 @@ use lemnos_core::{
 use lemnos_hal::ErrorKind;
 
 pub use gadget::{
-    FunctionFsGadget, GadgetHelper, HELD_LIMIT, Mounts, Outcome, Owner, REBIND_GAP, Rebind, Roots,
-    SerialString, SharedHelper, SystemMounts, Trees, bind as bind_gadget, errno_of,
-    fault as gadget_fault, is_controller_name, prepare as prepare_gadget, prepare_for_helper,
-    teardown as teardown_gadget, unbind as unbind_gadget,
+    FdStore, FunctionFsGadget, GadgetHelper, HELD_LIMIT, Mounts, Outcome, Owner, Parking,
+    REBIND_GAP, Rebind, Roots, SerialString, SharedHelper, SystemMounts, Trees,
+    bind as bind_gadget, errno_of, fault as gadget_fault, is_controller_name, is_kept_name,
+    prepare as prepare_gadget, prepare_for_helper, teardown as teardown_gadget,
+    unbind as unbind_gadget,
 };
 pub use gpio::GpioLine;
 pub use i2c::I2cBus;
@@ -111,6 +112,30 @@ impl LinuxBoard {
     /// is made by the daemon itself, as before.
     pub fn use_gadget_helper(&mut self, helper: SharedHelper, gadgets: Vec<(String, u32)>) {
         self.gadget_helper = Some((helper, gadgets));
+    }
+
+    /// Keeps the bound gadgets' FunctionFS files in `store` across the daemon's restarts, and takes
+    /// up the ones a daemon before this one kept (`given`: what the store passed this process; the
+    /// descriptors that are not a gadget's are left out). Returns the daemon's log lines for them.
+    /// See `gadget/keep.rs`.
+    pub fn keep_gadgets(
+        &mut self,
+        store: Arc<dyn FdStore>,
+        given: Vec<(String, std::os::fd::OwnedFd)>,
+    ) -> Vec<String> {
+        self.parking.keep_in(store);
+        let known: Option<Vec<String>> = self
+            .gadget_helper
+            .as_ref()
+            .map(|(_, gadgets)| gadgets.iter().map(|(udc, _)| udc.clone()).collect());
+        self.parking.adopt_kept(given, known.as_deref())
+    }
+
+    /// Where the gadgets park their sessions: the daemon tells it when it is stopping
+    /// ([`Parking::stopping`]), so that kept gadgets stay bound for the next daemon.
+    #[must_use]
+    pub fn gadget_parking(&self) -> gadget::Parking {
+        self.parking.clone()
     }
 
     /// Opens the kernel module, so the buses it serves go through it and the rest stay stock. The

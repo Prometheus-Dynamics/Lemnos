@@ -849,6 +849,17 @@ pub trait UsbFunction {
     fn enable_note(&self) -> Option<&'static str> {
         None
     }
+    /// Whether the last [`enable`](Self::enable) began work the backend finishes off the caller's
+    /// thread (a privileged helper's answer, a bind the kernel takes its time over, a close that
+    /// waits for the kernel) and said `Busy` for it: the caller asks again later with the same
+    /// descriptors, and the call that finds the work done says how it went. Nothing is left
+    /// behind that the caller must undo, and the caller must not take a pending enable as a
+    /// failure: no [`disable`](Self::disable) in between (a `disable` undoes the work when it
+    /// ends). [`enable_note`](Self::enable_note) says what it waits on. `false` by default: a
+    /// backend whose enable never waits needs no change.
+    fn enable_pending(&self) -> bool {
+        false
+    }
     /// Parks the live session (the bound gadget, its `ep0` and endpoint files) for the next
     /// function opened on the same controller, and lets go of the controller, so that function
     /// can be opened while this one still exists. Its [`enable`](Self::enable) with the same
