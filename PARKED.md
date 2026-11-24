@@ -7,10 +7,6 @@ leaves this file when its work is merged, or when it is dropped.
 - `I2b2-6`: the sys crates are on the shared ring's form, but the kernel module's own stream ring
   (`LEMNOS_RING_*` in `kernel/lemnos.h`) is still the old form. The daemon reads that ring through
   its own path until the kernel side moves, which is what the reference board uses.
-- `I6d`: a detached run's job survives the bridge's own session loss. It needs the Orion side's
-  persisted runs first; half of it on our side alone is worse than none. Blocked on Orion's work.
-- `STANDIN`: test doubles that pass where the real object fails. One failing-like-the-real-thing
-  case each is wanted. It can wait until the camera path is board-proven.
 - `R2-PREV`: the Pi "previous before flashing" mode. The simulated test and its record have landed
   (`testing/board-runs/R2-PREV.md`); the board check is not run, and waits for the first reference-board
   image. Until then the previous-file path is marked sim-only.

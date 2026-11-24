@@ -27,11 +27,13 @@ row removes the possibility; it is not shown to be the cause.
 1. Image with this row. Link up, a session connected, the comm core holding the pair.
 2. `systemctl restart lemnosd`. Keep traffic going on NCM and the pair for 120 s.
 3. Record, to `/data` (the journal is RAM-only): the helper's lines (`lemnosd-gadget: gadget ...:
-   bound again after it was ...: UDC was clear for N ms`), every one of them with its time; the
-   capture list below at 0, 30, 60 and 120 s.
-4. Pass: the link carries traffic at 120 s, and every `bound again` line has `clear for` at
-   least 500 ms. Expected after such a restart: one line, `after it was adopted` (or `taken
-   over`), with `clear for` in the thousands. A `bound again after it was unbound` line more than a few seconds after the
+   bound again after it was ... (UDC clear for N ms)`) and the daemon's (`gadget ...: bound, then
+   off the bus for 500 ms (soft_connect)` or `the controller's pullup cannot be taken off`), every
+   one of them with its time; the capture list below at 0, 30, 60 and 120 s.
+4. Pass: the link carries traffic at 120 s, every `bound again` line is followed by an `off the
+   bus for 500 ms` line, and the host's kernel log shows one disconnect and one enumeration for
+   it. Expected after a restart the store did not cover: one pair, `after it was adopted` (or
+   `taken over`). A restart the store covers shows none (GADGET-KEEP). A `bound again after it was unbound` line more than a few seconds after the
    restart is a second enable: record what the daemon said just before it.
 5. Ten restarts.
 

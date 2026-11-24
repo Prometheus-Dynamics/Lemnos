@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use lemnos_linux_sys::usbfs::UsbfsFile;
+use lemnos_linux_sys::usbfs::{ControlSetup, UsbfsFile};
 use orion_connect::{Options, Roles, Session};
 use orion_msg_session::{Ping, Pong};
 use orion_wire::{Decode, StreamDecoder, kind};
@@ -38,7 +38,18 @@ struct Pongs {
 /// test-only knob for the order of the host's hello and the bridge's re-offer after a bounce.
 /// `pace`, when not zero, is the time between round trips, each of which is said as `ROUND` and
 /// its number: a session that lasts, so the check can stop the daemon's driver while it runs.
+/// `rounds` of 0 runs until stdin ends: a session as long as the check needs, ended by it.
 pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
+    let open_ended = rounds == 0;
+    let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if open_ended {
+        let ended = Arc::clone(&ended);
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            ended.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+    let rounds = if open_ended { u64::MAX } else { rounds };
     let (usb, path) = match open_and_claim(Duration::from_secs(60)) {
         Ok(claimed) => claimed,
         Err(error) => {
@@ -117,7 +128,12 @@ pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
         welcomed.heartbeat
     );
 
+    let mut done = 0;
     for round in 0..rounds {
+        if ended.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        done = round + 1;
         let now_ms = BASE + round;
         if let Err(error) = session.send(&Ping { now_ms }) {
             say!("FAIL host: ping {round} not sent: {error:?}");
@@ -154,8 +170,28 @@ pub fn run(rounds: u64, hello_after: Duration, pace: Duration) -> bool {
             }
         }
     }
-    say!("ok   host: {rounds} ping and pong round trips with the node");
+    say!("ok   host: {done} ping and pong round trips with the node");
     true
+}
+
+/// A vendor control request, IN, to the link's interface (which the function behind it,
+/// FunctionFS, hands its daemon as a setup event), sent once: how long the host waited for its
+/// end, and what that end was. The interface must not be claimed by another file of the host's.
+pub fn control_request(timeout_ms: u32) -> Result<(Duration, std::io::Result<usize>), String> {
+    let path = find_device(Duration::from_secs(10)).ok_or("the host sees the gadget on the bus")?;
+    let usb =
+        UsbfsFile::open(&path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let setup = ControlSetup {
+        // IN, vendor, interface.
+        request_type: 0xc1,
+        request: 0x4c,
+        value: 0,
+        index: u16::from(LINK_INTERFACE),
+    };
+    let mut answer = [0u8; 8];
+    let sent = Instant::now();
+    let got = usb.control_in(setup, &mut answer, timeout_ms);
+    Ok((sent.elapsed(), got))
 }
 
 /// Decodes the frames of the IN direction as they pass, and notes the pongs.

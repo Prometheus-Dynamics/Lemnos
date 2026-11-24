@@ -56,10 +56,12 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=restart
 # The file descriptor store keeps the hardware watchdog's descriptor across a restart (docs/slots.md,
 # "The watchdog chain", window 5). lemnosd stores the one its root phase opened and fed, and the next start
-# takes it back and feeds nothing: opening a running watchdog feeds it. The store is emptied by a stop, so
-# a start after one is the first start. It is not kept across a failed unit (the watchdog then resets the
-# board). Four is more than any board's keep-alive watchdogs.
-FileDescriptorStoreMax=4
+# takes it back and feeds nothing: opening a running watchdog feeds it. It also keeps each bound USB
+# gadget's FunctionFS files, so a restart leaves the gadget on the bus and its network link up
+# (docs/daemon.md, "The USB gadget across a restart"). The store is emptied by a stop, so a start after one is
+# the first start. It is not kept across a failed unit (the watchdog then resets the board). 64 holds the
+# keep-alive watchdogs and a gadget's record, ep0 and every endpoint file FunctionFS allows (30).
+FileDescriptorStoreMax=64
 
 # Stop is for shutdown only. It drops every driver; the hardware watchdog then reboots a board that
 # is still running, so the unit is never stopped on a live board. The stop bound is under the shortest

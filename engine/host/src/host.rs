@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
@@ -668,6 +668,10 @@ struct Slot {
     open_jobs: AtomicU32,
     /// The END descriptor of the hold the caller has, if it was lent with one. See [`EndHold`].
     end: Mutex<Option<EndHold>>,
+    /// Where END holds are kept across a restart, if anywhere ([`EndKeeper`]).
+    keeper: OnceLock<Arc<dyn EndKeeper>>,
+    /// The hold is one taken up from the process before: the first tick says whether it goes on.
+    before: AtomicBool,
     /// The caller an END hold was lent to and has not given up, for a switch-off to wait on (see
     /// [`Host::off`]), with the condition its release signals.
     lent_to: Mutex<Option<CallerId>>,
@@ -692,9 +696,28 @@ struct Slot {
 /// which is how the host tells the holder the hold is over for good.
 struct EndHold {
     caller: CallerId,
-    read: OwnedFd,
-    /// Kept open, and never written to: dropping it is what ends the hold for the holder.
-    _write: OwnedFd,
+    /// The read end copies are made from. `None` for a hold taken up from the process before
+    /// ([`CallerId::BEFORE`]): its holder has its copies, and nobody here asks for more.
+    read: Option<OwnedFd>,
+    /// Kept open, and never written to: dropping it (and every copy an [`EndKeeper`] keeps) is
+    /// what ends the hold for the holder.
+    write: OwnedFd,
+}
+
+/// Where the write end of each END hold is kept while the process that runs the host restarts,
+/// so the holder's END does not read EOF across the restart and its link goes on: lemnosd gives
+/// the service manager's descriptor store. The next process takes the kept write end back
+/// ([`EndKeeper::take`]) and the hold is its, as [`CallerId::BEFORE`]'s, once the device's first
+/// tick says the link was taken up as it was ([`Driver::took_up_link`]); otherwise it ends there.
+pub trait EndKeeper: Send + Sync {
+    /// A hold on `device` began: a copy of `write` is kept for the next process.
+    fn keep(&self, device: &str, write: BorrowedFd<'_>);
+    /// The hold on `device` is over for good: its kept copy goes, so END reads EOF.
+    fn let_go(&self, device: &str);
+    /// The write end the process before kept for `device`, taken once. `None` when it kept none.
+    fn take(&self, device: &str) -> Option<OwnedFd>;
+    /// Whether every read end of the pipe `write` belongs to has closed: the holder has gone.
+    fn readers_gone(&self, write: BorrowedFd<'_>) -> bool;
 }
 
 /// How long a switch-off waits for the holder of an END hold to give it up once END is closed.
@@ -948,6 +971,8 @@ impl Slot {
             hung: AtomicBool::new(false),
             in_tick: AtomicBool::new(false),
             end: Mutex::new(None),
+            keeper: OnceLock::new(),
+            before: AtomicBool::new(false),
             lent_to: Mutex::new(None),
             released: Condvar::new(),
             kept: Mutex::new(None),
@@ -991,17 +1016,65 @@ impl Slot {
             if hold.caller != caller {
                 return Err(Status::BUSY);
             }
-            return hold.read.try_clone().map_err(|_| Status::IO);
+            return hold
+                .read
+                .as_ref()
+                .ok_or(Status::BUSY)?
+                .try_clone()
+                .map_err(|_| Status::IO);
         }
         let (read, write) = std::io::pipe().map_err(|_| Status::IO)?;
         let read = OwnedFd::from(read);
         let copy = read.try_clone().map_err(|_| Status::IO)?;
+        let write = OwnedFd::from(write);
+        if let Some(keeper) = self.keeper.get() {
+            keeper.keep(&self.spec.id, write.as_fd());
+        }
         *held = Some(EndHold {
             caller,
-            read,
-            _write: OwnedFd::from(write),
+            read: Some(read),
+            write,
         });
         Ok(copy)
+    }
+
+    /// Ends the hold, if there is one: its write end goes, and the copy kept for the next process.
+    fn drop_end(held: &mut Option<EndHold>, keeper: Option<&Arc<dyn EndKeeper>>, id: &str) {
+        if held.take().is_some()
+            && let Some(keeper) = keeper
+        {
+            keeper.let_go(id);
+        }
+    }
+
+    /// Takes up the hold the process before kept for this device, if it kept one: the hold is
+    /// [`CallerId::BEFORE`]'s until the first tick says whether the link was taken up as it was.
+    fn take_up_end(&self) {
+        let Some(keeper) = self.keeper.get() else {
+            return;
+        };
+        let Some(write) = keeper.take(&self.spec.id) else {
+            return;
+        };
+        *lock(&self.end) = Some(EndHold {
+            caller: CallerId::BEFORE,
+            read: None,
+            write,
+        });
+        *lock(&self.lent_to) = Some(CallerId::BEFORE);
+        self.before.store(true, Ordering::Release);
+    }
+
+    /// Whether the hold is one the process before lent and every copy of its END has closed:
+    /// the holder went while no hold was asked of it here.
+    fn before_orphaned(&self) -> bool {
+        let held = lock(&self.end);
+        match (held.as_ref(), self.keeper.get()) {
+            (Some(hold), Some(keeper)) if hold.caller == CallerId::BEFORE => {
+                keeper.readers_gone(hold.write.as_fd())
+            }
+            _ => false,
+        }
     }
 
     /// Ends the hold END belongs to, if `caller` has one: the write end goes, so every copy of
@@ -1009,7 +1082,7 @@ impl Slot {
     fn end_close_for(&self, caller: CallerId) {
         let mut held = lock(&self.end);
         if held.as_ref().is_some_and(|hold| hold.caller == caller) {
-            *held = None;
+            Self::drop_end(&mut held, self.keeper.get(), &self.spec.id);
         }
         drop(held);
         self.holder_released(caller);
@@ -1074,7 +1147,16 @@ impl Slot {
 
     /// Ends whatever hold has an END descriptor, whoever has it.
     fn end_close(&self) {
-        *lock(&self.end) = None;
+        let mut held = lock(&self.end);
+        let caller = held.as_ref().map(|hold| hold.caller);
+        Self::drop_end(&mut held, self.keeper.get(), &self.spec.id);
+        drop(held);
+        // A hold taken up from the process before has no connection to give it up: it is given
+        // up here, whether its first tick came or not.
+        let before = self.before.swap(false, Ordering::AcqRel);
+        if before || caller == Some(CallerId::BEFORE) {
+            self.holder_released(CallerId::BEFORE);
+        }
     }
 
     fn tracks_callers(&self) -> bool {
@@ -1158,6 +1240,8 @@ struct Rule {
 struct Inner {
     /// The board file's `[board] id`, given to every driver as it binds.
     board: String,
+    /// Where END holds are kept across a restart, if anywhere.
+    keeper: Option<Arc<dyn EndKeeper>>,
     /// The daemon's package version, given to every driver as it binds.
     daemon_version: &'static str,
     /// Devices are only ever added, so a device's index stays its own.
@@ -2096,6 +2180,9 @@ impl Inner {
                 return;
             };
             let slot = Arc::new(slot);
+            if let Some(keeper) = &self.keeper {
+                let _ = slot.keeper.set(Arc::clone(keeper));
+            }
             // Its streams are there before anyone can find the device.
             self.streams.add(index, &slot.spec);
             slots.push(Arc::clone(&slot));
@@ -2330,23 +2417,41 @@ impl Inner {
 
     /// The new instance's first tick has run: the instance kept across the rebind goes, and the
     /// holder's pair is lent to the new one. A lend that fails ends the hold.
+    ///
+    /// The same for a hold taken up from the process before ([`EndKeeper`]): its holder is
+    /// [`CallerId::BEFORE`], and its link went on only if the new instance took it up as it was.
     fn relend_after_rebind(&self, slot: &Slot, instance: &mut dyn Instance) {
-        let Some(kept) = lock(&slot.kept).take() else {
+        let (holder, what) = if let Some(kept) = lock(&slot.kept).take() {
+            let holder = kept.holder;
+            drop(catch_unwind(AssertUnwindSafe(move || drop(kept))));
+            (holder, "the link kept across the rebind")
+        } else if slot.before.swap(false, Ordering::AcqRel) {
+            (CallerId::BEFORE, "the hold the daemon before lent")
+        } else {
             return;
         };
-        let holder = kept.holder;
-        drop(catch_unwind(AssertUnwindSafe(move || drop(kept))));
         let taken = catch_unwind(AssertUnwindSafe(|| instance.took_up_link()))
             .unwrap_or(Err("the new instance panicked when asked"));
         if let Err(why) = taken {
             warn(|| {
                 format!(
-                    "device {} (driver {}): the link kept across the rebind is dropped: {why}; the hold ends",
+                    "device {} (driver {}): {what} is dropped: {why}; the hold ends",
                     slot.spec.id, slot.spec.driver
                 )
             });
             slot.end_close();
+            if holder == CallerId::BEFORE {
+                slot.holder_released(holder);
+            }
             return;
+        }
+        if holder == CallerId::BEFORE {
+            warn(|| {
+                format!(
+                    "device {} (driver {}): {what} is taken up: the holder's link goes on",
+                    slot.spec.id, slot.spec.driver
+                )
+            });
         }
         let lent = catch_unwind(AssertUnwindSafe(|| instance.endpoints(holder)));
         match lent {
@@ -2981,9 +3086,10 @@ impl Inner {
         let dead = old.take();
         drop(old);
         // An instance that parked the holder's link is kept, and the hold with it; one kept by the
-        // rebind before this bind keeps it too. Otherwise the hold ends here.
+        // rebind before this bind keeps it too; a hold taken up from the process before waits for
+        // the first tick of the instance this bind makes. Otherwise the hold ends here.
         let dead = dead.and_then(|dead| self.keep_for_rebind(&slot, dead));
-        if lock(&slot.kept).is_none() {
+        if lock(&slot.kept).is_none() && !slot.before.load(Ordering::Acquire) {
             slot.end_close();
         }
         slot.stop_wait();
@@ -3771,6 +3877,28 @@ impl Host {
         options: Options,
         allocator: Arc<dyn StreamAllocator>,
     ) -> core::result::Result<Self, HostError> {
+        Self::start_keeping(
+            daemon_version,
+            board,
+            drivers,
+            backend,
+            (clock, options),
+            allocator,
+            None,
+        )
+    }
+
+    /// [`Host::start_versioned`], with `keeper` keeping each END hold across a restart and
+    /// giving back the ones the process before kept, which are taken up before any device binds.
+    pub fn start_keeping(
+        daemon_version: &'static str,
+        board: &BoardFile,
+        drivers: &[DriverEntry],
+        backend: Box<dyn Provider + Send>,
+        (clock, options): (Arc<dyn HostClock>, Options),
+        allocator: Arc<dyn StreamAllocator>,
+        keeper: Option<Arc<dyn EndKeeper>>,
+    ) -> core::result::Result<Self, HostError> {
         let options = board.host.apply(options);
         let table: BTreeMap<_, _> = drivers
             .iter()
@@ -3832,6 +3960,12 @@ impl Host {
                 &security,
             )?));
         }
+        if let Some(keeper) = &keeper {
+            for slot in &slots {
+                let _ = slot.keeper.set(Arc::clone(keeper));
+                slot.take_up_end();
+            }
+        }
         let rules = each
             .iter()
             .zip(&each_refusals)
@@ -3850,6 +3984,7 @@ impl Host {
         // `shutdown` lets every device go.
         let inner: &'static Inner = Box::leak(Box::new(Inner {
             board: board.board.id.clone(),
+            keeper,
             daemon_version,
             slots: RwLock::new(slots),
             rules,
@@ -4131,6 +4266,7 @@ impl Host {
     /// `NOT_FOUND` for no such device.
     pub fn usb_endpoints(&self, caller: CallerId, device: u32) -> Result<[OwnedFd; 2]> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
+        self.release_orphaned(&slot);
         self.inner
             .on_lane_answer(slot, caller, "the endpoints' lend", move |instance| {
                 instance.endpoints(caller)
@@ -4146,6 +4282,7 @@ impl Host {
     /// END.
     pub fn usb_endpoints_end(&self, caller: CallerId, device: u32) -> Result<[OwnedFd; 3]> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
+        self.release_orphaned(&slot);
         let [out, input] = self.inner.on_lane_answer(
             Arc::clone(&slot),
             caller,
@@ -4155,6 +4292,27 @@ impl Host {
         let end = slot.end_for(caller)?;
         *lock(&slot.lent_to) = Some(caller);
         Ok([out, input, end])
+    }
+
+    /// A hold the daemon before lent whose holder has gone (every copy of its END closed) is
+    /// given up, so the pair can be lent again.
+    fn release_orphaned(&self, slot: &Arc<Slot>) {
+        if !slot.before_orphaned() {
+            return;
+        }
+        warn(|| {
+            format!(
+                "device {} (driver {}): the holder of the hold the daemon before lent has gone: the hold ends",
+                slot.spec.id, slot.spec.driver
+            )
+        });
+        let _ = self.inner.on_lane_answer(
+            Arc::clone(slot),
+            CallerId::BEFORE,
+            "the endpoints' release",
+            move |instance| instance.release_endpoints(CallerId::BEFORE),
+        );
+        slot.end_close_for(CallerId::BEFORE);
     }
 
     /// Gives up the endpoints `caller` holds on a device. `NOT_FOUND` if it holds none.

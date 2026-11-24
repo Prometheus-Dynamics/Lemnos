@@ -228,11 +228,19 @@ done
 accel=tcg
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=kvm; fi
 
+# The link check's daemon restarts with traffic on the board's network link (step 7): ten times in every
+# run, or LINK_CHECK_RESTARTS=N times.
+extra=""
+if [[ -n "${LINK_CHECK_RESTARTS:-}" ]]; then
+  [[ "$LINK_CHECK_RESTARTS" =~ ^[1-9][0-9]*$ ]] || { echo "LINK_CHECK_RESTARTS must be a positive number" >&2; exit 2; }
+  extra=" lemnos-qemu.link_restarts=$LINK_CHECK_RESTARTS"
+fi
+
 # boot [<word for the kernel command line>]: one guest, its console on standard output.
 boot() {
   timeout 600 qemu-system-x86_64 -accel "$accel" -cpu max -smp 2 -m 768 -nographic -no-reboot \
     -kernel "$KERNEL" -initrd "$work/initramfs" \
-    -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4 memmap=64K\$0x20000000 lemnos.serial=0123456789abcdef${1:+ $1}"
+    -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4 memmap=64K\$0x20000000 lemnos.serial=0123456789abcdef${1:+ $1}$extra"
 }
 
 # verdict <console log> <QEMU's status> <what the guest was asked for>: fails unless the guest's

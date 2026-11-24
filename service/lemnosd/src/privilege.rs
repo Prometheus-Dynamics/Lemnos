@@ -214,13 +214,21 @@ fn driver_root_phases(cx: &Context<'_>) -> io::Result<Refusals> {
 /// stored under it (`LISTEN_FDNAMES`).
 pub const WATCHDOG_STORE_NAME: &str = "lemnos-watchdog";
 
-/// Takes the watchdog descriptors the service manager kept for this process (`WATCHDOG_STORE_NAME`), as
-/// root before the drop. Any other descriptor the manager passed is closed here.
-fn stored_watchdogs() -> Vec<std::fs::File> {
-    lemnos_linux_sys::listen::take()
-        .into_iter()
-        .filter_map(|(name, fd)| (name == WATCHDOG_STORE_NAME).then(|| std::fs::File::from(fd)))
-        .collect()
+/// Takes the descriptors the service manager kept for this process, as root before the drop: the
+/// watchdogs (`WATCHDOG_STORE_NAME`), and the USB gadgets' FunctionFS files with their names
+/// (`lemnos_linux::is_kept_name`), which the daemon takes up after the drop. Any other descriptor the
+/// manager passed is closed here.
+fn stored() -> (Vec<std::fs::File>, Vec<(String, std::os::fd::OwnedFd)>) {
+    let mut watchdogs = Vec::new();
+    let mut gadgets = Vec::new();
+    for (name, fd) in lemnos_linux_sys::listen::take() {
+        if name == WATCHDOG_STORE_NAME {
+            watchdogs.push(std::fs::File::from(fd));
+        } else if lemnos_linux::is_kept_name(&name) || crate::ends::is_end_name(&name) {
+            gadgets.push((name, fd));
+        }
+    }
+    (watchdogs, gadgets)
 }
 
 /// Claims, as root, every node the board gives to the kernel module (`[[hardware]]` with `module`):
@@ -424,6 +432,9 @@ pub struct Started {
     /// The daemon's end of the gadget helper, which keeps root. `None` without a gadget, or when
     /// the start was not asked for one (the simulated board).
     pub helper: Option<crate::helper::Client>,
+    /// The USB gadgets' files the service manager kept for this start, with their names: the
+    /// gadgets a daemon before this one left bound.
+    pub kept_gadgets: Vec<(String, std::os::fd::OwnedFd)>,
 }
 
 /// Runs every step of `steps` in order, as root, and returns the devices they refused.
@@ -467,7 +478,7 @@ pub fn start(
         uid,
         gid,
     };
-    let mut stored = stored_watchdogs();
+    let (mut stored, kept_gadgets) = stored();
     let mut refused = run_steps(STEPS, &cx)?;
     let client = if helper {
         let (client, invalid) = crate::gadget::spawn(board, lemnos_linux::Owner { uid, gid })?;
@@ -518,6 +529,7 @@ pub fn start(
         refused,
         warnings,
         helper: client,
+        kept_gadgets,
     })
 }
 
