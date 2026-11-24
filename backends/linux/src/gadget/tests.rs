@@ -2809,21 +2809,23 @@ fn a_gadget_that_was_bound_is_kept_off_the_bus_for_the_gap_at_its_next_bind() {
 
     // Off and on again at once, as a driver that lets go and brings the function up does.
     fs::remove_file(&soft_connect).unwrap();
+    let counter = Arc::clone(&gadget.wired.gap_waits);
+    let waits = || counter.load(std::sync::atomic::Ordering::Relaxed);
     let before = std::time::Instant::now();
+    let waited_before = waits();
     gadget.disable().unwrap();
     settled(&gadget);
     assert_eq!(tree.attribute("UDC").trim(), "");
-    let disabled = before.elapsed();
+    // Counted, not timed: the disable's own time is its files' close, which waits on the
+    // kernel and stretches with the machine's load (280 ms seen in a loaded gate).
+    assert_eq!(waits(), waited_before, "the disable waited no gap");
     up(&mut gadget, &set()).unwrap();
     assert!(
         before.elapsed() >= gap,
         "on the bus again {:?} after the unbind began",
         before.elapsed()
     );
-    assert!(
-        disabled < gap / 2,
-        "the disable alone took {disabled:?}: the wait was the bind's"
-    );
+    assert_eq!(waits(), waited_before + 1, "the bind waited the gap, once");
     assert_eq!(tree.attribute("UDC").trim(), UDC);
     assert_eq!(fs::read_to_string(&soft_connect).unwrap(), "connect\n");
 
