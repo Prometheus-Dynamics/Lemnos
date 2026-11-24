@@ -572,10 +572,11 @@ const LemnosPackageDescriptor lemnos_package = {
 
     #[test]
     fn a_32_bit_package_from_the_real_linker_is_read() {
-        let dir = std::env::temp_dir().join(format!("lemnos-package-elf-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-package-elf-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let built = built_32_bit(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
         let Some(file) = built else {
             // No 32-bit compiler here: the crafted files above are the check.
             assert!(

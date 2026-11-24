@@ -19,7 +19,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use lemnos_client::{Client, DeviceState, Handle};
+use lemnos_client::{Client, DeviceState, Error, Handle};
 use lemnos_core::{Driver, Encode, Status, Writer};
 use lemnos_driver_system_slots::SystemSlots;
 use lemnos_firmware_check::sample;
@@ -47,7 +47,15 @@ const BIND_POLL: Duration = Duration::from_millis(200);
 fn wait_bound(client: &Client) -> Result<(), String> {
     let deadline = Instant::now() + BIND_WAIT;
     loop {
-        let entries = client.list().map_err(|e| format!("list: {e:?}"))?;
+        // No answer in time under load: the device is not known yet, so ask again until the bound.
+        let entries = match client.list() {
+            Ok(entries) => entries,
+            Err(Error::TimedOut) if Instant::now() < deadline => {
+                std::thread::sleep(BIND_POLL);
+                continue;
+            }
+            Err(e) => return Err(format!("list: {e:?}")),
+        };
         if entries
             .iter()
             .any(|e| e.name == "slots" && e.state == DeviceState::Running)

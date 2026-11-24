@@ -289,8 +289,10 @@ fn every_channel_can_run_at_once() {
 }
 
 /// A scratch `/sys` with one character device named `name` at `major:minor`.
-fn sys_with(name: &str, major: u32, minor: u32) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("rkvpss-sys-{}-{name}", std::process::id()));
+fn sys_with(name: &str, major: u32, minor: u32) -> lemnos_scratch::Scratch {
+    let root = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("rkvpss-sys-{}-{name}", std::process::id())),
+    );
     let dir = root.join(format!("dev/char/{major}:{minor}"));
     fs::create_dir_all(&dir).expect("mkdir");
     fs::write(dir.join("name"), format!("{name}\n")).expect("write");
@@ -314,8 +316,6 @@ fn only_the_offline_node_is_opened() {
     let empty =
         std::env::temp_dir().join(format!("rkvpss-sys-nothing-here-{}", std::process::id()));
     let unnamed = Node::open_in(&empty, Path::new("/dev/null"));
-    fs::remove_dir_all(&sys).expect("clean up");
-    fs::remove_dir_all(&other).expect("clean up");
 
     assert!(opened.is_ok());
     for refused in [refused, not_a_device, unnamed] {

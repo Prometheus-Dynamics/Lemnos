@@ -89,6 +89,12 @@ one thing it needs is named), **parked** (in `PARKED.md`).
 - [ ] `DTB-NAME-RUN-A` (blocked: a read-only board #2 session that can read the firmware DTB file name;
       `vclog` is not on the image).
 - [ ] `DAEMON-SECCOMP` (blocked: a read-only board #2 session for the two seccomp reads on the M2 image).
+- [ ] `HANG-UNDER-LOAD` (next; DEBT; after the speed batches): at load 160 the host's 2 s call deadline
+      declared a working device hung, abandoned it and rebound it (lander t8, a fan controller on
+      fakes), and the rebind reset the fan's slew: the new instance started at the curve. Under camera
+      load on a board the same false hang would reset real fan control. To settle: should the deadline
+      count only the time the call was runnable (its thread's run and run-queue time, not wall time),
+      or what load margin 2 s has on the board.
 
 ## Blocked
 

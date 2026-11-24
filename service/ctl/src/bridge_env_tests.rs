@@ -38,7 +38,9 @@ fn a_gadget_with_its_own_interfaces_offers_the_name_on_its_first_interface_line(
 
 #[test]
 fn the_name_is_read_from_an_interfaces_file() {
-    let dir = std::env::temp_dir().join(format!("lemnos-bridge-env-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-bridge-env-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("interfaces.txt");
     std::fs::write(&file, "interface 0xff 0 0 from-file\nendpoint in bulk\n").unwrap();
@@ -51,7 +53,6 @@ fn the_name_is_read_from_an_interfaces_file() {
         line_of(&text(&board, &crate::driver_manifests()).unwrap()),
         ["LEMNOS_ORION_LINKS=g=from-file"]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

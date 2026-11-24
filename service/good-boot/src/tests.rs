@@ -154,10 +154,14 @@ fn a_good_boot_at_the_start_is_good_at_zero_seconds() {
 
 #[test]
 fn the_real_probe_reads_the_booted_marker_from_the_data_partition() {
-    let dir = std::env::temp_dir().join(format!("lemnos-good-boot-test-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-good-boot-test-{}", std::process::id())),
+    );
     let slots = dir.join("board/slots");
     std::fs::create_dir_all(&slots).unwrap();
-    let mut probe = System { data: dir.clone() };
+    let mut probe = System {
+        data: dir.to_path_buf(),
+    };
     assert_eq!(probe.booted_marker(), "", "no marker yet");
     std::fs::write(slots.join("booted"), "os-3\n").unwrap();
     assert_eq!(probe.booted_marker(), "os-3");
@@ -165,5 +169,4 @@ fn the_real_probe_reads_the_booted_marker_from_the_data_partition() {
     std::fs::remove_file(slots.join("booted")).unwrap();
     std::fs::create_dir(slots.join("booted")).unwrap();
     assert_eq!(probe.booted_marker(), "");
-    std::fs::remove_dir_all(&dir).unwrap();
 }

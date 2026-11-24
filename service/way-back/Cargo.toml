@@ -19,3 +19,6 @@ path = "src/main.rs"
 # Lean on purpose: a static program an initramfs /init calls before the daemon exists. Plain std.
 [dependencies]
 lemnos-driver-rpi-firmware-sys = { path = "../../drivers/rpi-firmware-sys" }
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

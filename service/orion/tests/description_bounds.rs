@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use lemnos_client::{Client, DeviceState};
+use lemnos_client::{Client, DeviceState, Error};
 use lemnos_host::Options;
 use lemnos_host::board::parse;
 use lemnos_orion::{description, source};
@@ -70,10 +70,14 @@ fn every_built_in_drivers_description_keeps_the_bounds_through_the_text_form() {
     // The simulated devices bind with backoff: wait for them to run before describing them.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let list = client.list().unwrap();
-        let pending = list.iter().any(|d| {
-            simulated.iter().any(|(id, _)| *id == d.name) && d.state != DeviceState::Running
-        });
+        // No answer in time under load counts as not yet: ask again until the deadline.
+        let pending = match client.list() {
+            Ok(list) => list.iter().any(|d| {
+                simulated.iter().any(|(id, _)| *id == d.name) && d.state != DeviceState::Running
+            }),
+            Err(Error::TimedOut) => true,
+            Err(e) => panic!("list: {e:?}"),
+        };
         if !pending {
             break;
         }

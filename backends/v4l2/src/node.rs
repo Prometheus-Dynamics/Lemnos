@@ -140,13 +140,14 @@ mod tests {
 
     #[test]
     fn nodes_are_listed_by_number_from_a_directory() {
-        let dir = std::env::temp_dir().join(format!("lemnos-v4l2-nodes-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-v4l2-nodes-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         for name in ["video10", "video2", "videoX", "media0", "video"] {
             std::fs::write(dir.join(name), b"").unwrap();
         }
         let listed = list_nodes_in(&dir, "video");
-        std::fs::remove_dir_all(&dir).unwrap();
         let names: Vec<_> = listed
             .iter()
             .map(|p| p.file_name().unwrap().to_str().unwrap())

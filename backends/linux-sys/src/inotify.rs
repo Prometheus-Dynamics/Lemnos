@@ -124,7 +124,9 @@ mod tests {
 
     #[test]
     fn watches_a_directory() {
-        let dir = std::env::temp_dir().join(format!("lemnos-inotify-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-inotify-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let fd = init().unwrap();
         let wd = add_watch(fd.as_fd(), &dir, mask::CREATE | mask::DELETE).unwrap();
@@ -142,6 +144,5 @@ mod tests {
         let err = file.read(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
         rm_watch(file.as_fd(), wd).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

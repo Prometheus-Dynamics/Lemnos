@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_client::Client;
 use lemnos_core::{
-    Config as DriverConfig, ConfigError, Key, Kind, Lifecycle, Result, contract, driver,
+    Config as DriverConfig, ConfigError, Key, Kind, Lifecycle, Result, Status, contract, driver,
 };
 use lemnos_host::board::parse;
 use lemnos_host::entry;
@@ -114,7 +114,14 @@ fn a_periodic_driver_keeps_being_ticked() {
     let client = Client::connect(&socket, "test").unwrap();
     let mut ticker = client.open::<dyn Ticking>("t").unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
-    while ticker.fired().unwrap() < 5 {
+    loop {
+        match ticker.fired() {
+            Ok(fired) if fired >= 5 => break,
+            // No answer in time under load: ask again until the deadline.
+            Ok(_) => {}
+            Err(status) if status == Status::TIMED_OUT => {}
+            Err(status) => panic!("fired: {status:?}"),
+        }
         assert!(Instant::now() < deadline, "timed out");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -133,8 +140,16 @@ fn a_call_that_starts_timed_work_wakes_the_sleeping_loop() {
         std::thread::sleep(Duration::from_millis(30));
         let before = ONE_SHOTS.load(Ordering::Acquire);
         let start = Instant::now();
-        ticker.arm(5_000_000).unwrap();
         let deadline = start + Duration::from_secs(20);
+        // Setting the delay again is the same as setting it once (the driver keeps one slot), so
+        // an arm that got no answer in time under load is asked again.
+        loop {
+            match ticker.arm(5_000_000) {
+                Ok(()) => break,
+                Err(status) if status == Status::TIMED_OUT && Instant::now() < deadline => {}
+                Err(status) => panic!("arm: {status:?}"),
+            }
+        }
         while ONE_SHOTS.load(Ordering::Acquire) == before {
             assert!(Instant::now() < deadline, "timed out");
             std::thread::sleep(Duration::from_micros(200));

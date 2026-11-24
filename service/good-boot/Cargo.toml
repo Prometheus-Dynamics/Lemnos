@@ -19,3 +19,6 @@ path = "src/main.rs"
 [dependencies]
 # The booted marker's path and the slot id rule, and the deadline's rule: the same code slot-init and the driver use.
 lemnos-slot-store = { path = "../../drivers/slot-store" }
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

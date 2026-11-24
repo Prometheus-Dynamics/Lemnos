@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::start_board;
-use lemnos_client::{Client, DeviceHealth, Stall};
+use lemnos_client::{Client, DeviceHealth, Error, Stall};
 use lemnos_core::{Config as DriverConfig, Health, Lifecycle, Result, contract, driver};
 use lemnos_host::entry;
 use lemnos_sim::SimBoard;
@@ -58,11 +58,13 @@ impl StallKnob for Knob {
 fn stall_until(client: &Client, done: impl Fn(&Stall) -> bool) -> Option<Stall> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let stall = client
-            .last_stalls()
-            .unwrap()
-            .into_iter()
-            .find(|s| s.name == "k");
+        // No answer in time under load: look again, until the deadline.
+        let stalls = match client.last_stalls() {
+            Ok(stalls) => stalls,
+            Err(Error::TimedOut) => Vec::new(),
+            Err(e) => panic!("last_stalls: {e:?}"),
+        };
+        let stall = stalls.into_iter().find(|s| s.name == "k");
         if stall.as_ref().is_some_and(&done) || Instant::now() > deadline {
             return stall;
         }

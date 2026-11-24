@@ -341,7 +341,9 @@ fn the_header_matches_the_crate() {
             "_Static_assert(({expr}) == ({value}), \"{expr}\");\n"
         ));
     }
-    let dir = std::env::temp_dir().join(format!("lemnos-abi-header-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-abi-header-{}", std::process::id())),
+    );
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join("check.c");
     fs::write(&file, source).unwrap();
@@ -351,7 +353,6 @@ fn the_header_matches_the_crate() {
         .arg(&file)
         .output()
         .unwrap();
-    let _ = fs::remove_dir_all(&dir);
     assert!(
         out.status.success(),
         "{}",

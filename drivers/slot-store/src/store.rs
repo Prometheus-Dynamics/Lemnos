@@ -580,7 +580,9 @@ mod write_failure_tests {
 
     #[test]
     fn a_failed_replace_is_kept_until_the_next_write_in_its_dir_succeeds() {
-        let dir = std::env::temp_dir().join(format!("store-write-failure-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("store-write-failure-{}", std::process::id())),
+        );
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".state.env.new")).unwrap();
         assert!(replace(&dir.join("state.env"), b"x").is_err());
@@ -589,6 +591,5 @@ mod write_failure_tests {
         fs::remove_dir(dir.join(".state.env.new")).unwrap();
         replace(&dir.join("other"), b"y").unwrap();
         assert_eq!(write_failure(&dir), None);
-        let _ = fs::remove_dir_all(&dir);
     }
 }

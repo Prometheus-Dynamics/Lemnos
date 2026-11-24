@@ -91,7 +91,9 @@ fn precheck(host: &Host, on: bool) -> String {
 
 #[test]
 fn with_slots_and_no_flash_the_switch_binds_asks_only_slots_and_applies_only_to_slots() {
-    let dir = std::env::temp_dir().join(format!("lemnos-sec-slots-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-sec-slots-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let record = dir.join("security.rec");
     let host = start(&record.to_string_lossy(), "slots = \"slots\"");
@@ -121,12 +123,13 @@ fn with_slots_and_no_flash_the_switch_binds_asks_only_slots_and_applies_only_to_
     assert!(!off.contains("missing"), "{off}");
     assert!(!off.contains("flash"), "{off}");
     drop(host);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn naming_a_flash_device_the_board_does_not_have_is_refused_not_degraded() {
-    let dir = std::env::temp_dir().join(format!("lemnos-sec-noflash-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-sec-noflash-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let record = dir.join("security.rec");
     let host = start(
@@ -142,7 +145,6 @@ fn naming_a_flash_device_the_board_does_not_have_is_refused_not_degraded() {
         other => panic!("{other:?}"),
     }
     drop(host);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

@@ -128,14 +128,28 @@ fn frame(event: Event) -> lemnos_camera_sim::SimFrame {
     }
 }
 
+/// The next frame, within [`WAIT`]. A stall and the resume after it are passed over: on a loaded
+/// machine the producer can fall silent past the stream's stall bound and then go on, which is
+/// not what these tests look at (the stall tests read the events themselves).
+fn frame_within(
+    mut ask: impl FnMut(Duration) -> Result<Event, String>,
+) -> lemnos_camera_sim::SimFrame {
+    let until = Instant::now() + WAIT;
+    loop {
+        let event = ask(until.saturating_duration_since(Instant::now())).unwrap();
+        match event {
+            Event::Stalled { .. } | Event::Resumed if Instant::now() < until => {}
+            event => return frame(event),
+        }
+    }
+}
+
 fn next_frame(consumer: &mut lemnos_camera_sim::Consumer) -> lemnos_camera_sim::SimFrame {
-    let event = consumer.next(WAIT).unwrap();
-    frame(event)
+    frame_within(|wait| consumer.next(wait))
 }
 
 fn recv_frame(consumer: &mut lemnos_camera_sim::Consumer) -> lemnos_camera_sim::SimFrame {
-    let event = consumer.recv(WAIT).unwrap();
-    frame(event)
+    frame_within(|wait| consumer.recv(wait))
 }
 
 fn paced(clock: lemnos_camera_sim::ClockSource) -> Sim {
@@ -681,7 +695,15 @@ fn a_gone_receiver_reports_gone_for_good() {
     }
     let mut seen_not_ok = false;
     while Instant::now() < until && !seen_not_ok {
-        let list = consumer.client().list().unwrap();
+        let list = match consumer.client().list() {
+            Ok(list) => list,
+            // No answer in time under load: ask again until the bound.
+            Err(lemnos_client::Error::TimedOut) => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(e) => panic!("list: {e:?}"),
+        };
         let receiver = list.iter().find(|d| d.name == "cam0-receiver").unwrap();
         seen_not_ok = !format!("{:?}", receiver.health).contains("Ok");
         std::thread::sleep(Duration::from_millis(10));

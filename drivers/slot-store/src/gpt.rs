@@ -187,11 +187,12 @@ mod tests {
     const OTHER: [u8; 16] = [0xaf; 16];
 
     fn on(disk: &[u8], name: &str) -> FileEnv {
-        let path = std::env::temp_dir().join(format!("lemnos-gpt-{}-{name}", std::process::id()));
+        let path = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-gpt-{}-{name}", std::process::id())),
+        );
         std::fs::write(&path, disk).unwrap();
-        let env = FileEnv::open(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        env
+        // The open file keeps the bytes; the name goes when this returns, whatever the test does next.
+        FileEnv::open(&path).unwrap()
     }
 
     #[test]

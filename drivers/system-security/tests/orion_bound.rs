@@ -113,9 +113,10 @@ fn precheck(host: &Host, on: bool) -> Result<String> {
     Ok(String::from_utf8(reply[..n].to_vec()).unwrap())
 }
 
-fn dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("lemnos-orion-bound-{name}-{}", std::process::id()));
+fn dir(name: &str) -> lemnos_scratch::Scratch {
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-orion-bound-{name}-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -129,7 +130,6 @@ fn a_bound_orion_device_answers_for_the_switch_by_name() {
     let reply = precheck(&host, true).expect("the precheck answers");
     assert!(reply.contains("missing: orion: stub says no"), "{reply}");
     assert!(!reply.contains("no orion device is bound"), "{reply}");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// With Orion on the board and no device bound, a change to on is refused by name.
@@ -142,7 +142,6 @@ fn an_unbound_orion_refuses_a_change_to_on_by_name() {
         reply.contains("no orion device is bound to ask it"),
         "{reply}"
     );
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// On a board whose file says `orion = false` the bound device is not asked: its refusal is not in
@@ -153,5 +152,4 @@ fn a_board_without_orion_does_not_ask_the_bound_device() {
     let host = start(&dir, false, true);
     let reply = precheck(&host, true).expect("the precheck answers");
     assert!(!reply.contains("stub says no"), "{reply}");
-    let _ = std::fs::remove_dir_all(dir);
 }

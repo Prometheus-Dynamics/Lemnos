@@ -346,9 +346,8 @@ fn a_kernel_error_comes_back_with_its_errno() {
 /// offset gives the same bytes. No USB device is opened.
 #[test]
 fn reading_the_descriptors_is_positional() {
-    let dir = std::env::temp_dir();
     let name = format!("lemnos-usbfs-read-{}", std::process::id());
-    let path = dir.join(name);
+    let path = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(name));
     assert!(
         !path.as_os_str().as_bytes().starts_with(b"/dev"),
         "the temporary directory must not be under /dev"
@@ -363,14 +362,15 @@ fn reading_the_descriptors_is_positional() {
     assert_eq!(first[0], 4);
     assert_eq!(file.read_descriptors(39, &mut first).unwrap(), 1);
     assert_eq!(file.read_descriptors(40, &mut first).unwrap(), 0);
-    std::fs::remove_file(&path).unwrap();
 }
 
 /// The usbdevfs requests on a regular file are refused by the kernel, which is a real ioctl path
 /// that can't touch a USB device.
 #[test]
 fn a_device_file_that_refuses_the_request_reports_it() {
-    let path = std::env::temp_dir().join(format!("lemnos-usbfs-ioctl-{}", std::process::id()));
+    let path = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-usbfs-ioctl-{}", std::process::id())),
+    );
     std::fs::write(&path, b"").unwrap();
     let file = UsbfsFile::open(&path).unwrap();
     let mut data = [0u8; 4];
@@ -385,5 +385,4 @@ fn a_device_file_that_refuses_the_request_reports_it() {
         file.detach_kernel_driver(0).unwrap_err().raw_os_error(),
         Some(libc::ENOTTY)
     );
-    std::fs::remove_file(&path).unwrap();
 }

@@ -422,7 +422,10 @@ fn udev_is_done_when_its_database_has_the_devices_entry() {
 
 #[test]
 fn sysfs_is_read_as_the_kernel_writes_it() {
-    let root = std::env::temp_dir().join(format!("b2-sysfs-{}", std::process::id()));
+    let root = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("b2-sysfs-{}", std::process::id())),
+    );
+    let _ = std::fs::remove_dir_all(&root);
     let dev = root.join("3-4.2.1.4.1");
     std::fs::create_dir_all(dev.join("3-4.2.1.4.1:1.0")).unwrap();
     for (name, value) in [
@@ -442,9 +445,8 @@ fn sysfs_is_read_as_the_kernel_writes_it() {
     )
     .unwrap();
     std::fs::create_dir_all(root.join("usb3")).unwrap();
-    let mut sysfs = Sysfs::at(&root);
+    let mut sysfs = Sysfs::at(root.to_path_buf());
     let seen = sysfs.scan();
-    std::fs::remove_dir_all(&root).unwrap();
     assert_eq!(seen.len(), 1);
     let s = &seen[0];
     assert_eq!((s.vid, s.pid, s.devnum, s.busnum), (0x1209, 1, 121, 3));

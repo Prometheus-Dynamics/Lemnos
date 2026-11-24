@@ -40,3 +40,6 @@ load = ["std", "dep:libc"]
 
 [dependencies]
 libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

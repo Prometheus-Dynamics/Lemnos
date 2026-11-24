@@ -262,5 +262,4 @@ fn steady_state_calls_through_a_package_allocate_nothing() {
     // Letting go of the drivers gives back what they held.
     host.shutdown();
     assert_eq!(resources_held(), 0);
-    let _ = std::fs::remove_dir_all(dir);
 }

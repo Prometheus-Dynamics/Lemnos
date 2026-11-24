@@ -107,7 +107,9 @@ mod tests {
     /// The boot-file store is given with the state and image dirs, after the images dir it sits in.
     #[test]
     fn the_daemon_dirs_are_given_in_order_with_the_boot_file_store_last() {
-        let root = std::env::temp_dir().join(format!("owner-order-{}", std::process::id()));
+        let root = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("owner-order-{}", std::process::id())),
+        );
         let _ = fs::remove_dir_all(&root);
         let layout = crate::store::Layout::new(root.join("data"), root.join("boot"));
         let seen = RefCell::new(Vec::new());
@@ -122,11 +124,12 @@ mod tests {
         });
         assert!(given.iter().all(|(_, g)| g.is_ok()), "{given:?}");
         assert_eq!(*seen.borrow(), ["board/slots", "slots", "slots/bootfiles"]);
-        let _ = fs::remove_dir_all(&root);
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("slot-owner-{name}-{}", std::process::id()));
+    fn scratch(name: &str) -> lemnos_scratch::Scratch {
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("slot-owner-{name}-{}", std::process::id())),
+        );
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch");
         dir
@@ -144,7 +147,6 @@ mod tests {
         assert_eq!(got, Ok(Given::Given));
         assert!(dir.is_dir());
         assert_eq!(seen.into_inner(), [(dir, 990, 991)]);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -155,7 +157,6 @@ mod tests {
             Err("must not be called".into())
         });
         assert_eq!(got, Ok(Given::Already));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -167,6 +168,5 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).expect("link");
         let got = give_dir(&link, 1, 1, |_, _, _| Err("must not be called".into()));
         assert!(got.is_err_and(|e| e.contains("is not a plain directory")));
-        let _ = fs::remove_dir_all(root);
     }
 }

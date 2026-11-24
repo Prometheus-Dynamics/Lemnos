@@ -393,7 +393,9 @@ mod tests {
     /// symbol of the group is `=m` or unset, naming the symbol, and accepts one with all built in.
     #[test]
     fn the_checker_refuses_a_mailbox_symbol_that_is_a_module_or_unset() {
-        let dir = std::env::temp_dir().join(format!("slot-init-kconfig-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("slot-init-kconfig-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let script = repo().join("scripts/check-kernel-config.py");
         let run = |name: &str, text: &str| {
@@ -437,6 +439,5 @@ mod tests {
                 "{err}"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

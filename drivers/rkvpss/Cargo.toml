@@ -31,3 +31,6 @@ lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 
 [package.metadata.lemnos]
 driver = "Rkvpss"
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

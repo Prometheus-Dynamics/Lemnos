@@ -281,8 +281,10 @@ fn the_three_pointers_name_the_bay_the_first_slot_is_installed_in() {
 
 /// A new image on a file, as the device's node would be: the record's first sector and the switch's
 /// view through [`crate::security::BootSwitch`].
-fn switch_image(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("lemnos-switch-{}-{name}", std::process::id()));
+fn switch_image(name: &str) -> (lemnos_scratch::Scratch, std::path::PathBuf) {
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-switch-{}-{name}", std::process::id())),
+    );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let parts = tryboot_parts();
@@ -296,7 +298,7 @@ fn switch_image(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 #[test]
 fn a_new_image_reads_the_switch_off_at_generation_zero_and_round_trips_on_and_off() {
     use crate::security::{BootSwitch, Store};
-    let (dir, node) = switch_image("round-trip");
+    let (_dir, node) = switch_image("round-trip");
     let switch = BootSwitch::new(&node);
     let first = switch.read().unwrap().unwrap();
     assert!(!first.on, "a new image reads off");
@@ -309,13 +311,12 @@ fn a_new_image_reads_the_switch_off_at_generation_zero_and_round_trips_on_and_of
         off > on && on > first.generation,
         "each change is a newer generation"
     );
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn a_torn_copy_of_the_switch_record_is_recovered_from_the_other_copy() {
     use crate::security::{BootSwitch, Store};
-    let (dir, node) = switch_image("torn");
+    let (_dir, node) = switch_image("torn");
     let switch = BootSwitch::new(&node);
     switch.write(true).unwrap();
     let mut file = std::fs::OpenOptions::new()
@@ -349,7 +350,6 @@ fn a_torn_copy_of_the_switch_record_is_recovered_from_the_other_copy() {
             file.write_all_at(&saved, at).unwrap();
         }
     }
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The first sector of the switch record's two copies on the node `node`.
@@ -385,7 +385,7 @@ fn set(node: &std::path::Path, lba: u64, at: usize, value: u8) {
 #[test]
 fn a_good_switch_record_checks_off_then_on() {
     use crate::security::{BootSwitch, Store};
-    let (dir, node) = switch_image("check-good");
+    let (_dir, node) = switch_image("check-good");
     let switch = BootSwitch::new(&node);
     let fresh = switch.check().expect("a fresh image's record reads");
     // The builder pre-creates both copies as off, at sequences 0 and 1: the newer one is read.
@@ -393,13 +393,12 @@ fn a_good_switch_record_checks_off_then_on() {
     switch.write(true).unwrap();
     let on = switch.check().expect("a set record reads");
     assert!(on.on, "good on: {on:?}");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn a_missing_switch_record_is_missing_on_a_valid_volume() {
     use crate::security::{BootSwitch, RecordFault};
-    let (dir, node) = switch_image("check-missing");
+    let (_dir, node) = switch_image("check-missing");
     // Rename the record's directory entry: the volume is still a valid FAT, with no SECURE.REC.
     let name = crate::twocopy::Kind::SECURITY.file_name().unwrap();
     let mut image = std::fs::read(&node).unwrap();
@@ -413,13 +412,12 @@ fn a_missing_switch_record_is_missing_on_a_valid_volume() {
     image[hits[0]] = b'X';
     std::fs::write(&node, &image).unwrap();
     assert_eq!(BootSwitch::new(&node).check(), Err(RecordFault::Missing));
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn each_switch_record_copy_is_checked_alone_and_names_its_fault() {
     use crate::security::{BootSwitch, Store};
-    let (dir, node) = switch_image("check-copies");
+    let (_dir, node) = switch_image("check-copies");
     let switch = BootSwitch::new(&node);
     switch.write(true).unwrap();
     let lba = switch_copies(&node);
@@ -438,13 +436,12 @@ fn each_switch_record_copy_is_checked_alone_and_names_its_fault() {
         "the device still reads one good copy"
     );
     set(&node, lba, 9, before);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn one_damaged_switch_record_copy_reads_from_the_other() {
     use crate::security::{BootSwitch, Store};
-    let (dir, node) = switch_image("check-one");
+    let (_dir, node) = switch_image("check-one");
     let switch = BootSwitch::new(&node);
     switch.write(true).unwrap();
     switch.write(false).unwrap();
@@ -463,13 +460,12 @@ fn one_damaged_switch_record_copy_reads_from_the_other() {
         }
     }
     assert!(switch.check().is_ok());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn both_damaged_switch_record_copies_are_refused_naming_the_check() {
     use crate::security::{BootSwitch, RecordFault, Store};
-    let (dir, node) = switch_image("check-both");
+    let (_dir, node) = switch_image("check-both");
     let switch = BootSwitch::new(&node);
     switch.write(true).unwrap();
     switch.write(false).unwrap();
@@ -489,13 +485,14 @@ fn both_damaged_switch_record_copies_are_refused_naming_the_check() {
         set(&node, lba + 1, at, before1);
     }
     assert!(switch.check().is_ok(), "restored copies read again");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn a_node_without_the_switch_record_is_an_error_not_off() {
     use crate::security::{BootSwitch, Store};
-    let dir = std::env::temp_dir().join(format!("lemnos-switch-{}-bare", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-switch-{}-bare", std::process::id())),
+    );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let node = dir.join("bare.img");
@@ -504,5 +501,4 @@ fn a_node_without_the_switch_record_is_an_error_not_off() {
         BootSwitch::new(&node).read().is_err(),
         "a node with no SECURE.REC reads as an error, which the device reads as on"
     );
-    let _ = std::fs::remove_dir_all(dir);
 }

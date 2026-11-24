@@ -120,8 +120,10 @@ pub(crate) fn open(dev: &Path, need: &str, module: Option<&Node>) -> Result<PioI
 mod tests {
     use super::*;
 
-    fn temp_dev(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pio-i2c-test-{}-{name}", std::process::id()));
+    fn temp_dev(name: &str) -> lemnos_scratch::Scratch {
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("pio-i2c-test-{}-{name}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -136,7 +138,6 @@ mod tests {
         assert!(!provided(&dir, "pio-i2c:sda=8,scl=8"));
         assert!(!provided(&dir, "pio-i2c:sda=8"));
         assert!(!provided(&dir, "i2c-1"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -151,7 +152,6 @@ mod tests {
             Some(Status::INVALID_ARGUMENT)
         );
         assert_eq!(open(&dir, "i2c-1", None).err(), Some(Status::NOT_FOUND));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -163,6 +163,5 @@ mod tests {
             open(&dir, "pio-i2c:sda=8,scl=7", Some(&node)).err(),
             Some(Status::NO_DEVICE)
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

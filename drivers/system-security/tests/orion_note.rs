@@ -89,8 +89,10 @@ fn set_on(host: &Host) -> Result<String> {
     })
 }
 
-fn dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lemnos-sec-{name}-{}", std::process::id()));
+fn dir(name: &str) -> lemnos_scratch::Scratch {
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-sec-{name}-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -101,7 +103,6 @@ fn state_says_orion_is_not_covered_when_the_board_file_says_orion_is_false() {
     let state = state(&start(&dir, false));
     assert!(state.lines().any(|line| line == NOT_COVERED), "{state}");
     assert!(state.contains("orion absent"), "{state}");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -110,7 +111,6 @@ fn state_has_no_such_line_when_orion_is_true() {
     let state = state(&start(&dir, true));
     assert!(!state.contains("not covered"), "{state}");
     assert!(state.contains("orion present"), "{state}");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -119,7 +119,6 @@ fn a_set_to_on_with_orion_false_answers_the_note() {
     let host = start(&dir, false);
     let reply = set_on(&host).expect("the change is made");
     assert_eq!(reply, format!("note: {NOT_COVERED}\n"));
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -127,5 +126,4 @@ fn a_set_to_on_with_orion_true_stays_refused() {
     let dir = dir("set-true");
     let host = start(&dir, true);
     assert_eq!(set_on(&host), Err(lemnos_core::Status::NOT_PERMITTED));
-    let _ = std::fs::remove_dir_all(dir);
 }

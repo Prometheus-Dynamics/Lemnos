@@ -26,3 +26,6 @@ sha2 = { version = "0.10", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

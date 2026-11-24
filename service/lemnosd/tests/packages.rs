@@ -2,13 +2,13 @@
 //! the way of the built-in drivers. The loader's own tests, in `engine/package`, load a real
 //! package; these cover what the service adds.
 
-use std::path::PathBuf;
-
 use lemnosd::builtin;
 use lemnosd::packages::{PackageConfig, PackageMode, PackageReport, add_packages, add_packages_if};
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lemnosd-packages-{}-{name}", std::process::id()));
+fn scratch(name: &str) -> lemnos_scratch::Scratch {
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnosd-packages-{}-{name}", std::process::id())),
+    );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -47,7 +47,7 @@ fn signed_mode_without_usable_keys_loads_nothing_and_says_so() {
     let built_in = drivers.len();
 
     let no_keys = PackageConfig {
-        dir: Some(dir.clone()),
+        dir: Some(dir.to_path_buf()),
         keys: None,
         open: false,
     };
@@ -71,7 +71,6 @@ fn signed_mode_without_usable_keys_loads_nothing_and_says_so() {
     let said = add_packages(&mut drivers, &malformed).lines();
     assert!(said[0].contains("not 64 hex digits"), "{said:?}");
     assert_eq!(drivers.len(), built_in);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -84,7 +83,7 @@ fn a_file_that_is_no_package_is_refused_and_the_built_in_drivers_stay() {
     let built_in = drivers.len();
 
     let open = PackageConfig {
-        dir: Some(dir.clone()),
+        dir: Some(dir.to_path_buf()),
         keys: None,
         open: true,
     };
@@ -110,7 +109,6 @@ fn a_file_that_is_no_package_is_refused_and_the_built_in_drivers_stay() {
     let said = add_packages(&mut drivers, &missing).lines();
     assert_eq!(said.len(), 1, "{said:?}");
     assert_eq!(drivers.len(), built_in);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -120,7 +118,7 @@ fn a_statically_linked_service_loads_no_package_and_says_why() {
     let mut drivers = builtin::drivers();
     let built_in = drivers.len();
     let open = PackageConfig {
-        dir: Some(dir.clone()),
+        dir: Some(dir.to_path_buf()),
         keys: None,
         open: true,
     };
@@ -147,5 +145,4 @@ fn a_statically_linked_service_loads_no_package_and_says_why() {
     assert_eq!((report.mode, report.files.len()), (PackageMode::Open, 1));
     assert_eq!(report.files[0].driver, None);
     assert!(report.note.is_empty());
-    let _ = std::fs::remove_dir_all(dir);
 }

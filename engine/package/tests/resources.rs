@@ -362,7 +362,6 @@ fn a_stream_carries_buffers_jobs_bytes_and_buffer_handles() {
     // The last free buffer, then none.
     assert_eq!(run(1, &[]), Ok(joined(&[&[1], &le32(0)])));
     assert_eq!(run(1, &[]), Ok(vec![0]));
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

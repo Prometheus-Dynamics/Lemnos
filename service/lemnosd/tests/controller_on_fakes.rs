@@ -32,13 +32,15 @@ const BASELINE: u16 = 702;
 /// The board file of the rehearsal's shape: a fan, a zone at `zone`, and the controller wired to
 /// both with the B14 curve. The fan starts at [`BASELINE`] and keeps its duty in `fan` beside the
 /// zone's directory, so a test can read it once the daemon has stopped. `fan_extra` and `zone_extra`
-/// add settings to the two fakes.
+/// add settings to the two fakes. The host's call deadline is a minute: these tests follow the curve
+/// and the slew, and on a loaded machine the default 2 s took a working controller for hung and
+/// bound it again, which starts a new controller at the curve with no slew from the old duty.
 fn board(zone: &Path, fan_extra: &str, zone_extra: &str, max_age_ms: u32) -> String {
     let fan = zone.parent().unwrap().join("fan");
     let fan = fan.display();
     let zone = zone.display();
     format!(
-        "[[devices]]\nid = \"fan\"\ndriver = \"fake-fan\"\nconfig = {{ duty = {BASELINE}, file = \"{fan}\"{fan_extra} }}\n\
+        "[host]\ncall_deadline_ms = 60000\n[[devices]]\nid = \"fan\"\ndriver = \"fake-fan\"\nconfig = {{ duty = {BASELINE}, file = \"{fan}\"{fan_extra} }}\n\
          [[devices]]\nid = \"cpu-thermal\"\ndriver = \"fake-thermal-zone\"\n\
          config = {{ path = \"{zone}\"{zone_extra} }}\n\
          [[devices]]\nid = \"fan-control\"\ndriver = \"fan-control\"\n\

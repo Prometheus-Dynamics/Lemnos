@@ -124,7 +124,6 @@ fn what_a_package_registers_is_checked_before_it_is_used() {
             .map(|p| p.name()),
         Ok("raw-package")
     );
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -162,7 +161,6 @@ fn a_package_the_dynamic_loader_cannot_load_is_refused_in_its_words() {
     };
     assert!(why.contains("libgone.so"), "{why}");
     assert!(loader.entries().is_empty());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -222,8 +220,6 @@ fn files_too_large_or_unreadable_are_refused_without_being_looked_at() {
     assert_eq!(loader.packages().len(), 1);
     assert_eq!(loader.refused().len(), 1, "{:?}", loader.refused());
     assert_eq!(loader.refused()[0].why, Refusal::TooLarge);
-    let _ = std::fs::remove_dir_all(dir);
-    let _ = std::fs::remove_dir_all(scanned);
 }
 
 #[test]
@@ -346,5 +342,4 @@ fn a_package_with_a_boundary_this_host_does_not_know_is_refused() {
     let file = raw_package(&dir, "future.so", &["future_layout"]);
     let mut loader = Loader::new(Mode::Open);
     assert!(matches!(loader.load(&file), Err(Refusal::LayoutMismatch)));
-    let _ = std::fs::remove_dir_all(dir);
 }

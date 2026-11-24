@@ -7,11 +7,11 @@ const RK3588_SOCS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../socs");
 
 fn validate(text: &str) -> Result<(), String> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(format!(
         "lemnos-ctl-resources-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("board.toml");
     std::fs::write(&path, text).unwrap();
@@ -23,12 +23,10 @@ fn validate(text: &str) -> Result<(), String> {
         RK3588_SOCS.to_string(),
         path.display().to_string(),
     ];
-    let result = lemnos_ctl::run(&args, &mut out).map_err(|error| {
+    lemnos_ctl::run(&args, &mut out).map_err(|error| {
         let prefix = format!("{}: ", path.display());
         error.strip_prefix(&prefix).unwrap_or(&error).to_string()
-    });
-    std::fs::remove_dir_all(&dir).unwrap();
-    result
+    })
 }
 
 fn board(soc: &str, bus: &str) -> String {

@@ -27,6 +27,7 @@ sha2 = { version = "0.10", default-features = false }
 libc.workspace = true
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-restart = { path = "../../service/restart-helper", features = ["stand-in"] }
 # The command a builder runs: a test installs the file it writes (a dev-dependency cycle: ctl runs the driver).

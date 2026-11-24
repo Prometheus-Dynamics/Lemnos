@@ -26,3 +26,6 @@ multiple_unsafe_ops_per_block = "deny"
 [dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 libc.workspace = true
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

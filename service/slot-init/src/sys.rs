@@ -358,15 +358,15 @@ mod tests {
 
     /// A directory with `watchdog` as a plain file. The stand-in differs from a watchdog device in
     /// that it refuses the watchdog's requests (ENOTTY) and takes writes as ordinary file bytes.
-    fn stand_in() -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
+    fn stand_in() -> (lemnos_scratch::Scratch, PathBuf) {
+        let dir = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(format!(
             "slot-init-dog-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
-        ));
+        )));
         fs::create_dir_all(&dir).unwrap();
         let node = dir.join("watchdog");
         fs::write(&node, b"").unwrap();
@@ -401,14 +401,13 @@ mod tests {
             Some(dog::REASON_UNREADABLE)
         );
         assert_eq!(armed.feed_every, FEED_EVERY);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_feed_writes_one_byte_that_is_not_the_magic_close_and_a_stopped_feed_writes_nothing() {
         let (dir, node) = stand_in();
         let system = System {
-            dev: dir.clone(),
+            dev: dir.to_path_buf(),
             loops: RefCell::new(Vec::new()),
             dog: RefCell::new(None),
             feeding: Cell::new(true),
@@ -423,14 +422,13 @@ mod tests {
             vec![FEED_BYTE],
             "a stopped feed writes nothing"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_long_wait_feeds_while_it_runs_and_a_stopped_one_does_not() {
         let (dir, node) = stand_in();
         let system = System {
-            dev: dir.clone(),
+            dev: dir.to_path_buf(),
             loops: RefCell::new(Vec::new()),
             dog: RefCell::new(Some(stand_in_armed(&node))),
             feeding: Cell::new(true),
@@ -444,6 +442,5 @@ mod tests {
             fs::read(&node).unwrap().is_empty(),
             "a stopped system does not feed"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -293,7 +293,9 @@ fn a_missing_node_is_an_error() {
 
 #[test]
 fn the_node_is_found_by_name() {
-    let root = std::env::temp_dir().join(format!("rkvpss-find-{}", std::process::id()));
+    let root = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("rkvpss-find-{}", std::process::id())),
+    );
     for (node, name) in [
         ("video0", "rkisp_mainpath\n"),
         ("video7", "rkvpss-offline\n"),
@@ -303,7 +305,6 @@ fn the_node_is_found_by_name() {
         fs::write(dir.join("name"), name).expect("write");
     }
     let found = find_in(&root);
-    fs::remove_dir_all(&root).expect("clean up");
     assert_eq!(found, Some(PathBuf::from("/dev/video7")));
 }
 
@@ -314,10 +315,11 @@ fn a_kernel_without_the_node_finds_nothing() {
 
 #[test]
 fn a_file_that_is_not_the_node_is_refused() {
-    let path = std::env::temp_dir().join(format!("rkvpss-plain-{}", std::process::id()));
+    let path = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("rkvpss-plain-{}", std::process::id())),
+    );
     File::create(&path).expect("create");
     let refused = Node::open(&path);
-    fs::remove_file(&path).expect("clean up");
     assert_eq!(
         refused.expect_err("a plain file").kind(),
         io::ErrorKind::InvalidInput

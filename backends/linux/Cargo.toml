@@ -23,6 +23,7 @@ lemnos-usb = { path = "../usb" }
 libc.workspace = true
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-linux-sys = { path = "../linux-sys", features = ["test-pty"] }
 lemnos-host = { path = "../../engine/host" }

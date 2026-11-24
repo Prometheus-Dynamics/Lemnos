@@ -17,7 +17,9 @@ const INTERFACES: &str = "interface 0xff 0 0 pipe\nendpoint in bulk\nendpoint ou
 /// filesystem refuses the file, the driver never binds, and the device is not in the list.
 #[test]
 fn a_program_reads_the_gadget_interfaces_file() {
-    let path = std::env::temp_dir().join(format!("lemnosd-interfaces-{}", std::process::id()));
+    let path = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnosd-interfaces-{}", std::process::id())),
+    );
     std::fs::write(&path, INTERFACES).unwrap();
     let devices = format!(
         "[[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\nuses = {{ function = \"udc0\" }}\n\
@@ -34,7 +36,6 @@ fn a_program_reads_the_gadget_interfaces_file() {
     let device = client.open::<dyn UsbFunction>("gadget");
     let mut name = [0u8; 32];
     let served = device.map(|mut device| device.data_stream(&mut name));
-    let _ = std::fs::remove_file(&path);
     let len = served
         .expect("the gadget is open")
         .expect("the gadget is serving");

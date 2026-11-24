@@ -105,7 +105,14 @@ fn a_closed_connection_gives_up_only_its_own_holds() {
 
     drop(leaving);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while watch.held().unwrap() != 1 {
+    loop {
+        match watch.held() {
+            Ok(1) => break,
+            // No answer in time under load: ask again until the deadline.
+            Ok(_) => {}
+            Err(status) if status == Status::TIMED_OUT => {}
+            Err(status) => panic!("held: {status:?}"),
+        }
         assert!(Instant::now() < deadline, "the holds were never given up");
         std::thread::sleep(Duration::from_millis(2));
     }

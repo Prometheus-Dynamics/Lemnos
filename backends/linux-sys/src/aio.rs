@@ -852,8 +852,10 @@ mod tests {
         assert_eq!((PREAD, PWRITE), (0, 1));
     }
 
-    fn temp(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("lemnos-aio-{}-{name}", std::process::id()))
+    fn temp(name: &str) -> lemnos_scratch::Scratch {
+        lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-aio-{}-{name}", std::process::id())),
+        )
     }
 
     #[test]
@@ -872,7 +874,6 @@ mod tests {
         assert_eq!(aio.read(file.as_fd(), &mut data, WAIT).unwrap(), 5);
         assert_eq!(&data[..5], b"hello");
         assert_eq!(aio.read(file.as_fd(), &mut [], WAIT).unwrap(), 0);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -886,7 +887,6 @@ mod tests {
         let mut data = [0u8; 3];
         assert_eq!(aio.read(file.as_fd(), &mut data, WAIT).unwrap(), 3);
         assert_eq!(&data, b"abc");
-        std::fs::remove_file(path).unwrap();
     }
 
     // No file a test can open here completes later than `io_submit` returns: regular files and
@@ -927,7 +927,7 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(libc::EBADF));
     }
 
-    fn scratch_file(name: &str) -> (std::path::PathBuf, std::fs::File) {
+    fn scratch_file(name: &str) -> (lemnos_scratch::Scratch, std::fs::File) {
         let path = temp(name);
         let file = OpenOptions::new()
             .read(true)
@@ -952,7 +952,6 @@ mod tests {
         // A queue goes one way.
         let error = queue.read(file.as_fd(), &mut [0u8; 4], WAIT).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -976,7 +975,6 @@ mod tests {
         let error = queue.write(file.as_fd(), b"z", WAIT).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EBADF));
         assert!(!queue.under_way());
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

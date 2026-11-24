@@ -15,6 +15,7 @@ lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-driver-hw-watchdog-sys = { path = "../hw-watchdog-sys" }
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

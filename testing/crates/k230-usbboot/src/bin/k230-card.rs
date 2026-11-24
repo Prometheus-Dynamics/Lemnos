@@ -625,7 +625,9 @@ mod tests {
 
     #[test]
     fn held_sectors_read_as_zero_and_the_rest_as_the_source_has_them() {
-        let dir = std::env::temp_dir().join(format!("k230-card-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("k230-card-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("source.img");
         std::fs::write(&path, vec![0x11u8; 4 * SECTOR]).unwrap();
@@ -634,6 +636,5 @@ mod tests {
         assert!(data[..SECTOR].iter().all(|b| *b == 0x11));
         assert!(data[SECTOR..2 * SECTOR].iter().all(|b| *b == 0));
         assert!(data[2 * SECTOR..].iter().all(|b| *b == 0x11));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

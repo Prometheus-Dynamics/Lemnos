@@ -174,7 +174,9 @@ fn the_node_refuses_before_reaching_the_device() {
 
     // A plain file: any request that reaches it fails with `ENOTTY`, so `InvalidInput` means the
     // check refused it first.
-    let dir = std::env::temp_dir().join(format!("k230isp-sys-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("k230isp-sys-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("regs");
     std::fs::write(&path, [0u8; 8]).unwrap();
@@ -202,5 +204,4 @@ fn the_node_refuses_before_reaching_the_device() {
         node.next_event().unwrap_err().raw_os_error(),
         Some(libc::ENOTTY)
     );
-    std::fs::remove_dir_all(&dir).unwrap();
 }

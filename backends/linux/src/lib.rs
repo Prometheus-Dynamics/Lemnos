@@ -661,10 +661,12 @@ static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_al
 mod tests {
     use super::*;
 
-    fn temp_board(name: &str) -> (LinuxBoard, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("lemnos-linux-{}-{name}", std::process::id()));
+    fn temp_board(name: &str) -> (LinuxBoard, lemnos_scratch::Scratch) {
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-linux-{}-{name}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
-        (LinuxBoard::at(&dir, &dir), dir)
+        (LinuxBoard::at(dir.path(), dir.path()), dir)
     }
 
     #[test]
@@ -701,17 +703,15 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_watchdog_that_is_not_there_is_not_held_and_says_so() {
-        let (board, dir) = temp_board("absent-watchdog");
+        let (board, _dir) = temp_board("absent-watchdog");
         let why = board
             .hold_before_drop("watchdog9", &mut Vec::new())
             .unwrap_err();
         assert!(why.contains("watchdog9: not held"), "{why}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A machine whose `/dev` and `/sys` are a directory of the test's, with the I2C bus list in
@@ -721,20 +721,21 @@ mod tests {
     ) -> (
         lemnos_host::Host,
         lemnos_sim::SimClock,
-        PathBuf,
+        lemnos_scratch::Scratch,
         hotplug::BoardHints,
     ) {
         use lemnos_host::board::parse;
         use lemnos_host::{Host, entry};
 
         let (board, dir) = temp_board(name);
-        let dir = std::fs::canonicalize(dir).unwrap();
-        std::fs::create_dir_all(dir.join("bus/i2c/devices")).unwrap();
-        std::fs::create_dir_all(dir.join("devices/platform/soc/i2c-7")).unwrap();
+        // The guard keeps `dir` alive; the canonical path is used only for the host and its tree.
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        std::fs::create_dir_all(canonical.join("bus/i2c/devices")).unwrap();
+        std::fs::create_dir_all(canonical.join("devices/platform/soc/i2c-7")).unwrap();
         let paths = hotplug::LinuxPaths::new()
-            .with_sys_class_root(dir.join("class"))
-            .with_sys_bus_root(dir.join("bus"))
-            .with_dev_root(&dir);
+            .with_sys_class_root(canonical.join("class"))
+            .with_sys_bus_root(canonical.join("bus"))
+            .with_dev_root(&canonical);
         let filter = hotplug::BoardHints::filter_for(["i2c-7"]).unwrap();
         let watcher = hotplug::DeviceWatcher::inotify(paths, filter).expect("inotify");
         let hints = hotplug::BoardHints::new(watcher, ["i2c-7"]).unwrap();
@@ -797,7 +798,6 @@ mod tests {
             host.tick();
         }
         assert_eq!(attempts(&host), 2);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -810,12 +810,11 @@ mod tests {
         clock.advance(std::time::Duration::from_millis(700));
         host.tick();
         assert_eq!(attempts(&host), 2);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn dma_memory_comes_only_from_the_module() {
-        let (mut board, dir) = temp_board("dma");
+        let (mut board, _dir) = temp_board("dma");
         // Not a `dma:<block>` name.
         for name in ["dma:", "dma:a/b", "i2c-1", "91400000.isp"] {
             assert_eq!(board.dma(name).err(), Some(Status::NOT_FOUND), "{name}");
@@ -834,12 +833,11 @@ mod tests {
             Some(Status::NOT_SUPPORTED)
         );
         assert!(!board.provided("dma:91400000.isp"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn a_blocks_registers_interrupts_clocks_and_resets_come_only_from_the_module() {
-        let (mut board, dir) = temp_board("block");
+        let (mut board, _dir) = temp_board("block");
         let names = ["regs:blk/1", "irq:blk", "clocks:blk/core", "resets:blk/rst"];
         let open = |board: &mut LinuxBoard, name: &str| -> Vec<Option<Status>> {
             vec![
@@ -873,18 +871,16 @@ mod tests {
             );
             assert!(!board.provided(name));
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn names_stay_inside_dev() {
-        let (board, dir) = temp_board("names");
+        let (board, _dir) = temp_board("names");
         assert!(board.node("i2c-1", I2C).is_some());
         assert!(board.node("spidev0.1", SPI).is_some());
         assert!(board.node("i2c-", I2C).is_none());
         assert!(board.node("i2c-../../etc/passwd", I2C).is_none());
         assert!(board.node("spi0", SPI).is_none());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -894,7 +890,6 @@ mod tests {
         std::fs::write(dir.join("spidev0.0"), b"").unwrap();
         assert!(board.provided("spidev0.0"));
         assert!(!board.provided("pio-i2c:sda=8,scl=7"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The grammar table in `lemnos-linux-names` and the backend's own parsers agree: every example
@@ -972,7 +967,6 @@ mod tests {
         assert!(board.provided(name));
         assert!(!board.provided("i2c:of=/axi/pcie@1000120000/rp1/i2c@70000"));
         assert!(!board.provided("i2c:of=axi/pcie@1000120000/rp1/i2c@74000"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The real host's sysfs has no adapter with a node the host does not have: the name is not
@@ -998,7 +992,6 @@ mod tests {
             Some((dir.join("class/pwm/pwmchip2"), 1))
         );
         assert_eq!(board.pwm_node("pwmchip/x:1"), None);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1017,7 +1010,6 @@ mod tests {
         );
         drop(first);
         assert!(board.pwm("pwmchip0:1").is_ok());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1031,12 +1023,11 @@ mod tests {
         );
         drop(first);
         assert!(board.open_spi("spidev0.0").is_ok());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn a_missing_node_is_no_device() {
-        let (mut board, dir) = temp_board("missing");
+        let (mut board, _dir) = temp_board("missing");
         assert_eq!(
             board.i2c("i2c-99").map(|_| ()).unwrap_err(),
             Status::NO_DEVICE
@@ -1050,7 +1041,6 @@ mod tests {
             board.spi("spidev9.9").map(|_| ()).unwrap_err(),
             Status::NO_DEVICE
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A sysfs entry for a device, and a regular file where its node would be. No test goes
@@ -1152,7 +1142,6 @@ mod tests {
         assert!(board.provided("usb:1a2b:3c4d"));
         assert!(!board.provided("usb:1-5"));
         assert!(!board.provided("usb:1a2b:3c4e"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1175,7 +1164,6 @@ mod tests {
             board.usb_device("usb:2-1.3").map(|_| ()).unwrap_err(),
             Status::NO_DEVICE
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A sysfs entry for an interface of the device on `port`, as the kernel lists it beside
@@ -1259,7 +1247,6 @@ mod tests {
         let mut disk = board.usb_device("usb:class:08:06").map_err(|_| ()).unwrap();
         let mut config = [0u8; 16];
         assert_eq!(disk.config_descriptor(0, &mut config), Ok(9));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1275,7 +1262,6 @@ mod tests {
         }
         drop(first);
         assert!(board.usb_device("usb:1a2b:3c4d").is_ok());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1290,7 +1276,6 @@ mod tests {
         );
         assert!(board.usb_device("usb:1-4").is_ok());
         assert!(board.usb_device("usb:1-5").is_ok());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1304,7 +1289,6 @@ mod tests {
         assert!(!board.provided("usb:1a2b:3c4d"));
         assert!(board.usb_device("usb:5e6f:0001").is_ok());
         assert!(board.usb_device("usb:1-4").is_ok());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1315,7 +1299,6 @@ mod tests {
         }
         assert!(board.provided("usb:1a2b:0028"));
         assert!(!board.provided("usb:1a2b:0029"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

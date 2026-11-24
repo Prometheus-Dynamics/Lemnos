@@ -27,6 +27,7 @@ lemnos-driver-hw-watchdog-sys = { path = "../../drivers/hw-watchdog-sys" }
 lemnos-identity = { path = "../../engine/identity" }
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-slot-store = { path = "../../drivers/slot-store", features = ["linux", "fake"] }
 # The test reads the kernel requirements file; a dev-dependency, so the initramfs binary has no toml.
 toml.workspace = true

@@ -266,9 +266,11 @@ fn a_heap_that_is_missing_or_refuses_fails_the_attach_and_shared_memory_is_never
 #[test]
 fn the_kernels_heaps_are_looked_up_by_name_and_one_that_isnt_there_is_not_found() {
     // The real source, pointed at a directory with no heaps in it.
-    let empty = std::env::temp_dir().join(format!("lemnosd-no-heaps-{}", std::process::id()));
+    let empty = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnosd-no-heaps-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&empty).unwrap();
-    let running = start_with_buffers(&board(""), Arc::new(DmaHeaps::at(&empty)));
+    let running = start_with_buffers(&board(""), Arc::new(DmaHeaps::at(empty.path())));
     let mut session = Session::connect(&running.socket, "consumer").unwrap();
     let error = session.open_stream(DEVICE, DMA, platform()).unwrap_err();
     assert_eq!(
@@ -276,7 +278,6 @@ fn the_kernels_heaps_are_looked_up_by_name_and_one_that_isnt_there_is_not_found(
         Some(Status::NOT_FOUND)
     );
     assert!(!host(&running).stream_stats(DEVICE, DMA).unwrap().attached);
-    std::fs::remove_dir_all(&empty).unwrap();
 }
 
 #[test]

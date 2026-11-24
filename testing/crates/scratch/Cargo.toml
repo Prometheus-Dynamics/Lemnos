@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-scratch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "A test's scratch directory, removed when the guard drops, whether the test passed or panicked"
+
+[lints]
+workspace = true

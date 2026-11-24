@@ -265,7 +265,9 @@ mod tests {
     #[test]
     fn a_held_mailbox_is_opened_after_its_node_can_no_longer_be() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("rpi-fw-sys-held-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("rpi-fw-sys-held-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let node = dir.join("vcio");
         std::fs::write(&node, b"").unwrap();
@@ -284,7 +286,6 @@ mod tests {
             .is_err();
         let held = Mailbox::open(&node);
         let unheld = Mailbox::open(&other);
-        std::fs::remove_dir_all(&dir).unwrap();
         assert!(held.is_ok(), "the held node opens: {held:?}");
         if stopped {
             assert!(
@@ -298,7 +299,9 @@ mod tests {
     /// fails and the error is returned, not a count.
     #[test]
     fn a_missing_or_non_mailbox_device_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("rpi-fw-sys-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("rpi-fw-sys-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let missing = dir.join("no-such-vcio");
         assert!(Mailbox::open(&missing).is_err());
@@ -307,6 +310,5 @@ mod tests {
         let mailbox = Mailbox::open(&plain).unwrap();
         assert!(mailbox.boot_count().is_err());
         assert!(mailbox.clear_boot_count().is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

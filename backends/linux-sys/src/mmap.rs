@@ -217,7 +217,9 @@ mod tests {
 
     #[test]
     fn words_are_aligned_inside_and_respect_writability() {
-        let path = std::env::temp_dir().join(format!("lemnos-mmap-words-{}", std::process::id()));
+        let path = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-mmap-words-{}", std::process::id())),
+        );
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -243,13 +245,13 @@ mod tests {
             assert_eq!(map.read32(4092), Some(0x1234_5678));
             assert_eq!(map.write32(0, 1), None, "read-only");
         }
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn volatile_accessors_are_bounds_checked_and_respect_writability() {
-        let path =
-            std::env::temp_dir().join(format!("lemnos-mmap-volatile-{}", std::process::id()));
+        let path = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-mmap-volatile-{}", std::process::id())),
+        );
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -275,12 +277,13 @@ mod tests {
             assert_eq!(map.write_volatile(0, [1; 16]), None, "read-only");
             assert_eq!(map.as_slice()[0], 0);
         }
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn maps_a_file_shared_and_unmaps_it() {
-        let path = std::env::temp_dir().join(format!("lemnos-mmap-test-{}", std::process::id()));
+        let path = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-mmap-test-{}", std::process::id())),
+        );
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -300,7 +303,6 @@ mod tests {
             assert_eq!(map.as_slice()[0], 0x5a);
         }
         assert!(Mapping::new(file.as_fd(), 0, 0, false).is_err());
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

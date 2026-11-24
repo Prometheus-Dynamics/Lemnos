@@ -268,7 +268,9 @@ mod tests {
 
     #[test]
     fn a_missing_node_is_no_device_and_a_bad_pin_is_refused() {
-        let dir = std::env::temp_dir().join(format!("pio-out-test-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("pio-out-test-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!provided(&dir, "pio-out:gpio=13"));
         std::fs::write(dir.join(device::DEVNODE), b"").unwrap();
@@ -278,7 +280,6 @@ mod tests {
             Some(Status::INVALID_ARGUMENT)
         );
         assert_eq!(open(&dir, "i2c-1", None).err(), Some(Status::NOT_FOUND));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

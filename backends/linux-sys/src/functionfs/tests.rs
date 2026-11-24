@@ -1,5 +1,4 @@
 use std::io::{Seek, SeekFrom};
-use std::path::PathBuf;
 
 use super::*;
 
@@ -9,8 +8,10 @@ const OUT_FULL: [u8; 7] = [7, 5, 0x02, 2, 64, 0, 0];
 const IN_HIGH: [u8; 7] = [7, 5, 0x81, 2, 0, 2, 0];
 const OUT_HIGH: [u8; 7] = [7, 5, 0x02, 2, 0, 2, 0];
 
-fn temp(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("lemnos-ffs-{}-{name}", std::process::id()))
+fn temp(name: &str) -> lemnos_scratch::Scratch {
+    lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-ffs-{}-{name}", std::process::id())),
+    )
 }
 
 #[test]
@@ -176,7 +177,6 @@ fn ep0_writes_each_blob_whole_and_reads_events_after_them() {
         ep0.next_event().unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -219,7 +219,6 @@ fn a_file_that_is_not_functionfs_fails_cleanly() {
         endpoint.clear_halt().unwrap_err().raw_os_error(),
         Some(libc::ENOTTY)
     );
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
