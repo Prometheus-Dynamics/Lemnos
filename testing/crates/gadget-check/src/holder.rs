@@ -478,7 +478,10 @@ fn cases(
         "6 (d) after the daemon's death a new read takes the host's bytes",
     );
     daemon.restart().map_err(io::Error::other)?;
-    std::thread::sleep(Duration::from_secs(2));
+    // No fixed wait for an absence: the new daemon's first setup finds the instance held and says so
+    // in the gadget's health (failed, retrying). Waited for that, bounded; a daemon that bound the
+    // gadget anyway reads healthy throughout and fails the check below.
+    let _ = daemon::wait_until(Duration::from_secs(10), || gadget_failed(daemon));
     check(
         !gadget_ok(daemon),
         "6 a new daemon does not bind the gadget while the holder keeps its copies",
@@ -639,6 +642,16 @@ fn diagnose(hold: &mut Hold) {
 }
 
 /// Whether the daemon reports its gadget healthy, asked through a fresh connection.
+/// The gadget is listed, and its health reads failed: a setup was made and did not bind.
+fn gadget_failed(daemon: &Lemnosd) -> bool {
+    daemon
+        .connect()
+        .ok()
+        .and_then(|mut session| session.list().ok())
+        .and_then(|list| list.into_iter().find(|e| e.name == "gadget"))
+        .is_some_and(|e| e.health == lemnos_client::DeviceHealth::Failed)
+}
+
 fn gadget_ok(daemon: &Lemnosd) -> bool {
     daemon
         .connect()

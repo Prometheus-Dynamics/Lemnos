@@ -41,18 +41,29 @@ The code finds each consumer's files by name from that directory. Nothing in the
 
 ## Lanes
 
-A train runs four lanes at once, each with its own CPU set and its own bound:
+A train runs five lanes at once, each with its own CPU set and its own bound:
+
+- `notes`: `scripts/check-boundaries.sh` and `scripts/check-docs.py --list`, every train (seconds).
 
 - `gate`: `scripts/gate.sh` in the stack worktree, with `CARGO_BUILD_JOBS` from `LAND_JOBS_GATE`, on
   `LAND_CPUS_GATE`. Bound: 109164 s, 4 x the sum of the gate's step budgets (a backstop; each step is bounded by its CPU budget and its progress watch).
 - `qemu`: the modules QEMU harness, on `LAND_CPUS_QEMU`. Its kernel comes from `LAND_QK_DIR`, built when missing.
-  Bound 1000 s.
-- `off`: the modules-off kernel and the built-in and three watchdog runs, side by side on `LAND_CPUS_OFF`.
-  Bound 600 s each.
+  Its modules are kept under `$LAND_SCRATCH/qemu-modules` by the hash of all they are built from
+  (`LEMNOS_QEMU_MODULES`), so a train that does not change them builds none. Every stanza runs each train:
+  most trains deal them over three guests side by side (`run.sh --split orion-link,ncm-after-controller
+  gadget,route-a`), and every `LAND_WHOLE_EVERY`-th train (default 10) runs them all in one boot, so the
+  one-boot order is still checked. Bound 1000 s.
+- `off`: the modules-off kernel and the built-in and the watchdog runs, side by side on `LAND_CPUS_OFF`.
+  The kernel is kept like the modules kernel, its key also holding the tree hash of `kernel/`, which it
+  builds in; the newest three are kept. Bound 600 s each.
 - `ccomp`: consumer compile, niced, on `LAND_CPUS_CC`.
 
-Each lane writes its exit status to `<n>/<lane>.rc`. A part that already passed for the same tree is not run
-again. When every lane is 0 the stack is pushed; otherwise the train prints the first failure lines of each
+Each lane writes its exit status to `<n>/<lane>.rc`. No ceremony runs: a part is keyed by the paths it
+reads, and one already green for its key is not run again. The notes (`TODO.md`, `PARKED.md`, `notes/`,
+`testing/board-runs/`) are read only by the `notes` lane, so the gate's key is the tree without them. `docs/`
+is read by the gate's tests and checks and by nothing the other lanes run, so the `qemu`, `off` and `ccomp`
+key is the tree without the notes and `docs/` (`ccomp`'s also holds the base). A notes-only commit runs only
+the `notes` lane; a docs-only one runs it and the gate. When every lane is 0 the stack is pushed; otherwise the train prints the first failure lines of each
 red lane and pushes nothing.
 
 ## Consumer compile
