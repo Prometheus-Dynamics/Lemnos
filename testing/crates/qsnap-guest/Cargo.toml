@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-qsnap-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The guest's side of testing/qsnap: says ready on the control port, asks for its state to be kept, and unpacks the payload disk"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
