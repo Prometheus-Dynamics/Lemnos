@@ -192,9 +192,9 @@ off_part() { local d; d=$(kernel off kernel-modules-off.config --modules-off) ||
 ( part qemu "$code_key" qemu_part ) &
 ( part off "$code_key" off_part ) &
 # The consumer compile (scripts/land/README.md): compiles the consumers this change can break, against the stack's base
-# and head. Its own lane, niced; ccomp.rc is 0 (passed, or not checked), 1 (new breaks or hidden members, not
+# and head. Its own lane, at the train's nice level (LAND_UNIT_NICE); ccomp.rc is 0 (passed, or not checked), 1 (new breaks or hidden members, not
 # announced), or 2 (the step could not run). Its log is the train's consumer-compile.log, linked as ccomp.log.
-ccomp_part() { ln -sf consumer-compile.log "$L/ccomp.log"; nice -n 10 "$CCS" "$base" "$head" "$L" > "$L/ccomp.out" 2>&1; }
+ccomp_part() { ln -sf consumer-compile.log "$L/ccomp.log"; "$CCS" "$base" "$head" "$L" > "$L/ccomp.out" 2>&1; }
 CCS=$(cd "$(dirname "$0")" && pwd)/consumer-compile.sh
 # Keyed by the code key and the base: what it compares is base against head.
 ( part ccomp "$code_key-$base" ccomp_part ) &
