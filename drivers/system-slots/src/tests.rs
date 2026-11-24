@@ -1520,9 +1520,14 @@ config = {{ restart_socket = "{ctl}" }}
             .unwrap();
         offset += chunk.len() as u64;
     }
-    // The finish's steps run from the host's ticks, one a tick, until the job ends.
+    // The finish's steps run from the host's ticks, one a tick, until the job ends. Waited for
+    // the end, bounded by wall time: some steps wait on work off the tick (a thread's answer,
+    // the disk), and a count of ticks spun without waiting ran out before that work on a loaded
+    // machine (about 0.2 s for 1000).
     let mut updates: Vec<JobUpdate> = Vec::new();
-    for _ in 0..1000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        std::thread::yield_now();
         host.run_ticks();
         host.take_job_updates(&mut updates);
         if updates
@@ -1729,7 +1734,11 @@ impl Board {
     /// Ticks an install from a file to its end: its status, result and the progress seen.
     fn run_file_job(&mut self, job: JobId) -> (Status, Vec<u8>, Vec<u64>) {
         let mut seen = Vec::new();
-        for _ in 0..10_000 {
+        // Bounded by wall time, not by a count of ticks: the finish waits on the flush worker's
+        // barriers (`sync_all`), which a spin of ticks can outrun on a loaded disk.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            std::thread::yield_now();
             let next = self.slots.tick(0);
             match self.poll(job) {
                 Some(JobState::Running { done, total }) => {
