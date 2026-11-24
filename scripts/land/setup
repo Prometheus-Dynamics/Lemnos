@@ -7,6 +7,8 @@
 #   DIR/tools/slot-run.sh
 #   DIR/cc-data/         the consumer data (consumers/), each consumer's checkout found by its pinned commit
 #   DIR/bin/land-<rev8>  with --pin: the lander scripts at REV, which land.sh is run from
+#   DIR/wt/target, scratch/target-qemu, scratch/target-off, cc-work/target/<consumer>: cargo targets,
+#                        each its own btrfs subvolume (target-sv.sh)
 #   DIR/state, scratch, tmp, cc-work, and the caches under DIR/cache: qk (QEMU kernels), tarballs, busybox.
 #
 # The caches start empty and fill as trains run: a missing cache costs time (a kernel or BusyBox build,
@@ -84,6 +86,18 @@ put "$HERE/consumers/shims.tsv" "$B/cc-data/shims.tsv"
 put "$HERE/consumers/fields.tsv" "$B/cc-data/fields.tsv"
 for f in "$HERE"/consumers/fixes/*.json; do put "$f" "$B/cc-data/fixes/$(basename "$f")"; done
 for f in "$B"/cc-data/fixes/*.json; do [ -e "$HERE/consumers/fixes/$(basename "$f")" ] || { rm -f -- "$f"; echo "setup: $f removed (not in consumers/fixes/)"; changed=$((changed + 1)); }; done
+
+# The cargo target dirs, each its own btrfs subvolume (target-sv.sh). A train builds in them, so they
+# are made only while no train holds the stack lock; a train also makes its own when one is missing.
+exec 9>>"$B/state/lock.stack"
+if flock -n 9; then
+  sv=$("$HERE/target-sv.sh" "$B/wt/target" "$B/scratch/target-qemu" "$B/scratch/target-off" \
+    $(cut -f1 "$B/cc-data/consumers.tsv" | sed "s|^|$B/cc-work/target/|"))
+  [ -z "$sv" ] || { echo "$sv"; changed=$((changed + $(echo "$sv" | wc -l))); }
+else
+  echo "setup: a train is running: target subvolumes not checked (each train makes its own)"
+fi
+exec 9>&-
 
 # The lander scripts at a commit, copied whole and moved into place (a running train keeps its own copy).
 if [ -n "$pin" ]; then

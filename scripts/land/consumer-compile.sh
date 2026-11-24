@@ -133,6 +133,7 @@ compile_side() { # <consumer> <side:base|cand> <sha>
   # Four passes at most; if inserts are still needed after the last, the keys would be stale, so the step stops.
   local pass rc wall user sys cpu cpu_total=0 nedit=0 converged=0
   for pass in 1 2 3 4; do
+    "$HERE/target-sv.sh" "$WORK/target/$name" >> "$LOG" || { say "consumer-compile: $name: its target dir could not be made a subvolume"; return 2; }
     ( cd "$work/$mdir" && env CARGO_TARGET_DIR="$WORK/target/$name" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=$LAND_JOBS_CC TMPDIR="$WORK/tmp" \
         taskset -c $LAND_CPUS_CC timeout -k 30 3600 /usr/bin/time -o "$tim" -f "%e %U %S" \
         cargo check --workspace --all-targets --all-features --keep-going --message-format=json > "$json" 2> "$err" )

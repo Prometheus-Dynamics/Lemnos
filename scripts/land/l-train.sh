@@ -126,7 +126,7 @@ own_target() { # <target dir>
     echo "target $t was built from $(cat "$mark" 2>/dev/null || echo 'an unrecorded checkout'): removed"
     rm -rf --one-file-system "$t"
   fi
-  mkdir -p "$t" && echo "$W" > "$mark"
+  "$HERE/target-sv.sh" "$t" && echo "$W" > "$mark"
 }
 own_target "$W/target"
 own_target "$LAND_SCRATCH/target-qemu"
