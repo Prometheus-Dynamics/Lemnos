@@ -501,8 +501,10 @@ const RTO_MIN: Duration = Duration::from_millis(200);
 /// more than [`GAP_PAST_STALL`] past the guest's own longest stall `stalled`. A guest that stood
 /// still past [`MAX_GAP`] can lose a transfer on the link, which loopback never does: TCP sends it
 /// again on its retransmission timeouts (from [`RTO_MIN`], doubling), so the link's gap may run on
-/// to the first of them at or past the stall. Seen in QEMU with the machine under the guest busy:
-/// a 3923 ms stall over loopback, 4976 ms on the link, every other round within 250 ms of loopback.
+/// to the first of them at least [`GAP_PAST_STALL`] past the stall: one sent sooner can be lost
+/// too, the emulated bus not yet running again. Seen in QEMU with the machine under the guest
+/// busy: a 3923 ms stall over loopback, 4976 ms on the link; and a 1247 ms stall, 2806 ms on the
+/// link (the retry at 1400 ms lost, the one at 3000 ms carried).
 fn within_gap(gap: Duration, stalled: Duration) -> bool {
     if gap <= MAX_GAP || gap <= stalled + GAP_PAST_STALL {
         return true;
@@ -512,7 +514,7 @@ fn within_gap(gap: Duration, stalled: Duration) -> bool {
     }
     let mut timeout = RTO_MIN;
     let mut retried = RTO_MIN;
-    while retried < stalled {
+    while retried < stalled + GAP_PAST_STALL {
         timeout *= 2;
         retried += timeout;
     }
@@ -662,7 +664,25 @@ fn keep_through_restarts(
 
     // 7 and 8 under one Orion session over the link, its round trips paced 100 ms apart: it
     // lives through every restart and kill, and never sees its session lost.
-    let Some(session) = HostRun::start(me, 40, 0, 0, PACE_MS) else {
+    let witness = daemon.witness();
+    let bridge_lines = bridge.shared_lines();
+    let on_lost: Box<dyn Fn() + Send> = Box::new(move || {
+        for line in witness.report() {
+            say!("     at the loss: {line}");
+        }
+        let lines = bridge_lines.lock().unwrap_or_else(PoisonError::into_inner);
+        for line in lines
+            .iter()
+            .rev()
+            .take(15)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            say!("     at the loss: bridge: {line}");
+        }
+    });
+    let Some(session) = HostRun::start(me, 40, 0, 0, PACE_MS, Some(on_lost)) else {
         check(false, "the Orion session over the link starts");
         return;
     };
@@ -857,6 +877,11 @@ fn came_back(
             })
             == Some(true)
     });
+    // The line comes through the daemon's error output, read on another thread: it may land a
+    // moment after the pair reads lent (seen: one line late).
+    let _ = wait_until(LONG, || {
+        !daemon.lines_since(since, HOLD_TAKEN_UP).is_empty()
+    });
     let taken = daemon.lines_since(since, HOLD_TAKEN_UP);
     let dropped = daemon.lines_since(since, HOLD_DROPPED);
     check(
@@ -948,7 +973,7 @@ fn stuck_call_keeps_the_link(
         &named(&format!("the daemon's lane threads are found: {threads:?}")),
     );
     let offers = bridge.count(OFFERED);
-    let Some(run) = HostRun::start(me, 9 + round, PACED_ROUNDS, 0, PACE_MS) else {
+    let Some(run) = HostRun::start(me, 9 + round, PACED_ROUNDS, 0, PACE_MS, None) else {
         check(false, &named("the paced host session starts"));
         return;
     };
@@ -1252,7 +1277,7 @@ fn pair_lent_method(description: &lemnos_client::DeviceDescription) -> Option<u1
 /// Runs the host role as a child, with its lines on this check's output. True when the session came
 /// up, in that order the round trips followed, and the child exited cleanly.
 fn host_session(me: &Path, number: u32, hello_after_ms: u64) -> bool {
-    HostRun::start(me, number, ROUNDS, hello_after_ms, 0).is_some_and(HostRun::finish)
+    HostRun::start(me, number, ROUNDS, hello_after_ms, 0, None).is_some_and(HostRun::finish)
 }
 
 /// A host session running as a child, its lines kept as they come.
@@ -1269,6 +1294,7 @@ impl HostRun {
         rounds: u64,
         hello_after_ms: u64,
         pace_ms: u64,
+        on_lost: Option<Box<dyn Fn() + Send>>,
     ) -> Option<Self> {
         let child = Command::new(me)
             .arg("host")
@@ -1292,8 +1318,15 @@ impl HostRun {
             let lines = Arc::clone(&lines);
             std::thread::spawn(move || {
                 if let Some(stdout) = stdout {
+                    let mut on_lost = on_lost;
                     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                         say!("{line}");
+                        // A loss explains itself: what the daemon's side looked like, read now.
+                        if line.starts_with("FAIL host:")
+                            && let Some(report) = on_lost.take()
+                        {
+                            report();
+                        }
                         lines
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
@@ -1394,10 +1427,13 @@ mod gap_tests {
             "the whole guest stood still"
         );
         assert!(!within_gap(ms(900) + GAP_PAST_STALL + ms(1), ms(900)));
-        // A guest that stood still past a second: up to the retransmission timeout at or past it
-        // (retries at 200, 600, 1400, 3000, 6200 ms).
-        assert!(within_gap(ms(1400) + GAP_PAST_STALL, ms(1300)));
-        assert!(!within_gap(ms(1400) + GAP_PAST_STALL + ms(1), ms(1300)));
+        // A guest that stood still past a second: up to the retransmission timeout at least the
+        // margin past it (retries at 200, 600, 1400, 3000, 6200 ms).
+        assert!(within_gap(ms(1400) + GAP_PAST_STALL, ms(1100)));
+        assert!(!within_gap(ms(1400) + GAP_PAST_STALL + ms(1), ms(1100)));
+        assert!(within_gap(ms(3000) + GAP_PAST_STALL, ms(1300)));
+        assert!(!within_gap(ms(3000) + GAP_PAST_STALL + ms(1), ms(1300)));
+        assert!(within_gap(ms(2806), ms(1247)), "the retry at 1400 ms lost");
         assert!(within_gap(ms(4976), ms(3923)), "the QEMU run under load");
         assert!(!within_gap(ms(6200) + GAP_PAST_STALL + ms(1), ms(3923)));
     }

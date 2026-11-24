@@ -27,6 +27,48 @@ const READY_WAIT: Duration = Duration::from_secs(20);
 const STOP_BOUND: Duration = Duration::from_secs(5);
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 
+/// What the daemon's side looked like when the host's session was lost: the store's names and
+/// the daemon's last lines, read the moment the loss is seen.
+pub struct Witness {
+    manager: Arc<Manager>,
+    lines: Arc<Mutex<Vec<(Instant, String)>>>,
+}
+
+impl Witness {
+    pub fn report(&self) -> Vec<String> {
+        let names = self.manager.names();
+        let end = names.iter().any(|n| n.starts_with("lemnos-end."));
+        let mut out = vec![
+            format!("store: {names:?}"),
+            format!(
+                "store keeps the lend's END: {}",
+                if end { "yes" } else { "NO" }
+            ),
+            format!(
+                "gadget UDC: {:?}",
+                fs::read_to_string(format!("{GADGET_DIR}/UDC")).map(|t| t.trim().to_string())
+            ),
+        ];
+        let lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let recent: Vec<&String> = lines
+            .iter()
+            .rev()
+            .filter(|(at, line)| {
+                at.elapsed() < Duration::from_secs(20) && !line.contains("SLOT-TICK")
+            })
+            .map(|(_, line)| line)
+            .take(30)
+            .collect();
+        out.extend(
+            recent
+                .into_iter()
+                .rev()
+                .map(|line| format!("daemon: {line}")),
+        );
+        out
+    }
+}
+
 pub struct Lemnosd {
     socket: PathBuf,
     /// How it was started, for a restart.
@@ -99,6 +141,14 @@ impl KillAt {
 }
 
 impl Lemnosd {
+    /// What [`Witness::report`] reads, shared.
+    pub fn witness(&self) -> Witness {
+        Witness {
+            manager: Arc::clone(&self.manager),
+            lines: Arc::clone(&self.lines),
+        }
+    }
+
     /// Starts the daemon under `manager` and waits until it says it is ready (its socket listens).
     pub fn start(
         program: &Path,
