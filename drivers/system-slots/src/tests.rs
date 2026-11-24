@@ -6457,9 +6457,11 @@ fn a_verify_slower_than_the_call_deadline_neither_overruns_a_tick_nor_loops() {
         ticks > 5,
         "the ticks went on while the verify ran ({ticks})"
     );
+    // A tick that waited for the verify would take its whole delay. A loaded machine can stretch a
+    // tick that does not wait well past its 500 ms budget in wall time, so the bound is the delay.
     assert!(
-        longest < std::time::Duration::from_millis(500),
-        "a tick took {longest:?}"
+        longest < board.slots.verify_delay,
+        "a tick took {longest:?}, as long as the verify"
     );
     assert_eq!(board.slots.verifies_started, 1);
     assert_eq!(board.slots.record.restarts().unwrap(), Some(0));

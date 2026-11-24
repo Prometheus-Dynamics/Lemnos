@@ -96,7 +96,9 @@ fn one_request_is_sent_and_its_answer_is_the_result() {
 /// and a missing node fails at the open. Neither is taken for a yes.
 #[test]
 fn a_node_that_is_not_the_mailbox_is_never_taken_for_a_yes() {
-    let dir = std::env::temp_dir().join(format!("lemnos-way-back-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-way-back-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("vcio");
     std::fs::write(&file, [0u8; 32]).unwrap();
@@ -110,5 +112,4 @@ fn a_node_that_is_not_the_mailbox_is_never_taken_for_a_yes() {
         .unwrap_err();
         assert!(why.contains(&device.display().to_string()), "{why}");
     }
-    std::fs::remove_dir_all(&dir).unwrap();
 }

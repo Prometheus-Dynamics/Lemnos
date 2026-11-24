@@ -279,7 +279,9 @@ mod tests {
      {
         use std::io::{Read, Seek, Write};
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("flash-held-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("flash-held-{}", std::process::id())),
+        );
         fs::create_dir_all(&dir).unwrap();
         let held_path = dir.join("held.img");
         let other = dir.join("other.img");
@@ -315,7 +317,6 @@ mod tests {
         for path in [&held_path, &other] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         }
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -364,7 +365,9 @@ mod tests {
 
     #[test]
     fn the_devices_of_an_mtd_partition_include_its_ubi_volumes() {
-        let root = std::env::temp_dir().join(format!("lemnos-flash-sysfs-{}", std::process::id()));
+        let root = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-flash-sysfs-{}", std::process::id())),
+        );
         let _ = fs::remove_dir_all(&root);
         let class = root.join("class");
         fs::create_dir_all(class.join("ubi/ubi0_1")).unwrap();
@@ -374,7 +377,6 @@ mod tests {
         fs::write(class.join("ubi/ubi1/mtd_num"), "5\n").unwrap();
         fs::write(class.join("ubi/ubi0_1/dev"), "254:3\n").unwrap();
         let devices = mtd_devices(&root, 4);
-        let _ = fs::remove_dir_all(&root);
         assert_eq!(devices, vec![(31, 4), (254, 3)]);
     }
 

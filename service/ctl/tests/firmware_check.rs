@@ -26,13 +26,14 @@ fn run(img: &[u8], extra: &[&str]) -> (Result<(), String>, String) {
     // refuses a test that leaves anything in TMPDIR.
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("fwcheck-{}-{n}.img", std::process::id()));
+    let path = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("fwcheck-{}-{n}.img", std::process::id())),
+    );
     std::fs::write(&path, img).unwrap();
     let mut args = vec!["firmware-check".to_string(), path.display().to_string()];
     args.extend(extra.iter().map(|s| s.to_string()));
     let mut out = Vec::new();
     let r = lemnos_ctl::run(&args, &mut out);
-    let _ = std::fs::remove_file(&path);
     (r, String::from_utf8(out).unwrap())
 }
 

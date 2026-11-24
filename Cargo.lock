@@ -976,6 +976,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 name = "lemnos-abi"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-scratch",
  "libc",
 ]
 
@@ -1458,6 +1459,7 @@ dependencies = [
  "lemnos-identity",
  "lemnos-linux",
  "lemnos-restart",
+ "lemnos-scratch",
  "lemnos-shipped-features",
  "lemnos-sim",
  "lemnos-sim-walk",
@@ -1539,6 +1541,7 @@ name = "lemnos-driver-a733-video-sys"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
+ "lemnos-scratch",
  "libc",
 ]
 
@@ -1707,6 +1710,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-host",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
 ]
@@ -1889,6 +1893,7 @@ dependencies = [
 name = "lemnos-driver-k230isp-sys"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-scratch",
  "libc",
 ]
 
@@ -1903,6 +1908,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
  "lemnos-wire",
@@ -1989,6 +1995,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
  "lemnos-wire",
@@ -2218,6 +2225,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-host",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
  "lemnos-wire",
@@ -2256,6 +2264,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
  "lemnos-wire",
@@ -2267,6 +2276,7 @@ name = "lemnos-driver-rkvpss-sys"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
+ "lemnos-scratch",
  "libc",
 ]
 
@@ -2310,6 +2320,7 @@ name = "lemnos-driver-rpi-firmware-sys"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
+ "lemnos-scratch",
  "libc",
 ]
 
@@ -2352,6 +2363,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-driver-system-flash-sys",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-slot-store",
  "sha2 0.10.9",
 ]
@@ -2383,6 +2395,7 @@ dependencies = [
  "lemnos-contract-system-identity",
  "lemnos-core",
  "lemnos-host",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-slot-store",
  "lemnos-test-options",
@@ -2403,6 +2416,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-restart",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-slot-store",
  "lemnos-socket-dir",
@@ -2429,6 +2443,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
  "lemnos-wire",
@@ -2598,6 +2613,7 @@ dependencies = [
 name = "lemnos-good-boot"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-scratch",
  "lemnos-slot-store",
 ]
 
@@ -2644,6 +2660,7 @@ dependencies = [
  "embedded-hal",
  "embedded-hal-async",
  "lemnos-hal",
+ "lemnos-scratch",
 ]
 
 [[package]]
@@ -2727,6 +2744,7 @@ dependencies = [
  "lemnos-flash-stage",
  "lemnos-flash-wire",
  "lemnos-k230-usbboot-stage",
+ "lemnos-scratch",
  "rusb",
  "rustix",
  "sha2 0.11.1",
@@ -2796,6 +2814,7 @@ dependencies = [
  "lemnos-linux-names",
  "lemnos-linux-sys",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
  "lemnos-usb",
@@ -2825,6 +2844,7 @@ dependencies = [
 name = "lemnos-linux-sys"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-scratch",
  "libc",
  "shm-ring",
  "shm-ring-buffers",
@@ -2976,6 +2996,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-host",
  "lemnos-measure",
+ "lemnos-scratch",
  "lemnos-sim",
  "lemnos-test-options",
 ]
@@ -3090,6 +3111,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-scratch"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-sensor-power-up"
 version = "2.0.1-dev"
 dependencies = [
@@ -3176,6 +3201,7 @@ dependencies = [
  "lemnos-driver-system-slots",
  "lemnos-identity",
  "lemnos-linux-sys",
+ "lemnos-scratch",
  "lemnos-shipped-features",
  "lemnos-slot-store",
  "toml",
@@ -3197,6 +3223,7 @@ name = "lemnos-slot-store"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
+ "lemnos-scratch",
  "sha2 0.10.9",
 ]
 
@@ -3312,6 +3339,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
+ "lemnos-scratch",
  "libc",
 ]
 
@@ -3345,6 +3373,7 @@ name = "lemnos-way-back"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-driver-rpi-firmware-sys",
+ "lemnos-scratch",
 ]
 
 [[package]]
@@ -3432,6 +3461,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-package",
+ "lemnos-scratch",
  "lemnos-shipped-features",
  "lemnos-sim",
  "lemnos-slot-store",

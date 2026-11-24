@@ -436,9 +436,10 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
     }
 
     /// A file in the temp directory, unique to this test, holding `text`.
-    fn serial_file(name: &str, text: &[u8]) -> std::path::PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("lemnosd-gadget-{}-{name}", std::process::id()));
+    fn serial_file(name: &str, text: &[u8]) -> lemnos_scratch::Scratch {
+        let path = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnosd-gadget-{}-{name}", std::process::id())),
+        );
         std::fs::write(&path, text).expect("write the serial file");
         path
     }
@@ -477,13 +478,13 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
                 ifname: None,
             })
         );
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn derive_with_an_unreadable_serial_is_not_refused_the_helper_waits_for_the_source() {
-        let missing =
-            std::env::temp_dir().join(format!("lemnosd-gadget-{}-missing", std::process::id()));
+        let missing = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnosd-gadget-{}-missing", std::process::id())),
+        );
         let mut board = board_at(&missing.to_string_lossy(), DERIVE);
         resolve(&mut board);
         // The daemon's own read failed, and the settings that need the serial say so.
@@ -522,13 +523,13 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
                 ifname: None,
             })
         );
-        let _ = std::fs::remove_file(missing);
     }
 
     #[test]
     fn a_gadget_that_does_not_derive_sets_up_without_a_serial() {
-        let missing =
-            std::env::temp_dir().join(format!("lemnosd-gadget-{}-none", std::process::id()));
+        let missing = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnosd-gadget-{}-none", std::process::id())),
+        );
         let mut board = board_at(&missing.to_string_lossy(), PLAIN);
         resolve(&mut board);
         assert!(gadget(&board).config.contains_key("board_serial_error"));
@@ -557,7 +558,6 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
                 .unwrap()
                 .contains("set by the daemon")
         );
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -596,7 +596,6 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
                 .refused
                 .is_none()
         );
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -621,7 +620,6 @@ config = { vendor = 0x1209, product = 1, identity = "identity", interfaces = "IN
                 .unwrap()
                 .contains("`identity` is a setting, not a resource")
         );
-        let _ = std::fs::remove_file(path);
     }
 }
 

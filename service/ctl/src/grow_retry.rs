@@ -58,11 +58,11 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn data(name: &str, state: Option<&str>) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
+    fn data(name: &str, state: Option<&str>) -> lemnos_scratch::Scratch {
+        let root = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(format!(
             "lemnos-ctl-grow-retry-{name}-{}",
             std::process::id()
-        ));
+        )));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("board/slots")).unwrap();
         if let Some(text) = state {
@@ -81,7 +81,6 @@ mod tests {
         run(&[root.display().to_string()], &mut out).unwrap();
         assert!(!root.join("board/slots/grow-state").exists());
         assert!(String::from_utf8_lossy(&out).contains("the next boot tries the grow again"));
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -90,7 +89,6 @@ mod tests {
         let error = run(&[root.display().to_string()], &mut Vec::new()).unwrap_err();
         assert!(error.contains("not refused as stalled"), "{error}");
         assert!(root.join("board/slots/grow-state").exists());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -98,6 +96,5 @@ mod tests {
         let root = data("none", None);
         let error = run(&[root.display().to_string()], &mut Vec::new()).unwrap_err();
         assert!(error.contains("no refusal to clear"), "{error}");
-        let _ = fs::remove_dir_all(&root);
     }
 }

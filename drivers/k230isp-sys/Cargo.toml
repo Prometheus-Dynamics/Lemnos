@@ -25,3 +25,6 @@ multiple_unsafe_ops_per_block = "deny"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

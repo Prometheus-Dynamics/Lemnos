@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_client::Client;
 use lemnos_contract_gpu_lease::GpuLease;
+use lemnos_core::Status;
 use lemnos_driver_gpu_lease::GpuLeaseDevice;
 use lemnos_host::board::parse;
 use lemnos_host::entry;
@@ -47,7 +48,14 @@ fn a_lease_ends_with_its_connection_and_the_next_waiter_is_granted() {
     drop(first);
 
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !waiter.poll(waiting.lease).unwrap().held {
+    loop {
+        match waiter.poll(waiting.lease) {
+            Ok(reply) if reply.held => break,
+            // No answer in time under load: ask again until the deadline.
+            Ok(_) => {}
+            Err(status) if status == Status::TIMED_OUT => {}
+            Err(status) => panic!("poll: {status:?}"),
+        }
         assert!(Instant::now() < deadline, "the lease was never given up");
         std::thread::sleep(Duration::from_millis(2));
     }

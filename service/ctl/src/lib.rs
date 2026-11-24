@@ -1604,14 +1604,15 @@ mod watchdog_bound_tests {
 
     /// The example board with its keep-alive watchdog's `timeout_s` set to `seconds`, written to a
     /// temporary file. The example validates as it is (the board-files test says so).
-    fn board_with_timeout(seconds: &str, name: &str) -> std::path::PathBuf {
+    fn board_with_timeout(seconds: &str, name: &str) -> lemnos_scratch::Scratch {
         let text = include_str!("../../../docs/examples/full-board.toml");
         assert!(
             text.contains("timeout_s = 15"),
             "the example names the 15 s timeout"
         );
-        let path =
-            std::env::temp_dir().join(format!("lemnos-wdt-{}-{name}.toml", std::process::id()));
+        let path = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-wdt-{}-{name}.toml", std::process::id())),
+        );
         std::fs::write(
             &path,
             text.replace("timeout_s = 15", &format!("timeout_s = {seconds}")),
@@ -1626,14 +1627,12 @@ mod watchdog_bound_tests {
     fn a_board_whose_watchdog_period_is_outside_the_bound_is_refused_by_name() {
         let path = board_with_timeout("60", "long");
         let result = validate(path.to_str().unwrap(), None, false, &mut Vec::new());
-        std::fs::remove_file(&path).unwrap();
         let error = result.expect_err("a period above the bound is refused");
         assert!(error.contains("watchdog-period-outside-bound"), "{error}");
         assert!(error.contains("timeout_s is 60 s"), "{error}");
 
         let path = board_with_timeout("0", "zero");
         let result = validate(path.to_str().unwrap(), None, false, &mut Vec::new());
-        std::fs::remove_file(&path).unwrap();
         let error = result.expect_err("a period of 0 is refused");
         assert!(error.contains("timeout_s"), "{error}");
     }
@@ -1642,7 +1641,6 @@ mod watchdog_bound_tests {
     fn a_board_whose_watchdog_period_is_inside_the_bound_passes_that_check() {
         let path = board_with_timeout("15", "inside");
         let result = validate(path.to_str().unwrap(), None, false, &mut Vec::new());
-        std::fs::remove_file(&path).unwrap();
         assert_eq!(result, Ok(()));
     }
 

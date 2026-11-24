@@ -285,7 +285,9 @@ mod tests {
 
     #[test]
     fn a_pwm_chip_is_found_by_its_device_tree_node() {
-        let sys = std::env::temp_dir().join(format!("lemnos-stable-{}", std::process::id()));
+        let sys = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-stable-{}", std::process::id())),
+        );
         let _ = std::fs::remove_dir_all(&sys);
         let node = sys.join("firmware/devicetree/base/axi/pcie@1000120000/rp1/pwm@9c000");
         std::fs::create_dir_all(&node).unwrap();
@@ -302,7 +304,6 @@ mod tests {
             pwm_chip_dir(&sys, "/axi/pcie@1000120000/rp1/pwm@98000"),
             None
         );
-        std::fs::remove_dir_all(&sys).unwrap();
     }
 
     #[test]
@@ -317,7 +318,9 @@ mod tests {
         assert_eq!(parse("watchdog:/soc/../x"), None);
         assert_eq!(parse("watchdog0"), None);
 
-        let dir = std::env::temp_dir().join(format!("lemnos-watchdog-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-watchdog-{}", std::process::id())),
+        );
         let _ = std::fs::remove_dir_all(&dir);
         let dev = dir.join("dev");
         let sys = dir.join("sys");
@@ -363,6 +366,5 @@ mod tests {
         // A non-numbered class entry is not a watchdog.
         std::fs::create_dir_all(sys.join("class/watchdog/other")).unwrap();
         assert_eq!(watchdog_dev(&dev, &sys, "/soc@107c000000/other"), None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -29,3 +29,6 @@ lemnos-wire = { path = "../../engine/wire" }
 
 [package.metadata.lemnos]
 driver = "Rknpu"
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

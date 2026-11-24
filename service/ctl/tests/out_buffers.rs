@@ -341,7 +341,15 @@ fn start_slots() -> Running {
     // running. Wait for the state the daemon reports, as `lemnos-ctl list` shows it.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let listed = ctl(&running, &["list"]).unwrap();
+        let listed = match ctl(&running, &["list"]) {
+            Ok(listed) => listed,
+            // No answer in time under load: ask again until the deadline.
+            Err(error) if is_timeout(&error) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => panic!("list: {error}"),
+        };
         if listed
             .lines()
             .any(|row| row.contains("slots") && row.contains("running"))
@@ -361,6 +369,12 @@ fn start_slots() -> Running {
 /// host's first retry (`retry_first`, 1 s by default), so two of those cover one retry.
 const BIND_WAIT: Duration = Duration::from_secs(2);
 
+/// Whether ctl reports a call that got no answer in time (the client's own bound, or the daemon's
+/// TIMED_OUT status).
+fn is_timeout(error: &str) -> bool {
+    error == "no answer in time" || error.starts_with("refused (-110)")
+}
+
 fn ctl(running: &Running, words: &[&str]) -> Result<String, String> {
     let mut args = vec!["--socket".to_string(), running.socket.display().to_string()];
     args.extend(words.iter().map(ToString::to_string));
@@ -368,9 +382,12 @@ fn ctl(running: &Running, words: &[&str]) -> Result<String, String> {
     loop {
         let mut out = Vec::new();
         match lemnos_ctl::run(&args, &mut out) {
-            // Busy, or not bound yet: the device retries its bind with backoff.
+            // Busy, not bound yet, or no answer in time under load: the device retries its bind
+            // with backoff, and a slow daemon answers the next ask.
             Err(error)
-                if (error.starts_with("refused (-16)") || error.starts_with("refused (-19)"))
+                if (error.starts_with("refused (-16)")
+                    || error.starts_with("refused (-19)")
+                    || is_timeout(&error))
                     && Instant::now() < deadline =>
             {
                 std::thread::yield_now();

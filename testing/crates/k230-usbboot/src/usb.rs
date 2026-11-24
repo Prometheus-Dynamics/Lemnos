@@ -269,9 +269,13 @@ impl UsbIo for RusbIo {
                 .devices()
                 .map_err(|e| map_error(e, timeout_ms))?;
             for device in devices.iter() {
-                let descriptor = device
-                    .device_descriptor()
-                    .map_err(|e| map_error(e, timeout_ms))?;
+                // Gone since the listing (the device reset or left the bus): not there yet, so
+                // look again.
+                let descriptor = match device.device_descriptor() {
+                    Ok(descriptor) => descriptor,
+                    Err(rusb::Error::NoDevice) => continue,
+                    Err(e) => return Err(map_error(e, timeout_ms)),
+                };
                 let path = device.port_numbers().unwrap_or_default();
                 let port = Port {
                     bus: device.bus_number(),
@@ -291,10 +295,18 @@ impl UsbIo for RusbIo {
                         path: device.port_numbers().unwrap_or_default(),
                     };
                     if port == self.port {
-                        self.handle = device.open().map_err(|e| map_error(e, timeout_ms))?;
-                        self.handle
-                            .claim_interface(INTERFACE)
-                            .map_err(|e| map_error(e, timeout_ms))?;
+                        // Gone again before it opens or claims: not there yet, so keep polling.
+                        let handle = match device.open() {
+                            Ok(handle) => handle,
+                            Err(rusb::Error::NoDevice) => continue,
+                            Err(e) => return Err(map_error(e, timeout_ms)),
+                        };
+                        match handle.claim_interface(INTERFACE) {
+                            Ok(()) => {}
+                            Err(rusb::Error::NoDevice) => continue,
+                            Err(e) => return Err(map_error(e, timeout_ms)),
+                        }
+                        self.handle = handle;
                         return Ok(ids);
                     }
                 }

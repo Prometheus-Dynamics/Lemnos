@@ -48,6 +48,7 @@ lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnosd = { path = "../lemnosd" }
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 # The restart helper on a socket, for the driver the data-partition tests build.
 lemnos-restart = { path = "../restart-helper", features = ["stand-in"] }

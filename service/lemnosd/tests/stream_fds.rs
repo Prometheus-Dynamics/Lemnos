@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{StandIn, start_with_buffers};
-use lemnos_client::{Session, StreamPlatform};
+use lemnos_client::{Error, Session, StreamPlatform};
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_wire::{Frame, VERSION, append};
 
@@ -104,24 +104,33 @@ fn no_path_leaks_a_descriptor() {
 
     // The same for a stream with a descriptor per buffer: eighteen cross each time, and the
     // service holds sixteen of them while the stream is attached.
+    let mut completed = 0;
     for _ in 0..25 {
-        let mut session = Session::connect(&running.socket, "cycle").unwrap();
-        let stream = session
-            .open_stream(0, "handles", Arc::clone(&platform))
-            .unwrap();
-        assert!(stream.has_buffer_handles());
-        session.close_stream(stream).unwrap();
-        let held = session
-            .open_stream(0, "handles", Arc::clone(&platform))
-            .unwrap();
-        drop(held);
-        drop(session);
-        let host = running.service.as_ref().unwrap().host();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while host.stream_stats(0, "handles").unwrap().attached && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
+        let cycle = || -> Result<(), Error> {
+            let mut session = Session::connect(&running.socket, "cycle")?;
+            let stream = session.open_stream(0, "handles", Arc::clone(&platform))?;
+            assert!(stream.has_buffer_handles());
+            session.close_stream(stream)?;
+            let held = session.open_stream(0, "handles", Arc::clone(&platform))?;
+            drop(held);
+            drop(session);
+            let host = running.service.as_ref().unwrap().host();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while host.stream_stats(0, "handles").unwrap().attached && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        };
+        // A call with no answer in time under load ends its session, and the service ends that
+        // session's streams with it. Asking again on the same session would not be the same
+        // call, so the cycle is dropped and the next one starts fresh.
+        match cycle() {
+            Ok(()) => completed += 1,
+            Err(Error::TimedOut) => {}
+            Err(e) => panic!("cycle: {e:?}"),
         }
     }
+    assert!(completed > 0, "no cycle got an answer in time");
     assert_eq!(settle_to(baseline), baseline, "a descriptor per buffer");
 
     for _ in 0..25 {

@@ -202,20 +202,34 @@ fn resource(dashboard: &Orion, name: &str) -> Option<Found> {
 fn run_once_said(dashboard: &Orion, action: &str, resource: &str, args: &str) -> Finished {
     let deadline = Instant::now() + WAIT;
     loop {
-        let mut run = dashboard
-            .run(&ActionCall {
-                name: action,
-                target: Target::Resource(resource.parse().expect("name")),
-                args: args.as_bytes(),
-                deadline_ms: 0,
-                detached: false,
-            })
-            .expect("run");
+        let mut run = match dashboard.run(&ActionCall {
+            name: action,
+            target: Target::Resource(resource.parse().expect("name")),
+            args: args.as_bytes(),
+            deadline_ms: 0,
+            detached: false,
+        }) {
+            Ok(run) => run,
+            // No reply in time under load: asked again within the same bound.
+            Err(orion::Error::Client(ClientError::Io(error)))
+                if error.kind() == std::io::ErrorKind::TimedOut && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            Err(e) => panic!("run {action}: {e:?}"),
+        };
         match run.finish(WAIT) {
             Err(ClientError::Refused {
                 error: Refusal::NotFound,
                 ..
             }) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // No reply in time under load: asked again within the same bound.
+            Err(ClientError::Io(error))
+                if error.kind() == std::io::ErrorKind::TimedOut && Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(20));
             }
             // The device is not running (-19): it was refused before the call ran, so it is asked

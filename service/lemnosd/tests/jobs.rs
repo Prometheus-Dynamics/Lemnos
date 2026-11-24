@@ -271,7 +271,14 @@ fn a_starter_that_goes_away_has_its_jobs_cancelled() {
         copier.copy(1_000_000).unwrap();
     }
     let deadline = Instant::now() + LONG;
-    while watch.cancels().unwrap() != 2 {
+    loop {
+        match watch.cancels() {
+            Ok(2) => break,
+            // No answer in time under load: ask again until the deadline.
+            Ok(_) => {}
+            Err(status) if status == Status::TIMED_OUT => {}
+            Err(status) => panic!("cancels: {status:?}"),
+        }
         assert!(Instant::now() < deadline, "the jobs were never cancelled");
         std::thread::sleep(Duration::from_millis(2));
     }

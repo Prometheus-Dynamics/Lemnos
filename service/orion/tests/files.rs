@@ -342,9 +342,23 @@ fn setup_running(test: &str, reserve_mb: u64, running: &str) -> Setup {
 impl Setup {
     /// Stops lemnosd and starts it again on the same directories, its slot driver told slot
     /// `running` is the one running; returns once the bridge reaches it again.
+    ///
+    /// The bridge must have let the old lemnosd go first. A bridge slow to notice the stop (a
+    /// loaded machine) otherwise answers through the new lemnosd, then withdraws the slots and
+    /// offers them again, and an action asked in between finds none. With no lemnosd running
+    /// nothing is offered again, so the withdrawal is waited for before the new one starts.
     fn restart_lemnosd(&mut self, running: &str) {
         self.service = None;
+        wait_for("the bridge letting the old lemnosd go", || {
+            let found = self.dashboard.resources("lemnos.slots").ok()?;
+            (!found.iter().any(|f| f.name == "lemnos.slots")).then_some(())
+        });
         self.service = Some(start_lemnosd(&self.dir, &self.socket, 0, running));
+        wait_for("the slots resource again", || {
+            let found = self.dashboard.resources("lemnos.slots").ok()?;
+            found.iter().any(|f| f.name == "lemnos.slots").then_some(())
+        });
+        wait_accepted(&self.dashboard, "slots");
         wait_for("the bridge at the new lemnosd", || {
             let mut run = self.start("boots");
             let finished = run.finish(WAIT).ok()?;

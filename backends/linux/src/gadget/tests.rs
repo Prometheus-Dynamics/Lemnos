@@ -2277,7 +2277,9 @@ fn a_configfs_directory_that_is_not_a_mounted_configfs_is_not_there_yet() {
 /// in `/sys/class/udc`, whatever its index is; a name of an entry is itself; a name of no device, or of two, is none.
 #[test]
 fn a_platform_device_name_resolves_to_its_controller_entry() {
-    let root = std::env::temp_dir().join(format!("lemnos-udc-resolve-{}", std::process::id()));
+    let root = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-udc-resolve-{}", std::process::id())),
+    );
     let _ = fs::remove_dir_all(&root);
     let class = root.join("class/udc");
     fs::create_dir_all(&class).unwrap();
@@ -2311,7 +2313,6 @@ fn a_platform_device_name_resolves_to_its_controller_entry() {
         None,
         "two entries: none"
     );
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// A daemon started again in a fresh mount namespace (each start gets its own) can't see the mount

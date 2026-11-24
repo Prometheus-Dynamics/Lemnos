@@ -1419,9 +1419,10 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("lemnosd-helper-{name}-{}", std::process::id()));
+    fn scratch(name: &str) -> lemnos_scratch::Scratch {
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnosd-helper-{name}-{}", std::process::id())),
+        );
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1532,7 +1533,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(serial_string.trim(), "0123456789abcdef");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1572,7 +1572,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(serial_string.trim(), "fedcba9876543210");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Each verb, run under the production filter against fake roots: one forked child per verb,
@@ -1631,7 +1630,6 @@ mod tests {
             seccomp::Exit::Code(0),
             "a setup that logs, with stderr held by another thread"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1714,6 +1712,5 @@ mod tests {
         })
         .unwrap();
         assert_eq!(forbidden, seccomp::Exit::Signal(SIGSYS_TEST));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -116,8 +116,10 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 /// A scratch directory for one test, removed when the test starts.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fan-caller-gone-{}-{name}", std::process::id()));
+fn scratch(name: &str) -> lemnos_scratch::Scratch {
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("fan-caller-gone-{}-{name}", std::process::id())),
+    );
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -197,12 +199,11 @@ fn a_killed_client_hands_the_hwmon_fan_back_within_the_bound() {
         ),
     }
     drop(running);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_killed_client_hands_the_pwm_fan_back_within_the_bound() {
-    let dir = scratch("pwm");
+    let _dir = scratch("pwm");
     let sim = SimBoard::new();
     let pwm = sim.add_pwm("pwm0");
     let board = "[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\n\
@@ -234,7 +235,6 @@ fn a_killed_client_hands_the_pwm_fan_back_within_the_bound() {
         ),
     }
     drop(running);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// The fan controller over a real hwmon fan. The controller steps once a second and writes its duty each
@@ -314,7 +314,6 @@ fn a_killed_override_under_a_controller_leaves_the_controller_in_charge() {
     assert_eq!(read("pwm1"), "115");
     assert_eq!(control.state().unwrap().duty, 450);
     drop(running);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Starts `text` with the daemon's log going to a list, and returns the service and the list.
@@ -455,7 +454,6 @@ fn a_client_killed_before_the_controllers_next_step_leaves_the_controller_in_cha
         Some(&("115".to_string(), "1".to_string())),
         "the controller did not take the fan back: {seen:?}"
     );
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -519,12 +517,11 @@ fn a_pwm_channel_under_a_controller_keeps_the_controllers_duty_when_the_client_i
         "the controller's duty never came back: {after:?}"
     );
     logs(&lines, "lemnosd: fan: handed back to the controller");
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_hand_back_to_the_declared_default_names_it_in_the_log() {
-    let dir = scratch("log-default");
+    let _dir = scratch("log-default");
     let sim = SimBoard::new();
     let _pwm = sim.add_pwm("pwm0");
     let board = "[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\n\
@@ -539,12 +536,11 @@ fn a_hand_back_to_the_declared_default_names_it_in_the_log() {
         &lines,
         "lemnosd: fan: handed back to the declared default duty, per mille: 300",
     );
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_hand_back_to_full_duty_names_that_no_default_is_declared() {
-    let dir = scratch("log-full");
+    let _dir = scratch("log-full");
     let sim = SimBoard::new();
     let _pwm = sim.add_pwm("pwm0");
     let board = "[[devices]]\nid = \"fan\"\ndriver = \"pwm-channel-fan\"\n\
@@ -559,7 +555,6 @@ fn a_hand_back_to_full_duty_names_that_no_default_is_declared() {
         &lines,
         "lemnosd: fan: handed back to full duty: no default duty is declared",
     );
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -579,5 +574,4 @@ fn a_hand_back_to_the_governor_names_it_in_the_log() {
     let _ = child.0.kill();
     let _ = child.0.wait();
     logs(&lines, "lemnosd: fan: handed back to the governor");
-    let _ = fs::remove_dir_all(&dir);
 }

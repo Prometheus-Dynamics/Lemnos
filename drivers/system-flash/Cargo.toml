@@ -21,6 +21,7 @@ ed25519-dalek = { version = "2.2", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-slot-store = { path = "../slot-store", features = ["testing"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 

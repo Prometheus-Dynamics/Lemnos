@@ -125,7 +125,9 @@ mod tests {
 
     #[test]
     fn a_real_fdatasync_on_a_dup_of_the_file_completes() {
-        let dir = std::env::temp_dir().join(format!("lemnos-flush-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-flush-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("device");
         let file = std::fs::OpenOptions::new()
@@ -139,6 +141,5 @@ mod tests {
         let mut barrier = Barrier::start(Box::new(move || dup.sync_data())).unwrap();
         assert!(wait_for(&mut barrier).unwrap());
         drop(file);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

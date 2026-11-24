@@ -265,7 +265,9 @@ mod loader_tests {
     /// (here: its environment has no device, so trial updates are unavailable).
     #[test]
     fn a_repoint_is_refused_before_anything_is_written_when_the_loader_cannot_read_the_record() {
-        let dir = std::env::temp_dir().join(format!("lemnos-repoint-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-repoint-{}", std::process::id())),
+        );
         // Whatever is at the name is not ours to keep: a file left there would stop the directory.
         if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
             let _ = fs::remove_dir_all(&dir);
@@ -302,6 +304,5 @@ mod loader_tests {
             !dir.join("missing-env").exists(),
             "nothing was created in the environment"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -482,9 +482,10 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("lemnos-confined-{name}-{}", std::process::id()));
+    fn scratch(name: &str) -> lemnos_scratch::Scratch {
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-confined-{name}-{}", std::process::id())),
+        );
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -504,7 +505,6 @@ mod tests {
         assert!(dir.write("../escape", b"x").is_err());
         assert!(dir.read("/etc/passwd").is_err());
         assert!(!root.parent().unwrap().join("escape").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -526,8 +526,6 @@ mod tests {
         assert_eq!(dir.kind("dir").unwrap(), Kind::Symlink);
         // A link as the root of a `Dir` is not followed either.
         assert!(Dir::open_path(&root.join("dir")).is_err());
-        let _ = std::fs::remove_dir_all(root);
-        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]
@@ -554,6 +552,5 @@ mod tests {
         dir.remove_dir("g").unwrap();
         assert!(dir.names().unwrap().is_empty());
         assert!(g.proc_path().starts_with("/proc/self/fd/"));
-        let _ = std::fs::remove_dir_all(root);
     }
 }

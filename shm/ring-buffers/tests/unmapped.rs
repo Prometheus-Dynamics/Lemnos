@@ -128,6 +128,9 @@ fn an_unmapped_view_refuses_the_descriptors_a_mapped_one_refuses() {
     // A regular file is not sealed against shrinking.
     let path = std::env::temp_dir().join(format!("shm-unmapped-{}", std::process::id()));
     let file = std::fs::File::create(&path).unwrap();
+    // Unlinked at once, so a failed assertion below leaves nothing behind: the descriptor is all
+    // the test uses.
+    std::fs::remove_file(&path).unwrap();
     file.set_len(8192).unwrap();
     let unsealed: OwnedFd = file.into();
     let (page, _, buffers) = pieces(2, 4096);
@@ -137,7 +140,6 @@ fn an_unmapped_view_refuses_the_descriptors_a_mapped_one_refuses() {
         &buffers,
     );
     assert!(matches!(refused, Err(RingError::Unsealed)), "{refused:?}");
-    let _ = std::fs::remove_file(&path);
 
     // A buffer past the end of its descriptor.
     let (page, fds, _) = pieces(2, 4096);

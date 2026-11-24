@@ -2026,14 +2026,13 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        let path = std::env::temp_dir().join(name);
+        let path = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(name));
         let file = std::fs::File::options()
             .read(true)
             .write(true)
             .create_new(true)
             .open(&path)
             .unwrap();
-        std::fs::remove_file(&path).unwrap();
         file.set_len(len).unwrap();
         file.into()
     }

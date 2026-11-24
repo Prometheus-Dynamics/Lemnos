@@ -115,10 +115,11 @@ mod tests {
 
     #[test]
     fn a_request_on_a_plain_file_is_refused_and_it_has_no_media_device() {
-        let path = std::env::temp_dir().join(format!("lemnos-m2m-request-{}", std::process::id()));
+        let path = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-m2m-request-{}", std::process::id())),
+        );
         let file = File::create(&path).unwrap();
         assert!(Request::allocate(&file).is_err());
         assert_eq!(media_device_for(&path).unwrap(), None);
-        std::fs::remove_file(&path).unwrap();
     }
 }

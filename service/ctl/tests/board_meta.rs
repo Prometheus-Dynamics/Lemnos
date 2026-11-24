@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 fn validate(text: &str) -> Result<(), String> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(format!(
         "lemnos-ctl-meta-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("board.toml");
     std::fs::write(&path, text).unwrap();
@@ -19,12 +19,10 @@ fn validate(text: &str) -> Result<(), String> {
         "--no-live".to_string(),
         path.display().to_string(),
     ];
-    let result = lemnos_ctl::run(&args, &mut out).map_err(|error| {
+    lemnos_ctl::run(&args, &mut out).map_err(|error| {
         let prefix = format!("{}: ", path.display());
         error.strip_prefix(&prefix).unwrap_or(&error).to_string()
-    });
-    std::fs::remove_dir_all(&dir).unwrap();
-    result
+    })
 }
 
 const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\

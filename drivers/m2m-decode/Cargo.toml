@@ -35,3 +35,6 @@ lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
 
 [package.metadata.lemnos]
 driver = "M2mCodec"
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

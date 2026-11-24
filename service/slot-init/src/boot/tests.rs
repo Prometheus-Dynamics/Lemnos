@@ -2890,7 +2890,9 @@ fn an_erased_or_wrong_size_environment_is_refused_by_name_and_not_written() {
 fn the_device_form_writes_the_environment_where_the_locator_says() {
     // The device the locator names is a file of its own (the locator is in the image, so its path is
     // known before the board's tree is).
-    let device = std::env::temp_dir().join(format!("lemnos-envdev-{}", std::process::id()));
+    let device = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-envdev-{}", std::process::id())),
+    );
     let place = Place::device(device.to_str().unwrap(), 1024, 0, 4096).unwrap();
     let mut image = vec![0xEEu8; 8192];
     image[..1024].copy_from_slice(&env_copy(&[("default", "os-2")], 6));
@@ -2902,7 +2904,6 @@ fn the_device_form_writes_the_environment_where_the_locator_says() {
     let mut dev = FileEnv::open(&device).unwrap();
     let g = Geometry::new(1024, 0, 4096).unwrap();
     let (_, vars) = uboot_env::load(&mut dev, &g).unwrap().unwrap();
-    let _ = fs::remove_file(&device);
     assert!(
         vars.contains(&("default".to_string(), "os-1".to_string())),
         "{vars:?}"

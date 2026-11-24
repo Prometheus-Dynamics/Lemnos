@@ -830,7 +830,9 @@ fn a_node_handed_over_read_only_refuses_the_write_by_name_with_the_reason() {
     use super::{FileEnv, READ_ONLY, hand_over};
     use std::os::unix::fs::FileExt;
     // A stand-in node: a regular file (a block node in the daemon), handed over as the root phase does.
-    let node = std::env::temp_dir().join(format!("lemnos-uboot-ro-{}", std::process::id()));
+    let node = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-uboot-ro-{}", std::process::id())),
+    );
     std::fs::write(&node, vec![0u8; 4096]).unwrap();
     let read = std::fs::File::open(&node).unwrap();
     hand_over(
@@ -868,5 +870,4 @@ fn a_node_handed_over_read_only_refuses_the_write_by_name_with_the_reason() {
         .read_exact_at(&mut out, 0)
         .unwrap();
     assert_eq!(out, [7, 7, 7]);
-    let _ = std::fs::remove_file(&node);
 }

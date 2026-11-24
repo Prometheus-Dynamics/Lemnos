@@ -9,10 +9,10 @@ use std::os::fd::AsFd;
 use super::*;
 
 fn file(name: &str, bytes: &[u8]) -> File {
-    let path = std::env::temp_dir().join(format!(
+    let path = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(format!(
         "lemnos-a733-video-sys-{}-{name}",
         std::process::id()
-    ));
+    )));
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -21,7 +21,6 @@ fn file(name: &str, bytes: &[u8]) -> File {
         .open(&path)
         .unwrap();
     file.write_all(bytes).unwrap();
-    std::fs::remove_file(path).unwrap();
     file
 }
 

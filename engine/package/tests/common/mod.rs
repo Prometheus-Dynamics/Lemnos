@@ -97,8 +97,10 @@ pub fn ws2812_package() -> &'static Path {
 }
 
 /// An empty directory of this test's own.
-pub fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lemnos-package-{}-{name}", std::process::id()));
+pub fn scratch(name: &str) -> lemnos_scratch::Scratch {
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-package-{}-{name}", std::process::id())),
+    );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

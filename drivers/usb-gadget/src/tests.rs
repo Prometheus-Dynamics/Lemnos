@@ -1474,7 +1474,9 @@ fn an_interfaces_file_is_refused_by_name_without_a_filesystem() {
 #[cfg(feature = "std")]
 #[test]
 fn an_interfaces_file_gives_the_set_its_text_gives() {
-    let path = std::env::temp_dir().join(std::format!("lemnos-interfaces-{}", std::process::id()));
+    let path = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(std::format!("lemnos-interfaces-{}", std::process::id())),
+    );
     std::fs::write(&path, INTERFACES).unwrap();
     let text = path.to_str().unwrap();
     let mut from_file = settings();
@@ -1482,7 +1484,6 @@ fn an_interfaces_file_gives_the_set_its_text_gives() {
     from_file.push(("interfaces_file", ConfigValue::Str(text)));
     let (file_set, _) = settings_of(&from_file, "").expect("the file is read");
     let (text_set, _) = settings_of(&settings(), "").expect("the text is accepted");
-    let _ = std::fs::remove_file(&path);
     assert_eq!(file_set.bytes(), text_set.bytes());
 }
 

@@ -471,7 +471,9 @@ mod present_tests {
         // A file at the node's path that is not the module's: it opens and refuses the module's
         // ioctl (ENOTTY), so the block is there and does not answer. Not "absent": the node is
         // found by its path, as on the board where /dev/lemnos-rp1-csi2-<device> exists.
-        let dir = std::env::temp_dir().join(format!("pisp-fe-present-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("pisp-fe-present-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let settings = Settings::new("1f00110000.csi", "linux,cma").unwrap();
         let node = settings.node_path(dir.to_str().unwrap());
@@ -479,7 +481,6 @@ mod present_tests {
         let dev: &'static str = Box::leak(dir.to_str().unwrap().to_owned().into_boxed_str());
         let mut hw = LinuxHardware::under(settings, dev);
         let found = hw.present();
-        std::fs::remove_dir_all(&dir).unwrap();
         assert!(
             matches!(found, Err(status) if status != Status::NO_DEVICE),
             "the node at its path is there, so it is not absent: {found:?}"

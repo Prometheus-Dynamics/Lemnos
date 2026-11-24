@@ -37,6 +37,7 @@ lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }
 lemnos-wire = { path = "../../engine/wire", optional = true }
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-test-options = { path = "../../testing/crates/test-options" }

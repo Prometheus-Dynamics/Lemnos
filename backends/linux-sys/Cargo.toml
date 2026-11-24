@@ -43,3 +43,6 @@ libc.workspace = true
 shm-ring = { path = "../../shm/ring" }
 shm-ring-buffers = { path = "../../shm/ring-buffers" }
 shm-ring-holds = { path = "../../shm/ring-holds" }
+
+[dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }

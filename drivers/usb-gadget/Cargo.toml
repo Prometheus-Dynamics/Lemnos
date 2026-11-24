@@ -25,6 +25,7 @@ lemnos-contract-usb-function = { path = "../../contracts/usb-function" }
 sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["mock"] }
 lemnos-linux = { path = "../../backends/linux" }

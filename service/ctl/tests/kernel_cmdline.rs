@@ -33,7 +33,9 @@ fn cmdline_pairs(text: &str) -> BTreeSet<String> {
 
 #[test]
 fn the_command_line_carries_the_modprobe_values_for_every_board() {
-    let dir = std::env::temp_dir().join(format!("lemnos-ctl-cmdline-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-ctl-cmdline-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).expect("scratch directory");
     let socs = repo().join("socs");
     let mut boards = 0;
@@ -90,7 +92,6 @@ fn the_command_line_carries_the_modprobe_values_for_every_board() {
             with_options += 1;
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(boards > 0, "no board files found");
     assert!(
         with_options > 0,

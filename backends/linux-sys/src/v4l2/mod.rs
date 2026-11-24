@@ -1068,15 +1068,15 @@ pub(crate) fn test_file() -> File {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("lemnos-v4l2-sys-{}-{n}", std::process::id()));
-    let file = OpenOptions::new()
+    let path = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-v4l2-sys-{}-{n}", std::process::id())),
+    );
+    OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .open(&path)
-        .unwrap();
-    std::fs::remove_file(&path).unwrap();
-    file
+        .unwrap()
 }
 
 #[cfg(all(test, target_pointer_width = "64"))]

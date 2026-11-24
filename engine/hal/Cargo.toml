@@ -26,4 +26,5 @@ embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-hal = { path = ".", features = ["std", "mock"] }

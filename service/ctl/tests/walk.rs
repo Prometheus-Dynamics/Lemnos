@@ -67,9 +67,13 @@ fn show(running: &Running, device: &str) -> Result<String, String> {
     loop {
         let mut out = Vec::new();
         match lemnos_ctl::run(&args, &mut out) {
-            // Busy, or not bound yet: a device retries its bind with backoff, so wait for it.
+            // Busy, not bound yet, or no answer in time under load: a device retries its bind with
+            // backoff, and a slow daemon answers the next ask.
             Err(error)
-                if (error.starts_with("refused (-16)") || error.starts_with("refused (-19)"))
+                if (error.starts_with("refused (-16)")
+                    || error.starts_with("refused (-19)")
+                    || error == "no answer in time"
+                    || error.starts_with("refused (-110)"))
                     && Instant::now() < deadline =>
             {
                 std::thread::yield_now();

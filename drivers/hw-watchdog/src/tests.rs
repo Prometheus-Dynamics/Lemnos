@@ -246,17 +246,18 @@ fn a_timeout_the_device_refuses_says_why_in_the_health_until_it_is_set() {
 fn a_timeout_request_the_kernel_refuses_keeps_the_kernels_errno() {
     // A real descriptor that is not a watchdog: the kernel answers the ioctl with ENOTTY, as it
     // does for any node without the watchdog ioctls.
-    let dir = std::env::temp_dir().join(format!("hw-watchdog-errno-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("hw-watchdog-errno-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("not-a-watchdog");
     let file = std::fs::File::create(&path).unwrap();
     let mut node = OpenNode {
         file,
-        sys_dir: dir.clone(),
+        sys_dir: dir.to_path_buf(),
     };
     let set = node.set_timeout(15);
     let get = node.timeout();
-    std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(set, Err(ErrorKind::Unsupported));
     assert_eq!(get, Err(ErrorKind::Unsupported));
     assert_eq!(

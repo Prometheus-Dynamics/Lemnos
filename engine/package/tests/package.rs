@@ -186,7 +186,6 @@ fn a_scan_loads_what_it_can_and_says_why_it_refused_the_rest() {
     let mut loader = open_loader();
     assert!(loader.scan(&dir.join("missing")).is_err());
     assert!(loader.packages().is_empty());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -263,7 +262,6 @@ fn signed_mode_runs_only_what_a_trusted_key_signed() {
     // Open mode is the same loader with the other switch: it runs the unsigned one.
     let mut open = open_loader();
     assert!(open.load(&dir.join("b-unsigned.so")).is_ok());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

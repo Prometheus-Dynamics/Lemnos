@@ -98,7 +98,9 @@ mod tests {
 
     #[test]
     fn a_mark_is_read_back_for_its_boot_only() {
-        let dir = std::env::temp_dir().join(format!("boot-mark-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("boot-mark-{}", std::process::id())),
+        );
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("boot-good");
         assert_eq!(read(&path, "b1"), None, "no file is no mark");
@@ -119,6 +121,5 @@ mod tests {
             None,
             "a mark without its time is malformed"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

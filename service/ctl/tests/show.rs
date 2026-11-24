@@ -83,7 +83,13 @@ fn show(running: &Running, device: &str) -> Result<String, String> {
     loop {
         let mut out = Vec::new();
         match lemnos_ctl::run(&args, &mut out) {
-            Err(error) if error.starts_with("refused (-16)") && Instant::now() < deadline => {
+            // Busy, or no answer in time under load: ask again until the deadline.
+            Err(error)
+                if (error.starts_with("refused (-16)")
+                    || error == "no answer in time"
+                    || error.starts_with("refused (-110)"))
+                    && Instant::now() < deadline =>
+            {
                 std::thread::yield_now();
             }
             Err(error) => return Err(error),

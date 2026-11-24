@@ -146,7 +146,9 @@ fn a_board_without_slots_has_no_boot_files() {
 /// and nothing is written.
 #[test]
 fn tree_refuses_boot_dir_and_writes_nothing() {
-    let dir = std::env::temp_dir().join(format!("lemnos-ctl-boot-dir-gone-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-ctl-boot-dir-gone-{}", std::process::id())),
+    );
     let _ = std::fs::remove_dir_all(&dir);
     let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let args: Vec<String> = [
@@ -316,10 +318,10 @@ mod manifest_boot {
     /// Runs `tree` for the reference board, writing the overlay and the boot table into a directory
     /// of its own. Returns `(overlay text, boot table text)`.
     fn tree_outputs(name: &str) -> (String, String) {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(format!(
             "lemnos-ctl-manifest-boot-{}-{name}",
             std::process::id()
-        ));
+        )));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -339,12 +341,10 @@ mod manifest_boot {
         .map(|s| s.to_string())
         .collect();
         crate::run(&args, &mut Vec::new()).unwrap();
-        let outputs = (
+        (
             std::fs::read_to_string(&overlay).unwrap(),
             std::fs::read_to_string(&boot).unwrap(),
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-        outputs
+        )
     }
 
     /// The value of the marker property `key` in the overlay source: the text between the quotes
@@ -608,8 +608,9 @@ mod cmdline_slot {
 
     #[test]
     fn without_slot_the_tree_run_refuses_the_flag_and_writes_nothing() {
-        let dir =
-            std::env::temp_dir().join(format!("lemnos-ctl-cmdline-slot-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-ctl-cmdline-slot-{}", std::process::id())),
+        );
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -628,7 +629,6 @@ mod cmdline_slot {
         let error = crate::run(&args, &mut Vec::new()).unwrap_err();
         assert!(error.contains("--cmdline-slot needs --slot"), "{error}");
         assert!(!out.exists());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -873,7 +873,9 @@ fn the_uboot_config_fragment_names_what_the_boot_path_needs() {
 #[test]
 fn tree_writes_the_uboot_config_to_its_file() {
     let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let dir = std::env::temp_dir().join(format!("lemnos-uboot-config-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-uboot-config-{}", std::process::id())),
+    );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let text = std::fs::read_to_string(repo.join("testing/boards/reference.toml")).unwrap();
@@ -912,7 +914,6 @@ fn tree_writes_the_uboot_config_to_its_file() {
         "{error}"
     );
     assert!(!dir.join("none").exists());
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `tree --boot-dir` is refused by name, with the command that replaces it, whatever else is given;

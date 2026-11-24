@@ -136,7 +136,10 @@ mod tests {
 
     #[test]
     fn the_serial_is_read_from_the_words_by_the_shared_reader() {
-        let dir = std::env::temp_dir().join(format!("machine-id-serial-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("machine-id-serial-{}", std::process::id())),
+        );
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let cmdline_file = dir.join("cmdline");
         fs::write(&cmdline_file, "console=tty1 serialno=0123456789ABCDEF\n").unwrap();
@@ -152,7 +155,6 @@ mod tests {
         assert!(none.contains("names no serial source"), "{none}");
         let no_key = serial_from_cmdline("os.serial.kind=cmdline", "os").unwrap_err();
         assert!(no_key.contains("serial_key"), "{no_key}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A directory for one test's staged id and target, under a name of its own.

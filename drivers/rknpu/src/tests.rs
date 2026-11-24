@@ -1456,7 +1456,9 @@ fn runs_in_a_row_allocate_nothing() {
 
 #[test]
 fn the_node_is_the_one_render_node_bound_to_the_npu_driver() {
-    let root = std::env::temp_dir().join(format!("rknpu-find-{}", std::process::id()));
+    let root = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("rknpu-find-{}", std::process::id())),
+    );
     let _ = std::fs::remove_dir_all(&root);
     let drivers = root.join("bus/platform/drivers");
     let bind = |node: &str, driver: &str| {
@@ -1477,7 +1479,6 @@ fn the_node_is_the_one_render_node_bound_to_the_npu_driver() {
     // Two would be a guess.
     bind("renderD130", uapi::DRIVER_NAME);
     assert_eq!(crate::node::find_in(&root), None);
-    std::fs::remove_dir_all(&root).unwrap();
 }
 
 mod host;

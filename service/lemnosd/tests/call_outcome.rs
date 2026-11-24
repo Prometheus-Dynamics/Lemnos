@@ -97,7 +97,12 @@ const MARK: u16 = 1;
 fn settled(client: &mut Client, token: u64) -> Outcome {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let outcome = client.outcome(token).unwrap();
+        let outcome = match client.outcome(token) {
+            Ok(outcome) => outcome,
+            // No answer in time under load: ask again until the deadline.
+            Err(Error::TimedOut) => Outcome::Pending,
+            Err(e) => panic!("outcome: {e:?}"),
+        };
         if outcome != Outcome::Pending {
             return outcome;
         }

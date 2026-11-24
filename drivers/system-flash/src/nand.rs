@@ -1364,7 +1364,9 @@ mod tests {
 
     #[test]
     fn the_sysfs_geometry_is_read_from_the_partitions_node() {
-        let root = std::env::temp_dir().join(format!("lemnos-nand-sysfs-{}", std::process::id()));
+        let root = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-nand-sysfs-{}", std::process::id())),
+        );
         let _ = fs::remove_dir_all(&root);
         let dir = root.join("class/mtd/mtd3");
         fs::create_dir_all(&dir).unwrap();
@@ -1378,7 +1380,6 @@ mod tests {
             fs::write(dir.join(name), format!("{value}\n")).unwrap();
         }
         let got = sysfs_geometry(&root, 3);
-        let _ = fs::remove_dir_all(&root);
         assert_eq!(
             got,
             Ok(Geometry {

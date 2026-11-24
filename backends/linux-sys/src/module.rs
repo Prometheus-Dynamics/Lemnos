@@ -918,7 +918,9 @@ mod tests {
 
     #[test]
     fn a_process_opens_the_node_once_and_shares_it() {
-        let dir = std::env::temp_dir().join(format!("lemnos-shared-{}", std::process::id()));
+        let dir = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-shared-{}", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("node");
         std::fs::write(&path, b"").unwrap();
@@ -930,7 +932,6 @@ mod tests {
         // Every holder gone: the file closed, and the next call opens it again.
         let again = open_shared(&path).unwrap();
         assert_eq!(Arc::strong_count(&again), 1);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

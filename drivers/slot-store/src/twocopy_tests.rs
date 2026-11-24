@@ -332,7 +332,9 @@ fn precreated_files_are_valid_at_sequence_one_and_refuse_unknown_kinds() {
 
 #[test]
 fn a_file_device_writes_and_reads_its_sectors() {
-    let dir = std::env::temp_dir().join(format!("lemnos-twocopy-{}", std::process::id()));
+    let dir = lemnos_scratch::Scratch::adopt(
+        std::env::temp_dir().join(format!("lemnos-twocopy-{}", std::process::id())),
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rec.img");
     std::fs::write(&path, vec![0u8; 8 * SECTOR]).unwrap();
@@ -348,7 +350,6 @@ fn a_file_device_writes_and_reads_its_sectors() {
     assert_eq!(cur.payload, b"gen=1");
     let raw = std::fs::read(&path).unwrap();
     assert_eq!(sector_of(&raw, 2)[0..4], *b"LMRC");
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The FAT directory name (eleven bytes, space padded, upper case) of an 8.3 name with a dot.

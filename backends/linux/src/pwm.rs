@@ -342,10 +342,17 @@ mod tests {
         assert!(recorder.writes.into_inner().is_empty());
     }
 
-    fn fake_chip(name: &str, exported: bool) -> PathBuf {
-        let chip = std::env::temp_dir().join(format!("lemnos-pwm-{}-{name}", std::process::id()));
+    fn fake_chip(name: &str, exported: bool) -> lemnos_scratch::Scratch {
+        let chip = lemnos_scratch::Scratch::adopt(
+            std::env::temp_dir().join(format!("lemnos-pwm-{}-{name}", std::process::id())),
+        );
         let root = chip.join("pwm1");
-        std::fs::create_dir_all(if exported { &root } else { &chip }).unwrap();
+        std::fs::create_dir_all(if exported {
+            root.as_path()
+        } else {
+            chip.path()
+        })
+        .unwrap();
         if exported {
             for (name, value) in [
                 ("period", "1000\n"),
@@ -367,7 +374,6 @@ mod tests {
         pwm.configure(&config(2000, 500, true)).unwrap();
         assert_eq!(pwm.config(), Ok(config(2000, 500, true)));
         drop(pwm);
-        std::fs::remove_dir_all(chip).unwrap();
     }
 
     #[test]
@@ -380,7 +386,6 @@ mod tests {
             io::ErrorKind::NotFound
         );
         assert_eq!(std::fs::read_to_string(chip.join("export")).unwrap(), "1");
-        std::fs::remove_dir_all(chip).unwrap();
     }
 
     #[test]
@@ -411,7 +416,6 @@ mod tests {
         let mut pwm = SysfsPwm::open(&chip, 1).unwrap();
         pwm.configure(&config(2000, 500, true)).unwrap();
         drop(pwm);
-        std::fs::remove_dir_all(chip).unwrap();
     }
 
     #[test]
@@ -428,7 +432,6 @@ mod tests {
         let chip = fake_chip("left", true);
         drop(SysfsPwm::open(&chip, 1).unwrap());
         assert!(!chip.join("unexport").exists());
-        std::fs::remove_dir_all(chip).unwrap();
     }
 
     #[test]
@@ -446,7 +449,6 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(n, 0);
         drop(pwm);
-        std::fs::remove_dir_all(chip).unwrap();
     }
 }
 

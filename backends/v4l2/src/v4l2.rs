@@ -302,21 +302,27 @@ pub fn list_video_nodes() -> Vec<PathBuf> {
 pub(crate) fn test_device() -> (VideoDevice, std::fs::File) {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let path = std::env::temp_dir().join(format!(
+    let path = lemnos_scratch::Scratch::adopt(std::env::temp_dir().join(format!(
         "lemnos-v4l2-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .open(&path)
         .unwrap();
-    std::fs::remove_file(&path).unwrap();
     let fd = OwnedFd::from(file.try_clone().unwrap());
     let caps = Capabilities::from_raw(&zeroed());
-    (VideoDevice { fd, path, caps }, file)
+    (
+        VideoDevice {
+            fd,
+            path: path.to_path_buf(),
+            caps,
+        },
+        file,
+    )
 }
 
 #[cfg(test)]

@@ -97,5 +97,4 @@ fn a_statically_linked_program_refuses_every_package_and_says_why() {
             &format!("scan refused: {reason}"),
         ]
     );
-    let _ = std::fs::remove_dir_all(dir);
 }
