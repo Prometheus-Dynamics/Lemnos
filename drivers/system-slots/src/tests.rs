@@ -6718,13 +6718,17 @@ fn the_call_that_takes_the_last_byte_returns_before_the_finish_runs() {
     let mut buf = vec![0u8; 64 * 1024];
     let mut last = bundle.len() as u64;
     let mut ticks = 0;
+    // Bounded by wall time, not by a count of ticks: the first step waits on the flush worker's
+    // barriers, which a spin of ticks outruns on a loaded disk.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while let Some(JobState::Running { done, .. }) = board.poll(job) {
         assert!(done >= last, "progress went back: {done} after {last}");
         last = done;
+        assert!(Instant::now() < deadline, "the finish never ended");
+        std::thread::yield_now();
         board.slots.tick(0);
         board.slots.list(&mut buf).unwrap();
         ticks += 1;
-        assert!(ticks < 1000, "the finish never ended");
     }
     // Every phase, and every boot file's copy, is a step of its own.
     assert!(ticks > 5, "the finish took {ticks} steps");
@@ -6839,7 +6843,11 @@ fn install_slowly(board: &mut Board, bundle: &[u8], step_ns: u64) -> (Status, Ve
         offset += chunk.len() as u64;
     }
     let mut ticks = Vec::new();
+    // Bounded by wall time, not by a count of ticks (the flush worker's barriers can outrun one).
+    let deadline = Instant::now() + Duration::from_secs(30);
     while board.slots.install.as_ref().is_some_and(Install::finishing) {
+        assert!(Instant::now() < deadline, "the finish never ended");
+        std::thread::yield_now();
         let before = now.load(Ordering::Relaxed);
         board.slots.tick(0);
         ticks.push(
@@ -6847,7 +6855,6 @@ fn install_slowly(board: &mut Board, bundle: &[u8], step_ns: u64) -> (Status, Ve
                 .saturating_sub(before)
                 .saturating_sub(step_ns),
         );
-        assert!(ticks.len() < 100_000, "the finish never ended");
     }
     let mut out = [0u8; 128];
     match board.slots.job(job, &mut Reply::new(&mut out)) {

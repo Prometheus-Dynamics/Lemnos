@@ -185,6 +185,8 @@ struct Fake {
 struct Gate {
     open: Mutex<bool>,
     moved: Condvar,
+    /// The call the gate held has returned: it no longer touches the test's files.
+    left: Mutex<bool>,
 }
 
 impl Gate {
@@ -198,6 +200,19 @@ impl Gate {
     fn release(&self) {
         *self.open.lock().unwrap() = true;
         self.moved.notify_all();
+    }
+
+    fn mark_left(&self) {
+        *self.left.lock().unwrap() = true;
+        self.moved.notify_all();
+    }
+
+    /// Waits until the held call has returned, so the test's scratch is removed after its last write.
+    fn wait_left(&self) {
+        let mut left = self.left.lock().unwrap();
+        while !*left {
+            left = self.moved.wait(left).unwrap();
+        }
     }
 }
 
@@ -372,9 +387,21 @@ impl Disk for Fake {
 
     fn resize_fs(&mut self, blocks: u64) -> io::Result<()> {
         self.alive()?;
-        if let Some(gate) = self.gate.clone() {
+        let gate = self.gate.clone();
+        if let Some(gate) = &gate {
             gate.wait();
         }
+        let done = self.resize_past_the_gate(blocks);
+        if let Some(gate) = &gate {
+            gate.mark_left();
+        }
+        done
+    }
+}
+
+impl Fake {
+    /// The resize once the gate, if any, is open.
+    fn resize_past_the_gate(&mut self, blocks: u64) -> io::Result<()> {
         if self.fs_fails > 0 {
             self.fs_fails -= 1;
             return Err(io::Error::from_raw_os_error(ENOSPC));
@@ -1451,6 +1478,8 @@ fn a_call_that_never_returns_stalls_the_boot_at_the_hard_bound_and_leaves_its_ma
         &|s| reports.borrow_mut().push(s.clone()),
     );
     gate.release();
+    // The held call goes on once released: its last write is waited for before the scratch goes.
+    gate.wait_left();
     assert!(
         state.is_none(),
         "a call past the hard bound is a stall: nothing more is fed"
