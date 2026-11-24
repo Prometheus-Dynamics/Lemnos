@@ -51,6 +51,7 @@ pub fn run() -> bool {
         &format!("the link's gadget is bound with its network function ({bound:?})"),
     );
     let mark = log_since(0).len();
+    let daemon_log = daemon_stderr();
     let again = fs::write(format!("{PLATFORM}/unbind"), "dummy_udc.0")
         .and_then(|()| fs::write(format!("{PLATFORM}/bind"), "dummy_udc.0"));
     check(
@@ -81,10 +82,31 @@ pub fn run() -> bool {
     for line in log_since(mark) {
         say!("     poison: kernel: {line}");
     }
-    check(
+    if !check(
         named == Ok(true),
         &format!("the gadget's reason names the kernel's state ({named:?})"),
-    );
+    ) {
+        for line in where_the_daemon_waits() {
+            say!("     poison: {line}");
+        }
+        if let Some(log) = &daemon_log {
+            let text = log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            for line in String::from_utf8_lossy(&text)
+                .lines()
+                .filter(|l| !l.contains("SLOT-TICK"))
+                .rev()
+                .take(80)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                say!("     poison: daemon: {line}");
+            }
+        }
+    }
     let functions = |name: &str| Path::new(GADGET_DIR).join("functions").join(name).is_dir();
     check(
         daemon::enabled()
@@ -154,4 +176,94 @@ fn log_since(skip: usize) -> Vec<String> {
     }
     let from = skip.min(lines.len()).max(lines.len().saturating_sub(60));
     lines.split_off(from)
+}
+
+/// Where each thread of the daemon and its helpers is in the kernel: its name, state, `wchan` and
+/// kernel stack. Said when the gadget's reason never names the kernel's state, so a job that waits
+/// shows what it waits on (the link's daemon logs to a pipe that ended with the link check).
+fn where_the_daemon_waits() -> Vec<String> {
+    let mut lines = Vec::new();
+    let Ok(procs) = fs::read_dir("/proc") else {
+        return lines;
+    };
+    for entry in procs.flatten() {
+        let pid = entry.file_name().to_string_lossy().into_owned();
+        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        if !comm.starts_with("lemnosd") {
+            continue;
+        }
+        if comm.trim() == "lemnosd" {
+            // The FunctionFS mounts as the daemon sees them, and what each holds.
+            let mounts = fs::read_to_string(format!("/proc/{pid}/mountinfo")).unwrap_or_default();
+            for mount in mounts.lines().filter(|l| l.contains("functionfs")) {
+                lines.push(format!("pid {pid} mount {mount}"));
+                if let Some(point) = mount.split(' ').nth(4) {
+                    let names = fs::read_dir(format!("/proc/{pid}/root{point}")).map(|d| {
+                        d.flatten()
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                    });
+                    lines.push(format!("    holds {names:?}"));
+                }
+            }
+        }
+        let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let dir = task.path();
+            let read = |file: &str| fs::read_to_string(dir.join(file)).unwrap_or_default();
+            let state = read("stat");
+            let state = state
+                .rsplit_once(") ")
+                .map_or("", |(_, rest)| &rest[..1.min(rest.len())]);
+            lines.push(format!(
+                "pid {pid} task {} {} state {state} wchan {}",
+                task.file_name().to_string_lossy(),
+                read("comm").trim(),
+                read("wchan").trim()
+            ));
+            for frame in read("stack").lines().take(12) {
+                lines.push(format!("    {frame}"));
+            }
+        }
+    }
+    lines
+}
+
+/// The daemon's error output, read from here on, on a thread of its own: the link check that
+/// started it, and read it, has ended, so its lines go nowhere unless something reads them. The
+/// thread reads all the time: a reader that only read at the end would let the pipe fill, and a
+/// daemon whose writes block stops answering calls.
+fn daemon_stderr() -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let pid = entry.file_name().to_string_lossy().into_owned();
+        if pid.bytes().all(|b| b.is_ascii_digit())
+            && fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "lemnosd")
+        {
+            let mut pipe = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(format!("/proc/{pid}/fd/2"))
+                .ok()?;
+            let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let into = std::sync::Arc::clone(&kept);
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                while let Ok(n) = pipe.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    into.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .extend_from_slice(&chunk[..n]);
+                }
+            });
+            return Some(kept);
+        }
+    }
+    None
 }

@@ -499,6 +499,33 @@ fn a_controller_that_let_go_keeps_ep0_for_the_bind_again() {
     assert!(gadget.endpoint_handles().is_ok());
 }
 
+/// A session the controller let go of holds ep0 itself: its bind again does not look for the
+/// mount, which a daemon that took the session up from the store does not see (an earlier daemon
+/// mounted it, in its own mount namespace). Seen in QEMU: every retry failed `NotFound`.
+#[test]
+fn a_let_go_session_is_bound_again_without_the_mount_in_view() {
+    let tree = Tree::new();
+    setup(&tree);
+    let mut gadget = tree.gadget();
+    up(&mut gadget, &set()).unwrap();
+    fs::write(tree.gadget_dir().join("UDC"), "\n").unwrap();
+    gadget.session.as_mut().unwrap().released = true;
+    assert_eq!(gadget.disable(), Ok(()));
+    // The mount is out of this daemon's view: its ep0 is not there.
+    fs::remove_file(tree.mount().join("ep0")).unwrap();
+    assert_eq!(
+        up(&mut gadget, &set()),
+        Ok(()),
+        "bound again on the held ep0"
+    );
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
+    assert!(!gadget.session.as_ref().unwrap().released);
+    // A fresh setup still needs the mount: without a session, the same tree is not ready.
+    gone(gadget);
+    let mut fresh = tree.gadget();
+    assert_eq!(up(&mut fresh, &set()), Err(ErrorKind::NotFound));
+}
+
 #[test]
 fn disable_and_drop_unbind_and_leave_the_setup_as_it_made_it() {
     let tree = Tree::new();
@@ -1861,7 +1888,15 @@ fn with_a_helper_the_gadget_is_made_and_bound_through_it_and_the_daemon_writes_n
     up(&mut gadget, &set()).unwrap();
     assert_eq!(
         helper.lock().unwrap().calls,
-        ["setup", "unbind", "bind", "disconnect", "connect"]
+        [
+            "setup",
+            "unbind",
+            "bind",
+            "disconnect",
+            "connect",
+            "unbind",
+            "bind"
+        ]
     );
     assert_eq!(tree.attribute("UDC"), "udc0\n");
     // The helper's setup leaves UDC as root's: the owner hand-over (mode 0600) is not made.
@@ -1874,7 +1909,8 @@ fn with_a_helper_the_gadget_is_made_and_bound_through_it_and_the_daemon_writes_n
 }
 
 /// A tree a daemon before this one left (a host may still hold it configured) is bound, then taken
-/// off the bus by the controller's pullup for the gap and put back, so the host enumerates it
+/// off the bus by the controller's pullup for the gap and put back, then bound once more (a
+/// controller `connect` restarts without the bind's steps may stay deaf), so the host enumerates it
 /// again.
 #[test]
 fn a_gadget_a_host_may_hold_is_pulsed_off_the_bus_after_its_bind() {
@@ -1889,7 +1925,15 @@ fn a_gadget_a_host_may_hold_is_pulsed_off_the_bus_after_its_bind() {
     up(&mut gadget, &set()).unwrap();
     assert_eq!(
         next.lock().unwrap().calls,
-        ["setup", "unbind", "bind", "disconnect", "connect"]
+        [
+            "setup",
+            "unbind",
+            "bind",
+            "disconnect",
+            "connect",
+            "unbind",
+            "bind"
+        ]
     );
     assert_eq!(
         fs::read_to_string(tree.udc_root.join(UDC).join("soft_connect")).unwrap(),
@@ -1996,7 +2040,16 @@ fn teardown_then_setup_again_makes_the_gadget_again_and_binds_it() {
     settled(&gadget);
     assert_eq!(
         helper.lock().unwrap().calls,
-        ["setup", "unbind", "bind", "disconnect", "connect", "unbind"]
+        [
+            "setup",
+            "unbind",
+            "bind",
+            "disconnect",
+            "connect",
+            "unbind",
+            "bind",
+            "unbind"
+        ]
     );
     // unbind wrote the empty line: nothing is bound.
     assert_eq!(tree.attribute("UDC").trim(), "");
@@ -2016,11 +2069,15 @@ fn teardown_then_setup_again_makes_the_gadget_again_and_binds_it() {
             "disconnect",
             "connect",
             "unbind",
+            "bind",
+            "unbind",
             "setup",
             "unbind",
             "bind",
             "disconnect",
-            "connect"
+            "connect",
+            "unbind",
+            "bind"
         ]
     );
 }
