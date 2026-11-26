@@ -188,13 +188,14 @@ fn a_driver_that_panics_on_every_tick_does_not_stop_the_keepalive_device() {
 #[test]
 fn a_driver_that_hangs_does_not_stop_the_keepalive_device() {
     let options = Options {
-        call_deadline: Duration::from_millis(20),
+        call_deadline: Duration::from_millis(500),
         ..Options::default()
     };
-    let others = "[[devices]]\nid = \"stuck\"\ndriver = \"probe\"\nconfig = { hang_ms = 400 }\n";
+    let others = "[[devices]]\nid = \"stuck\"\ndriver = \"probe\"\nconfig = { hang_ms = 1500 }\n";
     let rig = rig(others, true, options);
-    // The stuck driver's first tick takes 400 ms, past the call deadline. The keep-alive device
-    // still gets its ticks in that time.
+    // The stuck driver's first tick takes 1.5 s, three times the call deadline. The keep-alive
+    // device still gets its ticks. The deadline is far above what a starved machine stretches the
+    // keep-alive device's own calls to: at 20 ms its own call was judged hung under load.
     let start = rig.ticks("dog");
     std::thread::sleep(Duration::from_millis(150));
     rig.step(150);
