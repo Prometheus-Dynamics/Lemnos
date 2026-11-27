@@ -28,11 +28,26 @@ CPUQuota on the unit, in % of one CPU (600% is the lane's six cores). No load wa
 |---|---|---|
 | 600% | pass | |
 | 300% | FAIL (q300.log) | the restart sequence: host session Lost after round 67 (from restart 5), then "the Orion session's round trips went on (0 since the stop)" for restarts 6-10 and kill at Exec, RootPhase and HostStart |
-| 300% again | FAIL (q300b.log) | "kill at RootPhase: the start never reached RootPhase" |
+| 300% again | FAIL (q300b.log) | "kill at RootPhase: the start never reached RootPhase". Not starvation: a torn start-trace line (see below) |
 | 150% | pass | |
 | 75% | pass | |
 | 37% | FAIL (q37.log) | stuck calls 1 and 2: bind gadget ok, UDC stayed set, the kept instance was taken up; the host session was Lost after round 77 (call 1) and at round 10 (call 2); FAIL "paced host session: every round trip came back" |
 | 18% | FAIL (q18.log) | as at 37%: Lost after round 193 and after round 15 |
+
+## Torn start-trace lines (the 300% again row)
+
+The daemon reached RootPhase in q300b; its trace line was torn by the gadget supervisor's line on the same
+standard error, so the check never saw a whole `start trace: <stamp> root phase` line:
+
+    lemnosd: lemnosd: start trace: 89lemnosd-gsuper: running, for daemon pid 363
+    lemnosd: .726567 root phase done (the drop included, when asked)
+
+The trace line is written with `write_fmt` to unbuffered standard error, one `write()` per piece, and the forked
+supervisor's line lands between them. The same tear failed CI's qemu job on next 718860998255 ("kill at RootPhase")
+while the lander's train passed. Torn lines also appear in passing runs (lander trains 1, 5, 7, 13, 14; q300, q37
+and q18), where the torn line was not one a check waited for. In q300 the tear is after the first failure (host
+session Lost after round 67), so that row stands as its own fault. The fix (one whole line per write) changes the
+daemon and is held as a proposal; the check is unchanged.
 
 ## A question about the test's premise
 
