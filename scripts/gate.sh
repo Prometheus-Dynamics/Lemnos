@@ -94,7 +94,35 @@ ccache_growth() {
   fi
 }
 
-trap 'stop_lanes; rm -rf -- "$gate_out"; clean_step_dirs' EXIT
+# The RAM directory for the board tests (testing/crates/scratch, ram_temp_dir): they write their trees and
+# flush them hundreds of times, and on a disk shared with this gate's builds each flush waits behind the
+# builds' writes (one uboot-fallback part: 2 s in RAM, 100-500 s in trains). Made here under
+# XDG_RUNTIME_DIR, checked to be tmpfs with GATE_RAM_NEED_KIB free, and given to every lane as
+# LEMNOS_TEST_RAM_DIR; a check that fails stops the gate by name, nothing falls back to the disk. Its use
+# is sampled each second; it must be empty when the gate passes (an entry left there fails the gate,
+# listed), and it is removed on every exit. Not on CI (GITHUB_ACTIONS) or without XDG_RUNTIME_DIR, or
+# when the caller set LEMNOS_TEST_RAM_DIR: the tests then use the temp directory, as before.
+ram_dir="" ram_sampler=0
+ram_stop() {
+  [ "$ram_sampler" != 0 ] && kill -TERM "$ram_sampler" 2>/dev/null && wait "$ram_sampler" 2>/dev/null
+  ram_sampler=0
+  [ -n "$ram_dir" ] && rm -rf -- "$ram_dir"
+  return 0
+}
+trap 'stop_lanes; ram_stop; rm -rf -- "$gate_out"; clean_step_dirs' EXIT
+if [ -z "${LEMNOS_TEST_RAM_DIR:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ "${GITHUB_ACTIONS:-}" != true ]; then
+  ram_dir="$(mktemp -d "$XDG_RUNTIME_DIR/lemnos-gate-ram.XXXXXX")" || { echo "gate: cannot make the RAM directory under XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >&2; exit 1; }
+  ram_fs="$(stat -f -c %T "$ram_dir")"
+  [ "$ram_fs" = tmpfs ] || { echo "gate: the RAM directory $ram_dir is on $ram_fs, not tmpfs" >&2; exit 1; }
+  ram_free="$(df -Pk "$ram_dir" | awk 'NR == 2 {print $4}')"
+  [ "$ram_free" -ge "${GATE_RAM_NEED_KIB:-1048576}" ] ||
+    { echo "gate: the RAM directory $ram_dir has $ram_free KiB free, under the ${GATE_RAM_NEED_KIB:-1048576} KiB its tests need (GATE_RAM_NEED_KIB)" >&2; exit 1; }
+  export LEMNOS_TEST_RAM_DIR="$ram_dir"
+  echo 0 >"$gate_out/ram.peak"
+  ( peak=0; while sleep 1; do k="$(du -sk -- "$ram_dir" 2>/dev/null | cut -f1)"
+      if [ -n "$k" ] && [ "$k" -gt "$peak" ]; then peak=$k; echo "$peak" >"$gate_out/ram.peak"; fi; done ) &
+  ram_sampler=$!
+fi
 
 # The process control (CPU budgets, the progress watch, the stop of a step) is in gate-bounds.sh.
 . "$(dirname "${BASH_SOURCE[0]}")/gate-bounds.sh"
@@ -405,5 +433,9 @@ while [ "$running" -gt 0 ]; do
   if [ "$running" -gt 0 ]; then sleep 0.2; fi
 done
 
+if [ -n "$ram_dir" ]; then
+  echo "gate: RAM directory peak $(cat "$gate_out/ram.peak") KiB (sampled each second; $ram_free KiB were free)"
+  step_tmp_check "the tests' RAM directory" "$ram_dir" || exit 1
+fi
 echo "gate: wall $SECONDS s"
 echo "gate passed${GATE_PART:+ (part $GATE_PART)}"

@@ -540,7 +540,7 @@ impl Board {
     /// the data partition's state. The slots and pointers are the caller's.
     fn fresh(boot_image: Vec<u8>, uboot: bool) -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = lemnos_scratch::ram_temp_dir().join(format!(
             "lemnos-slot-init-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -2891,7 +2891,7 @@ fn the_device_form_writes_the_environment_where_the_locator_says() {
     // The device the locator names is a file of its own (the locator is in the image, so its path is
     // known before the board's tree is).
     let device = lemnos_scratch::Scratch::adopt(
-        std::env::temp_dir().join(format!("lemnos-envdev-{}", std::process::id())),
+        lemnos_scratch::ram_temp_dir().join(format!("lemnos-envdev-{}", std::process::id())),
     );
     let place = Place::device(device.to_str().unwrap(), 1024, 0, 4096).unwrap();
     let mut image = vec![0xEEu8; 8192];
