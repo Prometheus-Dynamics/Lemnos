@@ -98,7 +98,8 @@ cc_env() { # <case dir>
     echo "LAND_REPO=$repo"; echo "LAND_CC_DATA=$d/data"; echo "LAND_CC_CACHE=$d/cache"; echo "LAND_CC_WORK=$d/work"
   } >"$d/land.env"
 }
-base="$(git -C "$repo" rev-parse HEAD~1)" cand="$(git -C "$repo" rev-parse HEAD)"
+# Base and candidate are both HEAD: a CI checkout is one commit deep, and no case needs two.
+base="$(git -C "$repo" rev-parse HEAD)" cand="$base"
 
 d="$work/cc-trigger"; cc_env "$d"
 rc=0; PATH="$bin:$PATH" PLANT_GIT_DIFF_FAILS=1 LEMNOS_LAND_ENV="$d/land.env" \
@@ -158,7 +159,15 @@ m="$work/mdev"; mkdir -p "$m/sys" "$m/etc"
 printf 'root:x:0:0::/:/bin/sh\n' >"$m/etc/passwd"; printf 'root:x:0:\n' >"$m/etc/group"; : >"$m/etc/mdev.conf"
 printf 'planted\n' >"$m/placeholders"
 printf '#!/bin/sh\necho "mdev: planted failure" >&2\nexit 1\n' >"$m/busybox"; chmod +x "$m/busybox"
-rc=0; "$tree/testing/mdev/nsrun.sh" /bin/sh "$tree/testing/mdev/inner.sh" "$m/busybox" "$m" >"$m/out" 2>&1 || rc=$?
+# The namespace is made as testing/mdev/check.sh makes it: a user namespace where that works, else sudo.
+user="$(id -un)"
+if unshare -U -m true 2>/dev/null && command -v newuidmap >/dev/null && command -v newgidmap >/dev/null \
+   && grep -q "^$user:" /etc/subuid && grep -q "^$user:" /etc/subgid; then
+  ns=("$tree/testing/mdev/nsrun.sh")
+else
+  ns=(sudo -n unshare -m --propagation private)
+fi
+rc=0; "${ns[@]}" /bin/sh "$tree/testing/mdev/inner.sh" "$m/busybox" "$m" >"$m/out" 2>&1 || rc=$?
 # inner.sh prints each node as placed: the planted one is left as it was made, root root 600 in the namespace.
 verdict mdev-status "$rc" "$m/out" 1 "/dev/planted"
 
