@@ -217,10 +217,13 @@ and the `unsafe` that issues them. They are not drivers.
 ## Used as libraries
 
 Other programs take these crates as plain libraries, with no `lemnosd`, no host and no driver
-runtime. Each builds and tests alone with its default features off, and then its dependency tree
+runtime. Each builds and tests with its default features off, and then its dependency tree
 holds no part of the engine: not `lemnos-core`, its macros, `lemnos-hal`, a contract, the client
 or the host. `scripts/check-libraries.sh`, a step of the gate, builds, lints and tests each one
-that way and checks its tree with `cargo tree -e normal`.
+that way and checks its tree with `cargo tree -e normal`. The crates whose features stay the same
+beside each other are linted and tested in one call, the rest one by one (`scripts/merged-sets.sh`),
+and `scripts/check-merged-sets.sh` fails the gate, naming the crate, if one in the merged call gets
+features there that it does not have alone.
 
 | Crate | What it is | With no default features |
 |---|---|---|

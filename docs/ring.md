@@ -20,7 +20,7 @@ Other projects depend on them at a locked revision of this repository.
 models and the bench; they are not published.
 
 The family is Linux first. `shm-sample-time`, `shm-ring` and `shm-ring-time` also build for
-Windows and macOS, and the gate checks that (`scripts/gate.sh`, the list `portable_crates`). The
+Windows and macOS, and the gate checks that (`scripts/gate.sh`, the list `portable_crates` in `scripts/merged-sets.sh`). The
 portable parts are the layout, the heap-backed ring (`Heap` with `Reader::over` and
 `Writer::over`), `at_or_before` and `SampleTime::now()`; the memfd ring, the descriptor
 constructors and `wait_at_or_before` are Linux only. A time from one machine does not compare with
