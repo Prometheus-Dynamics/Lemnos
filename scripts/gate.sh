@@ -337,7 +337,8 @@ side_lane() {
   lane_step root-stanzas 180 scripts/check-root-stanzas.py
   # Each crate the tail lane checks in a merged cargo call has there the features it has alone
   # (scripts/check-merged-sets.sh, keyed on the manifests), and the checker fails its planted drifts
-  # (testing/merged-sets/check.sh). Only cargo's resolver runs: 11 s and 26 s cold at load 66, a lookup warm.
+  # (testing/merged-sets/check.sh). Only cargo's resolver runs. Cold: the check 37 s (lander, load 85), the cases
+  # 31 s side by side (load 92, ten cores); warm, a lookup each.
   lane_step merged-sets 180 scripts/check-merged-sets.sh
   lane_step merged-sets-tests 180 testing/merged-sets/check.sh
   # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
