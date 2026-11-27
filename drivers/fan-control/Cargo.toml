@@ -17,6 +17,7 @@ lemnos-contract-temperature = { path = "../../contracts/temperature" }
 [dev-dependencies]
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [package.metadata.lemnos]
 driver = "FanController"

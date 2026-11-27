@@ -4,6 +4,8 @@
 //! switch-off and a shutdown let the kept instance go and end the hold; a parked session nothing
 //! took up is taken down with it, never left behind.
 
+mod test_options;
+
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -256,7 +258,7 @@ fn host_with(key: usize, options: Options) -> (Host, SimClock, &'static Shared) 
 }
 
 fn host(key: usize) -> (Host, SimClock, &'static Shared) {
-    host_with(key, Options::default())
+    host_with(key, test_options::options())
 }
 
 const HOLDER: CallerId = CallerId(7);

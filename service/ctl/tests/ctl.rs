@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use lemnos_fake_devices::{FakeCounter, FakeMagnetometer};
 use lemnos_host::board::{parse, parse_lenient};
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::packages::{PackageConfig, PackageFile, PackageMode, PackageReport, add_packages};
 use lemnosd::{Config, Service};
@@ -44,7 +44,7 @@ fn start_with(packages: PackageReport) -> Running {
         board: parse_lenient(text).unwrap(),
         drivers: vec![entry::<FakeCounter>(), entry::<FakeMagnetometer>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     };
     let service = Service::start_with_packages(config, packages).unwrap();
     Running {
@@ -559,7 +559,7 @@ fn start_counting() -> (Running, PathBuf) {
         board: parse(text).unwrap(),
         drivers: vec![entry::<Counter>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap();
     (

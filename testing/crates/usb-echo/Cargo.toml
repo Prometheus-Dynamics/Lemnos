@@ -17,6 +17,7 @@ lemnos-contract-usb-function = { path = "../../../contracts/usb-function" }
 
 [dev-dependencies]
 lemnos-socket-dir = { path = "../socket-dir" }
+lemnos-test-options = { path = "../test-options" }
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-host = { path = "../../../engine/host" }
 lemnos-sim = { path = "../../../backends/sim" }

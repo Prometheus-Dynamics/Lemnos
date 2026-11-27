@@ -2,6 +2,8 @@
 //! bind that succeeds takes it up. This binary holds its own refusal counter, so no other test
 //! sees a bind refused.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -11,7 +13,7 @@ use lemnos_core::{
     contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::{Consumer, ProducerWords, producer};
 
@@ -121,7 +123,7 @@ fn start() -> (Host, SimClock) {
         &[entry::<Keeping>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

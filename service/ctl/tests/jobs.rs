@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_fake_devices::FakeProbe;
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -30,7 +30,7 @@ fn start() -> Running {
         board: parse(text).unwrap(),
         drivers: vec![entry::<FakeProbe>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap();
     Running {

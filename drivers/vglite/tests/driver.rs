@@ -26,7 +26,7 @@ use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::mock::MockStream;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, Lease, MemfdAllocator, StreamAllocator};
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimClock};
@@ -123,7 +123,7 @@ impl Rig {
             &[entry::<VgliteDriver>(), entry::<FakeCounter>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
             allocator,
         )
         .unwrap();
@@ -303,7 +303,7 @@ fn bind_refuses_plain_streams_no_streams_and_a_bad_device_setting() {
             &[entry::<VgliteDriver>(), entry::<FakeCounter>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
             Arc::new(PerBuffer),
         )
         .unwrap_or_else(|error| panic!("{config}: {error}"));

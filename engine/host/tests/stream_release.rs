@@ -13,6 +13,8 @@
 
 #![cfg(unix)]
 
+mod test_options;
+
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
@@ -24,7 +26,7 @@ use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::{BufferHandle, StreamFrame};
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, StreamAllocator};
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
@@ -109,7 +111,7 @@ fn start(keys: &str) -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
         Arc::new(Standins),
     )
     .unwrap()

@@ -11,7 +11,7 @@ use lemnos_driver_ws2812::Ws2812;
 use lemnos_hal::ErrorKind;
 use lemnos_hal::pio::{PioJob, PioMachine, PioOperation};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::SimBoard;
 
 const OUTPUT: &str = "pio-out:gpio=13";
@@ -83,7 +83,7 @@ fn start(owner: &str) -> (Host, Arc<Mutex<Seen>>) {
             seen: Arc::clone(&seen),
         }),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     clock.advance(Duration::from_millis(10));

@@ -6,13 +6,15 @@
 //! (`shm_measure::sched::without_system_calls`), and counts its allocations there. The child is a fork of
 //! this test, which has no other thread, so the frame path can use its own memory safely.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::CallerId;
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::ProducerEndpoint;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimFrameSource};
 use lemnos_wire::ring::{Consumer, Pop, TicketReader};
@@ -37,7 +39,7 @@ fn start() -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

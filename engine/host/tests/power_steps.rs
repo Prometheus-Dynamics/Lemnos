@@ -3,13 +3,15 @@
 //! no bridge in the path. The bridge counts what it observes, so a step the host makes is not
 //! always a step the bridge publishes; that is checked where the bridge is in the path.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use lemnos_core::{Config, ConfigError, Key, Kind, Lifecycle, Result, Status, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 /// One set per test, picked by the device's `key`, since tests share the process.
@@ -79,7 +81,7 @@ fn host(key: usize) -> (Host, SimClock) {
         &[entry::<Stepper>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

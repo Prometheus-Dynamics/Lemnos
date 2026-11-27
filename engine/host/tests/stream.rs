@@ -1,5 +1,7 @@
 //! Frame streams through the host: a simulated producer and a consumer on the real ring.
 
+mod test_options;
+
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -13,7 +15,7 @@ use lemnos_hal::blocks::StreamFrame;
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_host::board::parse;
 use lemnos_host::stream::ProducerEndpoint;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock, SimFrameSource};
 use lemnos_wire::ring::{
     Consumer, STATE_CLOSED, STATE_DEVICE_FAILED, STATE_FAULT, STATE_OPEN, fds,
@@ -116,7 +118,7 @@ fn start_with_clock() -> (Host, SimClock) {
         &[entry::<FakeCounter>(), entry::<Emitter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, handle)

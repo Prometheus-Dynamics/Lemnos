@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The A733 video engine: encode jobs through lemnos.ko, which checks every register and buffer range; register reads through the vendor kernel's node. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

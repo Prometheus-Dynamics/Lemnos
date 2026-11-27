@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options};
+use lemnos_host::{DeviceState, Host};
 use lemnos_sim::SimBoard;
 use lemnosd::builtin;
 
@@ -19,7 +19,7 @@ fn start(text: &str) -> Host {
         &builtin::drivers(),
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .expect("the board starts")
 }

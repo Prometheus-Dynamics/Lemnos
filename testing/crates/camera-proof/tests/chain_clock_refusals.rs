@@ -104,7 +104,6 @@ fn a_clock_moved_backwards_mid_run_refuses_the_chain_proof() {
     use std::time::{Duration, Instant};
 
     use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
-    use lemnos_host::Options;
     use lemnosd::{Config, Service};
 
     assert!(lemnos_camera_sim::pisp::install());
@@ -122,7 +121,7 @@ fn a_clock_moved_backwards_mid_run_refuses_the_chain_proof() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(SimBuffers::probe()),
     )

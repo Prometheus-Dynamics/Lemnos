@@ -1756,7 +1756,7 @@ fn statistics_host(buffers: u32) -> lemnos_host::Host {
         &[lemnos_host::entry::<StatsSource>()],
         Box::new(sim),
         Arc::new(clock),
-        lemnos_host::Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap()
 }

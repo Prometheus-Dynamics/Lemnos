@@ -1,6 +1,8 @@
 //! A driver that declares a `HostClock` need reads the backend's clock: the simulated one under sim,
 //! so a test moves it by hand. A backend with no clock refuses the bind, and says which need it was.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -10,7 +12,7 @@ use lemnos_core::{
     Tag, contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 #[contract("clock-read", version = 1)]
@@ -159,7 +161,7 @@ fn sim_host() -> (Host, SimClock) {
         &[entry::<ClockProbe>(), entry::<OptionalProbe>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)
@@ -185,7 +187,7 @@ fn a_backend_without_a_clock_refuses_the_bind_by_name() {
         &[entry::<ClockProbe>()],
         Box::new(NoClock(SimBoard::new())),
         Arc::new(SimBoard::new().clock()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     let state = host.device("probe").unwrap().state;
@@ -221,7 +223,7 @@ fn an_optional_clock_is_absent_when_the_backend_has_none() {
         &[entry::<OptionalProbe>()],
         Box::new(NoClock(SimBoard::new())),
         Arc::new(SimBoard::new().clock()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     assert_eq!(read(&host, "optional"), u64::MAX);
@@ -242,7 +244,7 @@ fn the_clock_is_the_backends_not_the_one_the_host_ticks_on() {
             asked: asked.clone(),
         }),
         Arc::new(host_clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     assert_eq!(read(&host, "probe"), 42);
@@ -262,7 +264,7 @@ fn a_driver_that_declares_no_clock_is_never_given_one() {
             asked: asked.clone(),
         }),
         Arc::new(SimBoard::new().clock()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     assert!(matches!(

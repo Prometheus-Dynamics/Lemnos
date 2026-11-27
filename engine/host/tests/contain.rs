@@ -1,6 +1,7 @@
 //! A driver that panics, hangs or stops answering takes nothing else with it.
 
 mod common;
+mod test_options;
 
 use std::time::Duration;
 
@@ -196,7 +197,7 @@ fn auto_off_happens_only_to_a_device_that_opts_in() {
     let options = Options {
         retry_first: Duration::from_millis(1),
         retry_cap: Duration::from_millis(1),
-        ..Options::default()
+        ..test_options::options()
     };
     let (host, clock) = host_with(text, options);
     for _ in 0..3 {
@@ -227,7 +228,7 @@ fn auto_off_happens_only_to_a_device_that_opts_in() {
 fn the_board_files_host_settings_reach_the_host() {
     let text = "[host]\ncall_deadline_ms = 750\nretry_first_ms = 200\nretry_cap_ms = 3000\n\
         [[devices]]\nid = \"a\"\ndriver = \"fake-accelerometer\"\nconfig = { refuse = true }\n";
-    let (host, clock) = host_with(text, Options::default());
+    let (host, clock) = host_with(text, test_options::options());
     let options = host.options();
     assert_eq!(options.call_deadline, Duration::from_millis(750));
     assert_eq!(options.retry_first, Duration::from_millis(200));
@@ -278,7 +279,7 @@ fn devices_in_a_circle_are_refused_at_the_device_that_closes_it() {
         &common::drivers(),
         Box::new(sim),
         std::sync::Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .expect("the board starts");
     let DeviceState::Backoff { reason, .. } = host.device("a").unwrap().state else {

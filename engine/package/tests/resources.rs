@@ -13,7 +13,7 @@ use lemnos_core::package::status_of_bus;
 use lemnos_core::{ErrorKind, Status};
 use lemnos_hal::blocks::{ControlSetup, StreamFrame, UsbFunctionEvent};
 use lemnos_hal::raw::{Bias, EdgeDetect, LineConfig, Polarity, PwmConfig, SpiConfig, SpiMode};
-use lemnos_host::{DeviceState, Host, Options};
+use lemnos_host::{DeviceState, Host};
 use lemnos_package::{Loader, Mode};
 use lemnos_sim::SimBoard;
 use lemnos_sim::mock::{ControlAnswer, MockStream, SpiRecord};
@@ -24,7 +24,12 @@ fn thing(sim: SimBoard, uses: &str) -> (Host, u32) {
     loader.load(&fixtures().good).unwrap();
     let devices =
         format!("[[devices]]\nid = \"thing\"\ndriver = \"package-fixture\"\nuses = {{ {uses} }}\n");
-    let (host, _) = host_on(sim, &devices, &loader.entries(), Options::default());
+    let (host, _) = host_on(
+        sim,
+        &devices,
+        &loader.entries(),
+        lemnos_test_options::options(),
+    );
     assert_eq!(host.device("thing").unwrap().state, DeviceState::Running);
     let device = index(&host, "thing");
     (host, device)

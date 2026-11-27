@@ -3,7 +3,6 @@
 //! driver can read, a loop of `uses`. Each one shows failed with its reason, and every other device
 //! runs. `lemnos-ctl validate` refuses the board for what it can know without hardware.
 
-use lemnos_host::Options;
 use lemnos_host::board::{parse, parse_lenient};
 use lemnos_linux::Owner;
 use lemnos_sim::SimBoard;
@@ -57,7 +56,7 @@ fn start(mut board: lemnos_host::board::BoardFile) -> Result<Running, String> {
         board,
         drivers: lemnosd::builtin::drivers(),
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     };
     let service = Service::start(config).map_err(|error| error.to_string())?;
     Ok(Running {

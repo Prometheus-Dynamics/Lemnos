@@ -1,5 +1,7 @@
 //! A driver that asks for time gets it: when it said, and not otherwise.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -7,7 +9,7 @@ use std::time::Duration;
 use lemnos_core::{Config, ConfigError, Key, Kind, Lifecycle, MethodId, Result, contract, driver};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 #[contract("ticker", version = 1)]
@@ -93,7 +95,7 @@ fn host(period_ns: u64) -> (Host, SimClock) {
         &[entry::<Ticker>(), entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

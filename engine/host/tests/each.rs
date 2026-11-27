@@ -2,13 +2,15 @@
 //! when the host starts and as hardware comes, with an id that stays with the resource. A board
 //! entry keeps what it names, by any name, and an entry's `except` keeps what it names.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use lemnos_core::{Config, ErrorKind, Health, Lifecycle, Result, UsbDeviceHandle, driver};
 use lemnos_hal::usb_match::UsbCodes;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 /// A configuration with a video control and a video streaming interface.
@@ -98,7 +100,7 @@ impl Rig {
             &[entry::<Cam>()],
             Box::new(board.clone()),
             Arc::new(clock.clone()),
-            Options::default(),
+            test_options::options(),
         )
         .unwrap();
         Self { host, clock, board }
@@ -125,7 +127,7 @@ impl Rig {
     /// hint keeps has passed.
     fn deliver(&self) {
         self.board.hints().drain(|hint| self.host.hint(hint));
-        self.clock.advance(Options::default().hint_gap);
+        self.clock.advance(test_options::options().hint_gap);
         self.host.tick();
     }
 }
@@ -173,7 +175,7 @@ fn a_camera_plugged_in_later_binds_at_the_hint_or_at_the_next_look_without_one()
     assert!(rig.ids().is_empty());
     assert_eq!(
         rig.host.next_retry_ns(),
-        Some(rig.clock.now_ns() + Options::default().retry_cap.as_nanos() as u64),
+        Some(rig.clock.now_ns() + test_options::options().retry_cap.as_nanos() as u64),
         "an entry is looked at again a retry cap later"
     );
 
@@ -189,7 +191,7 @@ fn a_camera_plugged_in_later_binds_at_the_hint_or_at_the_next_look_without_one()
     assert_eq!(rig.board.hints().lose(), 1);
     rig.host.tick();
     assert_eq!(rig.ids().len(), 1);
-    rig.clock.advance(Options::default().retry_cap);
+    rig.clock.advance(test_options::options().retry_cap);
     rig.host.tick();
     assert_eq!(rig.ids(), ["camera@usb:2-1", "camera@usb:2-2"]);
     assert!(rig.running("camera@usb:2-2"));

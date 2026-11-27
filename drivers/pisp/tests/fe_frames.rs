@@ -36,7 +36,7 @@ use lemnos_driver_pisp::uapi::{
 use lemnos_driver_pisp::{FeLink, FeOptions, PispFe, PispFeNeeds};
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
-use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
@@ -164,7 +164,7 @@ fn host() -> Host {
         &[declared::<PispFe>()],
         Box::new(sim),
         Arc::new(clock),
-        HostOptions::default(),
+        lemnos_test_options::options(),
         Arc::new(Handles),
     )
     .unwrap()
@@ -1016,7 +1016,7 @@ fn bound(statistics: &str, output0: &str, output1: &str) -> Host {
         &[entry::<PispFe>()],
         Box::new(sim),
         Arc::new(clock),
-        HostOptions::default(),
+        lemnos_test_options::options(),
         Arc::new(Handles),
     )
     .unwrap()

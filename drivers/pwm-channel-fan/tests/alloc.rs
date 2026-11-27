@@ -7,7 +7,7 @@ use std::time::Duration;
 use lemnos_core::MethodId;
 use lemnos_driver_pwm_channel_fan::PwmChannelFan;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::SimBoard;
 
@@ -31,7 +31,7 @@ fn a_running_fan_with_a_tachometer_allocates_nothing_in_steady_state() {
         &[entry::<PwmChannelFan>()],
         Box::new(sim.clone()),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     let index = host.device("fan").unwrap().index;

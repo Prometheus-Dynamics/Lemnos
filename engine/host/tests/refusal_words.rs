@@ -2,12 +2,14 @@
 //! right after a failed method, keeps the words for that caller until it takes them or calls the
 //! device again, bounds them, and passes a failed job's UTF-8 words on with its status.
 
+mod test_options;
+
 use lemnos_core::{
     CallerId, Config, JobId, JobState, Lifecycle, MethodId, Reply, Result, Status, contract,
     driver, say,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Host, JobEvent, JobUpdate, Options, REFUSAL_WORDS, entry};
+use lemnos_host::{Host, JobEvent, JobUpdate, REFUSAL_WORDS, entry};
 use lemnos_sim::SimBoard;
 
 #[contract("example.words", version = 1)]
@@ -95,7 +97,7 @@ fn host() -> (Host, u32) {
         &[entry::<Sayer>()],
         Box::new(sim),
         std::sync::Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     let index = host.device("w").unwrap().index;

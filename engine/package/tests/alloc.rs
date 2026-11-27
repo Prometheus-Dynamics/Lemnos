@@ -12,8 +12,8 @@ use std::sync::atomic::Ordering;
 
 use common::{EXERCISE_ROOM, count, exercise_args, fixtures, index, kind, method, scratch};
 use lemnos_core::Status;
+use lemnos_host::Host;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options};
 use lemnos_measure::test_alloc::{Counting, TOTAL};
 use lemnos_package::{Loader, Mode, resources_held};
 use lemnos_sim::Layout;
@@ -191,7 +191,7 @@ fn steady_state_calls_through_a_package_allocate_nothing() {
         &loader.entries(),
         Box::new(board),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     let (user, chip, all) = (

@@ -8,7 +8,7 @@ use lemnos_core::Lifecycle;
 use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_host::board::parse;
 use lemnos_host::stream::MemfdAllocator;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf;
 use lemnos_sim::SimBoard;
 use std::os::fd::AsFd;
@@ -108,7 +108,7 @@ fn host(text: &str, handles: bool) -> Host {
         &[entry::<A733Di>(), entry::<nothing::Nothing>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
         allocator,
     )
     .unwrap()

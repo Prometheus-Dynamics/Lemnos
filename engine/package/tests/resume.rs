@@ -14,7 +14,7 @@ mod common;
 use std::time::Duration;
 
 use common::{count, fixtures, host, host_on, index, method, raw_package, scratch};
-use lemnos_host::{DeviceState, Host, Options};
+use lemnos_host::{DeviceState, Host};
 use lemnos_package::{Loader, Mode};
 use lemnos_sim::{SimBoard, SimClock};
 
@@ -107,7 +107,12 @@ uses = { line = "gpio7" }
 config = { base = 40 }
 "#;
     let clock = sim.clock();
-    let (host, _) = host_on(sim, devices, &loader.entries(), Options::default());
+    let (host, _) = host_on(
+        sim,
+        devices,
+        &loader.entries(),
+        lemnos_test_options::options(),
+    );
     let _ = std::fs::remove_dir_all(dir);
     (host, clock)
 }

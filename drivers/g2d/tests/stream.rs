@@ -27,7 +27,7 @@ use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Access, Buffers, DmaSync, Lease, MemfdAllocator, StreamAllocator};
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_linux_sys::dma_buf::{self, SYNC_END, SYNC_READ, SYNC_START, SYNC_WRITE, sealed_memfd};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
@@ -144,7 +144,7 @@ fn start_on(heap: Option<File>) -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
         Arc::new(PerBuffer { heap }),
     )
     .unwrap()

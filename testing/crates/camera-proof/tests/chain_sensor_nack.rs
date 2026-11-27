@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
-use lemnos_host::Options;
+
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
@@ -47,7 +47,7 @@ fn a_sensor_that_nacks_its_bus_refuses_the_chain_by_name() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(SimBuffers::probe()),
     )

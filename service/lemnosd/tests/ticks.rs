@@ -8,7 +8,7 @@ use lemnos_core::{
     Config as DriverConfig, ConfigError, Key, Kind, Lifecycle, Result, contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -102,7 +102,7 @@ fn start(period_ns: u64) -> (Service, Dir, std::path::PathBuf) {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<Ticker>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap();
     (service, guard, socket)

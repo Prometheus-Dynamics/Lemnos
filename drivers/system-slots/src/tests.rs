@@ -1429,7 +1429,7 @@ impl Drop for TestRoots {
 fn through_a_host_an_install_is_a_job_and_a_trial_restarts_with_tryboot() {
     use lemnos_core::{Encode, MethodId, Writer};
     use lemnos_host::board::parse;
-    use lemnos_host::{Host, JobEvent, JobUpdate, Options, entry};
+    use lemnos_host::{Host, JobEvent, JobUpdate, entry};
 
     let dir = TempDir::new("host");
     let layout = layout(&dir.0);
@@ -1486,7 +1486,7 @@ config = {{ restart_socket = "{ctl}" }}
         &[entry::<SystemSlots>(), entry::<crate::SystemReboot>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     let slots = host.device("slots").unwrap().index;

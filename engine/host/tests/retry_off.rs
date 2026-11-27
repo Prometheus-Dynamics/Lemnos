@@ -2,6 +2,8 @@
 //! device reads Off, and no bind is attempted while it is off, however long the clock runs. An on
 //! then resumes the normal bind and the failure rule.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -9,7 +11,7 @@ use std::time::Duration;
 
 use lemnos_core::{Config, Lifecycle, Result, Status, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, OffReason, Options, entry};
+use lemnos_host::{DeviceState, Host, OffReason, entry};
 use lemnos_sim::SimBoard;
 
 /// The attempt counter is process-wide: one test at a time.
@@ -51,7 +53,7 @@ fn host() -> (Host, lemnos_sim::SimClock) {
         &[entry::<Refusing>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

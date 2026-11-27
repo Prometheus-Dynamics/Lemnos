@@ -1,6 +1,8 @@
 //! A driver whose resources are dead for good says so, and the host binds it again under the
 //! failure rule: never sooner than the backoff allows, however often it asks.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -9,7 +11,7 @@ use lemnos_core::{
     Config, ConfigError, Health, Key, Kind, Lifecycle, MethodId, Result, Status, contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 const DEAD: &str = "what it was bound with is dead";
@@ -107,7 +109,7 @@ fn host_with(key: usize, config: &str, device: &str) -> (Host, SimClock, &'stati
         &[entry::<Leaver>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock, &SHARED[key])
@@ -231,7 +233,7 @@ fn the_wait_starts_again_from_the_shortest_once_a_driver_has_stayed_up() {
     assert_eq!(state(&host), DeviceState::Running);
 
     // Up for as long as the cap: what went before is forgotten.
-    clock.advance(Options::default().retry_cap);
+    clock.advance(test_options::options().retry_cap);
     shared.die.store(true, Ordering::Relaxed);
     host.tick();
     assert_eq!(waiting(&host, &clock).0, 1);

@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The rkvpss offline scaler: dma-buf to dma-buf crop, scale and format conversion on up to six output channels, through the vendor kernel's rkvpss-offline node, reopening itself after a failure. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

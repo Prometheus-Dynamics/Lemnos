@@ -1,6 +1,7 @@
 //! Three devices become one, through nothing but `uses` and tags.
 
 mod common;
+mod test_options;
 
 use common::{MAG, SIX_AXIS, host, method};
 use lemnos_core::{Decode, Health, Reader, Vector3};

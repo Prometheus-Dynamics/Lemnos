@@ -2,6 +2,8 @@
 //! tick, and between steps the device answers like any other. Only a step in progress is waited
 //! for (see `describe_waits.rs`). Facts, with a job parked inside a step and between steps.
 
+mod test_options;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -10,7 +12,7 @@ use lemnos_core::{
     CallerId, Config, JobId, JobState, Lifecycle, MethodId, Reply, Result, contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Host, JobEvent, Options, entry};
+use lemnos_host::{Host, JobEvent, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 /// The gate is one for the file, so the two tests take turns.
@@ -109,7 +111,7 @@ fn host() -> (Arc<Host>, SimClock) {
         &[entry::<Stepper>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (Arc::new(host), clock)

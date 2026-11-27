@@ -25,6 +25,7 @@ lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
 [dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }

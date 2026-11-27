@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The K230 video codec block through the SDK kernel's mvx V4L2 memory-to-memory driver, given to a caller as codec.block/1: a session held across jobs, the stream's dma-bufs as sources and destinations completing on the block's schedule, every plane checked against the buffer behind it. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

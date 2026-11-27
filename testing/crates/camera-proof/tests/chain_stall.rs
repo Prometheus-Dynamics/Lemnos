@@ -12,7 +12,7 @@ use lemnos_camera_proof::setup::{Chain, Tuning, post_front};
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
 use lemnos_client::Client;
 use lemnos_contract_camera_isp::CameraIsp;
-use lemnos_host::Options;
+
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
@@ -68,7 +68,7 @@ fn a_paused_consumer_loses_the_starts_it_queued_nothing_for_and_its_queued_frame
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(SimBuffers::probe()),
     )

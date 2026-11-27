@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_camera_sim::profile;
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
-use lemnos_host::Options;
+
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
@@ -69,7 +69,7 @@ fn the_chain_proof_passes_end_to_end_against_the_simulated_chain() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(buffers),
     )

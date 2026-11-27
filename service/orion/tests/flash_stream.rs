@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_driver_system_flash::SystemFlash;
 use lemnos_host::board::parse;
-use lemnos_host::{Options as HostOptions, entry};
+use lemnos_host::entry;
 use lemnos_orion::config::Config;
 use lemnos_orion::{Shared, calls, files, publish, source};
 
@@ -133,7 +133,7 @@ fn start_lemnosd(dir: &Path, socket: &Path, target: &Path, size_ok: bool) -> Ser
         board: parse(&text).expect("board"),
         drivers: vec![entry::<SystemFlash>(), entry::<TrackedDevice>()],
         backend: Box::new(SimBoard::new()),
-        options: HostOptions::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd")
 }

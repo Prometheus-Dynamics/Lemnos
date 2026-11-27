@@ -14,7 +14,7 @@ use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamEndpoint, StreamFrame};
 use lemnos_host::board::parse;
 use lemnos_host::stream::ProducerEndpoint;
-use lemnos_host::{Host, Options as HostOptions, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
@@ -184,7 +184,7 @@ impl Rig {
             &[entry::<nothing::Nothing>()],
             Box::new(sim),
             Arc::new(clock),
-            HostOptions::default(),
+            lemnos_test_options::options(),
             Arc::new(PerBuffer),
         )
         .unwrap();

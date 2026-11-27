@@ -2,11 +2,13 @@
 //! request drives it high again on the same line, with no rebind. Fails on the host code before
 //! the off path kept its driver: the drop released the line and it kept its high level.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_driver_gpio_power_switch::GpioPowerSwitch;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, OffReason, Options, entry};
+use lemnos_host::{DeviceState, Host, OffReason, entry};
 use lemnos_sim::SimBoard;
 
 const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
@@ -22,7 +24,7 @@ fn off_drives_the_line_low_and_holds_it_and_on_drives_it_high() {
         &[entry::<GpioPowerSwitch>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     assert_eq!(

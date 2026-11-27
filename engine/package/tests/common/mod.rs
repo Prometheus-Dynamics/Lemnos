@@ -184,7 +184,12 @@ pub fn host_on(
 }
 
 pub fn host(devices: &str, drivers: &[DriverEntry]) -> (Host, SimClock) {
-    host_on(SimBoard::new(), devices, drivers, Options::default())
+    host_on(
+        SimBoard::new(),
+        devices,
+        drivers,
+        lemnos_test_options::options(),
+    )
 }
 
 pub fn method(id: u16) -> MethodId {

@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The Rockchip NPU behind the vendor kernel's DRM node, serving npu/1: the caller's program carried as bytes, each program in an IOMMU domain of its own holding only its buffers, every task field the kernel takes checked. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

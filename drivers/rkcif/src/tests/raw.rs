@@ -15,7 +15,7 @@ use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamEndpoint, StreamFrame};
 use lemnos_host::board::parse;
 use lemnos_host::stream::{MemfdAllocator, ProducerEndpoint, StreamAllocator};
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_v4l2::FourCc;
@@ -319,7 +319,7 @@ impl Rig {
             &[entry::<nothing::Nothing>()],
             Box::new(sim),
             Arc::new(clock),
-            Options::default(),
+            lemnos_test_options::options(),
             allocator,
         )
         .unwrap();
@@ -628,7 +628,7 @@ fn embedded_driver() -> (Host, Rkcif, Node) {
         &[entry::<nothing::Nothing>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
         Arc::new(MemfdAllocator),
     )
     .unwrap();

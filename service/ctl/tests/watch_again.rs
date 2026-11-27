@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use lemnos_fake_devices::FakeCounter;
-use lemnos_host::Options;
+
 use lemnos_host::board::parse;
 use lemnos_host::entry;
 use lemnos_sim::SimBoard;
@@ -40,7 +40,7 @@ fn start(devices: &[(&str, &str)]) -> Running {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<FakeCounter>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     };
     let service = Service::start(config).unwrap();
     Running {

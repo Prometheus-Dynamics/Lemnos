@@ -700,7 +700,7 @@ mod tests {
         hotplug::BoardHints,
     ) {
         use lemnos_host::board::parse;
-        use lemnos_host::{Host, Options, entry};
+        use lemnos_host::{Host, entry};
 
         let (board, dir) = temp_board(name);
         let dir = std::fs::canonicalize(dir).unwrap();
@@ -721,7 +721,7 @@ mod tests {
             &[entry::<lemnos_driver_bmm150::Bmm150>()],
             Box::new(board),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
         )
         .unwrap();
         (host, clock, dir, hints)

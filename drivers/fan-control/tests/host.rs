@@ -305,7 +305,7 @@ fn start_rig(text: &str) -> Rig {
         Arc::new(clock.clone()),
         Options {
             error_limit: u32::MAX,
-            ..Options::default()
+            ..lemnos_test_options::options()
         },
     )
     .unwrap();
@@ -966,7 +966,7 @@ fn start_flap(key: &str) -> Rig {
         ],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     Rig { host, clock }

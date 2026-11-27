@@ -2,7 +2,6 @@
 //! validate` and the daemon's start run the same check, so a board file refused by one is refused
 //! by the other, naming the device and the key.
 
-use lemnos_host::Options;
 use lemnos_host::board::parse;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
@@ -53,7 +52,7 @@ fn running(text: &str) -> Result<Running, String> {
         board: parse(text).unwrap(),
         drivers: lemnosd::builtin::drivers(),
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     };
     let service = Service::start(config).map_err(|error| error.to_string())?;
     Ok(Running {

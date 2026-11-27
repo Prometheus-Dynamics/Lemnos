@@ -40,6 +40,7 @@ rustix = { version = "1", default-features = false, features = ["std", "event"] 
 [dev-dependencies]
 lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 # The test relay forwards the file descriptors Orion's transport passes with its frames.
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 rustix = { version = "1", default-features = false, features = ["std", "net"] }
 # A real comm core and real node logic, in-process, for the integration tests.
 orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "172054f4fd88e98e096c0134b17a5c27ccb3abb3", default-features = false }

@@ -1,11 +1,13 @@
 //! A driver that holds something for a caller learns who is calling and when they have gone.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use lemnos_core::{CallerId, Config, Lifecycle, MethodId, Result, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 #[contract("holder", version = 1)]
@@ -79,7 +81,7 @@ fn host() -> (Host, SimClock) {
         &[entry::<Holder>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

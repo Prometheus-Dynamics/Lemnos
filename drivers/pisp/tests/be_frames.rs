@@ -28,7 +28,7 @@ use lemnos_driver_pisp::{BeOptions as Options, PispBe, PispBeNeeds};
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
-use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
@@ -137,7 +137,7 @@ fn host_with(text: &str) -> Host {
         &[declared::<PispBe>()],
         Box::new(sim),
         Arc::new(clock),
-        HostOptions::default(),
+        lemnos_test_options::options(),
         Arc::new(Handles),
     )
     .unwrap()
@@ -813,7 +813,7 @@ fn bound(input_memory: &str, output_memory: &str) -> Host {
         &[entry::<PispBe>()],
         Box::new(sim),
         Arc::new(clock),
-        HostOptions::default(),
+        lemnos_test_options::options(),
         Arc::new(Handles),
     )
     .unwrap()

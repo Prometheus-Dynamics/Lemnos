@@ -3,6 +3,8 @@
 //! is back. The stand-in keeps one value; a record it cannot restore is the way a real rebind
 //! fails to carry on (the state no longer matches the hardware), and the stream then reads `Lost`.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +13,7 @@ use lemnos_core::{
     driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::{Consumer, ProducerWords, producer};
 
@@ -134,7 +136,7 @@ impl Rig {
             &[entry::<Keeping>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            test_options::options(),
         )
         .unwrap();
         Self { host, clock }

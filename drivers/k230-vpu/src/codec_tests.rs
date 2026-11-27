@@ -11,7 +11,7 @@ use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_driver_m2m_decode::Event;
 use lemnos_host::board::parse;
 use lemnos_host::stream::MemfdAllocator;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::v4l2::{BUF_FLAG_LAST, EVENT_SOURCE_CHANGE, SRC_CH_RESOLUTION};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::{SimBoard, SimClock};
@@ -87,7 +87,7 @@ impl Rig {
             &[entry::<K230Vpu>(), entry::<nothing::Nothing>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
             allocator,
         )
         .map_err(|error| error.to_string())?;

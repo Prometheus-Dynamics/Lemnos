@@ -10,7 +10,7 @@ use lemnos_client::{FrameStream, Session, StreamPlatform};
 use lemnos_core::{Config as DriverConfig, Lifecycle, Result, StreamHandle, contract, driver};
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_sim::SimBoard;
 use lemnosd::{BufferSource, Config, Service};
@@ -203,7 +203,7 @@ pub fn start(buffers: Arc<dyn BufferSource>, heap: &str) -> Running {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<FilledDriver>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     };
     let service = Service::start_with_buffers(config, buffers).unwrap();
     Running::new(service, socket, dir)

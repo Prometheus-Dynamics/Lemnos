@@ -18,7 +18,7 @@ use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::StreamEndpoint;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
@@ -121,7 +121,7 @@ fn host(memory: Memory) -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
         Arc::new(Allocator(memory)),
     )
     .unwrap()

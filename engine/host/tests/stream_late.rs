@@ -7,6 +7,8 @@
 //! every ask, which is `lag <= buffers - 1 - working`. Past that, the oldest unread frame is
 //! replaced and counted in `dropped`, and the newest never is.
 
+mod test_options;
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -15,7 +17,7 @@ use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::SimBoard;
 
 const CONSUMER: CallerId = CallerId(7);
@@ -35,7 +37,7 @@ fn start(buffers: u32) -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

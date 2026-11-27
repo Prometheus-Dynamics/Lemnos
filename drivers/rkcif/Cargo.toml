@@ -23,6 +23,7 @@ lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 lemnos-wire = { path = "../../engine/wire" }
 # Only for its test allocator, which makes each stream buffer a sealed memfd with a handle.
 lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }

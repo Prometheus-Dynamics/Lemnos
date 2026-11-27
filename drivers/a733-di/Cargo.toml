@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The A733 deinterlacer through the vendor kernel's /dev/deinterlace: weave, bob, motion-adaptive and temporal noise reduction between dma-bufs, every request built from frames checked against the buffers the caller holds. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

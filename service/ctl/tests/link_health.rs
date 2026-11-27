@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider};
-use lemnos_host::Options;
+
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../testing/boards/reference.toml");
@@ -46,7 +46,7 @@ fn a_healthy_chain_with_stated_wiring_reads_ok_in_list_chain_and_describe() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(SimBuffers::probe()),
     )

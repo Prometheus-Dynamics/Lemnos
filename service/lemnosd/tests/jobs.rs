@@ -8,7 +8,7 @@ use lemnos_core::{
     driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -155,7 +155,7 @@ fn serve(socket: &std::path::Path) -> Service {
         board: parse(text).unwrap(),
         drivers: vec![entry::<Copier>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap()
 }

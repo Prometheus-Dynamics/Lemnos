@@ -38,7 +38,7 @@ pub fn host_with(devices: &str, options: Options) -> (Host, SimClock) {
 }
 
 pub fn host(devices: &str) -> (Host, SimClock) {
-    host_with(devices, Options::default())
+    host_with(devices, crate::test_options::options())
 }
 
 pub fn quick() -> Options {

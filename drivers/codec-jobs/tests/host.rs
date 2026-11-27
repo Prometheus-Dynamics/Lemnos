@@ -27,7 +27,7 @@ use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_host::board::parse;
 use lemnos_host::stream::ProducerEndpoint;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::SimBoard;
 use lemnos_wire::ring::{Consumer, STATE_FAULT};
 
@@ -235,7 +235,7 @@ fn host() -> Host {
         &[entry::<JobDriver>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap()
 }

@@ -9,7 +9,7 @@ use lemnos_core::{CallerId, MethodId, Status};
 use lemnos_driver_board_self_test::BoardSelfTest;
 use lemnos_fake_devices::FakeProbe;
 use lemnos_host::board::parse;
-use lemnos_host::{DriverEntry, Host, JobEvent, JobUpdate, Options, entry};
+use lemnos_host::{DriverEntry, Host, JobEvent, JobUpdate, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 const CALLER: CallerId = CallerId(1);
@@ -35,7 +35,7 @@ fn host(config: &str) -> (Host, SimClock) {
         &drivers(),
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     (host, clock)

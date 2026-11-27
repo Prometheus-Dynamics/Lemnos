@@ -18,6 +18,7 @@ lemnos-driver-hw-watchdog-sys = { path = "../hw-watchdog-sys" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [package.metadata.lemnos]
 driver = "HwWatchdog"

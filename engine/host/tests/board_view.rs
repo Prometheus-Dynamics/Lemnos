@@ -2,6 +2,8 @@
 //! where it came from, whether it is bound, and its health (a dead device's `Gone` kept apart from
 //! `Failed`). Reading it allocates nothing, and a driver that does not watch never gets it.
 
+mod test_options;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -12,7 +14,7 @@ use lemnos_core::{
 };
 use lemnos_hal::usb_match::UsbCodes;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::SimBoard;
 
@@ -194,7 +196,7 @@ fn start(board: SimBoard, devices: &str) -> Host {
         ],
         Box::new(board),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

@@ -17,7 +17,7 @@ use lemnos_driver_usb_gadget::UsbGadget;
 use lemnos_hal::blocks::UsbFunctionEvent;
 use lemnos_hal::mock::MockUsbFunction;
 use lemnos_host::board::parse;
-use lemnos_host::{Options as HostOptions, entry};
+use lemnos_host::entry;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_orion::config::{Config, Link};
 use lemnos_orion::links;
@@ -56,7 +56,7 @@ fn start_lemnosd(socket: &Path, function: &MockUsbFunction) -> Service {
         board: parse(BOARD).expect("board"),
         drivers: vec![entry::<UsbGadget>()],
         backend: Box::new(sim),
-        options: HostOptions::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd")
 }

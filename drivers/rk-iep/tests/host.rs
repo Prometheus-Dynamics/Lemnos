@@ -22,7 +22,7 @@ use lemnos_driver_rk_mpp::played::{Kernel, iova};
 use lemnos_driver_rk_mpp::{Block, BoxedDevice, Device, Message, Session};
 use lemnos_host::board::parse;
 use lemnos_host::stream::MemfdAllocator;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf;
 use lemnos_sim::{SimBoard, SimClock};
 
@@ -116,7 +116,7 @@ impl Rig {
             &drivers,
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
             allocator,
         )
         .unwrap();
@@ -285,7 +285,7 @@ fn a_board_file_binds_it_and_what_it_names_is_checked() {
         &[entry::<RkIep>(), entry::<nothing::Nothing>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
         Arc::new(PerBuffer),
     )
     .expect("the board starts");

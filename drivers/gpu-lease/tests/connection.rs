@@ -6,7 +6,7 @@ use lemnos_client::Client;
 use lemnos_contract_gpu_lease::GpuLease;
 use lemnos_driver_gpu_lease::GpuLeaseDevice;
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -24,7 +24,7 @@ fn a_lease_ends_with_its_connection_and_the_next_waiter_is_granted() {
         board: parse(BOARD).unwrap(),
         drivers: vec![entry::<GpuLeaseDevice>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap();
 

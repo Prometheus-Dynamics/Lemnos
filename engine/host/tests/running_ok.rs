@@ -9,10 +9,11 @@ use lemnos_core::{
     Config, ConfigError, Health, Key, Kind, Lifecycle, MethodId, Result, contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 mod common;
+mod test_options;
 use common::{MAG, SIX_AXIS};
 
 /// The clock starts here, so a bind is not at zero.
@@ -90,7 +91,7 @@ fn host(ready_at_ns: u64) -> (Host, SimClock) {
         &[entry::<Warmer>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

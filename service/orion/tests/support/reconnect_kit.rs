@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use lemnos_driver_system_identity::Identity;
 use lemnos_fake_devices::{FakeAccelerometer, FakeCounter};
 use lemnos_host::board::parse;
-use lemnos_host::{Options as HostOptions, entry};
+use lemnos_host::entry;
 use lemnos_orion::config::Config;
 use lemnos_orion::{Shared, calls, publish, source};
 use lemnos_sim::SimBoard;
@@ -81,7 +81,7 @@ pub fn start_lemnosd(socket: &Path) -> Service {
             entry::<Identity>(),
         ],
         backend: Box::new(SimBoard::new()),
-        options: HostOptions::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd")
 }

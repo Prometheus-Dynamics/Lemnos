@@ -11,7 +11,7 @@ mod common;
 use common::{host_on, index, method, ws2812_package};
 use lemnos_core::{Health, Status};
 use lemnos_driver_ws2812::{Ws2812, encode_spi_byte};
-use lemnos_host::{DeviceState, DriverEntry, Options, entry};
+use lemnos_host::{DeviceState, DriverEntry, entry};
 use lemnos_package::{Loader, Mode};
 use lemnos_sim::SimBoard;
 
@@ -42,7 +42,7 @@ fn run(drivers: &[DriverEntry]) -> Vec<Vec<u8>> {
     let sim = SimBoard::new();
     let spi = sim.add_spi("spi0");
     let faults = sim.faults("spi0").unwrap();
-    let (host, _) = host_on(sim, DEVICES, drivers, Options::default());
+    let (host, _) = host_on(sim, DEVICES, drivers, lemnos_test_options::options());
     let strip = index(&host, "strip");
     let device = host.device("strip").unwrap();
     assert_eq!(device.state, DeviceState::Running);
@@ -106,7 +106,12 @@ fn a_packaged_driver_without_its_bus_waits_for_it_as_a_built_in_one_does() {
     let mut loader = Loader::new(Mode::Open);
     let entries = [loader.load(ws2812_package()).unwrap().entry()];
     let state = |drivers: &[DriverEntry]| {
-        let (host, _) = host_on(SimBoard::new(), DEVICES, drivers, Options::default());
+        let (host, _) = host_on(
+            SimBoard::new(),
+            DEVICES,
+            drivers,
+            lemnos_test_options::options(),
+        );
         let DeviceState::Backoff {
             attempts, reason, ..
         } = host.device("strip").unwrap().state

@@ -1045,6 +1045,7 @@ dependencies = [
  "lemnos-sim",
  "lemnos-sim-clock",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "lemnos-wire",
  "lemnosd",
 ]
@@ -1071,6 +1072,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-sim",
  "lemnos-sim-clock",
+ "lemnos-test-options",
  "lemnosd",
 ]
 
@@ -1089,6 +1091,7 @@ dependencies = [
  "lemnos-measure",
  "lemnos-sim",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "lemnos-wire",
  "lemnosd",
 ]
@@ -1460,6 +1463,7 @@ dependencies = [
  "lemnos-sim-walk",
  "lemnos-slot-store",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "lemnos-wire",
  "lemnosd",
  "sha2 0.10.9",
@@ -1498,6 +1502,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -1524,6 +1529,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
  "libc",
 ]
@@ -1577,6 +1583,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -1590,6 +1597,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -1611,6 +1619,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-host",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -1626,6 +1635,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -1662,6 +1672,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-host",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -1674,6 +1685,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-sim",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "lemnosd",
 ]
 
@@ -1696,6 +1708,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -1844,6 +1857,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -1867,6 +1881,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "libc",
 ]
 
@@ -1889,6 +1904,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -1915,6 +1931,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -1973,6 +1990,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2002,6 +2020,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -2043,6 +2062,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2068,6 +2088,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2110,6 +2131,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2144,6 +2166,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-v4l2",
  "lemnos-wire",
  "libc",
@@ -2168,6 +2191,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-v4l2",
 ]
 
@@ -2195,6 +2219,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2232,6 +2257,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
  "libc",
 ]
@@ -2267,6 +2293,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2309,6 +2336,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-v4l2",
  "lemnos-wire",
 ]
@@ -2357,6 +2385,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-sim",
  "lemnos-slot-store",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -2377,6 +2406,7 @@ dependencies = [
  "lemnos-sim",
  "lemnos-slot-store",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "libc",
  "sha2 0.10.9",
 ]
@@ -2400,6 +2430,7 @@ dependencies = [
  "lemnos-linux",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
  "sha2 0.10.9",
  "toml",
@@ -2415,6 +2446,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2453,6 +2485,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-wire",
 ]
 
@@ -2495,6 +2528,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -2763,6 +2797,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
  "lemnos-usb",
  "libc",
 ]
@@ -2883,6 +2918,7 @@ dependencies = [
  "lemnos-sim-walk",
  "lemnos-slot-store",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "lemnos-wire",
  "lemnosd",
  "orion",
@@ -2941,6 +2977,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-measure",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -3062,6 +3099,7 @@ dependencies = [
  "lemnos-driver-ina2xx",
  "lemnos-host",
  "lemnos-sim",
+ "lemnos-test-options",
 ]
 
 [[package]]
@@ -3208,6 +3246,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-test-options"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-host",
+]
+
+[[package]]
 name = "lemnos-uboot-grant-check"
 version = "2.0.1-dev"
 dependencies = [
@@ -3257,6 +3302,7 @@ dependencies = [
  "lemnos-linux-stream",
  "lemnos-sim",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "lemnosd",
 ]
 
@@ -3390,6 +3436,7 @@ dependencies = [
  "lemnos-sim",
  "lemnos-slot-store",
  "lemnos-socket-dir",
+ "lemnos-test-options",
  "lemnos-wire",
  "shm-ring",
  "shm-ring-buffers",

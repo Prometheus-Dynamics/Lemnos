@@ -2,6 +2,8 @@
 //! Lemnos answers its reads and refuses every call that would change it, and leaves its files as
 //! the host set them, through shutdown. A Lemnos-owned device on the same board still takes them.
 
+mod test_options;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +13,7 @@ use lemnos_driver_host_clock::HostClock as ClockFacts;
 use lemnos_driver_hwmon_fan::HwmonFan;
 use lemnos_driver_thermal_zone::ThermalZone;
 use lemnos_host::board::{Owner, parse};
-use lemnos_host::{DeviceState, DriverEntry, Host, Options, entry};
+use lemnos_host::{DeviceState, DriverEntry, Host, entry};
 use lemnos_sim::SimBoard;
 
 const SET_DUTY: u16 = 1;
@@ -109,7 +111,14 @@ config = {{ sys_root = "{sys}", name = "ours" }}
     let board = parse(&text).unwrap();
     let sim = SimBoard::new();
     let clock = Arc::new(sim.clock());
-    let host = Host::start(&board, &drivers(), Box::new(sim), clock, Options::default()).unwrap();
+    let host = Host::start(
+        &board,
+        &drivers(),
+        Box::new(sim),
+        clock,
+        test_options::options(),
+    )
+    .unwrap();
     for id in ["theirs", "zone", "ours"] {
         assert_eq!(host.device(id).unwrap().state, DeviceState::Running, "{id}");
     }

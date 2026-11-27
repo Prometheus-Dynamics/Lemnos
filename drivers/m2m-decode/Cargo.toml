@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "Stateless video decode through the kernel's V4L2 memory-to-memory and request interfaces: a session over one M2M node, media requests, and a stateless block that carries the caller's controls and buffers as bytes. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

@@ -3,6 +3,8 @@
 //! four-buffer stream. No kept frame's buffer is granted to the producer again, and its bytes and
 //! its metadata read back unchanged, until the consumer gives it back.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -12,7 +14,7 @@ use lemnos_core::{
 };
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::{Consumer, FrameSlot, STATE_OPEN};
 
@@ -95,7 +97,7 @@ fn start() -> (Host, SimClock) {
         &[entry::<Painter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, handle)
