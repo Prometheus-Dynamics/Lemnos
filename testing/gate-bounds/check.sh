@@ -3,31 +3,28 @@
 # it is starved; a step that hangs, or spins past its CPU budget, fails and is named. Every case runs one step
 # through the same unit and finish the gate uses, and checks the verdict and the words the gate prints.
 #
-# Contention is single-core only. The case under test and its competitors are pinned to one CPU (CORE, the last
-# CPU this shell may use), so the case gets a fair share of that one core and nothing else is loaded. Each case
-# starts CONTEND competitors (default 2) that spin on CORE for CONTEND_SECONDS (default 20) and no longer; they
-# are stopped by PID on EXIT, never waited on. No process outside this script is started or stopped. Each case
-# records the load average before and after, so the result says what the machine was doing.
+# No load is made up for it: nothing runs to burn CPU. The cases about slowness are starved by a CPU quota on the
+# step alone (a systemd scope with CPUQuota=QUOTA%, default 10; the starved case 3%), on one CPU (CORE, the last
+# CPU this shell may use); the cases about a hang or a CPU budget run unthrottled, since load changes neither. A quota-throttled process waits runnable, and that wait shows in its schedstat as for a busy CPU.
+# Each case records the load average before and after, so the result says what the machine was doing.
 #
 # GATE_BOUNDS_LIB names another copy of the library to test (the fail-before runs use the wall-clock library
 # from origin/next through scripts/gate.sh's old bounded()).
 set -euo pipefail
 # One CPU: the last one this shell may run on. The script re-runs itself pinned to it, so every child (the case,
-# its competitors and cargo) inherits the pin.
+# its quota scope and cargo) inherits the pin.
 if [ -z "${GB_PINNED:-}" ]; then
   core="$(taskset -pc $$ | sed 's/.*: //' | tr ',' '\n' | tail -1 | sed 's/-.*//')"
   GB_PINNED=1 CORE="$core" exec taskset -c "$core" "$0" "$@"
 fi
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIB="${GATE_BOUNDS_LIB:-$repo/scripts/gate-bounds.sh}"
-CONTEND="${CONTEND:-2}"
-CONTEND_SECONDS="${CONTEND_SECONDS:-20}"
+QUOTA="${QUOTA:-10}"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gb.XXXXXX")"
-competitor_pids=()
 flock_pid=0
 cleanup() {
   local p
-  for p in "${competitor_pids[@]}" "$flock_pid"; do [ "$p" = 0 ] || kill -KILL "$p" 2>/dev/null || true; done
+  for p in "$flock_pid"; do [ "$p" = 0 ] || kill -KILL "$p" 2>/dev/null || true; done
   rm -rf -- "$TMP"
 }
 trap cleanup EXIT
@@ -54,81 +51,68 @@ while time.process_time() - t < want:
 PY
 cat >"$TMP/pulse.py" <<'PY'
 import time
-for _ in range(8):
+for _ in range(4):
     t = time.process_time()
-    while time.process_time() - t < 0.3:
+    while time.process_time() - t < 0.1:
         pass
     time.sleep(1)
 PY
 
-# start_competitors: CONTEND spinners, each for CONTEND_SECONDS of its own clock (PIDs recorded; they share CORE).
-start_competitors() {
-  local i n="${1:-$CONTEND}"
-  for i in $(seq "$n"); do
-    python3 -c "import time,sys; t=time.time()
-while time.time()-t < float(sys.argv[1]): pass" "$CONTEND_SECONDS" &
-    competitor_pids+=($!)
-  done
-}
-stop_competitors() {
-  local p
-  for p in "${competitor_pids[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
-  competitor_pids=()
-}
+# quota <percent> <command...>: runs the command in a scope of its own, held to <percent> of one CPU. The scope
+# execs the command, so its process group and environment (the step's token) are the step's.
+quota() { local q="$1"; shift; systemd-run --user --scope --quiet -p "CPUQuota=$q%" -- "$@"; }
 
 fails=0
-# case <name> <pass|fail> <needle> <budget> <command...>: runs the step pinned to CORE with competitors on CORE.
+# case <name> <pass|fail> <needle> <budget> <command...>: runs the step pinned to CORE; with CASE_QUOTA set, held to
+# that percent of it.
 # "pass" needs rc 0 and "fail" needs rc nonzero; the output must contain <needle> ("-" for none).
 case_run() {
   local name="$1" want="$2" needle="$3" budget="$4" out rc=0 la_before la_after
   shift 4
   la_before="$(cut -d' ' -f1-3 /proc/loadavg)"
-  start_competitors
-  out="$( ( unit "$name" "$name" "$budget" "$@" || true; finish "$name" ) 2>&1 )" || rc=$?
-  stop_competitors
+  # shellcheck disable=SC2086 # two words, or none: the quota wrapper when the case asks for it
+  out="$( ( unit "$name" "$name" "$budget" ${CASE_QUOTA:+quota $CASE_QUOTA} "$@" || true; finish "$name" ) 2>&1 )" || rc=$?
   la_after="$(cut -d' ' -f1-3 /proc/loadavg)"
   printf '%s\n' "$out" | sed 's/^/    | /'
   local ok=1
   if [ "$want" = pass ] && [ "$rc" != 0 ]; then ok=0; fi
   if [ "$want" = fail ] && [ "$rc" = 0 ]; then ok=0; fi
   if [ "$needle" != - ] && ! printf '%s\n' "$out" | grep -qF -- "$needle"; then ok=0; fi
-  if [ "$ok" = 1 ]; then echo "ok   $name (rc $rc; core $CORE, $CONTEND competitors; load $la_before -> $la_after)"
+  if [ -n "${CASE_NEEDLE2:-}" ] && ! printf '%s\n' "$out" | grep -qF -- "$CASE_NEEDLE2"; then ok=0; fi
+  if [ "$ok" = 1 ]; then echo "ok   $name (rc $rc; core $CORE, quota ${CASE_QUOTA:-none}${CASE_QUOTA:+%}; load $la_before -> $la_after)"
   else echo "FAIL $name (rc $rc, want $want, needle: $needle; core $CORE; load $la_before -> $la_after)"; fails=$((fails + 1)); fi
 }
 
-# starved_case: a stand-in that fails after 1 CPU-s, run at nice 19 against 2 nice-0 competitors on CORE. It is
-# runnable and gets little CPU, so most looks find it waiting for one. A starved failure is a red like any other:
+# starved_case: a stand-in that fails after 0.3 CPU-s, held to 3% of CORE. It is runnable and throttled for most
+# of each period, so most looks find it waiting for a CPU. A starved failure is a red like any other:
 # the gate exits 1, names the step and gives the starvation as evidence. It is never a different status that a
 # caller could run again on.
 starved_case() {
   local out rc=0 la_before la_after
   cat >"$TMP/burnfail.py" <<'PY'
 import sys, time
-want = 1.0; t = time.process_time()
+want = 0.3; t = time.process_time()
 while time.process_time() - t < want:
     pass
 sys.exit(1)
 PY
   la_before="$(cut -d' ' -f1-3 /proc/loadavg)"
-  start_competitors 2
-  out="$( ( unit starved-step starved-step 600 nice -n 19 python3 "$TMP/burnfail.py" || true; finish starved-step ) 2>&1 )" || rc=$?
-  stop_competitors
+  out="$( ( unit starved-step starved-step 600 quota 3 python3 "$TMP/burnfail.py" || true; finish starved-step ) 2>&1 )" || rc=$?
   la_after="$(cut -d' ' -f1-3 /proc/loadavg)"
   printf '%s\n' "$out" | sed 's/^/    | /'
   if [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -qF -- "gate: starved-step was starved while it ran:" \
      && printf '%s\n' "$out" | grep -qF -- "gate: starved-step failed (exit 1)"; then
-    echo "ok   starved-step (rc 1, a red with its starvation as evidence; core $CORE, 2 competitors; load $la_before -> $la_after)"
+    echo "ok   starved-step (rc 1, a red with its starvation as evidence; core $CORE, quota 3%; load $la_before -> $la_after)"
   else
     echo "FAIL starved-step (rc $rc, want 1 with the starvation evidence; core $CORE; load $la_before -> $la_after)"; fails=$((fails + 1))
   fi
 }
 
-echo "== stand-ins (core $CORE, $CONTEND competitors on it)"
-case_run slow-progressing pass "CPU-s" 60 python3 "$TMP/burn.py" 6
-case_run pulsed-progressing pass "CPU-s" 60 python3 "$TMP/pulse.py"
-case_run hang fail "stalled: no CPU used and no time runnable" 600 sleep 600
+echo "== stand-ins (core $CORE; the slow ones held to $QUOTA% of it)"
+CASE_QUOTA=$QUOTA case_run slow-progressing pass "CPU-s" 60 python3 "$TMP/burn.py" 0.6
+CASE_QUOTA=$QUOTA case_run pulsed-progressing pass "CPU-s" 60 python3 "$TMP/pulse.py"
 # The stall's evidence names what the stuck process sleeps in (here sleep's hrtimer wait) and its system call.
-case_run hang-evidence fail "(sleep) state S, runnable wait" 600 sleep 600
+CASE_NEEDLE2="(sleep) state S, runnable wait" case_run hang fail "stalled: no CPU used and no time runnable" 600 sleep 600
 case_run spin-over-budget fail "exceeded its CPU budget of 3 CPU-s" 3 python3 -c 'while True: pass'
 # Short children, each gone before the next look: 20 burns of 0.5 CPU-s are 10 CPU-s in all, over a budget of 5.
 case_run short-children-over-budget fail "exceeded its CPU budget of 5 CPU-s" 5 bash -c 'for i in $(seq 20); do python3 "$1" 0.5; done' _ "$TMP/burn.py"
