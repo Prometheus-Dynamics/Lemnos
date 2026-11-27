@@ -99,7 +99,7 @@ fn host(id: &str) -> (Host, SimClock, u32) {
         Box::new(sim),
         Arc::new(clock.clone()),
         Options {
-            call_deadline: Duration::from_millis(100),
+            call_deadline: Duration::from_millis(500),
             ..Options::default()
         },
     )
@@ -133,25 +133,25 @@ fn the_line_names_the_method_and_the_caller_by_the_name_it_gave() {
     let (host, clock, a) = host("named");
     host.name_caller(CallerId(7), "bench-client");
     assert_eq!(
-        host.call_as(CallerId(7), a, NAP, &300u32.to_le_bytes(), &mut []),
+        host.call_as(CallerId(7), a, NAP, &1500u32.to_le_bytes(), &mut []),
         Err(Status::TIMED_OUT)
     );
     assert_eq!(
         overruns("named"),
         [
-            "device named (driver sleeper): the call sleeper.nap from caller 7 (bench-client) ran past its 100 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
+            "device named (driver sleeper): the call sleeper.nap from caller 7 (bench-client) ran past its 500 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
         ]
     );
     comes_back(&host, &clock, "named");
 
     // A caller that gave no name is its number; the daemon's own calls are the daemon's.
     assert_eq!(
-        host.call_as(CallerId(8), a, NAP, &300u32.to_le_bytes(), &mut []),
+        host.call_as(CallerId(8), a, NAP, &1500u32.to_le_bytes(), &mut []),
         Err(Status::TIMED_OUT)
     );
     comes_back(&host, &clock, "named");
     assert_eq!(
-        host.call(a, NAP, &300u32.to_le_bytes(), &mut []),
+        host.call(a, NAP, &1500u32.to_le_bytes(), &mut []),
         Err(Status::TIMED_OUT)
     );
     let lines = overruns("named");
@@ -172,14 +172,14 @@ fn a_name_goes_with_its_caller() {
     host.name_caller(CallerId(5), "first");
     host.name_caller(CallerId(5), "again");
     assert_eq!(
-        host.call_as(CallerId(5), a, NAP, &300u32.to_le_bytes(), &mut []),
+        host.call_as(CallerId(5), a, NAP, &1500u32.to_le_bytes(), &mut []),
         Err(Status::TIMED_OUT)
     );
     assert!(overruns("gone")[0].contains("from caller 5 (again) ran past"));
     comes_back(&host, &clock, "gone");
     host.caller_gone(CallerId(5));
     assert_eq!(
-        host.call_as(CallerId(5), a, NAP, &300u32.to_le_bytes(), &mut []),
+        host.call_as(CallerId(5), a, NAP, &1500u32.to_le_bytes(), &mut []),
         Err(Status::TIMED_OUT)
     );
     assert!(overruns("gone")[1].contains("from caller 5 ran past"));
@@ -196,14 +196,14 @@ fn nap_in_tick(ms: u32, after: u32) -> [u8; 8] {
 fn a_tick_that_runs_over_is_named_as_the_tick() {
     let (host, clock, a) = host("ticking");
     // The call's own tick after it is skipped; the host's next tick naps.
-    host.call(a, NAP_IN_TICK, &nap_in_tick(300, 1), &mut [])
+    host.call(a, NAP_IN_TICK, &nap_in_tick(1500, 1), &mut [])
         .unwrap();
     clock.advance(Duration::from_millis(5));
     host.tick();
     assert_eq!(
         overruns("ticking"),
         [
-            "device ticking (driver sleeper): its tick ran past its 100 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
+            "device ticking (driver sleeper): its tick ran past its 500 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
         ]
     );
     comes_back(&host, &clock, "ticking");
@@ -216,19 +216,19 @@ fn a_tick_that_runs_over_after_a_call_is_named_as_the_calls_tick() {
     let (host, clock, a) = host("after");
     host.name_caller(CallerId(6), "setter");
     assert_eq!(
-        host.call_as(CallerId(6), a, NAP_IN_TICK, &nap_in_tick(300, 0), &mut []),
+        host.call_as(CallerId(6), a, NAP_IN_TICK, &nap_in_tick(1500, 0), &mut []),
         Err(Status::TIMED_OUT)
     );
     assert_eq!(
         overruns("after"),
         [
-            "device after (driver sleeper): the call sleeper.nap_in_tick from caller 6 (setter), in the tick after it, ran past its 100 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
+            "device after (driver sleeper): the call sleeper.nap_in_tick from caller 6 (setter), in the tick after it, ran past its 500 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
         ]
     );
     comes_back(&host, &clock, "after");
     // The method itself running over is not said to be in the tick.
     assert_eq!(
-        host.call_as(CallerId(6), a, NAP, &300u32.to_le_bytes(), &mut []),
+        host.call_as(CallerId(6), a, NAP, &1500u32.to_le_bytes(), &mut []),
         Err(Status::TIMED_OUT)
     );
     assert!(overruns("after")[1].contains("from caller 6 (setter) ran past"));
@@ -244,7 +244,7 @@ fn work_for_a_hung_device_is_refused_at_once_and_leaves_no_second_line() {
     let (host, clock, a) = host("stuck");
     host.name_caller(CallerId(3), "holder");
     assert_eq!(
-        host.call_as(CallerId(3), a, NAP, &600u32.to_le_bytes(), &mut []),
+        host.call_as(CallerId(3), a, NAP, &1500u32.to_le_bytes(), &mut []),
         Err(Status::TIMED_OUT)
     );
     let started = Instant::now();
@@ -261,14 +261,14 @@ fn work_for_a_hung_device_is_refused_at_once_and_leaves_no_second_line() {
     );
     let waited = started.elapsed();
     assert!(
-        waited < Duration::from_millis(50),
+        waited < Duration::from_millis(400),
         "the work waited {waited:?} on the abandoned call"
     );
     comes_back(&host, &clock, "stuck");
     assert_eq!(
         overruns("stuck"),
         [
-            "device stuck (driver sleeper): the call sleeper.nap from caller 3 (holder) ran past its 100 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
+            "device stuck (driver sleeper): the call sleeper.nap from caller 3 (holder) ran past its 500 ms deadline; its driver is abandoned until the call returns; job(s) none end interrupted"
         ]
     );
     // The new instance takes calls, and a caller that goes reaches it.

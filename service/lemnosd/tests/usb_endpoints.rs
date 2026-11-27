@@ -402,7 +402,7 @@ fn a_tick_that_overruns_keeps_the_holders_pair_and_the_gadget_on_the_bus() {
 
     // The driver's tick is stuck past the call deadline: the host abandons it, and binds the
     // device again once it returns. The old instance parks its session; the new one takes it up.
-    host.function.stall_next_event(Duration::from_millis(600));
+    host.function.stall_next_event(Duration::from_millis(1500));
     let mut other = connect(&running.socket, "other");
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {

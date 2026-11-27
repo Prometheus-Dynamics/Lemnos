@@ -122,7 +122,7 @@ pub fn start_board_logged(
     // Built the way docs ask a consumer to build it, so a later field doesn't break it.
     let config = Config {
         options: Options {
-            call_deadline: Duration::from_millis(200),
+            call_deadline: Duration::from_millis(500),
             ..Options::default()
         },
         ..Config::new(

@@ -43,7 +43,7 @@ pub fn host(devices: &str) -> (Host, SimClock) {
 
 pub fn quick() -> Options {
     Options {
-        call_deadline: Duration::from_millis(100),
+        call_deadline: Duration::from_millis(500),
         ..Options::default()
     }
 }
