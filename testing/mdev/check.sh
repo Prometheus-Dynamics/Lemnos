@@ -30,14 +30,18 @@ cargo build -q -p lemnos-ctl
 ctl="$target/debug/lemnos-ctl"
 
 # How the namespace is made: a user namespace with the caller's subordinate ids when that works here,
-# else root in a private mount namespace through sudo (the same checks; mknod is then allowed too,
-# but the placeholders are used all the same).
+# else, on a CI runner only, root in a private mount namespace through sudo (the same checks; mknod is
+# then allowed too, but the placeholders are used all the same). Anywhere else sudo is never run: no user
+# namespace is a failure with its reason, since a check not run is not a pass.
 user="$(id -un)"
 if unshare -U -m true 2>/dev/null && command -v newuidmap >/dev/null && command -v newgidmap >/dev/null \
    && grep -q "^$user:" /etc/subuid && grep -q "^$user:" /etc/subgid; then
   runner=user
-else
+elif [[ "${GITHUB_ACTIONS:-}" == true ]]; then
   runner=sudo
+else
+  echo "mdev: not run: no user namespace with subordinate ids for $user (newuidmap, newgidmap, /etc/subuid, /etc/subgid), and sudo is used only on CI" >&2
+  exit 1
 fi
 echo "namespace: $runner"
 
