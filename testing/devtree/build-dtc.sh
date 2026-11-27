@@ -43,5 +43,6 @@ cd "$src"
 make -s -j"$jobs" NO_YAML=1 NO_PYTHON=1 dtc >"$out/build-$version.log" 2>&1 || { tail -n 40 "$out/build-$version.log" >&2; exit 1; }
 make -s -j"$jobs" NO_YAML=1 NO_PYTHON=1 EXTRA_CFLAGS=-Wno-error fdtoverlay fdtget >>"$out/build-$version.log" 2>&1 || { tail -n 40 "$out/build-$version.log" >&2; exit 1; }
 probe="$("$src/dtc" --version)"
-[[ "$probe" == "Version: DTC $version"* ]]  # dtc appends git describe when built in a git tree || { echo "build-dtc.sh: built $probe, not $version" >&2; exit 1; }
+# A prefix match: dtc appends git describe when built in a git tree.
+[[ "$probe" == "Version: DTC $version"* ]] || { echo "build-dtc.sh: built $probe, not $version" >&2; exit 1; }
 echo "$src"

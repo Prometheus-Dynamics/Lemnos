@@ -225,6 +225,15 @@ lookup() { awk -F'\t' -v e="$1" '$1 == e { print $2 }' "$work/keyed"; }
 failed=0
 # For the summary line: every crate checked, and the crates with a set that was not cached.
 declare -A seen=() rebuilt=()
+# The sets are taken into variables before the loops: a failing `sets` inside `< <(...)` would give the
+# loop no input and the step would pass having checked nothing.
+if [[ $part != options ]]; then
+  shipped_sets=$(sets shipped) || { echo "check-features: reading the shipped sets failed" >&2; exit 1; }
+  [[ -n $shipped_sets ]] || { echo "check-features: no shipped set found: nothing to check is not a pass" >&2; exit 1; }
+fi
+if [[ $part != shipped ]]; then
+  option_sets=$(sets options) || { echo "check-features: reading the library options failed" >&2; exit 1; }
+fi
 if [[ $part != options ]]; then
   while read -r crate features tested_set; do
     feat=()
@@ -274,7 +283,8 @@ if [[ $part != options ]]; then
         shipped_bin=$(test_build "$crate" "$features") && [[ -x $shipped_bin ]] || {
         echo "check-features: $crate: no IR or test build" >&2; failed=1; continue; }
       mark "$crate:builds"
-      "$shipped_bin" --list --format terse >"$work/tests.txt" </dev/null
+      "$shipped_bin" --list --format terse >"$work/tests.txt" </dev/null || {
+        echo "check-features: $crate: its test binary could not list its tests" >&2; failed=1; continue; }
       scripts/feature-tests.py "$crate" "$work/shipped.ll" "$work/tested.ll" "$work/tests.txt" >"$work/selected.txt" 2>"$work/why.txt" || {
         cat "$work/why.txt" >&2; failed=1; continue; }
       echo "    $crate, as shipped [$features]: $(cat "$work/why.txt")"
@@ -297,7 +307,7 @@ if [[ $part != options ]]; then
       echo "    $crate, as shipped [$features]: its dependencies resolve differently in [$tested_set], all tests run"
       cargo test -q --locked -p "$crate" --lib --no-default-features "${feat[@]}" </dev/null || failed=1
     fi
-  done < <(sets shipped)
+  done <<<"$shipped_sets"
 fi
 if [[ $part != shipped ]]; then
   while read -r crate flag; do
@@ -321,7 +331,7 @@ if [[ $part != shipped ]]; then
       </dev/null >>"$work/messages.json" || ok=0
     mark "$crate$flag:build"
     if [[ $ok == 1 ]]; then store "$entry" "$crate" "$work/messages.json"; else failed=1; fi
-  done < <(sets options)
+  done < <(printf '%s' "${option_sets:+$option_sets$'\n'}")
 fi
 # One line for the lander: a crate is cached when every set of it was a hit, rebuilt otherwise.
 n=${#seen[@]} m=${#rebuilt[@]}

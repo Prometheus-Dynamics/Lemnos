@@ -66,14 +66,17 @@ done
 # of these, or the crate is the workspace's own.
 allowed_licences='MIT|Apache-2.0|Zlib|BSD-2-Clause|BSD-3-Clause|ISC|Unicode-3.0'
 before=$failed
+# Taken into a variable first: a failing cargo tree inside `< <(...)` would go unnoticed.
+licences=$(cargo tree --locked -e normal,build -p lemnos-firmware-check --prefix none --format '{p} {l}' |
+  awk '{name=$1; $1=""; $2=""; sub(/^ +/, ""); print name, $0}' | sort -u)
+[[ -n "$licences" ]] || { echo "check-shipped: cargo tree listed nothing for lemnos-firmware-check" >&2; exit 1; }
 while read -r name licence; do
   grep -qx "$name" <<<"$workspace" && continue
   if ! grep -qE "(^|[ (/])($allowed_licences)([ )/]|$)" <<<"$licence"; then
     echo "lemnos-firmware-check: $name has licence '$licence', outside the allowed list" >&2
     failed=1
   fi
-done < <(cargo tree --locked -e normal,build -p lemnos-firmware-check --prefix none --format '{p} {l}' |
-  awk '{name=$1; $1=""; $2=""; sub(/^ +/, ""); print name, $0}' | sort -u)
+done <<<"$licences"
 [[ $failed == "$before" ]] &&
   echo "    lemnos-firmware-check: every dependency's licence on the allowed list"
 

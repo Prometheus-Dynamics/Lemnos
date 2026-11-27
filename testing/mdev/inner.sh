@@ -21,7 +21,11 @@ while read -r name; do
   : > "/dev/$name"
   chmod 600 "/dev/$name"
 done < "$w/placeholders"
-"$bb" mdev -s 2>"$w/mdev.err" || true
+# mdev's own status is this script's: a placeholder left as it was can match an expectation, so a
+# failed mdev must not read as one that set the node.
+rc=0
+"$bb" mdev -s 2>"$w/mdev.err" || rc=$?
 while read -r name; do
   stat -c "%n %U %G %a" "/dev/$name" 2>/dev/null || echo "/dev/$name missing"
 done < "$w/placeholders"
+exit "$rc"

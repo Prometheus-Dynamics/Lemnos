@@ -1,9 +1,8 @@
 #!/bin/bash
 # slot-run.sh N cmd...: runs cmd on N CPUs of this machine's slot pool, taken for as long as it runs.
 # The pool is SLOT_TOTAL lock files under SLOT_DIR (default 24 under /run/user/<uid>/slots); slot i is CPU
-# SLOT_CPU0+i-1 (default 8, so CPUs 8-31: inside the machine's cap of 6-31). N is 1 to 8. A train that
-# reserves slots (gate-attempts.sh, reserve_and_run) holds the pool's TRAIN lock while it fills, and
-# slot-run waits for it, so a reserving train is never starved by new runs. The slots' locks stay open in
+# SLOT_CPU0+i-1 (default 8, so CPUs 8-31: inside the machine's cap of 6-31). N is 1 to 8. A run takes the
+# pool's TRAIN lock while it fills its slots, so two waiters never hold part of the pool each. The slots' locks stay open in
 # cmd (exec), so they are released when cmd and every process that inherited them have ended.
 set -uo pipefail
 SLOT_DIR="${SLOT_DIR:-/run/user/$(id -u)/slots}"

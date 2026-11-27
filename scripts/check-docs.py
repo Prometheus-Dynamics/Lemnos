@@ -51,6 +51,9 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SKIP_DIRS = {"target", ".git", "target-docker", ".cargo-docker", "node_modules"}
 NO_COMMANDS = ("testing/board-runs/",)
+# The notes: no runnable block at all. The lander's gate is not run again for a change to them (only
+# this check's --list mode and the boundary check are), so a command there would never be run.
+NOTES = ("notes/", "TODO.md", "PARKED.md")
 # Planted violations for the boundary check; not documents.
 NOT_DOCUMENTS = ("testing/boundary/",)
 
@@ -345,7 +348,10 @@ def main():
                     elif wanted.read_text() != body:
                         problems.append(f"{path}:{number}: the block is not {word[5:]} as it stands")
             kind = classify(info)
-            if kind is None or path.startswith(NO_COMMANDS) or (only and path not in only):
+            if kind is not None and kind[0] != "needs" and path.startswith(NOTES):
+                problems.append(f"{path}:{number}: a command block in the notes: notes run nothing, "
+                                "so mark it needs:REASON or move it to a document")
+            if kind is None or path.startswith(NO_COMMANDS + NOTES) or (only and path not in only):
                 continue
             if kind[0] == "needs":
                 not_run.append((path, number, kind[1], first_line(body)))
