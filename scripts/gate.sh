@@ -250,9 +250,8 @@ cargo_lane() {
 }
 
 # The cargo steps that can run beside the workspace tests. None builds a program the tests start,
-# and none writes where the tests' programs are: the doc tests build nothing new, the checks for other
-# targets and the shipped programs have their own directories under the target, and the library
-# crates have no programs. A step that builds lemnosd or lemnos-ctl for this machine is not one of
+# and none writes where the tests' programs are: the lane builds in a target directory of its own
+# (lane-tail), and the library crates have no programs. A step that builds lemnosd or lemnos-ctl for this machine is not one of
 # them (the tests start those, and a build with other features would swap them mid-run): those stay
 # in the cargo lane, after the tests.
 tail_lane() {
