@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Checks the files in packaging/ without installing anything: the udev rules with udevadm, the
 # sysusers file with systemd-sysusers (a dry run in an empty root), and the units with
-# systemd-analyze. Each check is skipped, with a line saying so, when its tool is not installed.
+# systemd-analyze. Every check runs or the step fails: a tool that is not there is a red, never a
+# skip. The init scripts are parsed by the static BusyBox ash the board image runs them with
+# (testing/qemu/build-busybox-init.sh, built under BUSYBOX_DIR) and by the pinned ShellCheck
+# (scripts/fetch-shellcheck.sh, kept under the target directory).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -29,6 +32,14 @@ additions=(
   "lemnosd-health-tcp.service;RestrictAddressFamilies=~AF_(INET|INET6);3;a tcp: health source is a TCP connect the daemon makes to a port on the board. It listens on nothing"
 )
 
+need() { command -v "$1" >/dev/null || { echo "check-packaging: $1 is not installed: the $2 check cannot run" >&2; exit 1; }; }
+need udevadm "udev rules"
+need systemd-sysusers sysusers
+need systemd-analyze units
+target="${CARGO_TARGET_DIR:-target}"
+busybox="$(testing/qemu/build-busybox-init.sh "${BUSYBOX_DIR:-$target/busybox}" 1.37.0)"
+shellcheck="$(scripts/fetch-shellcheck.sh "$target/tools/shellcheck")"
+
 work="$(mktemp -d "${TMPDIR:-/tmp}/lemnos-packaging.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -45,28 +56,21 @@ if [ "$groups" != 'GROUP="lemnos"' ]; then
   exit 1
 fi
 
-if command -v udevadm >/dev/null; then
-  echo "==> udev rules"
-  udevadm verify --resolve-names=never --no-summary packaging/udev/*.rules "$generated"
-else
-  echo "==> udev rules: skipped, udevadm is not installed"
-fi
+echo "==> udev rules"
+udevadm verify --resolve-names=never --no-summary packaging/udev/*.rules "$generated"
 
-if command -v systemd-sysusers >/dev/null; then
-  echo "==> sysusers"
-  mkdir -p "$work/root/etc"
-  systemd-sysusers --dry-run --root="$work/root" packaging/systemd/lemnos.conf >/dev/null 2>&1
-else
-  echo "==> sysusers: skipped, systemd-sysusers is not installed"
-fi
+echo "==> sysusers"
+mkdir -p "$work/root/etc"
+systemd-sysusers --dry-run --root="$work/root" packaging/systemd/lemnos.conf >/dev/null 2>&1
 
-# RestartSteps= (the units' restart backoff) needs systemd 254 or newer. An older systemd, or a
-# runner whose systemd lacks a unit the files refer to, skips the unit checks with a line saying so.
-systemd_major=0
-if command -v systemd-analyze >/dev/null; then
-  systemd_major="$(systemd-analyze --version 2>/dev/null | awk 'NR == 1 { print $2 + 0 }')"
+# RestartSteps= (the units' restart backoff) needs systemd 254 or newer. An older systemd, or one
+# that lacks a unit the files refer to, fails the step: the unit checks cannot run there.
+systemd_major="$(systemd-analyze --version 2>/dev/null | awk 'NR == 1 { print $2 + 0 }')"
+if [[ "$systemd_major" -lt 254 ]]; then
+  echo "check-packaging: systemd $systemd_major is older than 254 (RestartSteps=): the unit checks cannot run" >&2
+  exit 1
 fi
-if [[ "$systemd_major" -ge 254 ]]; then
+if true; then
   echo "==> units"
   # The daemon binaries are not installed here, so each unit runs a stand-in in a copy: the
   # verification reads every other directive as written.
@@ -78,13 +82,10 @@ if [[ "$systemd_major" -ge 254 ]]; then
   # The generated security unit (`lemnos-ctl tree --security-unit`), as the reference board's golden.
   sed -e 's|^ExecStart=/usr/bin/[^ ]*.*|ExecStart=/bin/true|' service/ctl/tests/golden/reference-security.service \
     >"$work/lemnos-board-security.service"
+  # Any complaint fails the step, a unit this systemd does not know included: a skip is not a pass.
   verified="$(cd "$work" && systemd-analyze verify --man=no ./*.service ./*.socket 2>&1)" || {
-    if grep -q "not found" <<<"$verified"; then
-      echo "    units: skipped, a unit the files refer to is not on this systemd: $(grep -m1 'not found' <<<"$verified")"
-      echo "    packaging: ok"
-      exit 0
-    fi
     echo "$verified" >&2
+    echo "check-packaging: systemd-analyze verify failed" >&2
     exit 1
   }
   # The base unit with one fragment inserted at the end of its [Service] section (before [Install]),
@@ -186,10 +187,6 @@ if [[ "$systemd_major" -ge 254 ]]; then
     fi
   done
   if [[ "$bad" -ne 0 ]]; then exit 1; fi
-elif command -v systemd-analyze >/dev/null; then
-  echo "==> units: skipped, systemd $systemd_major is older than 254 (RestartSteps=)"
-else
-  echo "==> units: skipped, systemd-analyze is not installed"
 fi
 
 # The root phase: lemnosd and the bridge start as root and drop themselves (`--user`, LEMNOS_ORION_USER),
@@ -254,20 +251,13 @@ if grep -Eq '^(After|Requires|Wants|RequiresMountsFor|BindsTo)=.*(local-fs|basic
   exit 1
 fi
 
-# The BusyBox init scripts: parsed, never run. sh is always here; busybox and shellcheck are optional.
+# The BusyBox init scripts: parsed, never run, by this machine's sh, the board's ash and ShellCheck.
 echo "==> init scripts"
 for script in packaging/init/S[0-9]*; do
   sh -n "$script"
-  if command -v busybox >/dev/null; then
-    busybox sh -n "$script"
-  else
-    echo "    busybox sh -n $script: skipped, busybox is not installed"
-  fi
-  if command -v shellcheck >/dev/null; then
-    shellcheck --shell=sh "$script"
-  else
-    echo "    shellcheck $script: skipped, shellcheck is not installed"
-  fi
+  "$busybox" sh -n "$script"
+  "$shellcheck" --shell=sh "$script"
+  echo "    $script: sh, BusyBox ash and ShellCheck"
 done
 # The settings files are sourced by the scripts, so they must parse as shell too.
 for env in packaging/systemd/*.env.example; do

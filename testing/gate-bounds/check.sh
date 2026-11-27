@@ -96,9 +96,10 @@ case_run() {
   else echo "FAIL $name (rc $rc, want $want, needle: $needle; core $CORE; load $la_before -> $la_after)"; fails=$((fails + 1)); fi
 }
 
-# starved_case: a stand-in that fails after 1 CPU-s, run at nice 19 against 4 nice-0 competitors on CORE. It is
-# runnable and gets almost no CPU, so most looks find it starved. The gate must print STARVED[starved-step] and
-# exit with GATE_STARVED_EXIT (3): a label, not a pass, and not a code red.
+# starved_case: a stand-in that fails after 1 CPU-s, run at nice 19 against 2 nice-0 competitors on CORE. It is
+# runnable and gets little CPU, so most looks find it waiting for one. A starved failure is a red like any other:
+# the gate exits 1, names the step and gives the starvation as evidence. It is never a different status that a
+# caller could run again on.
 starved_case() {
   local out rc=0 la_before la_after
   cat >"$TMP/burnfail.py" <<'PY'
@@ -109,22 +110,25 @@ while time.process_time() - t < want:
 sys.exit(1)
 PY
   la_before="$(cut -d' ' -f1-3 /proc/loadavg)"
-  start_competitors 4
+  start_competitors 2
   out="$( ( unit starved-step starved-step 600 nice -n 19 python3 "$TMP/burnfail.py" || true; finish starved-step ) 2>&1 )" || rc=$?
   stop_competitors
   la_after="$(cut -d' ' -f1-3 /proc/loadavg)"
   printf '%s\n' "$out" | sed 's/^/    | /'
-  if [ "$rc" = "$GATE_STARVED_EXIT" ] && printf '%s\n' "$out" | grep -qF -- "STARVED[starved-step]"; then
-    echo "ok   starved-step (rc $rc = GATE_STARVED_EXIT; core $CORE, 4 competitors; load $la_before -> $la_after)"
+  if [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -qF -- "gate: starved-step was starved while it ran:" \
+     && printf '%s\n' "$out" | grep -qF -- "gate: starved-step failed (exit 1)"; then
+    echo "ok   starved-step (rc 1, a red with its starvation as evidence; core $CORE, 2 competitors; load $la_before -> $la_after)"
   else
-    echo "FAIL starved-step (rc $rc, want $GATE_STARVED_EXIT with STARVED[starved-step]; core $CORE; load $la_before -> $la_after)"; fails=$((fails + 1))
+    echo "FAIL starved-step (rc $rc, want 1 with the starvation evidence; core $CORE; load $la_before -> $la_after)"; fails=$((fails + 1))
   fi
 }
 
 echo "== stand-ins (core $CORE, $CONTEND competitors on it)"
 case_run slow-progressing pass "CPU-s" 60 python3 "$TMP/burn.py" 6
 case_run pulsed-progressing pass "CPU-s" 60 python3 "$TMP/pulse.py"
-case_run hang fail "stalled: no CPU progress" 600 sleep 600
+case_run hang fail "stalled: no CPU used and no time runnable" 600 sleep 600
+# The stall's evidence names what the stuck process sleeps in (here sleep's hrtimer wait) and its system call.
+case_run hang-evidence fail "(sleep) state S, runnable wait" 600 sleep 600
 case_run spin-over-budget fail "exceeded its CPU budget of 3 CPU-s" 3 python3 -c 'while True: pass'
 # Short children, each gone before the next look: 20 burns of 0.5 CPU-s are 10 CPU-s in all, over a budget of 5.
 case_run short-children-over-budget fail "exceeded its CPU budget of 5 CPU-s" 5 bash -c 'for i in $(seq 20); do python3 "$1" 0.5; done' _ "$TMP/burn.py"
@@ -137,7 +141,7 @@ case_run cargo-metadata pass "CPU-s" 180 cargo metadata --locked --format-versio
 mkdir -p "$TMP/target/debug"
 flock -x "$TMP/target/debug/.cargo-lock" -c 'sleep 600' & flock_pid=$!
 sleep 1
-case_run cargo-blocked-on-lock fail "stalled: no CPU progress" 600 env CARGO_TARGET_DIR="$TMP/target" cargo check -q --locked --manifest-path "$repo/Cargo.toml" -p lemnos-abi
+case_run cargo-blocked-on-lock fail "stalled: no CPU used and no time runnable" 600 env CARGO_TARGET_DIR="$TMP/target" cargo check -q --locked --manifest-path "$repo/Cargo.toml" -p lemnos-abi
 kill -KILL "$flock_pid" 2>/dev/null || true; flock_pid=0
 
 if [ "$fails" = 0 ]; then echo "gate-bounds: all cases as expected"; exit 0; fi

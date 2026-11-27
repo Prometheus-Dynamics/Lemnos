@@ -58,7 +58,9 @@ for c in $(git -C "$REPO" rev-list --reverse "$base..$cand"); do
   [ -n "$t" ] && announced+=("$(git -C "$REPO" rev-parse --short "$c"): $t")
 done
 
-tr=$("${PY[@]}" trigger "$REPO" "$base" "$cand" $(for n in "${order[@]}"; do echo "${NF_OF[$n]}"; done))
+tr=$("${PY[@]}" trigger "$REPO" "$base" "$cand" $(for n in "${order[@]}"; do echo "${NF_OF[$n]}"; done)) \
+  || { say "consumer-compile: the trigger check failed (status $?): the step did not run"; exit 2; }
+grep -qE '^RESULT (yes|no)$' <<<"$tr" || { say "consumer-compile: the trigger check gave no result: the step did not run"; exit 2; }
 t_trig=$(date +%s.%N)
 grep -E '^(TRIGGER|CHECKED)' <<<"$tr" >> "$LOG"
 if ! grep -q '^RESULT yes' <<<"$tr"; then
@@ -103,7 +105,10 @@ compile_side() { # <consumer> <side:base|cand> <sha>
   local keys=$L/cc-$name-$side.keys
   if [ -f "$skeys" ]; then
     say "consumer $name $side: result cached ($(wc -l < "$skeys") errors at ${sha:0:8})"
-    cp "$skeys" "$keys"; cp "$skeys.cov" "$L/cc-$name-$side.cov" 2>/dev/null || { say "consumer-compile: $name: cached result has no coverage: rerun it"; return 2; }; return 0
+    cp "$skeys" "$keys" && cp "$skeys.cov" "$L/cc-$name-$side.cov" 2>/dev/null \
+      && grep -qE '^[0-9]+ [1-9][0-9]*$' "$L/cc-$name-$side.cov" \
+      || { say "consumer-compile: $name: cached result is not whole (keys or coverage): the step did not run"; return 2; }
+    return 0
   fi
   local pristine=$WORK/pristine/$name-$r8
   if [ ! -f "$pristine/.ok" ]; then
@@ -150,28 +155,34 @@ compile_side() { # <consumer> <side:base|cand> <sha>
   if grep -q 'Prometheus-Dynamics/Lemnos' "$work/Cargo.lock" && grep -qE '^source = "git\+https://github.com/Prometheus-Dynamics/Lemnos' "$work/Cargo.lock"; then
     say "consumer-compile: $name $side: a Lemnos package still resolves to git (not the tree): the step did not run"; return 2
   fi
-  "${PY[@]}" keys "$json" > "$keys.tmp"
+  "${PY[@]}" keys "$json" > "$keys.tmp" || { say "consumer-compile: $name $side: reading the errors failed: the step did not run"; return 2; }
   local n; n=$(wc -l < "$keys.tmp")
   if [ "$rc" != 0 ] && [ "$n" = 0 ]; then
     say "consumer-compile: $name $side: cargo failed (rc $rc) with no compiler error: the step did not run"
     tail -15 "$err" | cut -c1-200 >> "$LOG"; return 2
   fi
   mv "$keys.tmp" "$keys"
-  ( cd "$work/$mdir" && "$HOME/.cargo/bin/cargo" metadata --no-deps --format-version 1 > "$WORK/out/$name-$side.meta" 2>/dev/null )
-  local cov; cov=$("${PY[@]}" coverage "$json" "$WORK/out/$name-$side.meta")
+  ( cd "$work/$mdir" && "$HOME/.cargo/bin/cargo" metadata --no-deps --format-version 1 > "$WORK/out/$name-$side.meta" 2>/dev/null ) \
+    || { say "consumer-compile: $name $side: cargo metadata failed: the step did not run"; return 2; }
+  local cov; cov=$("${PY[@]}" coverage "$json" "$WORK/out/$name-$side.meta") \
+    || { say "consumer-compile: $name $side: the coverage count failed: the step did not run"; return 2; }
+  grep -qE '^REACHED [0-9]+ [1-9][0-9]*$' <<<"$cov" || { say "consumer-compile: $name $side: the coverage count names no members: the step did not run"; return 2; }
   sed "s/^/consumer $name $side: /" <<<"$cov" >> "$LOG"
   # .cov: line 1 "reached total"; then "masked: <names>" when members are not reached (logged, never a failure by itself)
   awk '/^REACHED/{print $2" "$3} /^NOT-REACHED/{sub(/^NOT-REACHED /,""); print "masked: " $0}' <<<"$cov" > "$L/cc-$name-$side.cov"
   say "consumer $name $side: $n error(s)"
-  cp "$keys" "$skeys.tmp" && cp "$L/cc-$name-$side.cov" "$skeys.cov" && mv "$skeys.tmp" "$skeys"
+  # Kept only once both files are whole: an empty or partial result is never cached.
+  cp "$keys" "$skeys.tmp" && cp "$L/cc-$name-$side.cov" "$skeys.cov" && mv "$skeys.tmp" "$skeys" \
+    || { say "consumer-compile: $name $side: caching the result failed: the step did not run"; return 2; }
   return 0
 }
 
-verdict=0; newtotal=0; covfail=0; covhide=0
+verdict=0; newtotal=0; covhide=0
 for n in "${affected[@]}"; do
   compile_side "$n" base "$base" || { verdict=2; break; }
   compile_side "$n" cand "$cand" || { verdict=2; break; }
-  "${PY[@]}" newerrs "$L/cc-$n-base.keys" "$L/cc-$n-cand.keys" > "$L/cc-$n.diff"
+  "${PY[@]}" newerrs "$L/cc-$n-base.keys" "$L/cc-$n-cand.keys" > "$L/cc-$n.diff" \
+    || { say "consumer-compile: $n: comparing the errors failed: the step did not run"; verdict=2; break; }
   nnew=$(grep -c '^NEW' "$L/cc-$n.diff"); nfix=$(grep -c '^FIXED' "$L/cc-$n.diff")
   say "consumer $n: $nnew new error(s), $nfix fixed by the candidate (keys: $L/cc-$n.diff)"
   grep '^NEW' "$L/cc-$n.diff" | cut -f2- | sed 's/^/  NEW  /' | tee -a "$LOG" | head -60
@@ -184,7 +195,6 @@ done
 t_end=$(date +%s.%N)
 say "consumer-compile: wall $(echo "$t_end - $t_start" | bc | cut -c1-7) s; CPU see the cargo lines above"
 if [ $verdict = 2 ]; then say "consumer-compile: DID NOT RUN (see above)"; exit 2; fi
-if [ $covfail = 1 ]; then say "consumer-compile: FAIL: base coverage incomplete (see above)"; exit 1; fi
 if [ $covhide = 1 ] && [ ${#announced[@]} -eq 0 ]; then say "consumer-compile: FAIL: the candidate hides members from the compile and no Consumer-break-announced trailer covers it"; exit 1; fi
 if [ "$newtotal" = 0 ] && [ $covhide = 0 ]; then say "consumer-compile: PASS (no new errors in ${affected[*]})"; exit 0; fi
 if [ ${#announced[@]} -gt 0 ]; then

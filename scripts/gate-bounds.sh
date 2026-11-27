@@ -8,9 +8,12 @@
 #            step's token in its environment, so a child that left the group is still counted.
 #   stalled  the tree made no progress for GATE_STALL_SAMPLES samples in a row. A sample is one look at the
 #            tree, taken about once a second. The tree made progress in a sample when it used CPU since the
-#            last sample, or when one of its processes was runnable (state R: waiting for a CPU). A step that
-#            is slow under load is runnable or using CPU, so it never stalls; a step blocked on something
-#            that never comes does neither, and is stopped.
+#            last sample, or spent time runnable since then (waiting for a CPU: the run-queue wait in each
+#            process's /proc/<pid>/schedstat grew), or one of its processes is runnable now (state R). Only
+#            time blocked counts toward a stall: a step slow under load is runnable or using CPU, so it never
+#            stalls; a step blocked on something that never comes does neither, and is stopped. A stall is a
+#            red like any other failure, never run again, and its log carries what each process was blocked
+#            on (stall_evidence).
 # The budget is what the step costs in CPU, which load changes little. The stall count is in samples, not in
 # seconds of a deadline: nothing is cut for taking long while it progresses.
 # The gate's own state (gate_out, the step directories, the ccache check) lives in gate.sh and is used here.
@@ -19,8 +22,6 @@ GATE_STALL_SAMPLES="${GATE_STALL_SAMPLES:-180}"
 # A gap of more than this many seconds between two looks at a step means the step was frozen or stopped by the
 # machine (a lander train freezes the workers' units), not that it was slow. Such a step is starved.
 GATE_FREEZE_GAP="${GATE_FREEZE_GAP:-10}"
-# The exit status of a gate whose failing step was starved (a label, not a code red). Distinct from 1.
-GATE_STARVED_EXIT="${GATE_STARVED_EXIT:-3}"
 GATE_CLK_TCK="$(getconf CLK_TCK)"
 
 # gate_sweep <token> <signal>: sends the signal to each process whose environment carries the token. A step's
@@ -64,8 +65,9 @@ stop_step() {
 }
 
 # tree_sample <pgid> <token>: one look at a step's process tree. Sets tree_ticks (the tree's CPU so far, in clock
-# ticks) and sample_progress (1 when the tree used CPU since the last look, or when one of its processes is runnable,
-# state R). The tree is every process in the step's process group and every process that carries the token. A
+# ticks), tree_wait (its processes' run-queue wait so far, in ns), sample_progress (1 when the tree used CPU or
+# waited for a CPU since the last look, or one of its processes is runnable now, state R) and sample_starved (1 when
+# it waited for a CPU for half the look's interval or more). The tree is every process in the step's process group and every process that carries the token. A
 # process's CPU is its own time plus the time of the children it has waited for (cutime, cstime), so a short child
 # that exited between two looks is still counted, once: the child's time moves into its parent's cutime when the
 # parent reaps it. The sum is taken fresh at each look, never as deltas, so a reaped child is not counted twice.
@@ -75,18 +77,46 @@ tree_sample() {
   pids="$(grep -alP -- "GATE_STEP_TOKEN=\Q$tok\E\x00" /proc/[0-9]*/environ 2>/dev/null | sed -n 's#^/proc/\([0-9]*\)/environ$#\1#p' | tr '\n' ' ' || true)"
   before="$tree_ticks"
   sample_running=0
-  read -r tree_ticks sample_running < <(cat /proc/[0-9]*/stat 2>/dev/null | awk -v g="$pgid" -v want=" $pids " '
+  local wait_before="$tree_wait"
+  # The run-queue wait is summed over the tree's live processes, so a process that exits takes its wait with
+  # it: the sum may fall. Only a rise counts as runnable time.
+  read -r tree_ticks sample_running tree_wait < <(cat /proc/[0-9]*/stat 2>/dev/null | awk -v g="$pgid" -v want=" $pids " '
     { pid = $1; line = $0; sub(/^.*\) /, "", line); n = split(line, a, " ")
       if (a[3] == g || index(want, " " pid " ") > 0) {
         total += a[12] + a[13] + a[14] + a[15]
         if (a[1] == "R") running = 1
+        f = "/proc/" pid "/schedstat"
+        if ((getline ss < f) > 0) { split(ss, w, " "); waited += w[2] }
+        close(f)
       } }
-    END { printf "%d %d\n", total + 0, running + 0 }')
+    END { printf "%d %d %.0f\n", total + 0, running + 0, waited + 0 }')
   sample_progress=$sample_running
+  if [ "$tree_ticks" -gt "$before" ] || [ "$tree_wait" -gt "$wait_before" ]; then sample_progress=1; fi
+  # Starved in this look: the tree waited for a CPU for at least half of the look's interval (about 1 s).
   sample_starved=0
-  if [ "$tree_ticks" -gt "$before" ]; then sample_progress=1
-  elif [ "$sample_running" = 1 ]; then sample_starved=1
-  fi
+  if [ $((tree_wait - wait_before)) -ge 500000000 ]; then sample_starved=1; fi
+}
+
+# stall_evidence <pgid> <token>: what each process of a stalled step was doing when the stall was called, for
+# its log: pid, state, run-queue wait so far, wchan (the kernel function it sleeps in), the system call it is
+# in, and where that call's first argument leads when it is a file descriptor (the pipe, socket or file it
+# waits on). Only /proc is read, before the step is stopped.
+stall_evidence() {
+  local pgid="$1" tok="$2" p comm state wchan sc nr fd target wait
+  echo "gate: stall evidence (load $(cut -d' ' -f1-3 /proc/loadavg)):"
+  for p in $(cat /proc/[0-9]*/stat 2>/dev/null | awk -v g="$pgid" '{ line = $0; sub(/^.*\) /, "", line); split(line, a, " "); if (a[3] == g) print $1 }') \
+           $(grep -alP -- "GATE_STEP_TOKEN=\Q$tok\E\x00" /proc/[0-9]*/environ 2>/dev/null | sed -n 's#^/proc/\([0-9]*\)/environ$#\1#p'); do
+    [ -r "/proc/$p/stat" ] || continue
+    comm="$(cat "/proc/$p/comm" 2>/dev/null)"
+    state="$(sed 's/^.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f1)"
+    wchan="$(cat "/proc/$p/wchan" 2>/dev/null)"
+    sc="$(cat "/proc/$p/syscall" 2>/dev/null)"
+    nr="${sc%% *}"; target=""
+    fd="$(cut -d' ' -f2 <<<"$sc")"
+    case "$fd" in 0x*) fd=$((fd)); target="$(readlink "/proc/$p/fd/$fd" 2>/dev/null)";; esac
+    wait="$(awk '{ printf "%.1f", $2 / 1e9 }' "/proc/$p/schedstat" 2>/dev/null)"
+    echo "    pid $p ($comm) state ${state:-?}, runnable wait ${wait:-?} s, wchan ${wchan:-?}, syscall ${nr:-?}${target:+ on fd $fd -> $target}"
+  done | sort -u
 }
 
 # step_tmp_clear <label> <dir>: a step that was killed can leave what it had open in its TMPDIR (rustdoc's
@@ -127,7 +157,7 @@ bounded() {
   set +m
   echo "$pid $token" >"$gate_out/$key.pid"
   budget_ticks=$((budget * GATE_CLK_TCK))
-  tree_ticks=0
+  tree_ticks=0 tree_wait=0
   starved_gap=0; last_look=""; samples=0; starved_samples=0; max_gap=0
   while [ ! -e "$gate_out/$key.done" ]; do
     if [ $((loops % 5)) = 0 ]; then
@@ -147,6 +177,7 @@ bounded() {
       fi
       if [ "$sample_progress" = 1 ]; then stalled=0; else stalled=$((stalled + 1)); fi
       if [ "$stalled" -ge "$GATE_STALL_SAMPLES" ]; then
+        stall_evidence "$pid" "$token" >>"$gate_out/$key.evidence.stall" 2>&1
         step_killed=2
         break
       fi
@@ -161,9 +192,9 @@ bounded() {
     step_rc="$(cat "$gate_out/$key.done")"
   fi
   wait "$pid" 2>/dev/null || true
-  # Starved: a freeze or stop of the machine showed as a gap between looks, or at least half the looks found a
-  # runnable process that got no CPU (it waited for a CPU under load). Starved is a label, not a pass: the step's
-  # result stands, and the gate reports it as STARVED[<step>] with its evidence.
+  # Starved: a freeze or stop of the machine showed as a gap between looks, or at least half the looks found the
+  # tree waiting for a CPU. Starved is evidence for the log, never a pass and never a reason to run again: the
+  # step's result stands.
   starved=$starved_gap
   if [ "$samples" -ge 5 ] && [ $((starved_samples * 2)) -ge "$samples" ]; then starved=1; fi
   starved_pct=0; [ "$samples" -gt 0 ] && starved_pct=$((starved_samples * 100 / samples))
@@ -207,14 +238,10 @@ finish() {
   if [ "$rc" != 0 ]; then
     case "$killed" in
       1) echo "gate: $label exceeded its CPU budget of $(cat "$gate_out/$key.bound") CPU-s (killed at $(cat "$gate_out/$key.live") CPU-s)" >&2 ;;
-      2) echo "gate: $label stalled: no CPU progress and nothing runnable for $GATE_STALL_SAMPLES samples (killed at $(cat "$gate_out/$key.live") CPU-s)" >&2 ;;
+      2) echo "gate: $label stalled: no CPU used and no time runnable for $GATE_STALL_SAMPLES samples (killed at $(cat "$gate_out/$key.live") CPU-s)" >&2
+         cat "$gate_out/$key.evidence.stall" >&2 2>/dev/null ;;
     esac
-    if [ "$(cat "$gate_out/$key.starved")" = 1 ]; then
-      echo "STARVED[$label]: $label failed while starved; $(cat "$gate_out/$key.evidence")" >&2
-      echo "gate: $label failed (exit $rc, starved: not a pass; not rerun)" >&2
-      stop_lanes
-      exit "$GATE_STARVED_EXIT"
-    fi
+    [ "$(cat "$gate_out/$key.starved")" = 1 ] && echo "gate: $label was starved while it ran: $(cat "$gate_out/$key.evidence")" >&2
     echo "gate: $label failed (exit $rc)" >&2
     stop_lanes
     exit 1

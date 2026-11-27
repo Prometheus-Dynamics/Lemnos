@@ -129,8 +129,11 @@ case "$part" in
     slow=(lemnos-slot-store lemnos-driver-system-slots lemnos-package lemnos-driver-system-flash lemnos-orion
       shm-ring-model lemnos-macros lemnos-driver-system-security shm-ring-doorbell lemnos-camera-proof lemnos-host
       lemnos-linux lemnos-client)
-    mapfile -t packages < <(cargo metadata --locked --no-deps --format-version 1 |
-      python3 -c 'import json,sys; print("\n".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"])))')
+    # Into a variable first: a failing cargo metadata read through `< <(...)` would leave a shard of nothing.
+    names="$(cargo metadata --locked --no-deps --format-version 1 |
+      python3 -c 'import json,sys; print("\n".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"])))')"
+    [ -n "$names" ] || { echo "GATE_PART=$part: cargo metadata listed no package" >&2; exit 1; }
+    mapfile -t packages <<<"$names"
     declare -A known=()
     for pkg in "${packages[@]}"; do known[$pkg]=1; done
     ordered=()
@@ -317,6 +320,11 @@ side_lane() {
   # The consumer-lock checkers (scripts/check-lemnos-pin.sh, scripts/check-shm-one-source.sh) pass the pinned fixture lock
   # and fail the stray one, listing its strays (testing/lock-checks/). No lander measurement yet.
   lane_step lock-checks 180 testing/lock-checks/check.sh
+  # Each lane that once could pass on a failure fails on a planted one, with its own message (testing/gate-lanes/):
+  # the trigger, error and cache reads of the consumer compile, cargo tree in the shipped and library checks, a
+  # unit systemd does not know, mdev's status, the boundary fixtures' messages, notes, the dtc guard, one gate run
+  # and Kconfig comparisons. 23 CPU-s measured (load 149, nice 10); bound 3 times that and more.
+  lane_step gate-lanes 180 testing/gate-lanes/check.sh
   # The unit, udev and sysusers files; nothing is installed here.
   lane_step packaging 180 scripts/check-packaging.sh
   # Every file under packaging/ is listed in packaging/files.txt (installed, or marked never), and the list is well formed.

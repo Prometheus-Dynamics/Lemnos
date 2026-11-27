@@ -110,8 +110,13 @@ add_device() {
 
 # Runs one BusyBox against one prepared directory and compares its result with the expectation.
 check_one() {
-  local label="$1" bb="$2" dir="$3" actual
-  actual="$(run_inner "$bb" "$dir" 2>/dev/null)" || true
+  local label="$1" bb="$2" dir="$3" actual rc=0
+  actual="$(run_inner "$bb" "$dir" 2>"$dir/inner.err")" || rc=$?
+  if ((rc != 0)); then
+    echo "FAIL $label: mdev or its namespace exited $rc"
+    cat "$dir/inner.err" "$dir/mdev.err" 2>/dev/null
+    return 1
+  fi
   if diff -u "$dir/expect" <(printf '%s\n' "$actual") >"$dir/diff"; then
     echo "ok   $label: $(wc -l <"$dir/expect") nodes as the udev rules give them"
     return 0

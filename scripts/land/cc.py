@@ -40,6 +40,15 @@ def git(repo, *args):
     return r.returncode, r.stdout.decode(errors="replace")
 
 
+def git_ok(repo, *args):
+    """git's output; a failed git ends the program with status 2 (the step could not run)."""
+    rc, out = git(repo, *args)
+    if rc:
+        sys.stderr.write(f"cc.py: git {' '.join(args)} failed (status {rc})\n")
+        sys.exit(2)
+    return out
+
+
 def manifest_path(dirpath):
     return f"{dirpath}/Cargo.toml" if dirpath else "Cargo.toml"
 
@@ -90,7 +99,7 @@ def cmd_trigger(repo, base, cand, names_files):
                 locked.setdefault(name, []).append(cons)
     affected = {}  # consumer -> set of crates that reach it
     reasons = []
-    _, files = git(repo, "diff", "--name-only", "--no-renames", base, cand)
+    files = git_ok(repo, "diff", "--name-only", "--no-renames", base, cand)
     files = [f for f in files.splitlines() if f]
     checked = 0
     for path in files:
@@ -112,7 +121,7 @@ def cmd_trigger(repo, base, cand, names_files):
         if path.endswith("Cargo.toml"):
             why = "manifest changed"
         else:
-            _, diff = git(repo, "diff", "-U0", "--no-renames", base, cand, "--", path)
+            diff = git_ok(repo, "diff", "-U0", "--no-renames", base, cand, "--", path)
             for dl in diff.splitlines():
                 if dl[:1] not in ("+", "-") or dl.startswith(("+++", "---")):
                     continue

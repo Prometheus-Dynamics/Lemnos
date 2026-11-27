@@ -150,7 +150,7 @@ def parse_tree(root, extra=(), arch="arm64"):
     return syms
 
 
-TOKEN = re.compile(r"\s*(&&|\|\||!|\(|\)|[A-Za-z_][A-Za-z0-9_]*|=|!=)")
+TOKEN = re.compile(r"\s*(&&|\|\||!=|>=|<=|>|<|!|\(|\)|[A-Za-z0-9_]+|\"[^\"]*\"|=)")
 
 
 def tokens(expr):
@@ -188,11 +188,17 @@ def parse_expr(toks):
             e = disj()
             take()
             return e
-        if t is None or t in ("&&", "||", ")", "=", "!="):
+        if t is None or t in ("&&", "||", ")") + COMPARE:
             raise ValueError
         take()
-        if peek() in ("=", "!="):
-            raise ValueError  # a comparison (ARCH=..., X=y) is not a dependency on a symbol
+        if peek() in COMPARE:
+            # A comparison (X=n, X!=y, ARCH="x86"): its symbols are followed, never required alone.
+            op = take()
+            other = peek()
+            if other is None or other in ("&&", "||", "(", ")", "!") + COMPARE:
+                raise ValueError
+            take()
+            return ("cmp", op, t, other)
         return ("sym", t)
 
     def conj():
@@ -212,8 +218,31 @@ def parse_expr(toks):
     return disj()
 
 
+COMPARE = ("=", "!=", ">=", "<=", ">", "<")
+
+
+def value(word, env):
+    """A comparison operand's value: a quoted string as written, y/n/m as themselves, a number as itself, a
+    symbol as the configuration has it (n when unset)."""
+    if word.startswith('"'):
+        return word.strip('"')
+    if word in ("y", "n", "m") or word.isdigit():
+        return word
+    return env.get(word, "n").strip('"')
+
+
 def evaluate(node, env):
     kind = node[0]
+    if kind == "cmp":
+        a, b = value(node[2], env), value(node[3], env)
+        if node[1] in ("=", "!="):
+            return (a == b) == (node[1] == "=")
+        # Kconfig orders two numbers as numbers (a symbol unset reads as n, which orders as 0 against a number).
+        num = lambda v: int(v) if v.isdigit() else 0 if v == "n" else None
+        x, y = num(a), num(b)
+        if x is None or y is None:
+            x, y = a, b
+        return {">=": x >= y, "<=": x <= y, ">": x > y, "<": x < y}[node[1]]
     if kind == "sym":
         return env.get(node[1], "n") in ("y", "m")
     if kind == "not":
@@ -226,6 +255,8 @@ def evaluate(node, env):
 def names(node, out):
     if node[0] == "sym":
         out.add(node[1])
+    elif node[0] == "cmp":
+        out.update(w for w in node[2:] if not w.startswith('"') and w not in ("y", "n", "m") and not w.isdigit())
     elif node[0] in ("and", "or"):
         names(node[1], out)
         names(node[2], out)
@@ -236,6 +267,11 @@ def names(node, out):
 
 def conjuncts(node):
     return conjuncts(node[1]) + conjuncts(node[2]) if node[0] == "and" else [node]
+
+
+# Dependency expressions of required symbols that could not be read, as (symbol, expression): each is a
+# problem of the run, never a dependency taken as met.
+UNPARSED = []
 
 
 def closure(syms, config, root):
@@ -252,11 +288,17 @@ def closure(syms, config, root):
         seen[s] = required
         for expr in syms[s]["deps"]:
             toks = tokens(expr)
+            if toks is None:
+                if required:
+                    UNPARSED.append((s, expr))
+                continue
             if not toks:
                 continue
             try:
                 node = parse_expr(toks)
             except (ValueError, IndexError):
+                if required:
+                    UNPARSED.append((s, expr))
                 continue
             for c in conjuncts(node):
                 # A lone symbol is required when its parent is; the names inside an alternative are not.
@@ -285,6 +327,23 @@ def closure_self_check(problems):
     got = sorted(closure(syms, config, "ROOT"))
     if got != ["B"]:
         problems.append(f"closure self-check: expected ['B'] required of ROOT, got {got}")
+    # Comparisons are read, not skipped: `D || D=n` (BLK_DEV_DM's DAX) holds with D unset and requires
+    # nothing; `E!=y` and `ARCH="x86"` read; and an expression the parser cannot read is a problem.
+    UNPARSED.clear()
+    syms = {"ROOT": sym(["D || D=n", "E!=y", 'ARCH="x86"']), "D": sym(["F"]), "E": sym([]), "F": sym([])}
+    config = {"ROOT": "y", "D": "n", "E": "n", "F": "n", "ARCH": '"x86"'}
+    got = sorted(closure(syms, config, "ROOT"))
+    if got or UNPARSED:
+        problems.append(f"closure self-check: comparisons: expected nothing required, got {got}, unread {UNPARSED}")
+    if not (evaluate(parse_expr(tokens("D || D=n")), config) and evaluate(parse_expr(tokens("E!=y")), config)
+            and evaluate(parse_expr(tokens('ARCH="x86"')), config) and not evaluate(parse_expr(tokens("D=y")), config)
+            and evaluate(parse_expr(tokens("!K || V >= 109600")), {"V": "109601"})
+            and not evaluate(parse_expr(tokens("V >= 109600")), {"V": "90000"})):
+        problems.append("closure self-check: a comparison evaluates wrongly")
+    closure({"ROOT": sym(["A &&"]), "A": sym([])}, {"ROOT": "y"}, "ROOT")
+    if UNPARSED != [("ROOT", "A &&")]:
+        problems.append(f"closure self-check: an unreadable dependency was not reported: {UNPARSED}")
+    UNPARSED.clear()
 
 
 def read_config(path):
@@ -732,6 +791,8 @@ def main(argv):
         config = argv[argv.index("--config") + 1]
         arch = argv[argv.index("--arch") + 1] if "--arch" in argv else "x86"
         tree_checks(tree, config, arch, problems)
+        for sym, expr in sorted(set(UNPARSED)):
+            problems.append(f"{sym}: its dependency `{expr}` could not be read, so what it needs is not known")
     else:
         plain_checks(problems)
     for problem in problems:

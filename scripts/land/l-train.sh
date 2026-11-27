@@ -133,11 +133,12 @@ own_target "$LAND_SCRATCH/target-qemu"
 own_target "$LAND_SCRATCH/target-off"
 # No ceremony runs (user rule, 2026-11-23): a part runs only when something it reads changed. Each
 # part is keyed by the tree of the paths it reads, and a part already green for its key is not run
-# again. The notes (TODO.md, PARKED.md, notes/, testing/board-runs/) are read only by the notes
-# checks. docs/ is read by the gate's tests (include_str! of docs/wire.md, docs/daemon.md and an
+# again. The notes (TODO.md, PARKED.md, notes/) are read only by the notes checks: check-docs refuses
+# a runnable command block in them, and its --list mode with check-boundaries is everything the gate
+# reads them for. testing/board-runs/ is not a note here: documents' commands read it. docs/ is read by the gate's tests (include_str! of docs/wire.md, docs/daemon.md and an
 # example board file, all in test code) and by its kernel-config and documents checks, and by
 # nothing the QEMU, modules-off or consumer lanes run.
-notes_re='^(TODO\.md|PARKED\.md|notes/|testing/board-runs/)'
+notes_re='^(TODO\.md|PARKED\.md|notes/)'
 key_of() { git ls-tree -r HEAD | RE="$1" awk -F'\t' '$2 !~ ENVIRON["RE"]' | sha256sum | cut -c1-40; }
 gate_key=$(key_of "$notes_re")
 code_key=$(key_of "^(TODO\\.md|PARKED\\.md|notes/|testing/board-runs/|docs/)")
