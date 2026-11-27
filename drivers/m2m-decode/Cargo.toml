@@ -7,6 +7,7 @@ publish = false
 description = "Stateless video decode through the kernel's V4L2 memory-to-memory and request interfaces: a session over one M2M node, media requests, and a stateless block that carries the caller's controls and buffers as bytes. No vendor library"
 
 [dev-dependencies]
+lemnos-scratch = { path = "../../testing/crates/scratch" }
 lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [lints]
@@ -35,6 +36,3 @@ lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
 
 [package.metadata.lemnos]
 driver = "M2mCodec"
-
-[dev-dependencies]
-lemnos-scratch = { path = "../../testing/crates/scratch" }
