@@ -153,21 +153,28 @@ case "$part" in
   *) echo "GATE_PART=$part: expected all, checks or tests:K/N" >&2; exit 1 ;;
 esac
 
-# The steps run in four lanes at once. The cargo lane holds the lint, the workspace tests, and the
-# steps after them that build the programs the tests start (lemnosd, lemnos-ctl): cargo holds the
-# target directory's lock for the whole of each build, so those steps cannot overlap, and they run in
-# the order below. The side lane holds the steps that do not build: the U-Boot check (QEMU), the
+# The steps run in four lanes at once. Cargo holds a target directory's lock for the whole of each
+# build, and a step asleep on that lock makes no progress the gate can see, so it is stalled and killed
+# once another lane's build holds it long enough (CI's checks part, a cold clippy: 216 s). So no two
+# lanes share one: the tail and features lanes each build in a target directory of their own (lane-tail,
+# lane-features, under the target directory). The cargo lane holds the lint, the workspace tests, the doc
+# tests (they reuse the tests' build), and the steps after them that build the programs the tests start
+# (lemnosd, lemnos-ctl), in the order below. The side lane holds the steps that do not build: the U-Boot check (QEMU), the
 # packaging and kernel checks, and the cargo queries that read only the lock file. The tail lane
-# holds the cargo steps that touch nothing the workspace tests start or read: the doc tests, the
+# holds the cargo steps that touch nothing the workspace tests start or read: the
 # builds for other targets, the shipped programs (their own profile) and the library crates. It
-# starts once the workspace tests are built and running, when cargo's lock is free, and runs beside
-# them. The features lane holds the feature sets the workspace tests do not build (library tests and
+# starts once the workspace tests are built and running, and runs beside them. The features lane holds the feature sets the workspace tests do not build (library tests and
 # checks only, no programs): it starts with the tail lane and runs beside it, and its result is kept
 # per crate under the target directory, so a crate nothing touched costs a lookup. Each step's output is kept whole and printed under its "==> label" line when it finishes,
 # with its "label: N s" line after it. A failing step's output is shown, the other lanes are
 # stopped, and the gate fails. A step past its bound is killed and named the same way.
 
 use_nextest=0
+# lane_target <lane>: the target directory of a lane that builds beside the cargo lane, absolute.
+lane_target() {
+  mkdir -p "${CARGO_TARGET_DIR:-target}/lane-$1"
+  (cd "${CARGO_TARGET_DIR:-target}/lane-$1" && pwd)
+}
 if [ "${GATE_TESTS:-nextest}" = nextest ] && cargo nextest --version >/dev/null 2>&1; then use_nextest=1; fi
 
 cargo_lane() {
@@ -203,6 +210,11 @@ cargo_lane() {
     return "$rc"
   }
   [ "$part" = checks ] || lane_step tests 7437 workspace_tests
+  # cargo-nextest does not run doc tests, so they run here, on the tests' build. (The plain form runs
+  # them with the tests.)
+  if [ "$part" != checks ] && [ "$use_nextest" = 1 ]; then
+    lane_step "doc tests" 348 cargo test --workspace --doc
+  fi
 
   lane_step "counters on" 180 cargo test -q -p lemnos-measure --features perf,alloc-count
   # A setting's meaning never depends on a feature: the same board text runs the same tests with and
@@ -239,12 +251,9 @@ tail_lane() {
   local n=0
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "t$(printf %03d "$n")" "$@"; }
+  CARGO_TARGET_DIR="$(lane_target tail)"; export CARGO_TARGET_DIR
   if [ "$part" != checks ]; then
     until [ -f "$gate_out/tests.running" ] || [ -f "$gate_out/tests.over" ]; do sleep 0.2; done
-  fi
-  # cargo-nextest does not run doc tests, so they run here. (The plain form runs them with the tests.)
-  if [ "$part" != checks ] && [ "$use_nextest" = 1 ]; then
-    lane_step "doc tests" 348 cargo test --workspace --doc
   fi
 
   # What must still build without std, on the targets a microcontroller host uses. Each of these checks
@@ -274,12 +283,13 @@ tail_lane() {
 
 # The sets the workspace tests never build: each crate's tests in the exact set it ships with, and
 # each library option (no defaults, all features) linted and built (scripts/check-features.sh). Its
-# results are cached per crate (target/check-features), so a gate where nothing a crate depends on
-# changed spends a lookup on it. It waits, like the tail lane, for cargo's lock to be free.
+# results are cached per crate (lane-features/check-features under the target directory), so a gate where
+# nothing a crate depends on changed spends a lookup on it. It starts with the tail lane.
 features_lane() {
   local n=0
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "f$(printf %03d "$n")" "$@"; }
+  CARGO_TARGET_DIR="$(lane_target features)"; export CARGO_TARGET_DIR
   if [ "$part" != checks ]; then
     until [ -f "$gate_out/tests.running" ] || [ -f "$gate_out/tests.over" ]; do sleep 0.2; done
   fi
