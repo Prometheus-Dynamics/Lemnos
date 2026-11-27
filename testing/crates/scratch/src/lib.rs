@@ -12,6 +12,47 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// Where a test that writes and flushes a lot puts its scratch: `LEMNOS_TEST_RAM_DIR` when it is set,
+/// otherwise `std::env::temp_dir()`.
+///
+/// The gate sets `LEMNOS_TEST_RAM_DIR` to a directory in RAM (tmpfs) on the machines that run it locally. The
+/// board tests write their trees and flush them (`fdatasync`) hundreds of times; on a disk shared with a
+/// building gate each flush waits behind the disk's other writes (one test part: 2 s in RAM, 385 s on the
+/// disk while a gate built). The flush still runs; in RAM it does not wait. Nothing that uses this asserts
+/// what reaches a disk. When the variable is set, the directory must be there: a missing one, or a path
+/// that is not a directory, panics naming it, and nothing falls back to the disk. Unset (CI, a developer's
+/// `cargo test`), it is the temp directory as before.
+///
+/// With `LEMNOS_TEST_RAM_LOG` also set, each call appends the calling thread's name (the test's name under
+/// libtest and nextest) to that file, so the tests that use the RAM directory can be listed.
+pub fn ram_temp_dir() -> PathBuf {
+    let Some(dir) = std::env::var_os("LEMNOS_TEST_RAM_DIR") else {
+        return std::env::temp_dir();
+    };
+    let dir = PathBuf::from(dir);
+    match fs::metadata(&dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => panic!("LEMNOS_TEST_RAM_DIR={} is not a directory", dir.display()),
+        Err(error) => panic!("LEMNOS_TEST_RAM_DIR={}: {error}", dir.display()),
+    }
+    if let Some(log) = std::env::var_os("LEMNOS_TEST_RAM_LOG") {
+        let name = std::thread::current().name().unwrap_or("?").to_string();
+        let line = format!("{name}\n");
+        let written = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .and_then(|mut f| io::Write::write_all(&mut f, line.as_bytes()));
+        if let Err(error) = written {
+            panic!(
+                "LEMNOS_TEST_RAM_LOG={}: {error}",
+                PathBuf::from(log).display()
+            );
+        }
+    }
+    dir
+}
+
 /// A directory (or file) that is removed, with everything in it, when this value drops.
 #[derive(Debug)]
 pub struct Scratch(PathBuf);

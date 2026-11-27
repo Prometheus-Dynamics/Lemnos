@@ -35,7 +35,7 @@ impl TempDir {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!(
+        let dir = lemnos_scratch::ram_temp_dir().join(format!(
             "lemnos-slots-{label}-{}-{nanos}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -947,7 +947,7 @@ fn a_leftover_file_at_the_next_scratch_name_does_not_stop_a_test() {
     let last = probe.0.file_name().unwrap().to_str().unwrap().to_string();
     let counter: u32 = last.rsplit('-').next().unwrap().parse().unwrap();
     drop(probe);
-    let temp = std::env::temp_dir();
+    let temp = lemnos_scratch::ram_temp_dir();
     let planted = Planted(
         (counter + 1..=counter + 64)
             .map(|n| temp.join(format!("lemnos-slots-plant-{}-{n}", std::process::id())))

@@ -46,7 +46,7 @@ struct Dir(PathBuf);
 impl Dir {
     fn new(label: &str) -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
+        let path = lemnos_scratch::ram_temp_dir().join(format!(
             "lemnos-security-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

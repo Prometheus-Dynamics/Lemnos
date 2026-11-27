@@ -24,6 +24,8 @@
 #   dtc-guard      dtc's version is not the pinned one        old: exit 1 with no message (the guard was a comment)
 #   gate-once      a gate that fails with the starved status  old: run again, and green on the second run
 #   kconfig-cmp    a required symbol behind `A && B=n`        old: the expression was skipped, A not required
+#   ram-fs         the gate's RAM directory is not on tmpfs    old: no RAM directory; the tests flushed to the disk
+#   ram-small      it has less free than GATE_RAM_NEED_KIB     old: the same
 # check-features takes its sets into variables the same way (not planted here: it builds every crate), and
 # the gate's stall and starved verdicts have their own check, testing/gate-bounds/check.sh.
 set -uo pipefail
@@ -236,6 +238,28 @@ if got == ["A"]:
 print(f"required of ROOT: {got}")
 PY
 verdict kconfig-cmp "$rc" "$work/kconfig.out" 1 "A is required of ROOT through \`A && B=n\`"
+
+# ---- the gate's RAM directory ---------------------------------------------------------------------------------
+# The gate stops before any lane, naming the check, and leaves no directory behind. ram-fs puts XDG_RUNTIME_DIR
+# in the target directory (a disk); ram-small in /dev/shm (tmpfs) with a need no machine meets.
+ram_case() { # <case> <XDG_RUNTIME_DIR> <GATE_RAM_NEED_KIB> <needle>
+  local rc=0 out="$work/$1.out"
+  mkdir -p "$2"
+  (cd "$tree" && env -u LEMNOS_TEST_RAM_DIR -u GITHUB_ACTIONS XDG_RUNTIME_DIR="$2" GATE_RAM_NEED_KIB="$3" \
+    bash scripts/gate.sh) >"$out" 2>&1 || rc=$?
+  local left; left=$(find "$2" -maxdepth 1 -name 'lemnos-gate-ram.*' | wc -l)
+  [ "$left" = 0 ] || echo "gate-lanes: $left RAM directories left in $2" >>"$out"
+  [ "$left" = 0 ] || rc=99
+  verdict "$1" "$rc" "$out" 1 "$4"
+}
+ram_disk="${CARGO_TARGET_DIR:-$repo/target}/gate-lanes-ram"
+if [ "$(stat -f -c %T "$(dirname "$ram_disk")" 2>/dev/null)" = tmpfs ]; then
+  echo "NOT CAUGHT  ram-fs (the target directory is on tmpfs here, so it cannot stand in for a disk)"; fails=$((fails + 1))
+else
+  ram_case ram-fs "$ram_disk" 1 "not tmpfs"
+fi
+rm -rf -- "$ram_disk"
+ram_case ram-small /dev/shm 999999999999 "KiB its tests need (GATE_RAM_NEED_KIB)"
 
 if [ "$fails" = 0 ]; then echo "gate-lanes: every planted failure caught"; exit 0; fi
 echo "gate-lanes: $fails planted failure(s) not caught"
