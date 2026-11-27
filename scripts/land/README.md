@@ -77,7 +77,10 @@ The gate's own home. `setup` makes `cache/cargo-home` with a `config.toml` that 
 its automatic cleaning of the package cache off. Before any lane starts, the train fetches every committed
 lock file's crates into it (`cargo fetch --locked`, online) and writes `<n>/fetch.log`: each lock file's
 sha256, the sources (the registry, and each git source at its commit), the number of crate files and a
-sha256 over their sums. A failed fetch stops the train. The gate then never downloads and never shares a
+sha256 over their sums. A failed fetch stops the train. Each gate lane gets its own copy of that home
+(`<LAND_CARGO_HOME>.lanes/<key>/<lane>`, reflinks where the disk has them, `GATE_LANE_HOMES`), kept while the
+fetch stays the same: cargo takes the package-cache lock for writing while it resolves, even offline, so lanes
+sharing one home wait on each other. The gate then never downloads and never shares a
 lock on the package cache with another program: in `~/.cargo`, a step waiting on another program's
 download makes no progress the gate can see, and its stall rule cannot tell that wait from a hang. The
 `qemu`, `off` and `ccomp` lanes keep `~/.cargo`.

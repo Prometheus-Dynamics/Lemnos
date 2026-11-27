@@ -104,6 +104,21 @@ fetch_home() {
 }
 fetch_home > "$L/fetch.log" 2>&1 || { echo "fetch: the gate's CARGO_HOME could not be filled (see $L/fetch.log)"; tail -5 "$L/fetch.log"; exit 2; }
 grep -E '^fetch: ([0-9]+ registry|sources)' "$L/fetch.log" | cut -c1-200
+# One home per gate lane (scripts/gate.sh, lane_home), copies of the fetched home (reflinks where the disk
+# has them), kept by what was fetched: a train whose fetch is the same reuses them, a new fetch makes new ones
+# and removes the old. Lanes sharing one home wait on each other's resolves for cargo's package-cache lock.
+lane_key=$(grep -E '^fetch: ([0-9]+ registry|[0-9]+ git|sources)' "$L/fetch.log" | sha256sum | cut -c1-16)
+lane_homes=$LAND_CARGO_HOME.lanes/$lane_key
+if [ ! -d "$lane_homes" ]; then
+  mkdir -p "$LAND_CARGO_HOME.lanes"; part=$(mktemp -d "$LAND_CARGO_HOME.lanes/.part.XXXXXX")
+  for lane in cargo side tail features; do
+    mkdir -p "$part/$lane" && cp -a --reflink=auto "$LAND_CARGO_HOME/registry" "$LAND_CARGO_HOME/git" "$LAND_CARGO_HOME/config.toml" "$part/$lane/" ||
+      { echo "fetch: the lane homes could not be made"; rm -rf -- "${part:?}"; exit 2; }
+  done
+  mv -- "$part" "$lane_homes"
+  for old in "$LAND_CARGO_HOME.lanes"/*/; do old=${old%/}; [ "$old" = "$lane_homes" ] || rm -rf -- "${old:?}"; done
+  echo "fetch: lane homes made: $lane_homes"
+fi
 # The QEMU kernels, cached by the same inputs as CI's cache keys; built here when missing.
 kernel() { # <dir-name> <config> [--modules-off]
   # The modules-off kernel builds kernel/ in, so its key also holds kernel/'s tree hash.
@@ -180,7 +195,7 @@ part() { # <name> <key> <command...>: runs it unless already green for its key; 
 # (irq, pisp_fe, pisp_be, gadget). Gate 6-23, modules harness 24-27, modules-off 28-31.
 # The notes checks: what reads the notes, run every train (seconds).
 ( { scripts/check-boundaries.sh && python3 scripts/check-docs.py --list >/dev/null; } > "$L/notes.log" 2>&1; echo $? > "$L/notes.rc" ) &
-( part gate "$gate_key" gate_attempts "$L" bash -c 'CARGO_HOME=$6 CARGO_TARGET_DIR=$0/target CARGO_BUILD_JOBS=$3 BUSYBOX_DIR=$1 taskset -c $4 /usr/bin/time -o "$2/gate.time" -f "%e %U %S" timeout -k 30 $5 ./scripts/gate.sh; r=$?; [ $r = 124 -o $r = 137 ] && echo "lander: gate exceeded its bound of $5 s (killed)"; exit $r' "$W" "$LAND_BUSYBOX_DIR" "$L" "$LAND_JOBS_GATE" "$LAND_CPUS_GATE" "$GATE_BACKSTOP_S" "$LAND_CARGO_HOME" ) &
+( part gate "$gate_key" gate_attempts "$L" bash -c 'CARGO_HOME=$6 GATE_LANE_HOMES=$7 CARGO_TARGET_DIR=$0/target CARGO_BUILD_JOBS=$3 BUSYBOX_DIR=$1 taskset -c $4 /usr/bin/time -o "$2/gate.time" -f "%e %U %S" timeout -k 30 $5 ./scripts/gate.sh; r=$?; [ $r = 124 -o $r = 137 ] && echo "lander: gate exceeded its bound of $5 s (killed)"; exit $r' "$W" "$LAND_BUSYBOX_DIR" "$L" "$LAND_JOBS_GATE" "$LAND_CPUS_GATE" "$GATE_BACKSTOP_S" "$LAND_CARGO_HOME" "$lane_homes" ) &
 qemu_part() { local d; d=$(kernel modules kernel.config) || return 1
   # LAND_SCRATCH: where the harness writes (its work dir and cargo target), when the stack's own disk is unwell.
   local sc=$LAND_SCRATCH; mkdir -p "$sc/qemu-tmp" "$sc/qemu-modules"

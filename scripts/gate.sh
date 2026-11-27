@@ -183,10 +183,21 @@ lane_target() {
   mkdir -p "${CARGO_TARGET_DIR:-target}/lane-$1"
   (cd "${CARGO_TARGET_DIR:-target}/lane-$1" && pwd)
 }
+# lane_home <lane>: with GATE_LANE_HOMES set (the lander sets it), the lane runs in its own CARGO_HOME,
+# GATE_LANE_HOMES/<lane>, each holding the same fetched crates. Cargo takes its package-cache lock for writing
+# while it resolves, even offline, so lanes sharing one home wait on each other there (a full gate in one
+# own home: 12 "Blocking waiting for file lock on package cache" lines, 11 in the features lane). Unset, every
+# lane uses the caller's CARGO_HOME.
+lane_home() {
+  [ -n "${GATE_LANE_HOMES:-}" ] || return 0
+  [ -d "$GATE_LANE_HOMES/$1/registry" ] || { echo "gate: GATE_LANE_HOMES=$GATE_LANE_HOMES has no home for the $1 lane" >&2; exit 1; }
+  CARGO_HOME="$GATE_LANE_HOMES/$1"; export CARGO_HOME
+}
 if [ "${GATE_TESTS:-nextest}" = nextest ] && cargo nextest --version >/dev/null 2>&1; then use_nextest=1; fi
 
 cargo_lane() {
   local n=0
+  lane_home cargo
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "c$(printf %03d "$n")" "$@"; }
   lane_step clippy 1032 cargo clippy --workspace --all-targets -- -D warnings
@@ -256,6 +267,7 @@ cargo_lane() {
 # in the cargo lane, after the tests.
 tail_lane() {
   local n=0
+  lane_home tail
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "t$(printf %03d "$n")" "$@"; }
   CARGO_TARGET_DIR="$(lane_target tail)"; export CARGO_TARGET_DIR
@@ -295,6 +307,7 @@ tail_lane() {
 # nothing a crate depends on changed spends a lookup on it. It starts with the tail lane.
 features_lane() {
   local n=0
+  lane_home features
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "f$(printf %03d "$n")" "$@"; }
   CARGO_TARGET_DIR="$(lane_target features)"; export CARGO_TARGET_DIR
@@ -306,6 +319,7 @@ features_lane() {
 
 side_lane() {
   local n=0
+  lane_home side
   # lane_step <label> <bound> <command...>
   lane_step() { n=$((n + 1)); unit "s$(printf %03d "$n")" "$@"; }
   lane_step format 180 cargo fmt --all --check
