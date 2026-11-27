@@ -504,3 +504,14 @@ throughout, from other work on the machine):
 The added wall is in seconds for overrun_line, rebind_keeps_hold, contain and usb_endpoints (the intended
 hangs and the sleeps past them now run 1.5 s, not 0.2 to 0.6 s). Each is well under the one-minute rule
 on its own; the other binaries are unchanged within noise.
+
+### The record corrected
+
+- The `pushes.rs` failure was not load: -28 is ENOSPC. The run's tmpfs scratch was full from a stale
+  10 GB directory left by an earlier run; with it removed the test passes. It is not a flake and not a
+  regression.
+- show and walk: their old-side failures were panel text mismatches, not the deadline signature
+  (TIMED_OUT, or NO_DEVICE after one). Their raises have no red that proves them; they are kept on
+  reasoning only and marked unproven.
+- package.rs:373: not reproduced at 1%, and at 0.5% both sides hit the rig's 120 s timeout with no
+  panic. The raise is unproven.
