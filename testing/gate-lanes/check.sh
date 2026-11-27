@@ -164,10 +164,18 @@ user="$(id -un)"
 if unshare -U -m true 2>/dev/null && command -v newuidmap >/dev/null && command -v newgidmap >/dev/null \
    && grep -q "^$user:" /etc/subuid && grep -q "^$user:" /etc/subgid; then
   ns=("$tree/testing/mdev/nsrun.sh")
-else
+elif [ "${GITHUB_ACTIONS:-}" = true ]; then
   ns=(sudo -n unshare -m --propagation private)
+else
+  # sudo only on CI. Not run is counted as not caught, never as a pass.
+  ns=()
 fi
-rc=0; "${ns[@]}" /bin/sh "$tree/testing/mdev/inner.sh" "$m/busybox" "$m" >"$m/out" 2>&1 || rc=$?
+rc=0
+if [ "${#ns[@]}" -gt 0 ]; then
+  "${ns[@]}" /bin/sh "$tree/testing/mdev/inner.sh" "$m/busybox" "$m" >"$m/out" 2>&1 || rc=$?
+else
+  echo "not run: no user namespace with subordinate ids for $user, and sudo is used only on CI" >"$m/out"; rc=125
+fi
 # inner.sh prints each node as placed: the planted one is left as it was made, root root 600 in the namespace.
 verdict mdev-status "$rc" "$m/out" 1 "/dev/planted"
 
