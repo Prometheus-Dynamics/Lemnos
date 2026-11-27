@@ -1062,6 +1062,12 @@ fn stuck_call_keeps_the_link(
         held.len() == threads.len(),
         &named("every lane thread of the daemon stands still"),
     );
+    // Diagnostics (train 15's stuck call 1, open under HANG-UNDER-LOAD): the guest's times of each step
+    // from here, which deadline lines came and from whom, the binds, and the held threads' state when the
+    // deadline line is seen. Printed once the steps are done; nothing here is checked.
+    let frozen = Instant::now();
+    let mut steps: Vec<(&str, Duration)> = vec![("frozen", Duration::ZERO)];
+    let mut held_states = String::new();
     let before = run.count(host::ROUND);
     // The gadget ticks only when it has something to do, so the check's own call into it is what
     // runs past the deadline: it is answered with an error once the host abandons it.
@@ -1070,6 +1076,7 @@ fn stuck_call_keeps_the_link(
         let mut reply = [0u8; 8];
         session.call(&mut handle, PAIR_LENT, &[], &mut reply)
     });
+    steps.push(("answered", frozen.elapsed()));
     check(
         answered.is_err(),
         &named(&format!(
@@ -1082,6 +1089,14 @@ fn stuck_call_keeps_the_link(
         }),
         &named("the gadget's call runs past its deadline and the host abandons it"),
     );
+    steps.push(("deadline line seen", frozen.elapsed()));
+    for &tid in &threads {
+        let state = fs::read_to_string(format!("/proc/{tid}/stat"))
+            .ok()
+            .and_then(|stat| Some(stat.rsplit_once(") ")?.1.chars().next()?.to_string()))
+            .unwrap_or_else(|| "gone".to_string());
+        held_states.push_str(&format!(" {tid}:{state}"));
+    }
     std::thread::sleep(HELD_ON);
     let during = run.count(host::ROUND);
     check(
@@ -1097,6 +1112,7 @@ fn stuck_call_keeps_the_link(
         .filter(Result::is_err)
         .count();
     let released = failed == 0;
+    steps.push(("released", frozen.elapsed()));
     check(released, &named("the lane threads run again"));
     check(
         daemon.wait_for(KEPT, kept + 1, LONG),
@@ -1104,11 +1120,41 @@ fn stuck_call_keeps_the_link(
             "the call returned: the old instance parked its session and is kept across the rebind",
         ),
     );
+    steps.push(("kept line seen", frozen.elapsed()));
     check(
         wait_until(Duration::from_secs(10), || lent() == Some(true)),
         &named("the new instance has the holder's pair: the description says it is lent"),
     );
+    steps.push(("lent", frozen.elapsed()));
     let finished = run.finish();
+    steps.push(("session finished", frozen.elapsed()));
+    let ms = |d: Duration| d.as_millis();
+    let timeline: Vec<String> = steps
+        .iter()
+        .map(|(what, at)| format!("{what} +{} ms", ms(*at)))
+        .collect();
+    say!(
+        "     {}",
+        named(&format!("timeline: {}", timeline.join(", ")))
+    );
+    say!(
+        "     {}",
+        named(&format!(
+            "lane threads frozen: {threads:?}, state when the deadline line was seen:{held_states}; lane threads now: {:?}",
+            daemon.lane_threads()
+        ))
+    );
+    for (at, line) in daemon.lines_since(frozen, RAN_PAST) {
+        say!(
+            "     {}",
+            named(&format!("deadline at +{} ms: {line}", ms(at)))
+        );
+    }
+    for (at, line) in daemon.lines_since(frozen, "start trace: ") {
+        if line.contains(" bind ") {
+            say!("     {}", named(&format!("bind at +{} ms: {line}", ms(at))));
+        }
+    }
     sampling.store(false, Ordering::Relaxed);
     let _ = sampler.join();
     check(
