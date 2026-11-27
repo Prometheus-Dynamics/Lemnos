@@ -46,8 +46,10 @@ graph() { RUSTC_BOOTSTRAP=1 cargo "$@" --locked --unit-graph -Z unstable-options
 # from one gate to the next. An entry holds the key of what decided its result (see
 # scripts/features-cache.py): an unchanged key reuses the pass, and a changed one runs that crate
 # again. Only a pass is stored; a crate that fails, or whose key changed, loses its entry first.
-cache="${CARGO_TARGET_DIR:-target}/check-features"
-mkdir -p "$cache"
+# Absolute: the graphs are copied from inside the work directory, where a relative path (CI leaves
+# CARGO_TARGET_DIR unset, so it was target/check-features) names nothing.
+mkdir -p "${CARGO_TARGET_DIR:-target}/check-features"
+cache="$(cd "${CARGO_TARGET_DIR:-target}/check-features" && pwd)"
 toolchain_line=$(rustc -vV | tr '\n\t' '  ')
 scripts_hash_line=$(sha256sum scripts/check-features.sh scripts/feature-tests.py scripts/features-cache.py | tr '\n\t' '  ')
 ckey() { # ckey <crate> <dev|nodev> <entry> <text>...
