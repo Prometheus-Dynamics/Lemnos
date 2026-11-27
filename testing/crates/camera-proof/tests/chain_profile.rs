@@ -20,12 +20,13 @@ fn a_stalled_stage_is_named_with_its_tick_and_a_stuck_one_with_its_thread() {
 
     let text = profile::failure("the chain proof failed");
     assert!(text.starts_with("the chain proof failed\n"), "{text}");
+    // The sleep is at least 150 ms; a loaded machine makes it longer, never shorter.
     assert!(
-        text.contains("slowest tick: tick 3 of stage fake-stage, 1"),
+        ms_after(&text, "slowest tick: tick 3 of stage fake-stage, ") >= 150.0,
         "the slowest tick was not named by stage and tick:\n{text}"
     );
     assert!(
-        text.contains("stage fake-stage: 1 ticks, slowest 1"),
+        ms_after(&text, "stage fake-stage: 1 ticks, slowest ") >= 150.0,
         "{text}"
     );
     assert!(text.contains("at tick 3\n"), "{text}");
@@ -52,4 +53,17 @@ fn a_stalled_stage_is_named_with_its_tick_and_a_stuck_one_with_its_thread() {
     }
     stuck.join().unwrap();
     profile::reset();
+}
+
+/// The milliseconds printed right after `label` in `text`, as in "label 200.521 ms"; panics with the text
+/// when the label or the number is missing.
+fn ms_after(text: &str, label: &str) -> f64 {
+    let rest = text
+        .split_once(label)
+        .unwrap_or_else(|| panic!("no {label:?} in:\n{text}"))
+        .1;
+    let number = rest.split(" ms").next().unwrap_or("");
+    number
+        .parse()
+        .unwrap_or_else(|_| panic!("no milliseconds after {label:?} in:\n{text}"))
 }

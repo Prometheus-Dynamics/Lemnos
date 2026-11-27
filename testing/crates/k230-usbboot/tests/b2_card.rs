@@ -11,11 +11,20 @@ use lemnos_k230_usbboot::b2sim::{Build, CardRun, Faults, Reset, card_run};
 use lemnos_k230_usbboot::sdcard::SimCard;
 use lemnos_k230_usbboot_stage::bounds::CARD_DECLARED;
 
+/// The board's bounds: a stage that comes up is waited for as long as on the board, so a slow machine
+/// does not turn a good run into a give-up.
 fn plan() -> Plan {
+    Plan {
+        bounds: Bounds::BOARD,
+        ..Plan::scratch()
+    }
+}
+
+/// For the cases where the stage never shows: the give-up is the result, so the wait for it is short.
+fn plan_no_stage() -> Plan {
     Plan {
         bounds: Bounds {
             enumerate: Duration::from_secs(3),
-            back: Duration::from_secs(10),
             ..Bounds::BOARD
         },
         ..Plan::scratch()
@@ -30,8 +39,12 @@ fn scratch() -> Faults {
 }
 
 fn run(faults: Faults, card: SimCard) -> (CardRun, Vec<String>) {
+    run_on(&plan(), faults, card)
+}
+
+fn run_on(plan: &Plan, faults: Faults, card: SimCard) -> (CardRun, Vec<String>) {
     let mut lines = Vec::new();
-    let run = card_run(faults, card, &plan(), &mut |t| lines.push(t.to_string()));
+    let run = card_run(faults, card, plan, &mut |t| lines.push(t.to_string()));
     (run, lines)
 }
 
@@ -133,7 +146,7 @@ fn a_round_that_stalls_before_its_compare_feeds_nothing_and_the_watchdog_resets_
 
 #[test]
 fn another_card_is_never_written_and_usb_never_comes_up() {
-    let (run, lines) = run(scratch(), SimCard::another());
+    let (run, lines) = run_on(&plan_no_stage(), scratch(), SimCard::another());
     assert!(
         matches!(run.outcome.verdict, Verdict::GaveUp(_)),
         "{lines:#?}"
@@ -190,7 +203,7 @@ fn without_a_controller_or_with_the_pads_elsewhere_the_card_is_not_touched() {
             PADS_LINE,
         ),
     ] {
-        let (run, lines) = run(faults, SimCard::of_record());
+        let (run, lines) = run_on(&plan_no_stage(), faults, SimCard::of_record());
         assert!(
             matches!(run.outcome.verdict, Verdict::GaveUp(_)),
             "{lines:#?}"

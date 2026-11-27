@@ -515,3 +515,13 @@ on its own; the other binaries are unchanged within noise.
   reasoning only and marked unproven.
 - package.rs:373: not reproduced at 1%, and at 0.5% both sides hit the rig's 120 s timeout with no
   panic. The raise is unproven.
+
+### Starved run 5 (the stack at bbe7cd8d)
+
+CPUQuota 130%, 13 test threads, nice 10: 7087 run, 7085 passed, 2 failed, 16 skipped; wall 948 s, load 97.
+Both reds passed in runs 1-4. Each is a test bound tighter than the thing it stands in for:
+
+| test | red | cause | fix | proof |
+|---|---|---|---|---|
+| camera-proof `chain_profile` | slowest tick 200.521 ms; line 23 wants the text "..., 1" | a 150 ms sleep judged against a hidden ceiling of 200 ms | the printed milliseconds parsed and held to at least 150 | the test's own process held off the CPU for 150 ms during the sleep: old 5 of 5 fail at line 23 (203-207 ms), new 5 of 5 pass. A whole-unit quota (10%, 1%) does not delay that one wake and passed both sides |
+| k230-usbboot `b2_card` card that drops a write | "no stage at 3-4.2.1.4.1 within 3.0 s", then "did not come back within 10 s" | the test cut the board's bounds (enumerate 15 s, back 200 s) to 3 s and 10 s | runs where the stage comes up use `Bounds::BOARD`; the two cases where it never shows keep a 3 s enumerate, the give-up being their result, and the board's way back | CPUQuota 4%: old fails with both lines (144 s), new passes (190 s). At 10% both pass |
