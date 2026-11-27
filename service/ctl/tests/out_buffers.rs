@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use lemnos_core::{Contract, ContractInfo, Description, Manifest};
 use lemnos_driver_system_slots::SystemSlots;
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnos_wire::text::{OUT_LIMIT, encode_args, encode_call};
 use lemnos_wire::{
@@ -329,7 +329,7 @@ fn start_slots() -> Running {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<SystemSlots>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap();
     let running = Running {

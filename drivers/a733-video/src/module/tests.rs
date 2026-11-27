@@ -10,7 +10,7 @@ use lemnos_contract_codec_block::{BufferRef, JobStatus};
 use lemnos_core::{CallerId, Health, Lifecycle};
 use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::{SimBoard, SimClock};
 
@@ -136,7 +136,7 @@ fn clocked(text: &str) -> (Host, SimClock) {
         &[entry::<A733Video>(), entry::<nothing::Nothing>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
         Arc::new(PerBuffer),
     )
     .unwrap();
@@ -514,7 +514,7 @@ fn a_board_file_picks_the_route_and_a_module_not_there_fails_the_job() {
             &[entry::<A733Video>(), entry::<nothing::Nothing>()],
             Box::new(sim),
             Arc::new(clock),
-            Options::default(),
+            lemnos_test_options::options(),
             Arc::new(PerBuffer),
         )
         .unwrap();

@@ -1,12 +1,14 @@
 //! The steady state of a stream whose consumer declared its hold allocates nothing: the publish, the
 //! consumer's take and give-back, and the attached reader's pop, once the path has run.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::CallerId;
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimFrameSource};
 
@@ -26,7 +28,7 @@ fn start() -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

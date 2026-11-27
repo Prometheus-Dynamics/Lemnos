@@ -10,7 +10,7 @@ use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_core::{Config, Encode, Lifecycle, MethodId, Result, Writer, driver};
 use lemnos_driver_system_security::SystemSecurity;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 
 static ASKED: AtomicU32 = AtomicU32::new(0);
 static APPLIED: AtomicU32 = AtomicU32::new(0);
@@ -59,7 +59,7 @@ fn start(record: &str, uses: &str) -> Host {
         &[entry::<StubSlots>(), entry::<SystemSecurity>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap()
 }

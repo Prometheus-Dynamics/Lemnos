@@ -44,7 +44,7 @@ fn start_lemnosd_tracked(socket: &std::path::Path) -> lemnosd::Service {
             lemnos_host::entry::<TrackedDevice>(),
         ],
         backend: Box::new(lemnos_sim::SimBoard::new()),
-        options: lemnos_host::Options::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd")
 }

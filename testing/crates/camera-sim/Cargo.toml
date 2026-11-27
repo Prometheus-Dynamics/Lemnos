@@ -19,6 +19,7 @@ lemnos-sim-clock = { path = "../sim-clock" }
 lemnos-client = { path = "../../../engine/client" }
 lemnos-linux-stream = { path = "../../../backends/linux-stream" }
 lemnos-contract-camera-sensor = { path = "../../../contracts/camera-sensor" }
+lemnos-test-options = { path = "../test-options" }
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-contract-camera-isp = { path = "../../../contracts/camera-isp" }
 lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }

@@ -12,7 +12,7 @@ use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_driver_codec_jobs::{Block, Buffers, POLL_NS, Server, Start};
 use lemnos_hal::mock::MockStream;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::v4l2::fourcc;
 use lemnos_linux_sys::v4l2::h264;
@@ -526,7 +526,7 @@ fn try_host(text: &str) -> Result<Host, String> {
         &[entry::<M2mCodec>(), entry::<nothing::Nothing>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
         Arc::new(PerBuffer),
     )
     .map_err(|error| error.to_string())

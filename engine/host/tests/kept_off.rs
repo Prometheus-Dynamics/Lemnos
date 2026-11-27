@@ -2,13 +2,15 @@
 //! does not. A kept instance is neither ticked nor served while the device is off; an off that
 //! fails, or panics, drops the instance and says so in the device's state.
 
+mod test_options;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lemnos_core::{Config, Key, Kind, Lifecycle, MethodId, Result, Status, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, OffReason, Options, entry};
+use lemnos_host::{DeviceState, Host, OffReason, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 /// The counters are process-wide, and every test uses them: one test at a time.
@@ -115,7 +117,7 @@ fn host_with(devices: &str) -> (Host, SimClock) {
         &[entry::<Holding>(), entry::<Plain>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

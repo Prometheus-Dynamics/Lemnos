@@ -36,7 +36,7 @@ use std::time::Duration;
 use lemnos_driver_system_identity::Identity;
 use lemnos_fake_devices::{FakeAccelerometer, FakeCounter};
 use lemnos_host::board::parse;
-use lemnos_host::{Options as HostOptions, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Outcome, Target};
@@ -90,7 +90,7 @@ fn start_lemnosd(socket: &Path) -> Service {
             entry::<TrackedDevice>(),
         ],
         backend: Box::new(SimBoard::new()),
-        options: HostOptions::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd")
 }

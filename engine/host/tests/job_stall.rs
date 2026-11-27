@@ -3,6 +3,8 @@
 //! by the board's clock, never waited for. Each job method of the driver is checked against its own
 //! bound.
 
+mod test_options;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -11,7 +13,7 @@ use lemnos_core::{
     CallerId, Config, JobId, JobState, Lifecycle, MethodId, Reply, Result, Status, contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Host, JobEvent, JobUpdate, Options, entry};
+use lemnos_host::{Host, JobEvent, JobUpdate, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 /// Progress the test reports for the job of each method: `done` of [`TOTAL`].
@@ -111,7 +113,7 @@ fn host() -> (Arc<Host>, SimClock) {
         &[entry::<Stalling>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (Arc::new(host), clock)

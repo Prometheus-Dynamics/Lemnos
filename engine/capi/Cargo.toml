@@ -52,4 +52,5 @@ lemnos-host = { path = "../host" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 lemnosd = { path = "../../service/lemnosd" }

@@ -1,6 +1,8 @@
 //! A keep-alive device is ticked only while the daemon's liveness says it is healthy. Its ticks
 //! are not held up by other drivers: a driver that panics or hangs leaves it fed.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -121,7 +123,7 @@ impl Rig {
 
 #[test]
 fn a_keepalive_device_is_ticked_while_the_daemon_is_alive() {
-    let rig = rig("", true, Options::default());
+    let rig = rig("", true, test_options::options());
     rig.step(100);
     assert!(
         rig.ticks("dog") >= 90,
@@ -132,7 +134,7 @@ fn a_keepalive_device_is_ticked_while_the_daemon_is_alive() {
 
 #[test]
 fn a_keepalive_device_is_not_ticked_when_the_daemon_is_not_healthy_and_resumes_when_it_is() {
-    let rig = rig("", true, Options::default());
+    let rig = rig("", true, test_options::options());
     rig.step(50);
     assert!(rig.ticks("dog") > 0);
 
@@ -152,7 +154,7 @@ fn a_keepalive_device_is_not_ticked_when_the_daemon_is_not_healthy_and_resumes_w
 
 #[test]
 fn a_keepalive_device_is_not_ticked_without_a_liveness_at_all() {
-    let rig = rig("", false, Options::default());
+    let rig = rig("", false, test_options::options());
     rig.step(200);
     assert_eq!(
         rig.ticks("dog"),
@@ -164,7 +166,7 @@ fn a_keepalive_device_is_not_ticked_without_a_liveness_at_all() {
 #[test]
 fn an_ordinary_device_is_ticked_whatever_the_liveness_says() {
     let others = "[[devices]]\nid = \"plain\"\ndriver = \"probe\"\n";
-    let rig = rig(others, true, Options::default());
+    let rig = rig(others, true, test_options::options());
     rig.alive.store(false, Ordering::SeqCst);
     rig.step(100);
     assert!(rig.ticks("plain") >= 90);
@@ -174,7 +176,7 @@ fn an_ordinary_device_is_ticked_whatever_the_liveness_says() {
 #[test]
 fn a_driver_that_panics_on_every_tick_does_not_stop_the_keepalive_device() {
     let others = "[[devices]]\nid = \"bad\"\ndriver = \"probe\"\nconfig = { panic = true }\n";
-    let rig = rig(others, true, Options::default());
+    let rig = rig(others, true, test_options::options());
     rig.step(200);
     assert!(
         rig.ticks("dog") >= 190,

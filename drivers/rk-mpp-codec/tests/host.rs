@@ -19,7 +19,7 @@ use lemnos_driver_rk_mpp::{Block, BoxedDevice, Device, MAX_RUNS, Message, Sessio
 use lemnos_driver_rk_mpp_codec::{RkMpp, RkMppNeeds};
 use lemnos_host::board::parse;
 use lemnos_host::stream::MemfdAllocator;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_linux_sys::dma_buf;
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::STATE_FAULT;
@@ -97,7 +97,7 @@ impl Rig {
                 &drivers,
                 Box::new(sim),
                 Arc::new(clock.clone()),
-                Options::default(),
+                lemnos_test_options::options(),
                 Arc::new(PerBuffer),
             )
         } else {
@@ -106,7 +106,7 @@ impl Rig {
                 &drivers,
                 Box::new(sim),
                 Arc::new(clock.clone()),
-                Options::default(),
+                lemnos_test_options::options(),
                 Arc::new(MemfdAllocator),
             )
         }
@@ -261,7 +261,7 @@ fn device_state(text: &str) -> lemnos_host::DeviceState {
         &drivers,
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
         Arc::new(PerBuffer),
     )
     .expect("the board starts");

@@ -25,7 +25,7 @@ use lemnos_client::{Client, FrameStream, HeldFrame, Next, RemoteCaller};
 use lemnos_contract_camera_receiver::{CameraReceiver, Counters, Packing};
 use lemnos_contract_camera_sensor::{CameraSensor, Controls};
 use lemnos_core::{Bound, Status};
-use lemnos_host::Options;
+
 use lemnos_linux_stream::LinuxStreams;
 use lemnosd::{Config, Service};
 
@@ -193,7 +193,7 @@ impl SimBuilder {
                 board,
                 drivers: instance_drivers(),
                 backend: Box::new(backend),
-                options: Options::default(),
+                options: lemnos_test_options::options(),
             },
             Arc::new(buffers),
         )

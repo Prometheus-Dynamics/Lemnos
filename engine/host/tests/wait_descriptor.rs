@@ -1,6 +1,8 @@
 //! A driver that names a descriptor to wait on is ticked when it wakes, and not otherwise: the
 //! host waits on the descriptor in place of a tick deadline, and clears each wake.
 
+mod test_options;
+
 use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -10,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_core::{BufferHandle, Config, Lifecycle, Result, Status, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 #[contract("waiter-counts", version = 1)]
@@ -71,7 +73,7 @@ fn host() -> (Host, SimClock) {
         &[entry::<Waiter>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

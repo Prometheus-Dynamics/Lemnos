@@ -23,7 +23,7 @@ use lemnos_driver_rp1_csi2::{Channel, Finished, Hardware, Rp1Csi2, StartParams};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
-use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
@@ -94,7 +94,7 @@ fn host_with(buffer_bytes: u32, memory: &str) -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        HostOptions::default(),
+        lemnos_test_options::options(),
         Arc::new(Handles),
     )
     .unwrap()
@@ -914,7 +914,7 @@ fn bound(memory: &str) -> Host {
         &[entry::<Rp1Csi2>()],
         Box::new(sim),
         Arc::new(clock),
-        HostOptions::default(),
+        lemnos_test_options::options(),
         Arc::new(Handles),
     )
     .unwrap()

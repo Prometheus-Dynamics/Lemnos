@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_driver_system_slots::SystemSlots;
 use lemnos_host::board::parse;
-use lemnos_host::{Options as HostOptions, entry};
+use lemnos_host::entry;
 use lemnos_orion::config::Config;
 use lemnos_orion::{Shared, calls, files, publish, source};
 use lemnos_sim::SimBoard;
@@ -206,7 +206,7 @@ fn start_lemnosd(dir: &Path, socket: &Path, reserve_mb: u64, running: &str) -> S
         board: parse(&text).expect("board"),
         drivers: vec![entry::<SystemSlots>()],
         backend: Box::new(SimBoard::new()),
-        options: HostOptions::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd")
 }

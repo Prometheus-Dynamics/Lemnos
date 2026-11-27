@@ -12,7 +12,7 @@ use lemnos_core::{
     CallerId, Decode, Driver, Encode, Health, MethodId, Reader, Result, Status, Writer,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Binder, DeviceState, DriverEntry, Host, Instance, Options, entry};
+use lemnos_host::{Binder, DeviceState, DriverEntry, Host, Instance, entry};
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::Consumer;
@@ -82,7 +82,7 @@ impl Rig {
             drivers,
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
         )
         .unwrap();
         Self { host, clock }
@@ -383,7 +383,7 @@ fn the_real_entry_binds_from_the_board_file_and_opens_nothing_it_was_not_given()
         &[entry::<Rknpu>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     assert!(matches!(

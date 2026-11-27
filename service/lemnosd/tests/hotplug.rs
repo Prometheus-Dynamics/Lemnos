@@ -62,7 +62,7 @@ fn start() -> (Service, Dir, SimBoard) {
         options: Options {
             retry_first: Duration::from_secs(60),
             retry_cap: Duration::from_secs(60),
-            ..Options::default()
+            ..lemnos_test_options::options()
         },
     })
     .unwrap();

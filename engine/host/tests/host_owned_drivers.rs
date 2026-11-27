@@ -5,6 +5,8 @@
 //! Nothing here is real hardware: a fake sysfs tree, the simulated board's line, and a plain
 //! file standing where a watchdog's node would be.
 
+mod test_options;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use lemnos_driver_hwmon_fan::HwmonFan;
 use lemnos_driver_thermal_zone::ThermalZone;
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, DriverEntry, Host, Options, entry};
+use lemnos_host::{DeviceState, DriverEntry, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 const HEADER: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
@@ -30,7 +32,7 @@ fn host_on(sim: SimBoard, devices: &str, drivers: &[DriverEntry]) -> (Host, SimC
         drivers,
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

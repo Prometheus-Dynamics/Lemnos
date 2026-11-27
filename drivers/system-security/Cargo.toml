@@ -20,6 +20,7 @@ ed25519-dalek = { version = "2.2", default-features = false }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-slot-store = { path = "../slot-store", features = ["testing"] }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [package.metadata.lemnos]
 driver = "SystemSecurity"

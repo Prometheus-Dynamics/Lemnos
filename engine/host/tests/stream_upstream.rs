@@ -2,6 +2,8 @@
 //! it, directly or through others. The host knows nothing of what any of them is: a feeder-shaped
 //! device that `link`s to a holder-shaped one that has the stream is only a `link` edge.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +12,7 @@ use lemnos_core::{
 };
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, Stall, entry};
+use lemnos_host::{DeviceState, Host, Stall, entry};
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::{Consumer, ProducerWords, STATE_OPEN, producer};
 
@@ -179,7 +181,7 @@ impl Rig {
             &[entry::<Holder>(), entry::<Feeder>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            test_options::options(),
         )
         .unwrap();
         Self { host, clock }

@@ -2,6 +2,8 @@
 //! never names a descriptor, the stream is never output0 by default, and a lent buffer is never reused
 //! under it.
 
+mod test_options;
+
 use std::sync::{Arc, Mutex};
 
 use lemnos_core::{
@@ -12,7 +14,7 @@ use lemnos_hal::blocks::StreamFrame;
 use lemnos_hal::{Lend, StreamEndpoint};
 use lemnos_host::board::parse;
 use lemnos_host::stream::StreamAllocator;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
 use std::os::fd::OwnedFd;
@@ -142,7 +144,7 @@ fn start(lent: &str) -> Host {
         &[entry::<Source>(), entry::<Sink>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
         Arc::new(Standins),
     )
     .unwrap()

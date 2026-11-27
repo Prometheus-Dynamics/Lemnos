@@ -7,7 +7,7 @@ use std::sync::Arc;
 use lemnos_core::MethodId;
 use lemnos_driver_gpio_power_switch::GpioPowerSwitch;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::SimBoard;
 
 const BOARD: &str = r#"
@@ -33,7 +33,7 @@ fn a_bus_and_an_unnamed_optional_need_bind_with_the_optional_need_absent() {
         &[entry::<GpioPowerSwitch>()],
         Box::new(sim.clone()),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
 

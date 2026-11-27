@@ -24,7 +24,7 @@ use lemnos_core::{CallerId, Encode, Health, Lifecycle, Result, Status, StreamHan
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
-use lemnos_host::{Host, Options as HostOptions, entry};
+use lemnos_host::{Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
@@ -105,7 +105,7 @@ fn host_with(memory: &str) -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        HostOptions::default(),
+        lemnos_test_options::options(),
         Arc::new(Handles),
     )
     .unwrap()

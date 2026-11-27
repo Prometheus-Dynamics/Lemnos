@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use lemnos_driver_hw_watchdog::HwWatchdog;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Liveness, Options, entry};
+use lemnos_host::{Host, Liveness, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 struct Gate(Arc<AtomicBool>);
@@ -55,7 +55,7 @@ fn rig(name: &str) -> Rig {
         &[entry::<HwWatchdog>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     let alive = Arc::new(AtomicBool::new(true));

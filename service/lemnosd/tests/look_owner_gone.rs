@@ -20,7 +20,7 @@ use lemnos_contract_pixels::Pixels;
 use lemnos_core::{Config as DriverConfig, Lifecycle, Result, Status, driver};
 use lemnos_driver_status_light::{Envelope, MAX_LEN, Rgbw, Spec, StatusLight};
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -130,7 +130,7 @@ fn start(dir: &Path) -> Service {
         board: parse(text).unwrap(),
         drivers: vec![entry::<StatusLight>(), entry::<PixelStandIn>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap()
 }

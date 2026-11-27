@@ -599,7 +599,7 @@ fn a_second_service_cannot_take_a_live_socket() {
         board: lemnos_host::board::parse(text).unwrap(),
         drivers: Vec::new(),
         backend: Box::new(lemnos_sim::SimBoard::new()),
-        options: lemnos_host::Options::default(),
+        options: lemnos_test_options::options(),
     });
     assert!(second.is_err());
     Client::connect(&running.socket, "t")

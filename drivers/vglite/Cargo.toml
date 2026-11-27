@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The VGLite 2.5D GPU on /dev/vg_lite: resize, crop, flips and quarter turns, fill, blend, palette and width-1 lines (a stroke), its command streams ported from the vendor's library and checked as they are built, reopened after a failure; served as image.scaler/1 and image.convert/1 from job streams of dma-bufs. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

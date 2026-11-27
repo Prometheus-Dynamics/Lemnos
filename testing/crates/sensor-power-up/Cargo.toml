@@ -15,3 +15,4 @@ lemnos-sim = { path = "../../../backends/sim" }
 lemnos-driver-bmi088 = { path = "../../../drivers/bmi088" }
 lemnos-driver-bmm150 = { path = "../../../drivers/bmm150" }
 lemnos-driver-ina2xx = { path = "../../../drivers/ina2xx" }
+lemnos-test-options = { path = "../test-options" }

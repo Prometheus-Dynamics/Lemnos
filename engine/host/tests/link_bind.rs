@@ -3,6 +3,7 @@
 //! drivers here are stand-ins for a camera sensor and its receiver, with the contracts they serve.
 
 mod common;
+mod test_options;
 
 use std::sync::Arc;
 use std::time::Duration;

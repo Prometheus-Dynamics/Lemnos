@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The G2D 2D engine (fill, scale, format conversion, quarter turns and flips, blending between dma-bufs) through the BSP kernel's /dev/g2d, reopened after a failure. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

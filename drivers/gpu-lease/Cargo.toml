@@ -17,6 +17,7 @@ lemnos-socket-dir = { path = "../../testing/crates/socket-dir" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-client = { path = "../../engine/client" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 lemnosd = { path = "../../service/lemnosd" }
 
 [package.metadata.lemnos]

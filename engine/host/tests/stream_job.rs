@@ -1,6 +1,8 @@
 //! A job-driven stream: each frame is the result of a job the consumer posted, so an unread result
 //! is never replaced. The producer's ask for a buffer that is not there is refused and counted.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::{
@@ -9,7 +11,7 @@ use lemnos_core::{
 use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::SimBoard;
 
 const CONSUMER: CallerId = CallerId(7);
@@ -61,7 +63,7 @@ fn start(buffers: u32) -> Host {
         &[entry::<JobSource>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

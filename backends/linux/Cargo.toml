@@ -28,3 +28,4 @@ lemnos-linux-sys = { path = "../linux-sys", features = ["test-pty"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../sim" }
 lemnos-driver-bmm150 = { path = "../../drivers/bmm150" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }

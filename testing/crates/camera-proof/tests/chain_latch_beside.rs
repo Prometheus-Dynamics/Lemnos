@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
-use lemnos_host::Options;
+
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
@@ -49,7 +49,7 @@ fn the_latch_beside_the_chain_fails_as_on_a_board() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(SimBuffers::probe()),
     )

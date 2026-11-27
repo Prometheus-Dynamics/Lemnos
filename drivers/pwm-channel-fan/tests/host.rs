@@ -8,7 +8,7 @@ use lemnos_core::{CallerId, Decode, ErrorKind, Health, Reader, Status};
 use lemnos_driver_pwm_channel_fan::PwmChannelFan;
 use lemnos_hal::raw::{EdgeDetect, Polarity};
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::mock::{MockLine, MockPwm};
 use lemnos_sim::{SimBoard, SimClock};
 
@@ -47,7 +47,7 @@ fn rig(config: &str, tach: bool) -> Rig {
         &[entry::<PwmChannelFan>()],
         Box::new(sim.clone()),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     // The daemon's loop runs the due ticks; the first one writes the start-up duty.

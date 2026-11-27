@@ -2,6 +2,8 @@
 //! They are only hints: everything still happens without them, and a storm of them binds
 //! nothing more often than the gap allows.
 
+mod test_options;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -11,7 +13,7 @@ use lemnos_core::{
     contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 const PORT: &str = "port-a";
@@ -111,7 +113,7 @@ impl Rig {
             &[entry::<Plug>(), entry::<User>()],
             Box::new(board.clone()),
             Arc::new(clock.clone()),
-            Options::default(),
+            test_options::options(),
         )
         .unwrap();
         Self { host, clock, board }
@@ -152,7 +154,7 @@ impl Rig {
     /// Lets retries run until the device waits the longest it ever does, and a second of that
     /// wait go by.
     fn wait_out_the_ladder(&self, id: &str) {
-        while self.waiting(id).1 < Options::default().retry_cap {
+        while self.waiting(id).1 < test_options::options().retry_cap {
             self.clock.advance(self.waiting(id).1);
             self.host.tick();
         }

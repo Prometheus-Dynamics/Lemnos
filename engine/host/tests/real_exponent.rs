@@ -1,6 +1,8 @@
 //! A real-valued item must carry exponent 0. A describe that gives a real range, step or warning
 //! limit with a nonzero exponent is refused at bind, by the item's name.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::{
@@ -8,7 +10,7 @@ use lemnos_core::{
     Resources, Result, Shape, Status, Tag, Unit,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::SimBoard;
 
 const READ: MethodId = MethodId {
@@ -181,7 +183,7 @@ fn bind_one(driver: &str, entry_of: &[lemnos_host::DriverEntry]) -> Host {
         entry_of,
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

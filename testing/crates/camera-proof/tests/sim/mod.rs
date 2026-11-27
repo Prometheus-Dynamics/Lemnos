@@ -51,7 +51,7 @@ use lemnos_core::{
 };
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::SimBoard;
 
 /// Calls in the order they arrived, across every simulated device.
@@ -1080,7 +1080,7 @@ pub fn bus(text: &str) -> lemnos_camera_proof::HostBus {
         ],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .expect("host starts");
     lemnos_camera_proof::HostBus::new(host, clock)

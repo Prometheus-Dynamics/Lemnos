@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use lemnos_client::{Client, Error};
 use lemnos_core::{CallerId, Config as DriverConfig, Lifecycle, Result, Status, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -82,7 +82,7 @@ fn start() -> (Service, Dir, std::path::PathBuf) {
         board: parse(text).unwrap(),
         drivers: vec![entry::<Holder>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap();
     (service, guard, socket)

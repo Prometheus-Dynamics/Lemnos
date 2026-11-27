@@ -8,7 +8,7 @@ use lemnos_driver_usb_gadget::UsbGadget;
 use lemnos_hal::blocks::{ControlSetup, UsbFunctionEvent};
 use lemnos_hal::mock::ControlAnswer;
 use lemnos_host::board::parse;
-use lemnos_host::{Options, entry};
+use lemnos_host::entry;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -64,7 +64,7 @@ fn the_tool_answers_requests_and_echoes_what_the_host_sends() {
         board: parse(BOARD).unwrap(),
         drivers: vec![entry::<UsbGadget>()],
         backend: Box::new(sim),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .unwrap();
     assert!(until(|| usb.descriptors().is_some()), "the gadget is up");

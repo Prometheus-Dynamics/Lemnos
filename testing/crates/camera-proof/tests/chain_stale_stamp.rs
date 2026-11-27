@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
-use lemnos_host::Options;
+
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
@@ -59,7 +59,7 @@ fn a_stale_frame_start_fails_the_chain_proof_on_its_age_check() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(buffers),
     )

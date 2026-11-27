@@ -447,7 +447,12 @@ driver = "package-fixture"
 uses = { bus = "i2c0" }
 config = { start = 6 }
 "#;
-    let (host, _) = host_on(sim, devices, &loader.entries(), Options::default());
+    let (host, _) = host_on(
+        sim,
+        devices,
+        &loader.entries(),
+        lemnos_test_options::options(),
+    );
     let (user, chip) = (index(&host, "user"), index(&host, "chip"));
     assert_eq!(host.device("user").unwrap().state, DeviceState::Running);
     assert_eq!(host.device("chip").unwrap().state, DeviceState::Running);

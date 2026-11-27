@@ -8,7 +8,7 @@ use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_core::{Config, Encode, Lifecycle, MethodId, Result, Writer, driver};
 use lemnos_driver_system_security::SystemSecurity;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 
 /// A stakeholder with nothing to say: every change is fine by it.
 #[driver("quiet-slots", provides = [SecurityPrecondition])]
@@ -50,7 +50,7 @@ fn start(dir: &std::path::Path, orion: bool) -> Host {
         &[entry::<QuietSlots>(), entry::<SystemSecurity>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap()
 }

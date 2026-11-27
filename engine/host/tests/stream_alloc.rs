@@ -1,11 +1,13 @@
 //! The frame path allocates nothing once running.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::CallerId;
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimFrameSource};
 
@@ -24,7 +26,7 @@ fn a_thousand_frames_through_the_host_allocate_nothing() {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     let mut producer = host.stream_producer(0, "frames").unwrap();

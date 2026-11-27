@@ -13,7 +13,7 @@ use lemnos_core::{
     Result, Status, Tag, UsbDeviceHandle, Writer,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 
 use super::fixture::{self, CONTROL_INTERFACE, MODE_MJPEG, STREAM_INTERFACE};
 use super::mock::MockUsb;
@@ -117,7 +117,7 @@ impl Rig {
             &[entry::<Uvc>()],
             Box::new(board.clone()),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
         )
         .unwrap();
         let index = host.device("webcam").unwrap().index;
@@ -249,13 +249,13 @@ fn frames_reach_a_consumer_and_a_camera_that_leaves_is_opened_again_by_name() {
     rig.ticks();
     assert_eq!(
         rig.waiting(),
-        (GONE.to_string(), Options::default().retry_first)
+        (GONE.to_string(), lemnos_test_options::options().retry_first)
     );
     assert_eq!(rig.health(), Health::Failed("retrying"));
     assert_eq!(rig.board.opens(), vec![NAME], "not before its wait is over");
 
     // The host binds it again, which opens the device by its name: the new camera.
-    rig.advance(Options::default().retry_first);
+    rig.advance(lemnos_test_options::options().retry_first);
     assert_eq!(rig.board.opens(), vec![NAME, NAME]);
     assert_eq!(
         rig.host.device("webcam").unwrap().state,
@@ -387,13 +387,13 @@ fn every_camera_plugged_in_binds_by_its_class_with_no_entry_of_its_own() {
         &[entry::<Uvc>()],
         Box::new(board.clone()),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     // A second camera of the same make, plugged in later, and a hint that something came.
     let second = board.add_usb_device_as("usb:3-1.2", camera_codes(1), &webcam);
     board.hints().drain(|hint| host.hint(hint));
-    clock.advance(Options::default().hint_gap);
+    clock.advance(lemnos_test_options::options().hint_gap);
     for _ in 0..16 {
         host.tick();
     }

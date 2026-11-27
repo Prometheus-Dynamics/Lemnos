@@ -14,7 +14,7 @@ use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, prov
 use lemnos_client::Client;
 use lemnos_contract_camera_receiver::{CameraReceiver, Packing};
 use lemnos_driver_ov9782::SILENCE_MARGIN_NS;
-use lemnos_host::Options as HostOptions;
+
 use lemnosd::{Config, Service};
 
 const REFERENCE_BOARD: &str = include_str!("../../../boards/reference.toml");
@@ -48,7 +48,7 @@ fn a_sensor_that_stops_behind_its_driver_is_seen_silent_and_restarted() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: HostOptions::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(SimBuffers::probe()),
     )

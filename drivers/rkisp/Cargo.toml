@@ -29,6 +29,7 @@ lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [package.metadata.lemnos]
 driver = "Rkisp"

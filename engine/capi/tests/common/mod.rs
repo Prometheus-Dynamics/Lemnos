@@ -16,8 +16,8 @@ use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
+use lemnos_host::entry;
 use lemnos_host::stream::ProducerEndpoint;
-use lemnos_host::{Options, entry};
 use lemnos_linux_sys::dma_buf::{self, sealed_memfd};
 use lemnos_sim::SimBoard;
 use lemnosd::packages::{PackageFile, PackageMode, PackageReport};
@@ -65,7 +65,7 @@ fn config(socket: PathBuf, devices: &str) -> Config {
         board: parse(&text).unwrap(),
         drivers: vec![entry::<FakeCounter>()],
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     }
 }
 

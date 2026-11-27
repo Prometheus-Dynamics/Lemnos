@@ -3,7 +3,7 @@
 //! starts without the refused device and every other device runs.
 
 use lemnos_host::board::parse;
-use lemnos_host::{Options, settings_refusals};
+use lemnos_host::settings_refusals;
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, Service};
 
@@ -41,7 +41,7 @@ fn list(text: &str) -> String {
         board: parse(text).unwrap(),
         drivers: lemnosd::builtin::drivers(),
         backend: Box::new(SimBoard::new()),
-        options: Options::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("the daemon starts");
     let args = [

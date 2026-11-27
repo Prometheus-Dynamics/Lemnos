@@ -13,7 +13,7 @@ use lemnos_camera_proof::SocketBus;
 use lemnos_camera_proof::latch::{self, OFFSETS_US, Settings};
 use lemnos_camera_sim::{Model, SimBuffers, chain_board, drivers, new_world, provider, scene};
 use lemnos_client::Client;
-use lemnos_host::Options;
+
 use lemnosd::{Config, Service};
 use sim_timing::SimTiming;
 
@@ -46,7 +46,7 @@ fn a_sensor_that_latches_a_frame_early_fails_the_latch() {
             board,
             drivers: drivers(),
             backend: Box::new(provider()),
-            options: Options::default(),
+            options: lemnos_test_options::options(),
         },
         Arc::new(SimBuffers::probe()),
     )

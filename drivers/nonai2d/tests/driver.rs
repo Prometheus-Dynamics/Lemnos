@@ -22,7 +22,7 @@ use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::mock::MockStream;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, Lease, MemfdAllocator, StreamAllocator};
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimClock};
@@ -98,7 +98,7 @@ impl Rig {
             &[entry::<Nonai2dDriver>(), entry::<FakeCounter>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
             allocator,
         )
         .unwrap();
@@ -397,7 +397,7 @@ fn an_empty_or_non_text_device_setting_is_refused_before_any_device_is_made() {
             &[entry::<Nonai2dDriver>(), entry::<FakeCounter>()],
             Box::new(sim),
             Arc::new(clock),
-            Options::default(),
+            lemnos_test_options::options(),
             Arc::new(PerBuffer),
         )
         .unwrap();

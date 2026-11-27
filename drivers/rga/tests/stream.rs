@@ -11,7 +11,7 @@ use lemnos_contract_image_convert::{ConvertJob, Counters, ImageRef};
 use lemnos_core::{CallerId, Decode, Encode, HostClock, MethodId, Reader, Writer};
 use lemnos_driver_rga::Rga;
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::SimBoard;
 
 #[derive(Clone, Default)]
@@ -39,7 +39,7 @@ fn start(config: &str) -> (Host, Clock, u32) {
         &[entry::<Rga>()],
         Box::new(SimBoard::new()),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     let index = host.device("rga").unwrap().index;
@@ -71,7 +71,7 @@ fn without_a_soc_the_device_is_listed_failed_and_never_made() {
         &[entry::<Rga>()],
         Box::new(SimBoard::new()),
         Arc::new(Clock::default()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .expect("the board starts");
     let state = host.device("rga").unwrap().state;

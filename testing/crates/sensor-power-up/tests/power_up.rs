@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use lemnos_core::Health;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::{FaultScript, Layout, SimBoard, SimClock, SimI2c};
 
 const BOARD: &str = r#"
@@ -78,7 +78,7 @@ fn board() -> (Host, SimClock, SimI2c, SimI2c, FaultScript) {
         ],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     (host, clock, pio, i2c1, faults)

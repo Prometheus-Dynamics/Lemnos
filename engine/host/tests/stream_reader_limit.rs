@@ -2,13 +2,15 @@
 //! its frames. The grant's arithmetic is checked on the worked case: a consumer, one reader, and
 //! four buffers.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::{CallerId, Status};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::ProducerEndpoint;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::{SimBoard, SimFrameSource};
 use lemnos_wire::ring::{Consumer, Pop, TicketReader};
 
@@ -34,7 +36,7 @@ fn start_with(buffers: u32, reader_held_max: Option<u32>) -> Host {
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

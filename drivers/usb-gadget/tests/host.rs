@@ -17,7 +17,7 @@ use lemnos_driver_usb_gadget::UsbGadget;
 use lemnos_hal::blocks::{ControlSetup, UsbFunctionEvent};
 use lemnos_hal::mock::{ControlAnswer, MockUsbFunction};
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 use lemnos_wire::ring::{Consumer, FrameSlot, STATE_FAULT};
 
@@ -82,7 +82,7 @@ impl Rig {
             &[entry::<UsbGadget>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
         )
         .unwrap();
         let rig = Self { host, clock, usb };

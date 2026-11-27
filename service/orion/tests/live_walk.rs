@@ -20,7 +20,7 @@ use lemnos_driver_usb_gadget::UsbGadget;
 use lemnos_driver_ws2812::Ws2812;
 use lemnos_fake_devices::{FakeAccelerometer, FakeGyroscope};
 use lemnos_host::board::parse;
-use lemnos_host::{Options as HostOptions, entry};
+use lemnos_host::entry;
 use lemnos_orion::config::Config;
 use lemnos_orion::{Shared, calls, publish, source};
 use lemnos_sim::{Layout, SimBoard};
@@ -310,7 +310,7 @@ fn start_walk(dir: &Path, sim: SimBoard) -> Walk {
             entry::<Indicator>(),
         ],
         backend: Box::new(sim),
-        options: HostOptions::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd");
     let bridge = start_bridge(&lemnosd, board.socket(), None);
@@ -675,7 +675,7 @@ fn the_description_of_each_device_on_the_walk_board_is_measured_against_the_boun
         &drivers,
         Box::new(sim),
         Arc::new(Elapsed(Instant::now())),
-        HostOptions::default(),
+        lemnos_test_options::options(),
     )
     .expect("host");
     let mut largest = (0usize, String::new());

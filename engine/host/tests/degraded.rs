@@ -1,6 +1,7 @@
 //! An optional part missing is degraded. A required part missing is failed.
 
 mod common;
+mod test_options;
 
 use common::{MAG, SIX_AXIS, host, host_with, method, quick};
 use lemnos_core::{Decode, Health, Reader, Vector3};

@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-test-options"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "The host options a test runs under when its subject is not a hang: a call deadline sized for a loaded gate"
+
+[dependencies]
+lemnos-host = { path = "../../../engine/host" }
+
+[lints]
+workspace = true

@@ -10,7 +10,7 @@ use lemnos_core::{Health, Lifecycle};
 use lemnos_driver_a733_video_sys as sys;
 use lemnos_driver_codec_jobs::testing::{Caller, reference};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 use super::*;
@@ -128,7 +128,7 @@ fn clocked(text: &str) -> (Host, SimClock) {
         &[entry::<A733Video>(), entry::<nothing::Nothing>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     (host, clock)
@@ -382,7 +382,7 @@ fn start_board(text: &str) -> Host {
         &[entry::<A733Video>(), entry::<nothing::Nothing>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap()
 }

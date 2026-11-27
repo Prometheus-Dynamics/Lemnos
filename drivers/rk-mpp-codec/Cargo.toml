@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The driver that gives a caller one codec block of the vendor kernel's /dev/mpp_service as codec.block/1: lemnos-driver-rk-mpp's block on the real node of lemnos-driver-rk-mpp-sys, serving a job stream of dma-bufs. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

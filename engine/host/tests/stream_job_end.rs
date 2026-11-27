@@ -2,6 +2,8 @@
 //! frames: every refusal reason reaches the consumer that posted the job, with its identity and
 //! end time, and a bad result keeps its buffer and says it failed.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::{
@@ -10,7 +12,7 @@ use lemnos_core::{
 use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_sim::SimBoard;
 use lemnos_wire::ring::reason;
 
@@ -61,7 +63,7 @@ fn start() -> Host {
         &[entry::<JobSource>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap()
 }

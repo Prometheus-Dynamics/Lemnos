@@ -18,7 +18,7 @@ use lemnos_driver_rkvpss::{Channel, Device, Job, Rkvpss, RkvpssNeeds, State};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, Lease, MemfdAllocator, StreamAllocator};
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimClock};
@@ -101,7 +101,7 @@ impl Rig {
             &[entry::<Rkvpss>(), entry::<FakeCounter>()],
             Box::new(sim),
             Arc::new(clock.clone()),
-            Options::default(),
+            lemnos_test_options::options(),
             allocator,
         )
         .unwrap();
@@ -228,7 +228,7 @@ fn a_board_file_with_a_missing_or_bad_channel_is_listed_failed_and_never_made() 
             &[entry::<Rkvpss>(), entry::<FakeCounter>()],
             Box::new(sim),
             Arc::new(clock),
-            Options::default(),
+            lemnos_test_options::options(),
             Arc::new(PerBuffer),
         )
         .unwrap_or_else(|error| panic!("{bad}: {error}"));

@@ -11,7 +11,7 @@ use common::{
     trusted,
 };
 use lemnos_core::Status;
-use lemnos_host::{DeviceState, Options};
+use lemnos_host::DeviceState;
 use lemnos_package::{Loader, MAX_PACKAGE_BYTES, Mode, Refusal};
 use lemnos_sim::SimBoard;
 
@@ -42,7 +42,12 @@ driver = "raw-package"
 uses = { line = "gpio7" }
 config = { base = 40 }
 "#;
-    let (host, _) = host_on(sim, devices, &loader.entries(), Options::default());
+    let (host, _) = host_on(
+        sim,
+        devices,
+        &loader.entries(),
+        lemnos_test_options::options(),
+    );
     let thing = index(&host, "thing");
     assert_eq!(host.device("thing").unwrap().state, DeviceState::Running);
     assert_eq!(
@@ -243,7 +248,12 @@ driver = "raw-package"
 uses = { line = "gpio7" }
 config = { base = 40 }
 "#;
-    let (host, _) = host_on(sim, devices, &loader.entries(), Options::default());
+    let (host, _) = host_on(
+        sim,
+        devices,
+        &loader.entries(),
+        lemnos_test_options::options(),
+    );
     let description = host.describe(index(&host, "thing")).unwrap();
     let level = description
         .find("level")
@@ -300,7 +310,12 @@ driver = "raw-package"
 uses = { line = "gpio7" }
 config = { base = 40 }
 "#;
-    let (host, _) = host_on(sim, devices, &loader.entries(), Options::default());
+    let (host, _) = host_on(
+        sim,
+        devices,
+        &loader.entries(),
+        lemnos_test_options::options(),
+    );
     let description = host.describe(index(&host, "thing")).unwrap();
     let level = description.find("level").unwrap();
     // Its own record gives the limits; the reading, step, warning limits and group are unknown.

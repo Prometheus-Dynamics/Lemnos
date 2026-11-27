@@ -5,6 +5,8 @@
 //! Each chip's configuration registers hold values its owner (the operating system's driver)
 //! chose, different from what the Lemnos driver would write. Nothing here is real hardware.
 
+mod test_options;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,7 +23,7 @@ use lemnos_hal::i2c::{I2c as _, Operation};
 use lemnos_hal::register::{I2cRegisters, RegWrite, RegisterBus, RegisterError};
 use lemnos_hal::{ErrorKind, HalError};
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, DriverEntry, Host, Options, entry};
+use lemnos_host::{DeviceState, DriverEntry, Host, entry};
 use lemnos_sim::{Layout, SimBoard, SimClock, SimI2c};
 
 const HEADER: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
@@ -149,7 +151,7 @@ fn host_on(sim: SimBoard, devices: &str, drivers: &[DriverEntry]) -> (Host, SimC
         drivers,
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

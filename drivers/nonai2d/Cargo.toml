@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "The K230 non-AI 2D engine: pixel-format conversion between dma-bufs through the SDK kernel's nonai-2d V4L2 mem2mem driver, served as image.convert/1 from a job stream of dma-bufs, reopened after a failure. No vendor library"
 
+[dev-dependencies]
+lemnos-test-options = { path = "../../testing/crates/test-options" }
+
 [lints]
 workspace = true
 

@@ -1,13 +1,15 @@
 //! A stream's kind is the driver's declaration. A board file that has a `kind` key is refused by
 //! name, whatever its value; a driver that declares no kind for a stream it serves is refused too.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::{
     BusKind, Config, Driver, Manifest, Need, NeedKind, Resources, Result as CoreResult, StreamKind,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, entry};
 use lemnos_sim::SimBoard;
 
 /// Serves `frames` as a job-driven stream.
@@ -80,7 +82,7 @@ fn start(text: &str, drivers: &[lemnos_host::DriverEntry]) -> std::result::Resul
         drivers,
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .map_err(|e| e.to_string())
 }

@@ -91,7 +91,7 @@ fn every_built_in_driver_is_walked_or_named_with_its_reason() {
         &lemnosd::builtin::drivers(),
         Box::new(walked.board.clone()),
         std::sync::Arc::new(walked.board.clock()),
-        Options::default(),
+        lemnos_test_options::options(),
     )
     .unwrap();
     let mut built_in = host.driver_names();

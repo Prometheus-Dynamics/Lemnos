@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_driver_named_files::NamedFilesDriver;
 use lemnos_host::board::parse;
-use lemnos_host::{Options as HostOptions, entry};
+use lemnos_host::entry;
 use lemnos_orion::backoff::Backoff;
 use lemnos_orion::named::{Asker, Ended, Node, Snapshot, digest, keep_offering, serve};
 use lemnos_sim::SimBoard;
@@ -477,7 +477,7 @@ fn setup_with(test: &str, overlay: &Path, max_frame: u32) -> Setup {
         board: parse(&text).expect("board"),
         drivers: vec![entry::<NamedFilesDriver>()],
         backend: Box::new(SimBoard::new()),
-        options: HostOptions::default(),
+        options: lemnos_test_options::options(),
     })
     .expect("lemnosd");
     let stderr = std::fs::File::create(dir.join("bridge.log")).expect("log");

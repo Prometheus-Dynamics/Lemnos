@@ -1,11 +1,13 @@
 //! A driver's notes: the host takes them in order, counts what a full ring drops, and does not allocate
 //! in the steady state.
 
+mod test_options;
+
 use std::sync::Arc;
 
 use lemnos_core::{CallerId, Config, Lifecycle, MethodId, Note, Notes, Result, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{Host, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimClock};
 
@@ -65,7 +67,7 @@ fn host() -> (Host, SimClock) {
         &[entry::<Noter>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (host, clock)

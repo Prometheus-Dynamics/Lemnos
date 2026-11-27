@@ -17,6 +17,7 @@ lemnos-contract-fan = { path = "../../contracts/fan" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [package.metadata.lemnos]
 driver = "PwmChannelFan"

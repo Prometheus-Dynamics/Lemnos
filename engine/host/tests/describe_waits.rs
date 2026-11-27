@@ -2,6 +2,8 @@
 //! its tick or in a short call: it waits its turn on the device's lane, within the call deadline.
 //! A device whose driver never comes back still gets the typed refusal, on time.
 
+mod test_options;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -184,7 +186,7 @@ fn assert_waited(answers: &Answers) {
 
 #[test]
 fn describe_and_a_value_call_wait_for_a_tick_in_progress() {
-    let (host, _) = host(0, Options::default());
+    let (host, _) = host(0, test_options::options());
     let gate = &GATES[0];
     gate.armed.store(true, Ordering::Release);
     let ticker = {
@@ -199,7 +201,7 @@ fn describe_and_a_value_call_wait_for_a_tick_in_progress() {
 
 #[test]
 fn describe_and_a_value_call_wait_for_a_short_client_call_in_progress() {
-    let (host, _) = host(1, Options::default());
+    let (host, _) = host(1, test_options::options());
     let gate = &GATES[1];
     let index = host.device("p").unwrap().index;
     let caller = {

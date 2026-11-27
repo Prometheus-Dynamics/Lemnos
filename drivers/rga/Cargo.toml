@@ -27,6 +27,7 @@ lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 lemnos-wire = { path = "../../engine/wire" }
 
 [package.metadata.lemnos]

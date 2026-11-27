@@ -37,6 +37,7 @@ lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-host = { path = "../../engine/host" }
+lemnos-test-options = { path = "../../testing/crates/test-options" }
 
 [package.metadata.lemnos]
 driver = ["K230Isp", "K230IspFrames"]

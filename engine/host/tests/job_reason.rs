@@ -1,6 +1,8 @@
 //! A job the host ends because its driver was lost says why, in its end's result: the reason the
 //! device was taken off (here, its driver panicked), as UTF-8. Sim-clock test.
 
+mod test_options;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -8,7 +10,7 @@ use lemnos_core::{
     CallerId, Config, JobId, JobState, Lifecycle, MethodId, Reply, Result, Status, contract, driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Host, JobEvent, JobUpdate, Options, entry};
+use lemnos_host::{Host, JobEvent, JobUpdate, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 /// Set by the test: the driver's next tick panics.
@@ -73,7 +75,7 @@ fn host() -> (Arc<Host>, SimClock) {
         &[entry::<Reasoning>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     (Arc::new(host), clock)
