@@ -4,6 +4,8 @@
 //! whether the link was taken up as it was. If it was, the hold goes on as [`CallerId::BEFORE`]'s;
 //! if not, it ends there. A hold whose holder has gone is given up when someone asks for the pair.
 
+mod test_options;
+
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,7 +16,7 @@ use lemnos_core::{
     driver,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{EndKeeper, Host, Options, entry};
+use lemnos_host::{EndKeeper, Host, entry};
 use lemnos_sim::SimBoard;
 
 /// The host's warnings. Tests share the process: each looks for a line about its own device.
@@ -181,7 +183,7 @@ fn start(key: usize, store: &Arc<Store>) -> Host {
         &parse(&text).unwrap(),
         &[entry::<KeptLender>()],
         Box::new(sim),
-        (Arc::new(clock), Options::default()),
+        (Arc::new(clock), test_options::options()),
         Arc::new(lemnos_host::stream::MemfdAllocator),
         Some(Arc::clone(store) as Arc<dyn EndKeeper>),
     )
@@ -303,7 +305,7 @@ fn without_a_keeper_nothing_is_kept_and_a_stop_ends_the_hold() {
         &[entry::<KeptLender>()],
         Box::new(sim),
         Arc::new(clock),
-        Options::default(),
+        test_options::options(),
     )
     .unwrap();
     host.tick();
