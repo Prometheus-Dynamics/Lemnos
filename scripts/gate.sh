@@ -263,23 +263,24 @@ tail_lane() {
     until [ -f "$gate_out/tests.running" ] || [ -f "$gate_out/tests.over" ]; do sleep 0.2; done
   fi
 
-  # What must still build without std, on the targets a microcontroller host uses. Each of these checks
-  # is 1-7 s on the lander (green max over 58 trains), so the floor sets every bound here.
-  no_std_crates=(lemnos-abi lemnos-hal lemnos-core lemnos-contract-accelerometer lemnos-contract-gyroscope lemnos-contract-magnetometer lemnos-contract-orientation lemnos-driver-orientation lemnos-host-static lemnos-mcu lemnos-driver-usb-gadget lemnos-driver-generic-sensor shm-sample-time)
-  for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-linux-gnueabihf; do
-    for crate in "${no_std_crates[@]}"; do
+  # The crate sets (scripts/merged-sets.sh): one cargo call per target for the crates that build the same
+  # beside each other, and one per target for each crate that does not (scripts/check-merged-sets.sh, in the
+  # side lane, proves which is which). A failing call names its crate in cargo's own error. Each call is
+  # 1-11 s on the lander warm (2-19 s cold, measured off the gate), so the floor sets every bound here.
+  # shellcheck source=scripts/merged-sets.sh
+  source scripts/merged-sets.sh
+  local crate target merged=()
+  for crate in "${no_std_merged[@]}"; do merged+=(-p "$crate"); done
+  for target in "${no_std_targets[@]}"; do
+    lane_step "no_std crates on $target" 180 cargo check -q "${merged[@]}" --no-default-features --target "$target"
+    for crate in "${no_std_alone[@]}"; do
       lane_step "$crate on $target" 180 cargo check -q -p "$crate" --no-default-features --target "$target"
     done
   done
-
-  # What must build on the desktop targets: the crates meant to be portable, checked for Windows and
-  # macOS. A crate listed here that stops building there fails the gate, and the step names it.
-  # Linux-only crates stay off this list. Each check is 1-3 s on the lander, so the floor sets the bound.
-  portable_crates=(shm-ring shm-ring-time shm-sample-time)
-  for target in x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-apple-darwin; do
-    for crate in "${portable_crates[@]}"; do
-      lane_step "$crate on $target" 180 cargo check -q -p "$crate" --target "$target"
-    done
+  merged=()
+  for crate in "${portable_crates[@]}"; do merged+=(-p "$crate"); done
+  for target in "${desktop_targets[@]}"; do
+    lane_step "portable crates on $target" 180 cargo check -q "${merged[@]}" --target "$target"
   done
 
   # The crates used as plain libraries, alone and without their driver halves.
@@ -334,6 +335,11 @@ side_lane() {
   lane_step unit-grants-tests 180 python3 -I testing/unit-grants/test_check_unit_grants.py
   # Every QEMU stanza that starts lemnosd starts it through the unit launcher, or says why it is root.
   lane_step root-stanzas 180 scripts/check-root-stanzas.py
+  # Each crate the tail lane checks in a merged cargo call has there the features it has alone
+  # (scripts/check-merged-sets.sh, keyed on the manifests), and the checker fails its planted drifts
+  # (testing/merged-sets/check.sh). Only cargo's resolver runs: 11 s and 26 s cold at load 66, a lookup warm.
+  lane_step merged-sets 180 scripts/check-merged-sets.sh
+  lane_step merged-sets-tests 180 testing/merged-sets/check.sh
   # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
   # Also checks that docs/building.md lists each of them.
   lane_step shipped 180 scripts/check-shipped.sh
