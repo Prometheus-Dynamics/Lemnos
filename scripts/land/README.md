@@ -61,7 +61,7 @@ A train runs five lanes at once, each with its own CPU set and its own bound:
 - `notes`: `scripts/check-boundaries.sh` and `scripts/check-docs.py --list`, every train (seconds).
 
 - `gate`: `scripts/gate.sh` in the stack worktree, with `CARGO_BUILD_JOBS` from `LAND_JOBS_GATE`, on
-  `LAND_CPUS_GATE`. Bound: 109164 s, 4 x the sum of the gate's step budgets (a backstop; each step is bounded by its CPU budget and its progress watch).
+  `LAND_CPUS_GATE`, and `CARGO_HOME` set to the gate's own home (`LAND_CARGO_HOME`, below). Bound: 109164 s, 4 x the sum of the gate's step budgets (a backstop; each step is bounded by its CPU budget and its progress watch).
 - `qemu`: the modules QEMU harness, on `LAND_CPUS_QEMU`. Its kernel comes from `LAND_QK_DIR`, built when missing.
   Its modules are kept under `$LAND_SCRATCH/qemu-modules` by the hash of all they are built from
   (`LEMNOS_QEMU_MODULES`), so a train that does not change them builds none. Every stanza runs each train:
@@ -72,6 +72,15 @@ A train runs five lanes at once, each with its own CPU set and its own bound:
   The kernel is kept like the modules kernel, its key also holding the tree hash of `kernel/`, which it
   builds in; the newest three are kept. Bound 600 s each.
 - `ccomp`: consumer compile, niced, on `LAND_CPUS_CC`.
+
+The gate's own home. `setup` makes `cache/cargo-home` with a `config.toml` that sets cargo offline and turns
+its automatic cleaning of the package cache off. Before any lane starts, the train fetches every committed
+lock file's crates into it (`cargo fetch --locked`, online) and writes `<n>/fetch.log`: each lock file's
+sha256, the sources (the registry, and each git source at its commit), the number of crate files and a
+sha256 over their sums. A failed fetch stops the train. The gate then never downloads and never shares a
+lock on the package cache with another program: in `~/.cargo`, a step waiting on another program's
+download makes no progress the gate can see, and its stall rule cannot tell that wait from a hang. The
+`qemu`, `off` and `ccomp` lanes keep `~/.cargo`.
 
 Each lane writes its exit status to `<n>/<lane>.rc`. No ceremony runs: a part is keyed by the paths it
 reads, and one already green for its key is not run again. The notes (`TODO.md`, `PARKED.md`, `notes/`,

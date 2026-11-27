@@ -91,7 +91,7 @@ cc_env() { # <case dir>
   printf 'lemnos-core\t0.0.0\n' >"$d/cache/locks/self-${head:0:8}.names"
   {
     for v in LAND_WORKTREE LAND_STATE_DIR LAND_UNIT_DIR LAND_LOCK_FILE LAND_SCRATCH LAND_TMP LAND_GUARD_BIN \
-      LAND_QK_DIR LAND_KERNEL_TARBALLS LAND_BUSYBOX_DIR LAND_REMOTE LAND_UNIT_PREFIX; do echo "$v=$d/unused"; done
+      LAND_QK_DIR LAND_KERNEL_TARBALLS LAND_BUSYBOX_DIR LAND_CARGO_HOME LAND_REMOTE LAND_UNIT_PREFIX; do echo "$v=$d/unused"; done
     for v in LAND_CPUS_GATE LAND_CPUS_CC LAND_CPUS_QEMU LAND_CPUS_OFF; do echo "$v=0"; done
     for v in LAND_JOBS_GATE LAND_JOBS_CC LAND_JOBS_KERNEL LAND_JOBS_QEMU LAND_JOBS_QEMU_CARGO LAND_JOBS_OFF; do echo "$v=1"; done
     echo "LAND_PR_REPO="

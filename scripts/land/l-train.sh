@@ -82,6 +82,28 @@ if ! git diff --quiet -- Cargo.lock; then git add Cargo.lock && git commit -q -m
 head=$(git rev-parse HEAD)
 # TMPDIR never under /dev or /sys: tests refuse fake device trees there (backends/linux). Each train gets train-<n> under LAND_TMP.
 export TMPDIR=$LAND_TMP; case "$TMPDIR" in /dev/*|/sys/*) echo "TMPDIR $TMPDIR is under /dev or /sys"; exit 2;; esac; TMPDIR="$TMPDIR/train-$n"; mkdir -p "$TMPDIR"; export TMPDIR PATH="$LAND_GUARD_BIN:$HOME/.cargo/bin:$PATH" CARGO_INCREMENTAL=0
+# The gate's own CARGO_HOME (setup: offline, no automatic cleaning). The crates of every lock file the gate builds
+# are fetched into it here, online, before the gate starts; the gate then runs offline in it, so it never
+# downloads and never waits on another program's lock on ~/.cargo. fetch.log records each lock file's hash,
+# the sources, and a hash over the fetched crate files; a failed fetch stops the train before any part runs.
+fetch_home() {
+  local lock rc=0 locks
+  locks=$(git ls-files '*Cargo.lock')
+  echo "fetch: CARGO_HOME=$LAND_CARGO_HOME"
+  for lock in $locks; do
+    echo "fetch: $lock sha256 $(sha256sum "$lock" | cut -d' ' -f1)"
+    CARGO_HOME=$LAND_CARGO_HOME "$HOME/.cargo/bin/cargo" fetch --locked --config net.offline=false \
+      --manifest-path "$(dirname "$lock")/Cargo.toml" || { echo "fetch: $lock: cargo fetch failed"; rc=1; }
+  done
+  # shellcheck disable=SC2086 # the lock file paths have no spaces
+  echo "fetch: sources: $(sed -n 's/^source = "\([a-z]*+[^?#"]*\)[^#"]*\(#[0-9a-f]*\)\{0,1\}".*/\1\2/p' $locks | sort -u | tr '\n' ' ')"
+  local crates; crates=$(cd "$LAND_CARGO_HOME/registry/cache" 2>/dev/null && find . -name '*.crate' -print0 | LC_ALL=C sort -z | xargs -0r sha256sum)
+  echo "fetch: $(printf '%s' "$crates" | grep -c . ) registry crate files, sha256 over their sums $(printf '%s\n' "$crates" | sha256sum | cut -c1-64)"
+  echo "fetch: $(find "$LAND_CARGO_HOME/git/checkouts" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | wc -l) git checkouts"
+  return $rc
+}
+fetch_home > "$L/fetch.log" 2>&1 || { echo "fetch: the gate's CARGO_HOME could not be filled (see $L/fetch.log)"; tail -5 "$L/fetch.log"; exit 2; }
+grep -E '^fetch: ([0-9]+ registry|sources)' "$L/fetch.log" | cut -c1-200
 # The QEMU kernels, cached by the same inputs as CI's cache keys; built here when missing.
 kernel() { # <dir-name> <config> [--modules-off]
   # The modules-off kernel builds kernel/ in, so its key also holds kernel/'s tree hash.
@@ -158,7 +180,7 @@ part() { # <name> <key> <command...>: runs it unless already green for its key; 
 # (irq, pisp_fe, pisp_be, gadget). Gate 6-23, modules harness 24-27, modules-off 28-31.
 # The notes checks: what reads the notes, run every train (seconds).
 ( { scripts/check-boundaries.sh && python3 scripts/check-docs.py --list >/dev/null; } > "$L/notes.log" 2>&1; echo $? > "$L/notes.rc" ) &
-( part gate "$gate_key" gate_attempts "$L" bash -c 'CARGO_TARGET_DIR=$0/target CARGO_BUILD_JOBS=$3 BUSYBOX_DIR=$1 taskset -c $4 /usr/bin/time -o "$2/gate.time" -f "%e %U %S" timeout -k 30 $5 ./scripts/gate.sh; r=$?; [ $r = 124 -o $r = 137 ] && echo "lander: gate exceeded its bound of $5 s (killed)"; exit $r' "$W" "$LAND_BUSYBOX_DIR" "$L" "$LAND_JOBS_GATE" "$LAND_CPUS_GATE" "$GATE_BACKSTOP_S" ) &
+( part gate "$gate_key" gate_attempts "$L" bash -c 'CARGO_HOME=$6 CARGO_TARGET_DIR=$0/target CARGO_BUILD_JOBS=$3 BUSYBOX_DIR=$1 taskset -c $4 /usr/bin/time -o "$2/gate.time" -f "%e %U %S" timeout -k 30 $5 ./scripts/gate.sh; r=$?; [ $r = 124 -o $r = 137 ] && echo "lander: gate exceeded its bound of $5 s (killed)"; exit $r' "$W" "$LAND_BUSYBOX_DIR" "$L" "$LAND_JOBS_GATE" "$LAND_CPUS_GATE" "$GATE_BACKSTOP_S" "$LAND_CARGO_HOME" ) &
 qemu_part() { local d; d=$(kernel modules kernel.config) || return 1
   # LAND_SCRATCH: where the harness writes (its work dir and cargo target), when the stack's own disk is unwell.
   local sc=$LAND_SCRATCH; mkdir -p "$sc/qemu-tmp" "$sc/qemu-modules"
