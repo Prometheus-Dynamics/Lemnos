@@ -370,7 +370,7 @@ fn a_panic_in_a_package_is_contained_and_retried() {
 fn a_hang_in_a_package_returns_on_time_and_leaves_its_neighbour_running() {
     let loader = loaded();
     let quick = Options {
-        call_deadline: Duration::from_millis(100),
+        call_deadline: Duration::from_millis(500),
         ..Options::default()
     };
     let (host, clock) = host_on(SimBoard::new(), TWO, &loader.entries(), quick);
@@ -379,11 +379,11 @@ fn a_hang_in_a_package_returns_on_time_and_leaves_its_neighbour_running() {
     // The call gives up at its deadline, long before the driver comes back.
     let started = std::time::Instant::now();
     assert_eq!(
-        host.call(bad, method(4), &1000u32.to_le_bytes(), &mut [0; 8]),
+        host.call(bad, method(4), &1500u32.to_le_bytes(), &mut [0; 8]),
         Err(Status::TIMED_OUT)
     );
     assert!(
-        started.elapsed() < Duration::from_millis(800),
+        started.elapsed() < Duration::from_millis(1000),
         "{:?}",
         started.elapsed()
     );

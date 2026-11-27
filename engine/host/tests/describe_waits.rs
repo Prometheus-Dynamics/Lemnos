@@ -217,7 +217,7 @@ fn describe_and_a_value_call_wait_for_a_short_client_call_in_progress() {
 #[test]
 fn a_driver_that_never_comes_back_gives_the_typed_refusal_on_time() {
     let options = Options {
-        call_deadline: Duration::from_millis(100),
+        call_deadline: Duration::from_millis(500),
         ..Options::default()
     };
     let (host, _) = host(2, options);
@@ -237,7 +237,7 @@ fn a_driver_that_never_comes_back_gives_the_typed_refusal_on_time() {
         "{answer:?}"
     );
     assert!(
-        started.elapsed() < Duration::from_millis(400),
+        started.elapsed() < Duration::from_millis(1500),
         "{:?}",
         started.elapsed()
     );

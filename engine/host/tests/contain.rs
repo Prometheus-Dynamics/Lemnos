@@ -40,7 +40,7 @@ fn a_hang_returns_on_time_and_leaves_neighbours_running() {
     let (host, _) = host_with(COUNTERS, quick());
     let (bad, good) = (index(&host, "bad"), index(&host, "good"));
 
-    let args = 400u32.to_le_bytes();
+    let args = 1500u32.to_le_bytes();
     assert_eq!(
         host.call(bad, method(4), &args, &mut [0; 8]),
         Err(Status::TIMED_OUT)
@@ -57,13 +57,13 @@ fn a_hang_returns_on_time_and_leaves_neighbours_running() {
 fn a_hung_device_comes_back_once_the_stuck_call_returns() {
     let (host, clock) = host_with(COUNTERS, quick());
     let bad = index(&host, "bad");
-    let args = 200u32.to_le_bytes();
+    let args = 1500u32.to_le_bytes();
     assert_eq!(
         host.call(bad, method(4), &args, &mut [0; 8]),
         Err(Status::TIMED_OUT)
     );
 
-    std::thread::sleep(Duration::from_millis(250));
+    std::thread::sleep(Duration::from_millis(1500));
     clock.advance(Duration::from_secs(1));
     host.tick();
     assert_eq!(host.device("bad").unwrap().state, DeviceState::Running);
@@ -84,7 +84,7 @@ fn neighbours_on_one_bus_survive_a_hang_through_a_new_lane() {
     "#;
     let (host, _) = host_with(text, quick());
     let (bad, good) = (index(&host, "bad"), index(&host, "good"));
-    let args = 400u32.to_le_bytes();
+    let args = 1500u32.to_le_bytes();
     assert_eq!(
         host.call(bad, method(4), &args, &mut [0; 8]),
         Err(Status::TIMED_OUT)
@@ -319,20 +319,20 @@ fn a_deadline_a_refused_rebind_and_the_release_each_leave_a_warning() {
     lemnos_host::set_warning_sink(record_warning);
     let (host, clock) = host_with(COUNTERS, quick());
     let bad = index(&host, "bad");
-    let args = 400u32.to_le_bytes();
+    let args = 1500u32.to_le_bytes();
     assert_eq!(
         host.call(bad, method(4), &args, &mut [0; 8]),
         Err(Status::TIMED_OUT)
     );
     assert!(warned("device bad (driver fake-counter): the call "));
-    assert!(warned(" from the daemon ran past its 100 ms deadline"));
+    assert!(warned(" from the daemon ran past its 500 ms deadline"));
     // The stuck call still holds the old instance: the rebind is refused, and says so.
     clock.advance(Duration::from_secs(1));
     host.tick();
     assert!(warned("device bad (driver fake-counter): rebind refused"));
     assert_ne!(host.device("bad").unwrap().state, DeviceState::Running);
     // Once the call returns, the next rebind releases the old instance and says so.
-    std::thread::sleep(Duration::from_millis(450));
+    std::thread::sleep(Duration::from_millis(1500));
     clock.advance(Duration::from_secs(8));
     host.tick();
     assert!(warned("the abandoned call returned"));

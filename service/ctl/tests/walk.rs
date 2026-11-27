@@ -44,7 +44,7 @@ fn start(devices: &str, board: SimBoard) -> Running {
         drivers: lemnosd::builtin::drivers(),
         backend: Box::new(board),
         options: Options {
-            call_deadline: Duration::from_millis(200),
+            call_deadline: Duration::from_millis(500),
             ..Options::default()
         },
     };

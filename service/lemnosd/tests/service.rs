@@ -640,7 +640,7 @@ fn the_board_files_host_settings_reach_the_service_and_the_rest_keep_its_own() {
     assert_eq!(options.retry_first, Duration::from_millis(300));
     assert_eq!(options.retry_cap, Duration::from_secs(5));
     // Not set in the board file: what the service was started with.
-    assert_eq!(options.call_deadline, Duration::from_millis(200));
+    assert_eq!(options.call_deadline, Duration::from_millis(500));
 }
 
 #[test]

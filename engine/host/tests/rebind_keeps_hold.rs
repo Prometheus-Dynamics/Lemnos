@@ -492,10 +492,10 @@ fn overrun_and_rebind(host: &Host, clock: &SimClock, shared: &Shared, end: &Owne
         method: 1,
     };
     let mut reply = [0; 4];
-    let ms = 400u32.to_le_bytes();
+    let ms = 1500u32.to_le_bytes();
     assert!(host.call(index(host), method, &ms, &mut reply).is_err());
     // The call returns on its own; the bind after it finds the old instance free.
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(1500));
     let until = Instant::now() + Duration::from_secs(10);
     while state(host) != DeviceState::Running || shared.binds.load(Ordering::Relaxed) < n + 1 {
         assert!(Instant::now() < until, "no rebind: {:?}", state(host));
@@ -522,7 +522,7 @@ fn overrun_and_rebind(host: &Host, clock: &SimClock, shared: &Shared, end: &Owne
 
 fn short_deadline() -> Options {
     Options {
-        call_deadline: Duration::from_millis(100),
+        call_deadline: Duration::from_millis(500),
         ..Options::default()
     }
 }

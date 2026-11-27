@@ -440,3 +440,67 @@ version failed 1 of 10 with `Late` and the fixed one passed 10 of 10.
 
 Run 3 was clean, and left nothing in its TMPDIR. Runs 1 to 3 were of this branch on `next`; run 4
 is of the whole stack the train lands.
+
+## Short call deadlines under load
+
+Why: a driver call or tick that runs past `Options::call_deadline` is judged hung. Tests that set a
+short deadline, to make an intended hang trip it quickly, can see an ordinary device judged hung when
+the machine is loaded. The same goes for a test's own short wall bound on a hung or refused path.
+Keep-alive (0837c60f) was the first fix; this sweeps the rest.
+
+How: every `call_deadline` in test code and every test wall bound on a hung or refused path was read.
+Test deadlines at or under 750 ms were judged. Ordinary calls or ticks that race a deadline, or a wall
+bound on that path, are RISK; parse-only or configuration-read tests are SAFE. A RISK deadline now sits
+at 500 ms, with each intended hang at 3x it (1500 ms) and each wait past a hang at 1500 ms.
+
+Proof rig: each test runs 20 times on the old build and 20 on the new, alone on core 31 with
+`CPUQuota` on the test unit as the only limit (no competing load). The quota steps down (10, 5, 3, 2,
+1, 0.5, 0.2%) until the old build fails; the new build then runs 20 at that same quota. A failure
+counts only if it matches the signature: NO_DEVICE (-19), TimedOut (-110), an unexpected rebind or
+hang, or the wall-bound message. Runs are counted per side.
+
+| site | deadline before→after | hang or bound before→after | verdict | proof (old x/20 fail, new y/20 fail) |
+|---|---|---|---|---|
+| engine/host/tests/common/mod.rs:46 `quick()`, shared (contain, degraded, link_bind) | 100→500 ms | contain hangs 200/400 → 1500; sleeps 250/450 → 1500 | RISK | contain, 0.5%: old 4 fail (NO_DEVICE -19 on the hung device and its neighbour), new 0; degraded, 1%: old 2 fail ("retrying", bind judged failed), new 0; link_bind: no rig, see wall times |
+| engine/host/tests/describe_waits.rs:218 | 100→500 ms | describe refusal bound 400→1500 ms | RISK | 0.5%: old 4 fail ("the driver never got inside": the hung call judged before it entered the driver), new 0 |
+| engine/host/tests/overrun_line.rs:102 (and the sleeper naps) | 100→500 ms | naps 300/600 → 1500; refused-at-once wall bound 50→400 ms | RISK | 0.5%: old 11 fail ("the work waited ~100 ms" against the 50 ms bound), new 0. At 1%: old 0 fail (not reproduced there) |
+| engine/host/tests/rebind_keeps_hold.rs:523 (short_deadline) | 100→500 ms | hang 400→1500; sleep after 500→1500 | RISK | 0.5%: old 3 fail (Status -110 and -19), new 0 |
+| engine/package/tests/package.rs:373 | 100→500 ms | hang 1000→1500; return bound 800→1000 ms | RISK | 1%: old 0 fail, new 0 (not reproduced at 1%). 0.5%: old 10 of 20 time out at 120 s, new 17 of 20 time out; no panic on either side, so no deadline signature, not counted |
+| service/ctl/tests/show.rs:62 | 200→500 ms | none (ordinary calls) | RISK | 0.5%: old 2 fail (panel text "Board power", not a deadline signature), new 0. Verdict stands on reasoning |
+| service/ctl/tests/walk.rs:47 | 200→500 ms | none | RISK | 1%: old 3 fail (same panel text mismatch, not a deadline signature), new 0. Verdict stands on reasoning |
+| service/orion/tests/description_bounds.rs:63 | 200→500 ms | none | RISK | 1%: old 4 fail (describe Refused -110 TimedOut), new 0 |
+| service/lemnosd/tests/common/mod.rs:125, shared by all lemnosd tests using start_board_logged | 200→500 ms | usb_endpoints stall 600→1500; service.rs:643 default-check 200→500 | RISK | usb_endpoints, 0.5%: old 8 fail (unexpected rebind: "parks (2, 0), configured true"), new 0. Full lemnosd suite passes (265) |
+| engine/host/src/board/mod.rs:1881 (30 ms), :1890 (500 ms) | unchanged | none (parse and apply only) | SAFE | none: no host call, no wall bound |
+| service/ctl/tests/users_only.rs:44 | unchanged, 500 ms | none | at aim, no change | not rigged (old and new binaries are the same) |
+| service/ctl/tests/ctl.rs:432 (500 ms) | unchanged | none (validate never connects) | SAFE | none |
+| engine/host/tests/call_deadline.rs:77 (750 ms) | unchanged | none (the value is read back) | SAFE | not rigged (binary unchanged) |
+| engine/host/tests/contain.rs:228 (750 ms) | unchanged | none (config read-back, refused bind) | SAFE | none |
+
+Not in scope: client.rs refusal bounds (a missing socket, not the host's hung path); describe_job.rs:129
+(500 ms bound while a job is open, default deadline, not a hung path); deadlines of 1 s and above.
+
+Failure seen in passing: `service/orion/tests/pushes.rs` `a_device_given_a_place_takes_its_file_as_before`
+failed once in a full `lemnos-orion` run under load ("slots doesn't take 5 bytes now: refused (-28)"). It
+passed 3 of 3 when run alone. pushes.rs uses no changed helper, so it is not counted as a regression here.
+
+Whole-binary wall time, one run each, old then new, run one at a time with no competing load (load1 73-80
+throughout, from other work on the machine):
+
+| test binary | old s | new s |
+|---|---|---|
+| describe_waits | 0.13 | 0.53 |
+| overrun_line | 0.74 | 3.56 |
+| rebind_keeps_hold | 1.27 | 4.66 |
+| contain | 0.60 | 2.35 |
+| degraded | 0.35 | 0.36 |
+| link_bind | 0.42 | 0.42 |
+| package | 2.93 | 2.15 |
+| show | 0.86 | 0.87 |
+| walk | 0.22 | 0.24 |
+| description_bounds | 0.23 | 0.19 |
+| usb_endpoints | 1.65 | 3.96 |
+| lemnosd service | 1.75 | 1.73 |
+
+The added wall is in seconds for overrun_line, rebind_keeps_hold, contain and usb_endpoints (the intended
+hangs and the sleeps past them now run 1.5 s, not 0.2 to 0.6 s). Each is well under the one-minute rule
+on its own; the other binaries are unchanged within noise.
