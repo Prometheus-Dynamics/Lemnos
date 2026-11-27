@@ -29,8 +29,12 @@ starved red could land as green on the second run. The gate now runs once. In `s
 - A stalled step's log has each process's state, run-queue wait, wchan, system call and where that call's first
   file descriptor leads. For example, cargo waiting on a build lock:
   `pid N (cargo) state S, runnable wait 0.8 s, wchan locks_lock_inode_wait, syscall 73 on fd 8 -> .../target/debug/.cargo-lock`.
-- `testing/gate-bounds/check.sh`: 9 of 9 cases, starved-step now wants exit 1 with its evidence. It had four
-  competitors on its core; now two, the most allowed.
+- `testing/gate-bounds/check.sh`: 8 of 8 cases (the hang case also checks the stall evidence). starved-step now wants
+  exit 1 with its evidence. It used to start busy-loop competitors on its core, which is invented load and is not
+  allowed. Now nothing burns CPU for it: the cases about slowness are held to a CPU quota on the step alone, in a
+  systemd scope, at 10%, or 3% for the starved case. A throttled process waits runnable, and its schedstat shows
+  that wait as it would for a busy CPU (a probe at 5%: 0.1 s run, 1.9 s waited in 2 s). The cases about a hang or
+  a CPU budget run unthrottled. 55 s, 17 CPU-s, nice 10, load 70 to 83.
 
 ## The suspects
 
