@@ -7,6 +7,7 @@
 #   DIR/tools/slot-run.sh
 #   DIR/cc-data/         the consumer data (consumers/), each consumer's checkout found by its pinned commit
 #   DIR/bin/land-<rev8>  with --pin: the lander scripts at REV, which land.sh is run from
+#   DIR/cache/cargo-home the gate's own CARGO_HOME: its config.toml (offline, no automatic cache cleaning)
 #   DIR/state, scratch, tmp, cc-work, and the caches under DIR/cache: qk (QEMU kernels), tarballs, busybox.
 #
 # The caches start empty and fill as trains run: a missing cache costs time (a kernel or BusyBox build,
@@ -39,7 +40,7 @@ put() {
   [ -f "$dst" ] && echo "setup: $dst changed:" && { diff -u "$dst" "$tmp" | sed -n '3,40p'; } || echo "setup: $dst written"
   mv -f -- "$tmp" "$dst"; changed=$((changed + 1))
 }
-mkdir -p "$B"/{state,scratch,tmp,cc-work,guard-bin,tools,bin,cc-data/fixes,cache/qk,cache/tarballs,cache/busybox}
+mkdir -p "$B"/{state,scratch,tmp,cc-work,guard-bin,tools,bin,cc-data/fixes,cache/qk,cache/tarballs,cache/busybox,cache/cargo-home}
 
 # The env file.
 { echo "# Written by scripts/land/setup from scripts/land/machine.env: run setup again instead of editing it."
@@ -54,11 +55,18 @@ mkdir -p "$B"/{state,scratch,tmp,cc-work,guard-bin,tools,bin,cc-data/fixes,cache
   echo "LAND_QK_DIR=$B/cache/qk"
   echo "LAND_KERNEL_TARBALLS=$B/cache/tarballs"
   echo "LAND_BUSYBOX_DIR=$B/cache/busybox"
+  echo "LAND_CARGO_HOME=$B/cache/cargo-home"
   echo "LAND_CC_WORK=$B/cc-work"
   echo "LAND_CC_CACHE=$B/state/cc-cache"
   echo "LAND_CC_DATA=$B/cc-data"
   grep -E '^LAND_[A-Z_]+=' "$HERE/machine.env"
 } | put - "$B/land.env"
+
+# The gate's own CARGO_HOME. Offline: the gate never downloads (each train fetches first, l-train.sh). Cargo's
+# automatic cleaning of the package cache never runs, so no gate step takes the cache's lock for writing.
+# Neither waits on any other program's lock on ~/.cargo, which the gate's stall rule could not tell from a hang.
+printf '%s\n' "# Written by scripts/land/setup: the gate's own CARGO_HOME." "[net]" "offline = true" "[cache]" \
+  'auto-clean-frequency = "never"' | put - "$B/cache/cargo-home/config.toml"
 
 # The guards and the slot pool's wrapper.
 for g in "$HERE"/guard/*; do put "$g" "$B/guard-bin/$(basename "$g")" 0755; done
