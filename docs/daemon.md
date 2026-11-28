@@ -94,7 +94,7 @@ four fake drivers the simulated board uses.
 The shipped form is a small static binary:
 
 ```sh slow
-cargo build -p lemnosd -p lemnos-ctl --profile service
+scripts/service-build.sh -p lemnosd -p lemnos-ctl
 ```
 
 For a board, add `--target aarch64-unknown-linux-musl` (after `rustup target add` for it). A

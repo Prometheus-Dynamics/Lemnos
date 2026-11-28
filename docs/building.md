@@ -24,12 +24,24 @@ cargo metadata --format-version 1 >/dev/null
 Then commit the `Cargo.lock` that run changed. It keeps every version already locked and adds only
 what the manifests newly need. Other cargo calls in the gate leave a consistent lock unchanged.
 
+## The builder's paths
+
+Build the shipped programs with `scripts/service-build.sh` (it runs `cargo build --locked --profile
+service` with the arguments given). It maps the cargo home to `/cargo` and the checkout to `/lemnos`
+in every path rustc writes into a binary (the panic locations of registry, git and vendored crates),
+so the bytes are the same whoever builds them, in whatever home and directory. A plain `cargo build`
+writes the builder's home directory into four of the seven programs. The script refuses when
+`RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` is set, since either would replace the maps and the target
+link flags below. `scripts/check-shipped-paths.sh [--target <triple>]` builds the seven programs in
+two cargo homes, compares them byte for byte and looks for both homes' paths and the checkout's; CI
+runs it.
+
 ## Vendored, offline build
 
 ```text
 cargo vendor --locked vendor/ > vendor-config.toml
 # append vendor-config.toml to .cargo/config.toml (keep the repository's target settings)
-cargo build --locked --offline --profile service --target <triple> -p <package>
+scripts/service-build.sh --offline --target <triple> -p <package>
 ```
 
 `cargo vendor` also vendors the Orion git dependency of `service/orion`, pinned by `rev` in its

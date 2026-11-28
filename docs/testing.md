@@ -302,7 +302,7 @@ grep -l 'drivers/bmi088' testing/board-runs/*.md
 2. **Build on a solid-state disk**, for the board:
 
    ```sh needs:the-board-target-installed
-   cargo build -p lemnosd -p lemnos-ctl --profile service --target aarch64-unknown-linux-musl
+   scripts/service-build.sh -p lemnosd -p lemnos-ctl --target aarch64-unknown-linux-musl
    ```
 
    Use a glibc target when the run needs driver packages.
