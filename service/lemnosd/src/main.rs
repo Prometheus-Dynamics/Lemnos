@@ -7,7 +7,6 @@
 //! loaded and what was refused goes to the error output, and to `lemnos-ctl packages`. A
 //! statically linked build loads none, and says so.
 
-use std::io::Write;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -42,7 +41,7 @@ fn soc_map(board: &lemnos_host::board::BoardFile) -> Option<lemnos_devtree::SocM
     {
         Ok(map) => Some(map),
         Err(error) => {
-            let _ = writeln!(std::io::stderr(), "lemnosd: live tree not checked: {error}");
+            lemnos_linux_sys::stderr::line(&format!("lemnosd: live tree not checked: {error}"));
             None
         }
     }
@@ -68,19 +67,16 @@ fn report_live_tree(board: &lemnos_host::board::BoardFile, map: Option<&lemnos_d
         regulators: std::path::Path::new("/sys/class/regulator"),
     };
     let findings = lemnos_devtree::check(board, map, &live);
-    // One write per line (see the root phase's claim lines): stderr is unbuffered.
     for problem in &findings.problems {
-        let line = format!("lemnosd: live tree: {problem}\n");
-        let _ = std::io::stderr().write_all(line.as_bytes());
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: live tree: {problem}"));
     }
     for note in &findings.notes {
-        let line = format!("lemnosd: live tree note: {note}\n");
-        let _ = std::io::stderr().write_all(line.as_bytes());
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: live tree note: {note}"));
     }
 }
 
 fn complain(text: &str) -> ExitCode {
-    let _ = writeln!(std::io::stderr(), "lemnosd: {text}");
+    lemnos_linux_sys::stderr::line(&format!("lemnosd: {text}"));
     ExitCode::FAILURE
 }
 
@@ -155,12 +151,11 @@ fn test_boot_roots() {
         if let Ok(mut held) = lemnos_slot_store::boot_node::TEST_ROOTS.lock() {
             *held = Some(roots);
         }
-        let _ = writeln!(std::io::stderr(), "lemnosd: test boot roots {value}");
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: test boot roots {value}"));
     } else {
-        let _ = writeln!(
-            std::io::stderr(),
+        lemnos_linux_sys::stderr::line(&format!(
             "lemnosd: LEMNOSD_TEST_BOOT_ROOTS is not CHOSEN:SYS:DEV: {value}"
-        );
+        ));
     }
 }
 
@@ -186,9 +181,8 @@ fn main() -> ExitCode {
         }
         lemnosd::start_trace_line("exec");
     } else if stop_after.is_some() {
-        let _ = writeln!(
-            std::io::stderr(),
-            "lemnosd: LEMNOSD_STOP_AFTER is honoured only with LEMNOSD_START_TRACE: not stopping"
+        lemnos_linux_sys::stderr::line(
+            "lemnosd: LEMNOSD_STOP_AFTER is honoured only with LEMNOSD_START_TRACE: not stopping",
         );
     }
     // The host's warnings are journal lines at warning priority, with or without the start trace.
@@ -261,7 +255,7 @@ fn main() -> ExitCode {
     let mut drivers = drivers();
     let refused = lemnos_host::settings_refusals(&board_file, &drivers);
     for (_, reason) in &refused {
-        let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: {board}: not started: {reason}"));
     }
     // The board's SoC map: the root phase claims the module's nodes from it, and the live tree is
     // checked against it after that. None under --sim, which touches no hardware.
@@ -313,10 +307,10 @@ fn main() -> ExitCode {
     }
     // A device the root phase could not set up is refused, and the daemon starts without it.
     for line in &root.warnings {
-        let _ = writeln!(std::io::stderr(), "lemnosd: {board}: {line}");
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: {board}: {line}"));
     }
     for (_, reason) in &root.refused {
-        let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: {board}: not started: {reason}"));
     }
     privilege::refuse(&mut board_file, &root.refused);
     // Without a root phase, the gadgets' files the service manager kept are taken here; any other
@@ -372,7 +366,7 @@ fn main() -> ExitCode {
             let mut board = linux_board(gadget_helper.as_ref());
             if let Some(store) = store {
                 for line in board.keep_gadgets(store, gadgets_given) {
-                    let _ = writeln!(std::io::stderr(), "lemnosd: {line}");
+                    lemnos_linux_sys::stderr::line(&format!("lemnosd: {line}"));
                 }
                 gadget_parking = Some(board.gadget_parking());
             }
@@ -398,7 +392,7 @@ fn main() -> ExitCode {
     // has is let go here, which ends that hold.
     if let Some(ends) = &ends {
         for line in ends.let_go_untaken() {
-            let _ = writeln!(std::io::stderr(), "lemnosd: {line}");
+            lemnos_linux_sys::stderr::line(&format!("lemnosd: {line}"));
         }
     }
     // Hints only: without them devices still bind, when their retries come round.

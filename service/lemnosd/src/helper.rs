@@ -680,7 +680,7 @@ impl Client {
                         verb.word(),
                         self.name_of(index)
                     );
-                    let _ = writeln!(io::stderr(), "lemnosd: {why}");
+                    lemnos_linux_sys::stderr::line(&format!("lemnosd: {why}"));
                     return Err(io::Error::new(io::ErrorKind::Interrupted, why));
                 }
                 // An answer to a request the daemon gave up on, the rest of a line cut by a
@@ -693,13 +693,12 @@ impl Client {
                     ) =>
                 {
                     silent += self.wait;
-                    let _ = writeln!(
-                        io::stderr(),
+                    lemnos_linux_sys::stderr::line(&format!(
                         "lemnosd: gadget {}: the gadget helper has not answered {} for {} s: still waiting (it may still carry it out, so it is not asked again)",
                         self.name_of(index),
                         verb.word(),
                         silent.as_secs()
-                    );
+                    ));
                 }
                 Err(error) => return Err(self.gone(&error)),
             }
@@ -724,30 +723,27 @@ impl Client {
                 "the gadget helper's reply to {} is not in its vocabulary: `{answer}`",
                 verb.word()
             );
-            let _ = writeln!(
-                io::stderr(),
+            lemnos_linux_sys::stderr::line(&format!(
                 "lemnosd: gadget {}: {why}",
                 self.name_of(index)
-            );
+            ));
             return Err(io::Error::other(why));
         }
         if let Some(rest) = answer.strip_prefix("fail ") {
             let (errno, reason) = rest.split_once(' ').unwrap_or((rest, ""));
             let errno: i32 = errno.parse().unwrap_or(EIO);
-            let _ = writeln!(
-                io::stderr(),
+            lemnos_linux_sys::stderr::line(&format!(
                 "lemnosd: gadget {}: {} failed: {reason}",
                 self.name_of(index),
                 verb.word()
-            );
+            ));
             return Err(io::Error::from_raw_os_error(errno));
         }
-        let _ = writeln!(
-            io::stderr(),
+        lemnos_linux_sys::stderr::line(&format!(
             "lemnosd: gadget {}: {} {answer}",
             self.name_of(index),
             verb.word()
-        );
+        ));
         Err(io::Error::other(format!("the gadget helper {answer}")))
     }
 
@@ -756,7 +752,7 @@ impl Client {
         let why = format!(
             "the gadget helper's parent is gone ({error}): the USB gadget cannot be set up again until the daemon restarts"
         );
-        let _ = writeln!(io::stderr(), "lemnosd: {why}");
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: {why}"));
         self.dead = Some(why.clone());
         io::Error::new(io::ErrorKind::BrokenPipe, why)
     }

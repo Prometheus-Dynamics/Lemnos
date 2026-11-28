@@ -164,7 +164,7 @@ impl Core {
         match &self.log {
             Some(sink) => sink(line),
             None => {
-                let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{line}\n"));
+                lemnos_linux_sys::stderr::line(line);
             }
         }
     }
@@ -455,7 +455,7 @@ pub fn notify_for_gadgets() -> Option<Arc<dyn lemnos_linux::FdStore>> {
 /// A host warning as a journal line at warning priority: systemd reads a leading `<4>` as the
 /// level when the unit's stderr is the journal (`SyslogLevelPrefix`, on by default).
 pub fn warning_line(text: &str) {
-    let _ = io::Write::write_fmt(&mut io::stderr(), format_args!("<4>lemnosd: {text}\n"));
+    lemnos_linux_sys::stderr::line(&format!("<4>lemnosd: {text}"));
 }
 
 /// One line of the start trace, when it is on: seconds on CLOCK_MONOTONIC (the clock the boot path's own stamps
@@ -467,17 +467,11 @@ pub fn start_trace_line(event: &str) {
         return;
     }
     let now = lemnos_linux_sys::time::monotonic_now().map_or(0.0, |d| d.as_secs_f64());
-    let _ = io::Write::write_fmt(
-        &mut io::stderr(),
-        format_args!("lemnosd: start trace: {now:.6} {event}\n"),
-    );
+    lemnos_linux_sys::stderr::line(&format!("lemnosd: start trace: {now:.6} {event}"));
     // The line is written (stderr is unbuffered) before the stop, so a reader sees it whatever it does next.
     let stopping = STOP_AFTER.get().is_some_and(|stop| stop.ends(event));
     if stopping && let Err(error) = lemnos_linux_sys::signal::stop_self() {
-        let _ = io::Write::write_fmt(
-            &mut io::stderr(),
-            format_args!("lemnosd: stopping after {event} failed: {error}\n"),
-        );
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: stopping after {event} failed: {error}"));
     }
 }
 
