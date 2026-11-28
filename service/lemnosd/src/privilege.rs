@@ -82,33 +82,29 @@ pub const STEPS: &[Step] = &[
 /// that is not there yet (`NotFound`) does not refuse: the device's driver binds it under the failure
 /// rule, and the hotplug rule grants its attributes when they appear (packaging/udev/70-lemnos.rules).
 fn pwm_channels(cx: &Context<'_>) -> io::Result<Refusals> {
-    use std::io::Write;
     let linux = lemnos_linux::LinuxBoard::new();
     let mut refused = Vec::new();
     for device in cx.board.devices.iter().filter(|d| d.refused.is_none()) {
         for (need, name) in &device.uses {
             match linux.grant_pwm_before_drop(name, (0, cx.gid)) {
                 Ok(Some(line)) => {
-                    let _ = writeln!(
-                        io::stderr(),
+                    lemnos_linux_sys::stderr::line(&format!(
                         "lemnosd: root phase: {}: {need}: {line}",
                         device.id
-                    );
+                    ));
                 }
                 Ok(None) => {}
                 Err((io::ErrorKind::NotFound, why)) => {
-                    let _ = writeln!(
-                        io::stderr(),
+                    lemnos_linux_sys::stderr::line(&format!(
                         "lemnosd: root phase: {}: {need}: not there yet, bound when it is: {why}",
                         device.id
-                    );
+                    ));
                 }
                 Err((_, why)) => {
-                    let _ = writeln!(
-                        io::stderr(),
+                    lemnos_linux_sys::stderr::line(&format!(
                         "lemnosd: root phase: {}: {need}: {why}",
                         device.id
-                    );
+                    ));
                     refused.push((device.id.clone(), format!("{need}: {why}")));
                 }
             }
@@ -124,7 +120,6 @@ fn pwm_channels(cx: &Context<'_>) -> io::Result<Refusals> {
 /// rule grants its attributes when they appear. Any other failure refuses its device by name; the
 /// daemon keeps running and the others start.
 fn hwmon_fans(cx: &Context<'_>) -> io::Result<Refusals> {
-    use std::io::Write;
     let mut refused = Vec::new();
     for device in cx
         .board
@@ -137,35 +132,31 @@ fn hwmon_fans(cx: &Context<'_>) -> io::Result<Refusals> {
         });
         match granted {
             Ok(Ok(dir)) => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd: root phase: {}: fan: {}: granted to 0:{}",
                     device.id,
                     dir.display(),
                     cx.gid
-                );
+                ));
             }
             Ok(Err(why)) if why.kind() == io::ErrorKind::NotFound => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd: root phase: {}: fan: not there yet, bound when it is: {why}",
                     device.id
-                );
+                ));
             }
             Ok(Err(why)) => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd: root phase: {}: fan: {why}",
                     device.id
-                );
+                ));
                 refused.push((device.id.clone(), format!("fan: {why}")));
             }
             Err(why) => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd: root phase: {}: fan: its settings can't be read: {why}",
                     device.id
-                );
+                ));
                 refused.push((
                     device.id.clone(),
                     format!("fan: its settings can't be read: {why}"),
@@ -198,14 +189,13 @@ pub const ROOT_PHASES: &[(&str, RootPhase)] = &[
 /// name after the drop, and its health says so. Run after the gadget helper is forked, so the
 /// helper (a fork with no exec, which close-on-exec does not cover) never holds the files.
 fn driver_root_phases(cx: &Context<'_>) -> io::Result<Refusals> {
-    use std::io::Write;
     for device in cx.board.devices.iter().filter(|d| d.refused.is_none()) {
         let Some((_, phase)) = ROOT_PHASES.iter().find(|(name, _)| *name == device.driver) else {
             continue;
         };
         let line = lemnos_host::with_device_config(cx.board, device, phase)
             .unwrap_or_else(|why| format!("its settings can't be read: {why}"));
-        let _ = writeln!(io::stderr(), "lemnosd: root phase: {}: {line}", device.id);
+        lemnos_linux_sys::stderr::line(&format!("lemnosd: root phase: {}: {line}", device.id));
     }
     Ok(Vec::new())
 }
@@ -244,7 +234,6 @@ pub fn claim_module_nodes(
     map: Option<&lemnos_devtree::SocMap>,
     platform: &Path,
 ) {
-    use std::io::Write;
     let given: Vec<_> = board
         .hardware
         .iter()
@@ -254,9 +243,8 @@ pub fn claim_module_nodes(
         return;
     }
     let Some(map) = map else {
-        let _ = writeln!(
-            io::stderr(),
-            "lemnosd: root phase: module nodes: not claimed: the board's SoC map can't be read (see the live tree line)"
+        lemnos_linux_sys::stderr::line(
+            "lemnosd: root phase: module nodes: not claimed: the board's SoC map can't be read (see the live tree line)",
         );
         return;
     };
@@ -294,10 +282,9 @@ pub fn claim_module_nodes(
             },
         };
         let label = hardware.name.as_deref().unwrap_or(&hardware.controller);
-        // One write per line: stderr is unbuffered, and a line formatted in pieces can be split in
-        // the journal by another thread's write between them.
-        let text = format!("lemnosd: root phase: module node {label}: {line}\n");
-        let _ = io::stderr().write_all(text.as_bytes());
+        lemnos_linux_sys::stderr::line(&format!(
+            "lemnosd: root phase: module node {label}: {line}"
+        ));
     }
 }
 
@@ -318,7 +305,6 @@ fn hold_keepalive_nodes(
     linux: &lemnos_linux::LinuxBoard,
     stored: &mut Vec<std::fs::File>,
 ) -> Vec<std::path::PathBuf> {
-    use std::io::Write;
     let mut fed = Vec::new();
     for device in board
         .devices
@@ -328,12 +314,10 @@ fn hold_keepalive_nodes(
         for (need, name) in &device.uses {
             match linux.hold_before_drop(name, stored) {
                 Ok(Some(hold)) => {
-                    let _ = writeln!(
-                        io::stderr(),
+                    lemnos_linux_sys::stderr::line(&format!(
                         "lemnosd: root phase: {}: {need}: {}",
-                        device.id,
-                        hold.line
-                    );
+                        device.id, hold.line
+                    ));
                     let event = if hold.fed {
                         format!("root phase: {} fed", device.id)
                     } else {
@@ -346,11 +330,10 @@ fn hold_keepalive_nodes(
                 }
                 Ok(None) => {}
                 Err(why) => {
-                    let _ = writeln!(
-                        io::stderr(),
+                    lemnos_linux_sys::stderr::line(&format!(
                         "lemnosd: root phase: {}: {need}: {why}",
                         device.id
-                    );
+                    ));
                 }
             }
         }
@@ -363,32 +346,28 @@ fn hold_keepalive_nodes(
 /// its node by name, as a BusyBox init's does. A store that refuses a descriptor is named, and the
 /// node is then opened by name at a restart, which feeds it.
 fn keep_in_store(fed: &[std::path::PathBuf], notifier: &crate::notify::Notifier) {
-    use std::io::Write;
     for (path, file) in lemnos_linux::held_watchdogs() {
         if !fed.contains(&path) {
             continue;
         }
         match notifier.store(WATCHDOG_STORE_NAME, std::os::fd::AsFd::as_fd(&file)) {
             Ok(true) => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd: root phase: {}: kept in the service's descriptor store, for a restart to take back",
                     path.display()
-                );
+                ));
             }
             Ok(false) => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd: root phase: {}: not kept: no service manager; a restart opens the node by name",
                     path.display()
-                );
+                ));
             }
             Err(error) => {
-                let _ = writeln!(
-                    io::stderr(),
+                lemnos_linux_sys::stderr::line(&format!(
                     "lemnosd: root phase: {}: not kept in the service's descriptor store ({error}); a restart opens the node by name",
                     path.display()
-                );
+                ));
             }
         }
     }
@@ -470,7 +449,6 @@ pub fn start(
     helper: bool,
     before_drop: &dyn Fn(),
 ) -> Result<Started, String> {
-    use std::io::Write;
     let (uid, gid) = resolve(request)?;
     let cx = Context {
         board,
@@ -498,9 +476,8 @@ pub fn start(
     before_drop();
     let fed = hold_keepalive_nodes(board, &lemnos_linux::LinuxBoard::new(), &mut stored);
     for file in stored.drain(..) {
-        let _ = writeln!(
-            io::stderr(),
-            "lemnosd: root phase: refused a stored watchdog descriptor: it is not a character device with a keep-alive node's device number; closed, and a node not adopted is opened by name"
+        lemnos_linux_sys::stderr::line(
+            "lemnosd: root phase: refused a stored watchdog descriptor: it is not a character device with a keep-alive node's device number; closed, and a node not adopted is opened by name",
         );
         drop(file);
     }
