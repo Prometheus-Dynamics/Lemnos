@@ -72,8 +72,11 @@ reach = load("test-reach.py")
 elfkey = load("elf-alloc-key.py")
 
 
-def off():
-    return os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("LEMNOS_TEST_REUSE") == "0"
+def off(env=None):
+    """Whether reuse is off: on CI, or asked off. Read from ENV, the environment the plan is for
+    (the process's when none is given)."""
+    env = os.environ if env is None else env
+    return env.get("GITHUB_ACTIONS") == "true" or env.get("LEMNOS_TEST_REUSE") == "0"
 
 
 def file_hash(path):
@@ -153,7 +156,7 @@ def plan(listing, commit, out, root=ROOT, classes=None, executables=None, env=No
         if not any(suite["package-name"] == pkg for suite in listing["rust-suites"].values()):
             continue  # no tests: nothing runs, nothing is reused
         c = classes.get(pkg)
-        if c is None or c["reasons"] or off():
+        if c is None or c["reasons"] or off(env):
             ran.append(pkg)
             continue
         key = package_key(shared, binaries.get(pkg, []), c["inputs"])
@@ -169,7 +172,7 @@ def plan(listing, commit, out, root=ROOT, classes=None, executables=None, env=No
         if reused:
             f.write("not (" + " | ".join(f"package(={p})" for p, _ in reused) + ")\n")
     with open(os.path.join(out, "run"), "w") as f:
-        if not off():
+        if not off(env):
             f.write(f"{records}\n{commit}\n")
             for pkg, key in sorted(keys.items()):
                 f.write(f"{pkg} {key}\n")
@@ -226,7 +229,8 @@ def self_test():
         listing = {"rust-build-meta": {"target-directory": target},
                    "rust-suites": {p: {"package-name": p, "binary-id": p, "binary-path": bins[p]} for p in "abc"}}
         records = os.path.join(tmp, "records")
-        # A fixed PATH: the plants never depend on the PATH of whoever runs them.
+        # A fixed environment: the plants never depend on the PATH, CI or reuse setting of whoever
+        # runs them (on CI, GITHUB_ACTIONS turned reuse off for every plant: the red of c4fba27d).
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LEMNOS_TEST_RAM_DIR": "/somewhere"}
         out = os.path.join(tmp, "out")
 
@@ -280,14 +284,11 @@ def self_test():
                 go("c5", dict(env, PATH=f"/usr/bin:{fixed}"))
             except PerRunValue as e:
                 failures.append(f"a fixed PATH entry refused: {e}")
-        os.environ["GITHUB_ACTIONS"] = "true"
-        try:
-            check("on CI", go("c6"), [], ["a", "b", "c"])
-            with open(os.path.join(out, "run")) as f:
-                if f.read():
-                    failures.append("on CI the run still lists keys to record")
-        finally:
-            del os.environ["GITHUB_ACTIONS"]
+        check("on CI", go("c6", dict(env, GITHUB_ACTIONS="true")), [], ["a", "b", "c"])
+        with open(os.path.join(out, "run")) as f:
+            if f.read():
+                failures.append("on CI the run still lists keys to record")
+        check("asked off", go("c6", dict(env, LEMNOS_TEST_REUSE="0")), [], ["a", "b", "c"])
     for f in failures:
         print(f"test-reuse self-test: FAIL {f}", file=sys.stderr)
     print(f"test-reuse self-test: {'FAILED' if failures else 'passed'} ({len(failures)} failed)")
