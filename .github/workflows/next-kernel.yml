@@ -47,6 +47,16 @@ jobs:
       # toolchain (and so its rust-src) for every command in this job.
       - run: echo "RUSTUP_TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_ENV"
       - run: rustc -vV && rustup component list --installed | grep rust-src
+      # The same pin as the Next workflow builds with (rust-toolchain.toml), in the checkout and as
+      # RUSTUP_TOOLCHAIN for the kernel's directory, or the job stops.
+      - name: The active rustc is the pin
+        run: |
+          pin=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          here=$(rustc -vV | sed -n 's/^release: //p')
+          kernel=$(cd / && rustc -vV | sed -n 's/^release: //p')
+          rustup toolchain list
+          [ "$here" = "$pin" ] && [ "$kernel" = "$pin" ] && [ "$RUSTUP_TOOLCHAIN" = "$pin" ] || {
+            echo "::error::rustc $here (outside the checkout $kernel, RUSTUP_TOOLCHAIN $RUSTUP_TOOLCHAIN), rust-toolchain.toml pins $pin"; exit 1; }
       # bindgen loads libclang from the clang package's directory: name it.
       - run: echo "LIBCLANG_PATH=$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | sort -V | tail -1)")" >> "$GITHUB_ENV"
       # bindgen-cli is cached as the binary, keyed on its version: no cargo install on a warm run.
@@ -110,6 +120,16 @@ jobs:
       # toolchain (and so its rust-src) for every command in this job.
       - run: echo "RUSTUP_TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_ENV"
       - run: rustc -vV && rustup component list --installed | grep rust-src
+      # The same pin as the Next workflow builds with (rust-toolchain.toml), in the checkout and as
+      # RUSTUP_TOOLCHAIN for the kernel's directory, or the job stops.
+      - name: The active rustc is the pin
+        run: |
+          pin=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          here=$(rustc -vV | sed -n 's/^release: //p')
+          kernel=$(cd / && rustc -vV | sed -n 's/^release: //p')
+          rustup toolchain list
+          [ "$here" = "$pin" ] && [ "$kernel" = "$pin" ] && [ "$RUSTUP_TOOLCHAIN" = "$pin" ] || {
+            echo "::error::rustc $here (outside the checkout $kernel, RUSTUP_TOOLCHAIN $RUSTUP_TOOLCHAIN), rust-toolchain.toml pins $pin"; exit 1; }
       # bindgen loads libclang from the clang package's directory: name it.
       - run: echo "LIBCLANG_PATH=$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | sort -V | tail -1)")" >> "$GITHUB_ENV"
       # bindgen-cli is cached as the binary, keyed on its version: no cargo install on a warm run.
