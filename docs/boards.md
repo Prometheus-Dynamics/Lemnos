@@ -121,7 +121,7 @@ In `[host]`, every key optional. Each one left out keeps the default:
 
 | Key | Default | Range | Meaning |
 |---|---|---|---|
-| `call_deadline_ms` | 2000 | 1 to 60000 | How long one driver call may run before it is `TIMED_OUT` and the device is retried once the call lets go |
+| `call_deadline_ms` | 2000 | 1 to 60000 | How long one driver call may run before it is `TIMED_OUT` and the device is retried once the call lets go. Time the call's thread spent waiting for a CPU does not count, up to 8 times this of wall time (see [Daemon](daemon.md#when-a-command-is-refused), "A deadline on a loaded machine") |
 | `retry_first_ms` | 1000 | 1 to the cap | The wait before a device that failed is bound again. It doubles with each failure in a row |
 | `retry_cap_ms` | 8000 | 1 to 8000 | The longest wait, and how long a driver must stay up before its wait starts again from the first |
 | `read_floor_ms` | 10 | 1 to 60000 | The shortest period at which a polled reading is read for its subscribers. A subscriber that asks for less is granted this, and is told so. Under 1 ms is refused: a subscriber could then make the service read in a loop |
