@@ -15,6 +15,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::os::fd::AsFd;
 use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
@@ -30,6 +31,18 @@ pub(crate) fn say(line: &str) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
+}
+
+/// [`say`] for the last line before the guest ends (PID 1 exits, or the power goes off): the line is
+/// written, then the console is drained (`tcdrain`, TCSBRK with a non-zero argument) before the caller
+/// goes on. Without it the kernel's own lines at the end (the exit's stack-depth note, "Attempted to
+/// kill init", the power-off) go out synchronously while the rest of this line still waits in the
+/// tty, and the guest ends before it is sent: the host reads a cut line, or none. A stdout that is not
+/// a terminal has nothing to drain.
+pub(crate) fn say_last(line: &str) {
+    say(line);
+    let out = io::stdout();
+    let _ = guest::ioctl_at(out.as_fd(), libc::TCSBRK as u32, 1);
 }
 
 /// Seconds on CLOCK_MONOTONIC since the hook's last feed, `last`. A clock that cannot be read
@@ -85,7 +98,7 @@ fn main() -> ExitCode {
         }
         thread::sleep(Duration::from_secs(1));
     }
-    say(&format!(
+    say_last(&format!(
         "user: fed the watchdog for {STAY_SECONDS} s and the guest stayed up; powering off"
     ));
     let _ = guest::power_off();
