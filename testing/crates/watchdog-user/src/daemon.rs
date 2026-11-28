@@ -46,7 +46,7 @@ use std::time::Duration;
 use lemnos_linux_sys::guest::{self, Waited};
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 
-use crate::{say, since};
+use crate::{say, say_last, since};
 
 const NODE: &str = "/dev/watchdog0";
 /// The stand-in manager's notification socket: lemnosd's `NOTIFY_SOCKET`.
@@ -345,7 +345,7 @@ fn drain(stderr: &mut ChildStderr) -> io::Result<Vec<String>> {
 /// The stop modes' end: lemnosd ran past its stop point, which fails the mode. Says why and ends the guest, so
 /// the host reads the failure at once.
 fn fail_past_stop() -> ! {
-    say("user: daemon: powering off after a failed start check (the line above names it)");
+    say_last("user: daemon: powering off after a failed start check (the line above names it)");
     let _ = guest::power_off();
     loop {
         thread::park();
@@ -407,7 +407,7 @@ fn crash_loop(mode: &str, last: f64, store: &Store) -> ! {
             ));
         }
         if since(last) > STAY_SECONDS as f64 {
-            say(&format!(
+            say_last(&format!(
                 "user: daemon ({mode}): the guest stayed up through the restarts; powering off"
             ));
             let _ = guest::power_off();
@@ -519,7 +519,7 @@ pub fn run(mode: &str, last: f64) -> ! {
         // PID 1 exits: the kernel panics ("Attempted to kill init") and, with panic=-1, reboots at once.
         // The daemon's feeding ends with the system, not by a timeout of its own.
         thread::sleep(Duration::from_secs(PID1_EXIT_AFTER));
-        say("user: daemon (pid1-dead): PID 1 exits now");
+        say_last("user: daemon (pid1-dead): PID 1 exits now");
         std::process::exit(0);
     }
     if mode.starts_with("pid1-hang") {
@@ -531,7 +531,7 @@ pub fn run(mode: &str, last: f64) -> ! {
         let label = mode.to_owned();
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(STAY_SECONDS));
-            say(&format!(
+            say_last(&format!(
                 "user: daemon ({label}): the guest stayed up {STAY_SECONDS} s with PID 1 hung; powering off"
             ));
             let _ = guest::power_off();
@@ -541,7 +541,7 @@ pub fn run(mode: &str, last: f64) -> ! {
         }
     }
     thread::sleep(Duration::from_secs(STAY_SECONDS));
-    say(&format!(
+    say_last(&format!(
         "user: daemon ({mode}): the guest stayed up {STAY_SECONDS} s on lemnosd's feeding; powering off"
     ));
     let _ = child.kill();
