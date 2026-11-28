@@ -64,11 +64,13 @@ pub enum RecvError {
     },
     /// More descriptors were sent than the receiver allowed.
     TruncatedControl,
-    /// The peer closed part way through a frame.
+    /// The peer hung up (closed, or shut down its writing side) part way through a frame: inside
+    /// its header or its body. Nothing more can arrive, so close the connection.
     ShortRead,
     /// A control message was malformed.
     BadControl,
-    /// The system call failed. `WouldBlock` means no whole frame is queued yet.
+    /// The system call failed. `WouldBlock` means no whole frame is queued yet and the peer is
+    /// still there.
     Io(io::Error),
 }
 
@@ -294,9 +296,25 @@ unsafe fn collect(msg: &libc::msghdr, out: &mut FdSet) -> Result<(), RecvError> 
     }
 }
 
-/// Reads the frame length without consuming anything. `None` means the peer closed.
-fn peek_len(socket: RawFd, flags: i32) -> Result<Option<usize>, RecvError> {
-    let mut header = [0_u8; HEADER_LEN];
+/// Whether the peer has hung up: closed, or shut down its writing side. After that nothing more
+/// can arrive, so what is queued is final.
+fn hung_up(socket: RawFd) -> Result<bool, RecvError> {
+    let mut poll = libc::pollfd {
+        fd: socket,
+        events: libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: `poll` is one valid `pollfd` for the whole call, and a zero timeout never waits.
+    retry(|| unsafe { libc::poll(&mut poll, 1, 0) }).map_err(RecvError::Io)?;
+    Ok(poll.revents & (libc::POLLRDHUP | libc::POLLHUP) != 0)
+}
+
+/// Peeks at up to [`HEADER_LEN`] bytes; `wait_all` waits for all of them (or the hang-up).
+fn peek_header(
+    socket: RawFd,
+    flags: i32,
+    header: &mut [u8; HEADER_LEN],
+) -> Result<usize, RecvError> {
     // SAFETY: `header` is valid for `HEADER_LEN` bytes for the whole call.
     let got = retry(|| unsafe {
         libc::recv(
@@ -306,18 +324,52 @@ fn peek_len(socket: RawFd, flags: i32) -> Result<Option<usize>, RecvError> {
             flags | libc::MSG_PEEK,
         )
     })
-    .map_err(RecvError::Io)? as usize;
-    match got {
-        0 => Ok(None),
-        HEADER_LEN => Ok(Some(u32::from_le_bytes(header) as usize)),
-        _ => Err(RecvError::Io(io::ErrorKind::WouldBlock.into())),
+    .map_err(RecvError::Io)?;
+    Ok(got as usize)
+}
+
+/// Reads the frame length without consuming anything. `None` means the peer closed between frames.
+/// Part of a header with the peer hung up is [`RecvError::ShortRead`]; with the peer still there it
+/// is `WouldBlock` when `nonblocking`, and a wait for the rest otherwise.
+fn peek_len(socket: RawFd, flags: i32, nonblocking: bool) -> Result<Option<usize>, RecvError> {
+    let mut header = [0_u8; HEADER_LEN];
+    let wait = if nonblocking { 0 } else { libc::MSG_WAITALL };
+    loop {
+        match peek_header(socket, flags | wait, &mut header)? {
+            0 => return Ok(None),
+            HEADER_LEN => return Ok(Some(u32::from_le_bytes(header) as usize)),
+            _ => {}
+        }
+        if hung_up(socket)? {
+            // Nothing more can arrive: the rest may have come in just before the hang-up.
+            return match peek_header(socket, flags, &mut header)? {
+                HEADER_LEN => Ok(Some(u32::from_le_bytes(header) as usize)),
+                _ => Err(RecvError::ShortRead),
+            };
+        }
+        if nonblocking {
+            return Err(RecvError::Io(io::ErrorKind::WouldBlock.into()));
+        }
+        // A blocking peek cut short by a signal: wait again.
     }
+}
+
+/// Bytes queued on the socket.
+fn queued(socket: RawFd) -> Result<usize, RecvError> {
+    let mut queued: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one int to `queued`.
+    if unsafe { libc::ioctl(socket, libc::FIONREAD, &mut queued) } < 0 {
+        return Err(RecvError::Io(io::Error::last_os_error()));
+    }
+    Ok(queued as usize)
 }
 
 /// Receives one frame into `buffer`, accepting up to `max_fds` descriptors.
 ///
-/// Returns `Ok(None)` when the peer has closed the connection. When `nonblocking` is set, a frame
-/// that isn't wholly queued yet stays queued and the result is `WouldBlock`.
+/// Returns `Ok(None)` when the peer has closed the connection between frames, and
+/// [`RecvError::ShortRead`] when it hung up (closed, or shut down its writing side) part way through
+/// one, blocking or not. When `nonblocking` is set, a frame that isn't wholly queued yet while the
+/// peer is still there stays queued and the result is `WouldBlock`.
 ///
 /// # Errors
 ///
@@ -334,23 +386,22 @@ pub fn recv(
     if nonblocking {
         flags |= libc::MSG_DONTWAIT;
     }
-    let Some(len) = peek_len(fd, flags)? else {
+    let Some(len) = peek_len(fd, flags, nonblocking)? else {
         return Ok(None);
     };
     if len > buffer.len() {
         return Err(RecvError::TooLarge { len });
     }
     let total = HEADER_LEN + len;
-    if nonblocking {
-        let mut queued: libc::c_int = 0;
-        // SAFETY: FIONREAD writes one int to `queued`.
-        if unsafe { libc::ioctl(fd, libc::FIONREAD, &mut queued) } < 0 {
-            return Err(RecvError::Io(io::Error::last_os_error()));
+    if nonblocking && queued(fd)? < total {
+        // Nothing more can arrive after a hang-up, so the second count is final.
+        if hung_up(fd)? && queued(fd)? < total {
+            return Err(RecvError::ShortRead);
         }
-        if (queued as usize) < total {
+        if queued(fd)? < total {
             return Err(RecvError::Io(io::ErrorKind::WouldBlock.into()));
         }
-    } else {
+    } else if !nonblocking {
         flags |= libc::MSG_WAITALL;
     }
 

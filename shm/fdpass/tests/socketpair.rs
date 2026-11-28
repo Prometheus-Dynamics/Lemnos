@@ -53,6 +53,9 @@ fn frames_carry_their_descriptors_and_nothing_leaks() {
     a_partial_frame_stays_queued();
     a_closed_peer_is_none();
     a_peer_closing_inside_a_frame_is_short();
+    a_peer_closing_inside_a_frame_is_short_without_blocking();
+    a_partial_header_waits_while_the_peer_is_open();
+    whole_frames_before_the_close_still_arrive();
     received_descriptors_are_close_on_exec();
     assert_eq!(open_fds(), before, "descriptors leaked");
 }
@@ -166,6 +169,110 @@ fn a_peer_closing_inside_a_frame_is_short() {
     let mut buf = [0; 8];
     let err = recv(b.as_fd(), &mut buf, 0, false).unwrap_err();
     assert!(matches!(err, RecvError::ShortRead), "{err}");
+}
+
+fn is_short(err: &RecvError) -> bool {
+    matches!(err, RecvError::ShortRead)
+}
+
+fn would_block(err: &RecvError) -> bool {
+    matches!(err, RecvError::Io(e) if e.kind() == ErrorKind::WouldBlock)
+}
+
+/// A peer that hangs up (closes, or shuts down its writing side) after part of a frame: inside the
+/// header or inside the body. A WouldBlock there would never change, and a caller that polls for
+/// readable (set at the hang-up) and then tries again spins for good. The receive says ShortRead,
+/// blocking or not, and asked again it never says WouldBlock.
+fn a_peer_closing_inside_a_frame_is_short_without_blocking() {
+    let header = 4_u32.to_le_bytes();
+    let partials: [&[u8]; 5] = [
+        &header[..1],
+        &header[..2],
+        &header[..3],
+        &[4, 0, 0, 0],
+        b"\x04\0\0\0ab",
+    ];
+    let mut wrong = Vec::new();
+    for (i, part) in partials.into_iter().enumerate() {
+        for close in ["close", "shutdown"] {
+            for nonblocking in [true, false] {
+                let (mut a, b) = UnixStream::pair().unwrap();
+                a.write_all(part).unwrap();
+                let kept = match close {
+                    "close" => {
+                        drop(a);
+                        None
+                    }
+                    _ => {
+                        a.shutdown(std::net::Shutdown::Write).unwrap();
+                        Some(a)
+                    }
+                };
+                let mut buf = [0; 8];
+                for attempt in 0..2 {
+                    match recv(b.as_fd(), &mut buf, 0, nonblocking) {
+                        Err(err) if is_short(&err) => {}
+                        // A blocking receive has read the partial frame out with its ShortRead; what
+                        // is left is the close.
+                        Ok(None) if attempt == 1 && !nonblocking && part.len() >= 4 => {}
+                        other => wrong.push(format!(
+                            "partial {i} ({} bytes), {close}, nonblocking {nonblocking}, attempt {attempt}: {:?}",
+                            part.len(),
+                            other.map(|r| r.map(|r| r.len)).map_err(|e| e.to_string())
+                        )),
+                    }
+                }
+                drop(kept);
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of 40 cases not ShortRead:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+    // Still queued, peer open: that is the wait it always was.
+    let (mut a, b) = UnixStream::pair().unwrap();
+    let mut buf = [0; 8];
+    a.write_all(&header[..2]).unwrap();
+    let err = recv(b.as_fd(), &mut buf, 0, true).unwrap_err();
+    assert!(would_block(&err), "{err}");
+    a.write_all(&header[2..]).unwrap();
+    a.write_all(b"ab").unwrap();
+    let err = recv(b.as_fd(), &mut buf, 0, true).unwrap_err();
+    assert!(would_block(&err), "{err}");
+}
+
+/// Blocking, with part of the header queued and the peer still open: the receive waits for the
+/// rest instead of returning.
+fn a_partial_header_waits_while_the_peer_is_open() {
+    let (mut a, b) = UnixStream::pair().unwrap();
+    a.write_all(&4_u32.to_le_bytes()[..2]).unwrap();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        a.write_all(&[0, 0]).unwrap();
+        a.write_all(b"wxyz").unwrap();
+        a
+    });
+    let mut buf = [0; 8];
+    let got = recv(b.as_fd(), &mut buf, 0, false).unwrap().unwrap();
+    assert_eq!(&buf[..got.len], b"wxyz");
+    drop(writer.join().unwrap());
+}
+
+/// Frames wholly queued before the hang-up arrive, then the close.
+fn whole_frames_before_the_close_still_arrive() {
+    let (a, b) = UnixStream::pair().unwrap();
+    send_on(&a, &[b"one"], &[]).unwrap();
+    send_on(&a, &[b"two"], &[]).unwrap();
+    drop(a);
+    let mut buf = [0; 8];
+    for want in [&b"one"[..], b"two"] {
+        let got = recv(b.as_fd(), &mut buf, 0, true).unwrap().unwrap();
+        assert_eq!(&buf[..got.len], want);
+    }
+    assert!(recv(b.as_fd(), &mut buf, 0, true).unwrap().is_none());
 }
 
 fn received_descriptors_are_close_on_exec() {
