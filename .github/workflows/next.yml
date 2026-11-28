@@ -172,9 +172,33 @@ jobs:
           GATE_PART: tests:${{ matrix.shard }}/4
 
   # The one check to require. It passes only when every part above passed.
+  # The shipped programs built in two cargo homes are byte-identical and hold no builder path
+  # (scripts/check-shipped-paths.sh, through scripts/service-build.sh): two cold service builds.
+  shipped-paths:
+    runs-on: ubuntu-latest
+    name: shipped paths
+    steps:
+      - uses: actions/checkout@v5
+      - name: Rust toolchain (the pin in rust-toolchain.toml, alone)
+        run: |
+          read -r pin components targets < <(python3 -c '
+          import tomllib
+          t = tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]
+          print(t["channel"], ",".join(t.get("components", [])) or "-", ",".join(t.get("targets", [])) or "-")')
+          args=(--profile minimal --no-self-update)
+          [ "$components" = - ] || args+=(--component "$components")
+          [ "$targets" = - ] || args+=(--target "$targets")
+          rustup toolchain install "$pin" "${args[@]}"
+          rustup default "$pin"
+          rustup toolchain list | awk '{print $1}' | while read -r tc; do
+            case "$tc" in "$pin"-*) ;; *) rustup toolchain uninstall "$tc" ;; esac
+          done
+      - run: cargo fetch --locked
+      - run: scripts/check-shipped-paths.sh
+
   gate:
     name: gate
-    needs: [checks, tests]
+    needs: [checks, tests, shipped-paths]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -182,5 +206,7 @@ jobs:
         run: |
           echo "checks: ${{ needs.checks.result }}"
           echo "tests: ${{ needs.tests.result }}"
+          echo "shipped-paths: ${{ needs.shipped-paths.result }}"
           test "${{ needs.checks.result }}" = success
           test "${{ needs.tests.result }}" = success
+          test "${{ needs.shipped-paths.result }}" = success

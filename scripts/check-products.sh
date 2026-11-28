@@ -9,7 +9,10 @@
 #   1. features: `cargo build --unit-graph` (an unstable flag, so RUSTC_BOOTSTRAP is set; the
 #      toolchain is pinned in rust-toolchain.toml) for the merged run and for each solo run. Each
 #      compiled unit's features must match between the two, package by package.
-#   2. bytes: the merged run's four binaries and each solo build's, compared with cmp.
+#   2. bytes: the merged run's four binaries and each solo build's, compared with cmp. Both are
+#      built as the images build them, by scripts/service-build.sh (the builder's paths mapped out),
+#      and none may hold this cargo home's path or this checkout's (scripts/check-shipped-paths.sh
+#      compares two homes; CI runs it).
 # Cost: a cold build of the four programs with fat LTO; warm, a relink per program. The gate runs it.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -58,13 +61,19 @@ print(f"    features: the four programs resolve the same features, merged and so
 PY
 
 # 2. Bytes. The merged run's binaries first, then each program built alone.
-cargo build --locked --profile service "${args[@]}"
+scripts/service-build.sh "${args[@]}"
 mkdir "$work/merged"
 for p in "${products[@]}"; do cp "${CARGO_TARGET_DIR:-target}/service/$p" "$work/merged/$p"; done
 failed=0
 for p in "${products[@]}"; do
-  cargo build --locked --profile service -p "$p"
+  scripts/service-build.sh -p "$p"
   cp "${CARGO_TARGET_DIR:-target}/service/$p" "$work/solo-$p"
+  for path in "${CARGO_HOME:-$HOME/.cargo}" "$PWD"; do
+    if grep -qaF -- "$path" "$work/solo-$p"; then
+      echo "check-products: $p holds the builder's path $path (scripts/service-build.sh maps it out)" >&2
+      failed=1
+    fi
+  done
   if cmp -s "$work/merged/$p" "$work/solo-$p"; then
     echo "    $p: merged and solo identical ($(stat -c %s "$work/solo-$p") bytes)"
   else
