@@ -84,7 +84,7 @@ fn boot_parts(layout: &Layout) -> Parts {
 }
 
 /// The boot partition the builder makes for `layout`: slot `a` in bay 0, every pointer naming it.
-fn volume_image(layout: &Layout) -> Vec<u8> {
+fn volume_image(layout: &Layout) -> Img {
     bootimage::build(
         &boot_parts(layout),
         BOARD_SECTORS * 512,
@@ -92,6 +92,7 @@ fn volume_image(layout: &Layout) -> Vec<u8> {
         &refs(&payloads_a()),
     )
     .expect("the image builds at the board's geometry")
+    .into()
 }
 
 /// The write the device tears, and how.
@@ -118,10 +119,133 @@ impl Torn {
     }
 }
 
+/// An in-memory image, copy on write: a shared base and the sectors written over it. A clone shares
+/// the base, so a sweep's fresh device, its re-run and its checks cost the sectors written, not the
+/// whole image. A sector never written reads as the base; a written sector reads as written.
+#[derive(Clone)]
+struct Img {
+    base: std::sync::Arc<Vec<u8>>,
+    over: std::collections::HashMap<u64, Box<Sector>>,
+}
+
+impl From<Vec<u8>> for Img {
+    fn from(bytes: Vec<u8>) -> Self {
+        assert_eq!(bytes.len() % SECTOR, 0, "an image is whole sectors");
+        Self {
+            base: std::sync::Arc::new(bytes),
+            over: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl Img {
+    fn sectors(&self) -> u64 {
+        (self.base.len() / SECTOR) as u64
+    }
+
+    /// Sector `lba` as it reads now.
+    fn sector(&self, lba: u64) -> &[u8] {
+        match self.over.get(&lba) {
+            Some(s) => &s[..],
+            None => {
+                let at = lba as usize * SECTOR;
+                &self.base[at..at + SECTOR]
+            }
+        }
+    }
+
+    /// Sector `lba` to change in place: copied from the base the first time.
+    fn sector_mut(&mut self, lba: u64) -> &mut Sector {
+        let base = &self.base;
+        self.over.entry(lba).or_insert_with(|| {
+            let at = lba as usize * SECTOR;
+            let mut s = Box::new([0u8; SECTOR]);
+            s.copy_from_slice(&base[at..at + SECTOR]);
+            s
+        })
+    }
+
+    /// Fills `buf` from byte `offset`, across sectors.
+    fn read_at(&self, offset: usize, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.base[offset..offset + buf.len()]);
+        if self.over.is_empty() || buf.is_empty() {
+            return;
+        }
+        let first = (offset / SECTOR) as u64;
+        let last = ((offset + buf.len() - 1) / SECTOR) as u64;
+        let mut patch = |lba: u64, s: &Sector| {
+            let s0 = lba as usize * SECTOR;
+            let (lo, hi) = (s0.max(offset), (s0 + SECTOR).min(offset + buf.len()));
+            buf[lo - offset..hi - offset].copy_from_slice(&s[lo - s0..hi - s0]);
+        };
+        if (last - first + 1) as usize > self.over.len() {
+            for (&lba, s) in &self.over {
+                if (first..=last).contains(&lba) {
+                    patch(lba, s);
+                }
+            }
+        } else {
+            for lba in first..=last {
+                if let Some(s) = self.over.get(&lba) {
+                    patch(lba, s);
+                }
+            }
+        }
+    }
+
+    /// The whole image as bytes.
+    fn to_vec(&self) -> Vec<u8> {
+        let mut out = (*self.base).clone();
+        for (&lba, s) in &self.over {
+            let at = lba as usize * SECTOR;
+            out[at..at + SECTOR].copy_from_slice(&s[..]);
+        }
+        out
+    }
+
+    /// The sectors that differ from `other`, in order. Over one base only the sectors either has
+    /// written can differ (the rest is the same base); over two bases every sector is compared.
+    fn differ(&self, other: &Img) -> Vec<u64> {
+        let all = self.sectors().max(other.sectors());
+        if self.sectors() != other.sectors() {
+            return (0..all).collect();
+        }
+        let candidates: Vec<u64> = if std::sync::Arc::ptr_eq(&self.base, &other.base) {
+            let mut lbas: Vec<u64> = self.over.keys().chain(other.over.keys()).copied().collect();
+            lbas.sort_unstable();
+            lbas.dedup();
+            lbas
+        } else {
+            (0..all).collect()
+        };
+        candidates
+            .into_iter()
+            .filter(|&lba| self.sector(lba) != other.sector(lba))
+            .collect()
+    }
+}
+
+impl PartialEq for Img {
+    fn eq(&self, other: &Self) -> bool {
+        self.differ(other).is_empty()
+    }
+}
+
+impl std::fmt::Debug for Img {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Img({} sectors, {} written)",
+            self.sectors(),
+            self.over.len()
+        )
+    }
+}
+
 /// A block device over an in-memory image. Writes are counted and logged by sector; the write at
 /// `cut.0` is torn as `cut.1`, reports failure, and every later write fails without changing anything.
 struct Dev {
-    img: Vec<u8>,
+    img: Img,
     writes: usize,
     written: Vec<u64>,
     cut: Option<(usize, Torn)>,
@@ -129,9 +253,9 @@ struct Dev {
 }
 
 impl Dev {
-    fn new(img: Vec<u8>) -> Self {
+    fn new(img: impl Into<Img>) -> Self {
         Self {
-            img,
+            img: img.into(),
             writes: 0,
             written: Vec::new(),
             cut: None,
@@ -142,16 +266,14 @@ impl Dev {
 
 impl ReadAt for Dev {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-        let at = offset as usize;
-        buf.copy_from_slice(&self.img[at..at + buf.len()]);
+        self.img.read_at(offset as usize, buf);
         Ok(())
     }
 }
 
 impl Sectors for Dev {
     fn read(&mut self, lba: u64, buf: &mut Sector) -> std::io::Result<()> {
-        let at = lba as usize * SECTOR;
-        buf.copy_from_slice(&self.img[at..at + SECTOR]);
+        buf.copy_from_slice(self.img.sector(lba));
         Ok(())
     }
 
@@ -162,14 +284,13 @@ impl Sectors for Dev {
         let idx = self.writes;
         self.writes += 1;
         self.written.push(lba);
-        let at = lba as usize * SECTOR;
         match self.cut.filter(|(n, _)| *n == idx) {
             None => {
-                self.img[at..at + SECTOR].copy_from_slice(buf);
+                self.img.sector_mut(lba).copy_from_slice(buf);
                 Ok(())
             }
             Some((_, torn)) => {
-                let s = &mut self.img[at..at + SECTOR];
+                let s = self.img.sector_mut(lba);
                 match torn {
                     Torn::Old => {}
                     Torn::New => s.copy_from_slice(buf),
@@ -193,8 +314,8 @@ impl Sectors for Dev {
 
 /// What an install into `set` may write: the set's own sectors (its region, the region's FAT
 /// sectors in both copies, its directories, its record) and the two pointers it moves.
-fn write_set(img: &[u8], set: u8) -> HashSet<u64> {
-    let mut dev = Dev::new(img.to_vec());
+fn write_set(img: &Img, set: u8) -> HashSet<u64> {
+    let mut dev = Dev::new(img.clone());
     let mut out: HashSet<u64> = set_sectors(&mut dev, set).unwrap().into_iter().collect();
     let placed = place(&mut dev).unwrap();
     for lba in [placed.default, placed.previous] {
@@ -205,22 +326,25 @@ fn write_set(img: &[u8], set: u8) -> HashSet<u64> {
 }
 
 /// Every write lies inside `allowed`, and every sector outside it is byte-identical to `pre`.
-fn only_inside(pre: &[u8], dev: &Dev, allowed: &HashSet<u64>) -> Result<(), String> {
+fn only_inside(pre: &Img, dev: &Dev, allowed: &HashSet<u64>) -> Result<(), String> {
     if let Some(bad) = dev.written.iter().find(|l| !allowed.contains(l)) {
         return Err(format!("sector {bad} was written, outside the set's own"));
     }
-    for (lba, (a, b)) in pre.chunks(SECTOR).zip(dev.img.chunks(SECTOR)).enumerate() {
-        if a != b && !allowed.contains(&(lba as u64)) {
-            return Err(format!("sector {lba} changed outside the set's own"));
-        }
+    if let Some(lba) = dev
+        .img
+        .differ(pre)
+        .into_iter()
+        .find(|l| !allowed.contains(l))
+    {
+        return Err(format!("sector {lba} changed outside the set's own"));
     }
     Ok(())
 }
 
 /// The boot chain's view: the default boots `a` (bay 0) or the new slot in `new`, and the previous
 /// boots `a`.
-fn check_bootable(img: &[u8], layout: &Layout, new: (u8, &str)) -> Result<(), String> {
-    let mut dev = Dev::new(img.to_vec());
+fn check_bootable(img: &Img, layout: &Layout, new: (u8, &str)) -> Result<(), String> {
+    let mut dev = Dev::new(img.clone());
     let placed = place(&mut dev)?;
     let d = boot_view(&mut dev, layout, placed.default)?;
     if d != (0, "a".to_string()) && d != (new.0, new.1.to_string()) {
@@ -235,8 +359,8 @@ fn check_bootable(img: &[u8], layout: &Layout, new: (u8, &str)) -> Result<(), St
 
 /// The cut set reads uncommitted, or committed with every file whole: never a record over files
 /// that do not match it, and never without a record (the region would be lost).
-fn check_cut_set(img: &[u8], layout: &Layout, set: u8) -> Result<(), String> {
-    let mut dev = Dev::new(img.to_vec());
+fn check_cut_set(img: &Img, layout: &Layout, set: u8) -> Result<(), String> {
+    let mut dev = Dev::new(img.clone());
     let lba = place_sets(&mut dev)?[set as usize];
     match read_info(&mut dev, lba).map_err(|e| e.to_string())? {
         None => Err(format!("bay{set} has no record: its region is lost")),
@@ -246,9 +370,9 @@ fn check_cut_set(img: &[u8], layout: &Layout, set: u8) -> Result<(), String> {
 }
 
 /// A file of a set, read by path through the boot chain's FAT reader.
-fn file(img: &[u8], set: u8, path: &str) -> Vec<u8> {
+fn file(img: &Img, set: u8, path: &str) -> Vec<u8> {
     bootfat::read_file(
-        &mut Dev::new(img.to_vec()),
+        &mut Dev::new(img.clone()),
         &format!("{}/{path}", set_dir(set)),
         64 << 20,
     )
@@ -509,7 +633,7 @@ fn a_changed_byte_in_a_committed_file_is_found_by_name() {
     let mut img = volume_image(&layout);
     let mut dev = Dev::new(img.clone());
     let found = bootfat::locate_path(&mut dev, "slots/bay0/cmdline.txt", 20).unwrap();
-    img[found.first_lba as usize * SECTOR] ^= 1;
+    img.sector_mut(found.first_lba)[0] ^= 1;
     let mut dev = Dev::new(img);
     let placed = place(&mut dev).unwrap();
     let e = boot_view(&mut dev, &layout, placed.default).unwrap_err();
@@ -537,7 +661,9 @@ fn the_layout_is_read_back_from_the_volume() {
     let mut p = payloads_a().to_vec();
     p.push(vec![5; 100]);
     let refs: Vec<&[u8]> = p.iter().map(Vec::as_slice).collect();
-    let img = bootimage::build(&boot_parts(&layout), BOARD_SECTORS * 512, "a", &refs).unwrap();
+    let img: Img = bootimage::build(&boot_parts(&layout), BOARD_SECTORS * 512, "a", &refs)
+        .unwrap()
+        .into();
     let mut dev = Dev::new(img.clone());
     let found = discover(&mut dev).unwrap();
     assert_eq!(found.names(), layout.names());
@@ -865,7 +991,7 @@ fn a_disk_of_layout_5_is_refused_by_name_by_every_write_and_nothing_is_written()
     let layout = test_layout();
     // "ours-a" is six bytes long: its v5 record begins with the byte 6, this layout's version.
     for slot in ["a", "ours-a"] {
-        let v5 = as_layout_5(&volume_image(&layout), slot);
+        let v5 = as_layout_5(&volume_image(&layout).to_vec(), slot);
         let why = records_version(&mut Dev::new(v5.clone()))
             .unwrap()
             .expect("a layout 5 record is not this layout's");
@@ -915,7 +1041,7 @@ fn a_disk_of_layout_5_is_refused_by_name_by_every_write_and_nothing_is_written()
         assert!(lay_out_empty_sets(&mut dev, &layout).is_err());
         assert!(discover(&mut dev).is_err());
         assert!(dev.written.is_empty(), "written: {:?}", dev.written);
-        assert!(dev.img == v5, "the image changed");
+        assert!(dev.img.to_vec() == v5, "the image changed");
     }
 }
 
@@ -933,7 +1059,7 @@ struct Cached {
 }
 
 impl Cached {
-    fn new(img: Vec<u8>) -> Self {
+    fn new(img: impl Into<Img>) -> Self {
         Self {
             dev: Dev::new(img),
             cache: Vec::new(),
@@ -993,8 +1119,7 @@ impl Sectors for Cached {
             Some(keep) => {
                 for (i, (lba, sector)) in cache.iter().enumerate() {
                     if keep(i) {
-                        let at = *lba as usize * SECTOR;
-                        self.dev.img[at..at + SECTOR].copy_from_slice(sector);
+                        self.dev.img.sector_mut(*lba).copy_from_slice(sector);
                     }
                 }
                 self.dev.dead = true;
@@ -1081,12 +1206,11 @@ fn a_cut_before_the_flush_leaves_the_set_uncommitted_whatever_reached_the_medium
 }
 
 /// The image a power cut leaves: the cached sectors `keep` picks reach the medium, the rest do not.
-fn cut_image(dev: &Cached, keep: fn(usize) -> bool) -> Vec<u8> {
+fn cut_image(dev: &Cached, keep: fn(usize) -> bool) -> Img {
     let mut img = dev.dev.img.clone();
     for (i, (lba, sector)) in dev.cache.iter().enumerate() {
         if keep(i) {
-            let at = *lba as usize * SECTOR;
-            img[at..at + SECTOR].copy_from_slice(sector);
+            img.sector_mut(*lba).copy_from_slice(sector);
         }
     }
     img
@@ -1204,7 +1328,7 @@ impl Sectors for Gated {
 }
 
 impl Gated {
-    fn new(img: Vec<u8>, info_lba: u64, fail_flush: bool) -> Self {
+    fn new(img: impl Into<Img>, info_lba: u64, fail_flush: bool) -> Self {
         Self {
             inner: Cached::new(img),
             info_lba,
