@@ -357,6 +357,13 @@ side_lane() {
   # pgrep fed to kill (scripts/check-signals.py). Its own cases (testing/signals) plant text fixtures and run the checker by path.
   lane_step signals 180 scripts/check-signals.py
   lane_step signals-tests 180 python3 -I testing/signals/test_check_signals.py
+  # Test reuse by key, its parts (nothing is reused yet): the binary key by what loads (scripts/elf-alloc-key.py,
+  # objcopy plants that must move it and must not), and which packages' tests read only what that key and their declared
+  # inputs hold (scripts/test-reach.py: its cases and a planted repository, then the real tree, where a declared input
+  # that does not exist fails).
+  lane_step elf-alloc-key 180 python3 -I scripts/elf-alloc-key.py --self-test
+  lane_step test-reach-tests 180 python3 -I scripts/test-reach.py --self-test
+  lane_step test-reach 180 python3 -I scripts/test-reach.py
   # The bridge and Orion share one copy of each shm-* crate (the root Cargo.toml's patch of the Orion source).
   lane_step orion-copies 180 scripts/check-orion-copies.sh
   # The consumer-lock checkers (scripts/check-lemnos-pin.sh, scripts/check-shm-one-source.sh) pass the pinned fixture lock

@@ -1,0 +1,7 @@
+# Files outside a package's own directory that its tests read at run time, by package. Each path is
+# from the repository root, a file or a directory; what lies under it is keyed by content
+# (scripts/test-reach.py), so a change there reruns the package's tests. A package reading outside
+# its directory without a line here is never reused: its tests always run.
+#
+# [packages.<name>]
+# reads = ["docs/wire.md", "testing/boards"]
