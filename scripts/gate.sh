@@ -242,14 +242,24 @@ cargo_lane() {
   # The tail lane waits for the tests to be built and running: nextest says "Starting N tests"
   # when its build is over and cargo's lock is free. tests.over is there once the step has ended,
   # whichever way, so the tail lane never waits on a build that failed.
+  # Test reuse by key (scripts/test-reuse.py): the tests' build is listed first, and a package whose key
+  # passed in an earlier gate is left out of the run, named "reused-by-key" with that gate's commit. A
+  # package scripts/test-reach.py finds reaching outside its key always runs. On a pass, the keys that ran
+  # are recorded. CI (GITHUB_ACTIONS) and LEMNOS_TEST_REUSE=0 reuse nothing; the plain form never reuses.
   workspace_tests() {
-    local rc=0 watcher
+    local rc=0 watcher filter=() reuse="$gate_out/reuse" commit
     if [ "$use_nextest" = 1 ]; then
+      cargo nextest list --workspace --message-format json >"$gate_out/tests.list.json" || { touch "$gate_out/tests.over"; return 1; }
+      commit="$(git rev-parse HEAD)"
+      [ -z "$(git status --porcelain --untracked-files=no)" ] || commit="$commit+changes"
+      python3 -I scripts/test-reuse.py plan "$gate_out/tests.list.json" "$commit" "$reuse" || { touch "$gate_out/tests.over"; return 1; }
+      [ -s "$reuse/filter" ] && filter=(-E "$(cat "$reuse/filter")")
       (until grep -qE '^ *Starting [0-9]+ tests' "$unit_out" 2>/dev/null; do sleep 0.2; done
         touch "$gate_out/tests.running") &
       watcher=$!
-      cargo nextest run --workspace --no-fail-fast --test-threads "${GATE_TEST_JOBS:-$(test_jobs)}" || rc=$?
+      cargo nextest run --workspace --no-fail-fast --no-tests=warn "${filter[@]}" --test-threads "${GATE_TEST_JOBS:-$(test_jobs)}" || rc=$?
       kill "$watcher" 2>/dev/null || true
+      [ "$rc" = 0 ] && { python3 -I scripts/test-reuse.py record "$reuse" || rc=$?; }
     else
       cargo test --workspace || rc=$?
     fi
@@ -357,13 +367,14 @@ side_lane() {
   # pgrep fed to kill (scripts/check-signals.py). Its own cases (testing/signals) plant text fixtures and run the checker by path.
   lane_step signals 180 scripts/check-signals.py
   lane_step signals-tests 180 python3 -I testing/signals/test_check_signals.py
-  # Test reuse by key, its parts (nothing is reused yet): the binary key by what loads (scripts/elf-alloc-key.py,
+  # Test reuse by key, its parts (the tests step uses them): the binary key by what loads (scripts/elf-alloc-key.py,
   # objcopy plants that must move it and must not), and which packages' tests read only what that key and their declared
   # inputs hold (scripts/test-reach.py: its cases and a planted repository, then the real tree, where a declared input
   # that does not exist fails).
   lane_step elf-alloc-key 180 python3 -I scripts/elf-alloc-key.py --self-test
   lane_step test-reach-tests 180 python3 -I scripts/test-reach.py --self-test
   lane_step test-reach 180 python3 -I scripts/test-reach.py
+  lane_step test-reuse-tests 180 python3 -I scripts/test-reuse.py --self-test
   # The bridge and Orion share one copy of each shm-* crate (the root Cargo.toml's patch of the Orion source).
   lane_step orion-copies 180 scripts/check-orion-copies.sh
   # The consumer-lock checkers (scripts/check-lemnos-pin.sh, scripts/check-shm-one-source.sh) pass the pinned fixture lock
