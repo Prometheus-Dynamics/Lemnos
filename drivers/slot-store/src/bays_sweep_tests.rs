@@ -44,7 +44,7 @@ fn manifest(slot: &str) -> [Vec<u8>; 5] {
     }
 }
 
-fn pi_image() -> Vec<u8> {
+fn pi_image() -> Img {
     bootimage::build(
         &super::boot_parts(&test_layout()),
         BOARD_SECTORS * 512,
@@ -52,6 +52,7 @@ fn pi_image() -> Vec<u8> {
         &refs(&payloads_a()),
     )
     .expect("the image builds")
+    .into()
 }
 
 fn pi_parts() -> Parts {
@@ -66,7 +67,7 @@ fn uboot_parts() -> Parts {
     }
 }
 
-fn uboot_image() -> Vec<u8> {
+fn uboot_image() -> Img {
     bootimage::build(
         &uboot_parts(),
         BOARD_SECTORS * 512,
@@ -74,18 +75,19 @@ fn uboot_image() -> Vec<u8> {
         &refs(&payloads_a()),
     )
     .expect("the image builds")
+    .into()
 }
 
 /// The device's volume run through one driver operation, uncut.
 type Run<'a> = &'a dyn Fn(Dev) -> (Dev, Result<(), String>);
 
-fn pi(img: Vec<u8>, f: impl FnOnce(&mut Boot<Dev>) -> Result<(), String>) -> Vec<u8> {
+fn pi(img: Img, f: impl FnOnce(&mut Boot<Dev>) -> Result<(), String>) -> Img {
     let mut boot = Boot::on(Dev::new(img)).unwrap();
     f(&mut boot).unwrap();
     boot.into_device().img
 }
 
-fn install_pi(img: Vec<u8>, slot: &str) -> Vec<u8> {
+fn install_pi(img: Img, slot: &str) -> Img {
     pi(img, |b| {
         b.install_slot(slot, &refs(&manifest(slot))).map(|_| ())
     })
@@ -95,15 +97,15 @@ fn install_pi(img: Vec<u8>, slot: &str) -> Vec<u8> {
 /// `c` installed; a trial of `c` armed; `c` confirmed (`b` previous, `a` unprotected); `a` removed.
 struct History {
     /// `a` default, `b` and `c` not installed.
-    h0: Vec<u8>,
+    h0: Img,
     /// `b` default, `a` previous.
-    h2: Vec<u8>,
+    h2: Img,
     /// `c` installed into the one free bay.
-    h3: Vec<u8>,
+    h3: Img,
     /// A trial of `c` armed.
-    h4: Vec<u8>,
+    h4: Img,
     /// `c` confirmed: default `c`, previous `b`, `a`'s bay holds `a`'s record, named by nothing.
-    h5: Vec<u8>,
+    h5: Img,
 }
 
 fn history() -> History {
@@ -120,8 +122,8 @@ fn history() -> History {
 }
 
 /// Set `set`'s own sectors (region, its FAT sectors, its directories, its record) on `img`.
-fn own(img: &[u8], set: u8, out: &mut HashSet<u64>) {
-    out.extend(bays::set_sectors(&mut Dev::new(img.to_vec()), set).unwrap());
+fn own(img: &Img, set: u8, out: &mut HashSet<u64>) {
+    out.extend(bays::set_sectors(&mut Dev::new(img.clone()), set).unwrap());
 }
 
 fn pair(lba: u64, out: &mut HashSet<u64>) {
@@ -161,8 +163,8 @@ struct Expect<'a> {
 }
 
 /// The boot chain's reading of a cut Pi image, and the verifier's.
-fn pi_chain(img: &[u8], layout: &Layout, e: &Expect, parts: &Parts) -> Result<(), String> {
-    let mut dev = Dev::new(img.to_vec());
+fn pi_chain(img: &Img, layout: &Layout, e: &Expect, parts: &Parts) -> Result<(), String> {
+    let mut dev = Dev::new(img.clone());
     let placed = place(&mut dev)?;
     let d = boot_view(&mut dev, layout, placed.default)?;
     if !e.defaults.iter().any(|(s, n)| (*s, n.to_string()) == d) {
@@ -198,7 +200,7 @@ fn pi_chain(img: &[u8], layout: &Layout, e: &Expect, parts: &Parts) -> Result<()
             files_are(&mut dev, layout, set, &slot)?;
         }
     }
-    let bad: Vec<String> = bootimage::verify(&mut bootimage::Mem(img.to_vec()), parts)
+    let bad: Vec<String> = bootimage::verify(&mut Dev::new(img.clone()), parts)
         .into_iter()
         .filter(|f| !f.ok)
         .map(|f| f.text)
@@ -211,24 +213,19 @@ fn pi_chain(img: &[u8], layout: &Layout, e: &Expect, parts: &Parts) -> Result<()
 
 /// Every sector written lies inside `allowed`, and every sector outside it is byte-identical to `pre`
 /// (the FAT's boot sector, both FATs and all directory clusters are outside it).
-fn only_inside(pre: &[u8], dev: &Dev, allowed: &HashSet<u64>) -> Result<(), String> {
+fn only_inside(pre: &Img, dev: &Dev, allowed: &HashSet<u64>) -> Result<(), String> {
     if let Some(bad) = dev.written.iter().find(|l| !allowed.contains(l)) {
         return Err(format!(
             "wrote sector {bad}, outside the operation's write set"
         ));
     }
-    let mut start = 0u64;
-    for lba in 0..=BOARD_SECTORS {
-        if lba == BOARD_SECTORS || allowed.contains(&lba) {
-            if lba > start {
-                let (a, b) = (start as usize * SECTOR, lba as usize * SECTOR);
-                if pre[a..b] != dev.img[a..b] {
-                    let at = (a..b).find(|i| pre[*i] != dev.img[*i]).unwrap() / SECTOR;
-                    return Err(format!("sector {at} changed outside the write set"));
-                }
-            }
-            start = lba + 1;
-        }
+    if let Some(at) = dev
+        .img
+        .differ(pre)
+        .into_iter()
+        .find(|l| !allowed.contains(l))
+    {
+        return Err(format!("sector {at} changed outside the write set"));
     }
     Ok(())
 }
@@ -242,13 +239,13 @@ struct Totals {
 /// operation completed (uncut, or re-run from a cut).
 fn sweep(
     name: &str,
-    pre: &[u8],
+    pre: &Img,
     run: Run,
     allowed: &HashSet<u64>,
-    chain: &dyn Fn(&[u8]) -> Result<(), String>,
-    done: &dyn Fn(&[u8]) -> Result<(), String>,
+    chain: &dyn Fn(&Img) -> Result<(), String>,
+    done: &dyn Fn(&Img) -> Result<(), String>,
 ) -> Totals {
-    let (uncut, result) = run(Dev::new(pre.to_vec()));
+    let (uncut, result) = run(Dev::new(pre.clone()));
     result.unwrap_or_else(|e| panic!("{name}: the uncut operation failed: {e}"));
     let writes = uncut.writes;
     assert!(writes > 0, "{name}: the operation writes");
@@ -262,7 +259,7 @@ fn sweep(
             Torn::FirstHalfNew,
             Torn::Random(cut as u64 + 1),
         ] {
-            let mut dev = Dev::new(pre.to_vec());
+            let mut dev = Dev::new(pre.clone());
             dev.cut = Some((cut, torn));
             let (after, result) = run(dev);
             assert!(
@@ -291,12 +288,12 @@ fn report(name: &str, t: &Totals) {
     );
 }
 
-fn placed_of(img: &[u8]) -> Placed {
-    place(&mut Dev::new(img.to_vec())).unwrap()
+fn placed_of(img: &Img) -> Placed {
+    place(&mut Dev::new(img.clone())).unwrap()
 }
 
 /// Pi form, install of `c` (and of `d` over a bay that held `a`).
-fn pi_install_sweep(name: &str, pre: &[u8], slot: &'static str, bay: u8, e: &Expect) {
+fn pi_install_sweep(name: &str, pre: &Img, slot: &'static str, bay: u8, e: &Expect) {
     let layout = test_layout();
     let mut allowed = HashSet::new();
     own(pre, bay, &mut allowed);
@@ -314,7 +311,7 @@ fn pi_install_sweep(name: &str, pre: &[u8], slot: &'static str, bay: u8, e: &Exp
         &|img| pi_chain(img, &layout, e, &parts),
         &|img| {
             pi_chain(img, &layout, &Expect { ..*e }, &parts)?;
-            files_are(&mut Dev::new(img.to_vec()), &layout, bay, slot)
+            files_are(&mut Dev::new(img.clone()), &layout, bay, slot)
         },
     );
     report(name, &t);
@@ -365,9 +362,9 @@ fn sweep_pi_trial_arm() {
         defaults: &[(1, "b")],
         previous: &[(0, "a")],
     };
-    let done = |img: &[u8]| {
+    let done = |img: &Img| {
         pi_chain(img, &layout, &e, &parts)?;
-        let mut dev = Dev::new(img.to_vec());
+        let mut dev = Dev::new(img.clone());
         let placed = place(&mut dev)?;
         let t = pending_trial(&mut dev, placed.trial).map_err(|e| e.to_string())?;
         match t {
@@ -409,13 +406,13 @@ fn sweep_pi_confirm() {
         defaults: &[(1, "b"), (2, "c")],
         previous: &[(0, "a"), (1, "b")],
     };
-    let done = |img: &[u8]| {
+    let done = |img: &Img| {
         let end = Expect {
             defaults: &[(2, "c")],
             previous: &[(1, "b")],
         };
         pi_chain(img, &layout, &end, &parts)?;
-        let mut dev = Dev::new(img.to_vec());
+        let mut dev = Dev::new(img.clone());
         let placed = place(&mut dev)?;
         if pending_trial(&mut dev, placed.trial)
             .map_err(|e| e.to_string())?
@@ -455,9 +452,9 @@ fn sweep_pi_remove() {
         defaults: &[(2, "c")],
         previous: &[(1, "b")],
     };
-    let done = |img: &[u8]| {
+    let done = |img: &Img| {
         pi_chain(img, &layout, &e, &parts)?;
-        let mut boot = Boot::on(Dev::new(img.to_vec())).unwrap();
+        let mut boot = Boot::on(Dev::new(img.clone())).unwrap();
         if boot.bay_of("a").is_ok() {
             return Err("a still has a bay".into());
         }
@@ -488,8 +485,8 @@ fn uboot_bay(dev: &mut Dev, set: u8, slot: &str) -> Result<(), String> {
 
 /// The environment's reading after a cut: its default's bay is bootable and whole, and so is the
 /// previous's; `verify` accepts the image except for the set being written.
-fn uboot_chain(img: &[u8], default: (u8, &str), previous: (u8, &str)) -> Result<(), String> {
-    let mut dev = Dev::new(img.to_vec());
+fn uboot_chain(img: &Img, default: (u8, &str), previous: (u8, &str)) -> Result<(), String> {
+    let mut dev = Dev::new(img.clone());
     uboot_bay(&mut dev, default.0, default.1).map_err(|e| format!("default: {e}"))?;
     uboot_bay(&mut dev, previous.0, previous.1).map_err(|e| format!("previous: {e}"))?;
     let sets = place_sets(&mut dev)?;
@@ -501,7 +498,7 @@ fn uboot_chain(img: &[u8], default: (u8, &str), previous: (u8, &str)) -> Result<
             uboot_bay(&mut dev, set, &slot)?;
         }
     }
-    let bad: Vec<String> = bootimage::verify(&mut bootimage::Mem(img.to_vec()), &uboot_parts())
+    let bad: Vec<String> = bootimage::verify(&mut Dev::new(img.clone()), &uboot_parts())
         .into_iter()
         .filter(|f| !f.ok)
         .map(|f| f.text)
@@ -512,7 +509,7 @@ fn uboot_chain(img: &[u8], default: (u8, &str), previous: (u8, &str)) -> Result<
     Ok(())
 }
 
-fn uboot_install(img: Vec<u8>, slot: &str, protected: &Protected) -> Vec<u8> {
+fn uboot_install(img: Img, slot: &str, protected: &Protected) -> Img {
     let p = manifest(slot);
     let mut v = BayVolume::on(Dev::new(img)).unwrap();
     v.install_slot_with(slot, &refs(&p), protected).unwrap();
@@ -528,7 +525,7 @@ fn prot(default: u8, previous: u8) -> Protected {
     }
 }
 
-fn uboot_set_sectors(img: &[u8], set: u8) -> HashSet<u64> {
+fn uboot_set_sectors(img: &Img, set: u8) -> HashSet<u64> {
     let mut out = HashSet::new();
     own(img, set, &mut out);
     out
@@ -554,7 +551,7 @@ fn sweep_uboot_install() {
         &|img| uboot_chain(img, (1, "b"), (0, "a")),
         &|img| {
             uboot_chain(img, (1, "b"), (0, "a"))?;
-            uboot_bay(&mut Dev::new(img.to_vec()), 2, "c")
+            uboot_bay(&mut Dev::new(img.clone()), 2, "c")
         },
     );
     report("U-Boot form, install c", &t);
@@ -580,7 +577,7 @@ fn sweep_uboot_install_over_a_bay_that_holds_an_old_record() {
         &|img| uboot_chain(img, (2, "c"), (1, "b")),
         &|img| {
             uboot_chain(img, (2, "c"), (1, "b"))?;
-            uboot_bay(&mut Dev::new(img.to_vec()), 0, "d")
+            uboot_bay(&mut Dev::new(img.clone()), 0, "d")
         },
     );
     report("U-Boot form, install d over a's old bay", &t);
@@ -607,7 +604,7 @@ fn sweep_uboot_remove() {
         &|img| uboot_chain(img, (2, "c"), (1, "b")),
         &|img| {
             uboot_chain(img, (2, "c"), (1, "b"))?;
-            let mut v = BayVolume::on(Dev::new(img.to_vec())).unwrap();
+            let mut v = BayVolume::on(Dev::new(img.clone())).unwrap();
             match v.slot_bay("a") {
                 Err(_) => Ok(()),
                 Ok(_) => Err("a still has a bay".into()),
@@ -615,4 +612,198 @@ fn sweep_uboot_remove() {
         },
     );
     report("U-Boot form, remove a", &t);
+}
+
+/// The device the sweeps used before the copy-on-write image: the whole image in one `Vec`, every
+/// write in place, the same cut and the same tears. Kept as the reference the copy-on-write device
+/// is checked against.
+struct FlatDev {
+    img: Vec<u8>,
+    writes: usize,
+    written: Vec<u64>,
+    cut: Option<(usize, Torn)>,
+    dead: bool,
+}
+
+impl ReadAt for FlatDev {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let at = offset as usize;
+        buf.copy_from_slice(&self.img[at..at + buf.len()]);
+        Ok(())
+    }
+}
+
+impl Sectors for FlatDev {
+    fn read(&mut self, lba: u64, buf: &mut Sector) -> std::io::Result<()> {
+        let at = lba as usize * SECTOR;
+        buf.copy_from_slice(&self.img[at..at + SECTOR]);
+        Ok(())
+    }
+
+    fn write(&mut self, lba: u64, buf: &Sector) -> std::io::Result<()> {
+        if self.dead {
+            return Err(std::io::Error::other("power is off"));
+        }
+        let idx = self.writes;
+        self.writes += 1;
+        self.written.push(lba);
+        let at = lba as usize * SECTOR;
+        match self.cut.filter(|(n, _)| *n == idx) {
+            None => {
+                self.img[at..at + SECTOR].copy_from_slice(buf);
+                Ok(())
+            }
+            Some((_, torn)) => {
+                let s = &mut self.img[at..at + SECTOR];
+                match torn {
+                    Torn::Old => {}
+                    Torn::New => s.copy_from_slice(buf),
+                    Torn::FirstHalfNew => s[..256].copy_from_slice(&buf[..256]),
+                    Torn::Random(seed) => {
+                        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                        for b in s.iter_mut() {
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            *b = x as u8;
+                        }
+                    }
+                }
+                self.dead = true;
+                Err(std::io::Error::other("power cut mid-write"))
+            }
+        }
+    }
+}
+
+#[test]
+fn an_unwritten_sector_reads_the_base_and_a_written_one_reads_what_was_written() {
+    let base: Vec<u8> = (0..8 * SECTOR)
+        .map(|i| (i * 7 + i / SECTOR) as u8)
+        .collect();
+    let mut dev = Dev::new(base.clone());
+    let mut s = [0u8; SECTOR];
+    dev.read(3, &mut s).unwrap();
+    assert_eq!(&s[..], &base[3 * SECTOR..4 * SECTOR], "unwritten: the base");
+    let new = [0xA5u8; SECTOR];
+    dev.write(3, &new).unwrap();
+    dev.read(3, &mut s).unwrap();
+    assert_eq!(s, new, "written: what was written");
+    // A read across the written sector and its neighbours, at odd offsets.
+    let mut flat = base.clone();
+    flat[3 * SECTOR..4 * SECTOR].copy_from_slice(&new);
+    for (off, len) in [
+        (0, 8 * SECTOR),
+        (3 * SECTOR - 1, 2),
+        (2 * SECTOR + 100, 3 * SECTOR),
+        (3 * SECTOR + 511, 1),
+    ] {
+        let mut buf = vec![0u8; len];
+        dev.read_at(off as u64, &mut buf).unwrap();
+        assert_eq!(buf, flat[off..off + len], "read_at {off} {len}");
+    }
+    assert_eq!(dev.img.to_vec(), flat);
+    // A clone shares the base and keeps its own writes.
+    let mut other = Dev::new(dev.img.clone());
+    other.write(5, &[1u8; SECTOR]).unwrap();
+    dev.read(5, &mut s).unwrap();
+    assert_eq!(
+        &s[..],
+        &base[5 * SECTOR..6 * SECTOR],
+        "a clone's write stays in the clone"
+    );
+    assert_eq!(other.img.differ(&dev.img), vec![5]);
+    assert_eq!(
+        dev.img.differ(&Img::from(base.clone())),
+        vec![3],
+        "over two bases every sector is compared"
+    );
+}
+
+#[test]
+fn the_copy_on_write_device_leaves_the_same_image_as_a_flat_one_at_every_cut_of_the_uboot_install()
+{
+    let pre = uboot_install(uboot_image(), "b", &prot(0, 0));
+    let flat_pre = pre.to_vec();
+    let p = manifest("c");
+    let protected = prot(1, 0);
+    let flat_dev = |cut| FlatDev {
+        img: flat_pre.clone(),
+        writes: 0,
+        written: Vec::new(),
+        cut,
+        dead: false,
+    };
+    let mut v = BayVolume::on(flat_dev(None)).unwrap();
+    v.install_slot_with("c", &refs(&p), &protected).unwrap();
+    let writes = v.into_device().writes;
+    let mut compared = 0;
+    for cut in 0..writes {
+        for torn in Torn::all(cut) {
+            let mut v = BayVolume::on(flat_dev(Some((cut, torn)))).unwrap();
+            let flat_r = v.install_slot_with("c", &refs(&p), &protected).map(|_| ());
+            let flat = v.into_device();
+            let mut dev = Dev::new(pre.clone());
+            dev.cut = Some((cut, torn));
+            let mut v = BayVolume::on(dev).unwrap();
+            let cow_r = v.install_slot_with("c", &refs(&p), &protected).map(|_| ());
+            let cow = v.into_device();
+            assert_eq!(cow_r, flat_r, "cut {cut} {torn:?}: the outcome");
+            assert_eq!(cow.written, flat.written, "cut {cut} {torn:?}: the writes");
+            assert!(
+                cow.img.to_vec() == flat.img,
+                "cut {cut} {torn:?}: the image"
+            );
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, writes * 4);
+}
+
+#[test]
+fn a_change_outside_the_write_set_is_still_caught_on_the_copy_on_write_device() {
+    let pre = uboot_install(uboot_image(), "b", &prot(0, 0));
+    let allowed = uboot_set_sectors(&pre, 2);
+    let outside = (0..pre.sectors()).find(|l| !allowed.contains(l)).unwrap();
+    // A logged write outside the set.
+    let mut dev = Dev::new(pre.clone());
+    dev.write(outside, &[0x5Au8; SECTOR]).unwrap();
+    let e = only_inside(&pre, &dev, &allowed).unwrap_err();
+    assert!(e.contains(&format!("wrote sector {outside}")), "{e}");
+    // A byte changed outside the set with no write logged: the comparison finds it.
+    let mut dev = Dev::new(pre.clone());
+    dev.img.sector_mut(outside)[17] ^= 1;
+    let e = only_inside(&pre, &dev, &allowed).unwrap_err();
+    assert_eq!(e, format!("sector {outside} changed outside the write set"));
+    // The same check against an image over another base (no shared sectors to skip).
+    let mut dev = Dev::new(pre.to_vec());
+    dev.img.sector_mut(outside)[0] ^= 1;
+    let e = only_inside(&pre, &dev, &allowed).unwrap_err();
+    assert_eq!(e, format!("sector {outside} changed outside the write set"));
+}
+
+#[test]
+fn a_torn_sector_in_the_default_bay_breaks_the_chain_on_both_devices_with_the_same_finding() {
+    let pre = uboot_install(uboot_image(), "b", &prot(0, 0));
+    uboot_chain(&pre, (1, "b"), (0, "a")).unwrap();
+    // A sector of the default's bay (bay1), torn as the sweeps tear.
+    let lba = *uboot_set_sectors(&pre, 1).iter().min().unwrap();
+    let mut cow = Dev::new(pre.clone());
+    let mut flat = FlatDev {
+        img: pre.to_vec(),
+        writes: 0,
+        written: Vec::new(),
+        cut: Some((0, Torn::Random(9))),
+        dead: false,
+    };
+    cow.cut = Some((0, Torn::Random(9)));
+    let mut s = [0u8; SECTOR];
+    cow.read(lba, &mut s).unwrap();
+    assert!(cow.write(lba, &s).is_err());
+    assert!(flat.write(lba, &s).is_err());
+    assert!(cow.img.to_vec() == flat.img);
+    let cow_e = uboot_chain(&cow.img, (1, "b"), (0, "a")).unwrap_err();
+    let flat_e = uboot_chain(&Img::from(flat.img.clone()), (1, "b"), (0, "a")).unwrap_err();
+    assert_eq!(cow_e, flat_e);
+    assert!(cow_e.starts_with("default:"), "{cow_e}");
 }
