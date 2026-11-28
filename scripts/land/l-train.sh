@@ -19,6 +19,7 @@ cred=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
 # progressing is killed by its own watch long before. Its only other job is to stop a gate the watch cannot see.
 GATE_BACKSTOP_S=109164
 . "$HERE/gate-attempts.sh"
+. "$HERE/watchdog-modes.sh"
 export QUEUE_STOP_FILE="$LAND_STATE_DIR/QUEUE-STOPPED"
 exec 8>>"$LAND_LOCK_FILE"; flock 8
 if [ -s "$QUEUE_STOP_FILE" ]; then echo "queue stopped: $(cat "$QUEUE_STOP_FILE"); clear it by hand before landing"; exit 2; fi
@@ -216,7 +217,10 @@ off_part() { local d; d=$(kernel off kernel-modules-off.config --modules-off) ||
   # every part's log under its rc, then one verdict line naming each part that failed (the red summary
   # greps off.log and shows its tail). Each script has its own mktemp work dir; the watchdog's LOGS names
   # its files per mode, and the guests' cargo builds share the target under cargo's own lock.
-  local wdt=(slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop) names=(builtin) pids=() i r bad=()
+  # The watchdog modes are run-watchdog.sh's own list (watchdog-modes.sh): a mode added there runs here.
+  local wdt=() names=(builtin) pids=() i r bad=() modes
+  modes=$(watchdog_modes . 2>&1) || { echo "$modes" > "$L/off.log"; return 1; }
+  mapfile -t wdt <<<"$modes"
   names+=("${wdt[@]}")
   taskset -c $LAND_CPUS_OFF timeout -k 20 600 testing/qemu/run-builtin.sh > "$L/off-builtin.log" 2>&1 & pids+=($!)
   for i in "${wdt[@]}"; do LOGS="$L/qemu-watchdog-$i" MODES=$i taskset -c $LAND_CPUS_OFF timeout -k 20 600 testing/qemu/run-watchdog.sh > "$L/off-$i.log" 2>&1 & pids+=($!); done

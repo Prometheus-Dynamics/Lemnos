@@ -26,6 +26,9 @@
 #   kconfig-cmp    a required symbol behind `A && B=n`        old: the expression was skipped, A not required
 #   ram-fs         the gate's RAM directory is not on tmpfs    old: no RAM directory; the tests flushed to the disk
 #   ram-small      it has less free than GATE_RAM_NEED_KIB     old: the same
+#   watchdog-modes a mode added to run-watchdog.sh's list      old: the lander's own list left it out (4 modes ran
+#                                                             only on CI)
+#   watchdog-none  run-watchdog.sh names no mode              old: (the list was the lander's own)
 # check-features takes its sets into variables the same way (not planted here: it builds every crate), and
 # the gate's stall and starved verdicts have their own check, testing/gate-bounds/check.sh.
 set -uo pipefail
@@ -260,6 +263,27 @@ else
 fi
 rm -rf -- "$ram_disk"
 ram_case ram-small /dev/shm 999999999999 "KiB its tests need (GATE_RAM_NEED_KIB)"
+
+# ---- the lander's watchdog modes -------------------------------------------------------------------------------
+# The off part runs run-watchdog.sh's own list. A mode added to that list comes out of watchdog_modes with no other
+# edit, and l-train.sh holds no list of its own; a script naming no mode fails by name.
+(
+  . "$tree/scripts/land/watchdog-modes.sh"
+  wd="$work/wd-plant"; mkdir -p "$wd/testing/qemu"
+  sed 's/^ALL_MODES="\(.*\)"$/ALL_MODES="\1 plant-late-mode"/' "$tree/testing/qemu/run-watchdog.sh" >"$wd/testing/qemu/run-watchdog.sh"
+  rc=0; watchdog_modes "$wd" >"$work/wd.out" 2>&1 || rc=$?
+  if grep -qE 'wdt=\([a-z]' "$tree/scripts/land/l-train.sh" || ! grep -q 'watchdog_modes \.' "$tree/scripts/land/l-train.sh"; then
+    echo "l-train.sh keeps a watchdog list of its own" >>"$work/wd.out"; rc=98
+  fi
+  [ "$(grep -cxE '[a-z0-9-]+' "$work/wd.out")" -ge 2 ] || rc=97
+  exit $rc
+); verdict watchdog-modes "$?" "$work/wd.out" 0 "plant-late-mode"
+(
+  . "$tree/scripts/land/watchdog-modes.sh"
+  wd="$work/wd-none"; mkdir -p "$wd/testing/qemu"
+  sed 's/^ALL_MODES=".*"$/ALL_MODES=""/' "$tree/testing/qemu/run-watchdog.sh" >"$wd/testing/qemu/run-watchdog.sh"
+  watchdog_modes "$wd" >"$work/wd-none.out" 2>&1
+); verdict watchdog-none "$?" "$work/wd-none.out" nonzero "named no watchdog mode"
 
 if [ "$fails" = 0 ]; then echo "gate-lanes: every planted failure caught"; exit 0; fi
 echo "gate-lanes: $fails planted failure(s) not caught"
