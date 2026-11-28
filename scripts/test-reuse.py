@@ -37,7 +37,9 @@ ROOT = os.path.dirname(HERE)
 FORMAT = "test-reuse 1"
 SCRIPTS = ("test-reuse.py", "test-reach.py", "elf-alloc-key.py")
 PER_RUN_ENV = {"LEMNOS_TEST_RAM_DIR", "LEMNOS_TEST_REUSE"}
-MKTEMP = re.compile(r"\.[A-Za-z0-9]{6}(?:/|$)")
+# mktemp's XXXXXX: six letters and digits of both cases. A run of lowercase letters alone is a
+# name (".config"), not a mktemp suffix.
+MKTEMP = re.compile(r"\.(?=[a-z]{0,5}[A-Z0-9])[A-Za-z0-9]{6}(?:/|$)")
 
 
 class PerRunValue(Exception):
@@ -224,7 +226,8 @@ def self_test():
         listing = {"rust-build-meta": {"target-directory": target},
                    "rust-suites": {p: {"package-name": p, "binary-id": p, "binary-path": bins[p]} for p in "abc"}}
         records = os.path.join(tmp, "records")
-        env = {"PATH": os.environ.get("PATH", ""), "LEMNOS_TEST_RAM_DIR": "/somewhere"}
+        # A fixed PATH: the plants never depend on the PATH of whoever runs them.
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LEMNOS_TEST_RAM_DIR": "/somewhere"}
         out = os.path.join(tmp, "out")
 
         def go(commit, env=env):
@@ -271,6 +274,12 @@ def self_test():
             except PerRunValue:
                 pass
         check("a fixed keyed value", go("c5", dict(env, LEMNOS_Y="/opt/fixed")), [], ["a", "b", "c"])
+        # The shape of an entry on CI's runner PATH: a dot-directory, not a mktemp name (the red of 8309fd90).
+        for fixed in ["/srv/runner/.config/composer/vendor/bin", "/srv/u/.cargo/bin", "/opt/x/.local/bin"]:
+            try:
+                go("c5", dict(env, PATH=f"/usr/bin:{fixed}"))
+            except PerRunValue as e:
+                failures.append(f"a fixed PATH entry refused: {e}")
         os.environ["GITHUB_ACTIONS"] = "true"
         try:
             check("on CI", go("c6"), [], ["a", "b", "c"])
