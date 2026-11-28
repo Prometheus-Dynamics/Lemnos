@@ -131,6 +131,7 @@ grant = [
   {path = "/proc/cmdline", kind = "file", access = "ro", how = "none", drivers = ["engine/identity"], reason = "the kernel command line, read"},
   {path = "/proc/mounts", kind = "file", access = "ro", how = "none", drivers = ["drivers/slot-store"], reason = "the mount table, read (the grow)"},
   {path = "/proc/self/mountinfo", kind = "file", access = "ro", how = "none", drivers = ["drivers/system-flash", "drivers/system-slots"], reason = "the daemon's own mount table, read"},
+  {path = "/proc/thread-self/schedstat", kind = "file", access = "ro", how = "none", drivers = ["engine/host"], reason = "a contained call's lane thread reads its own run-queue wait, so a call deadline counts only time the call could have run"},
   {path = "/proc/sys/kernel/random/boot_id", kind = "file", access = "ro", how = "none", drivers = ["drivers/system-slots"], reason = "the boot id, read; /proc/sys is read-only under ProtectKernelTunables"},
   {path = "/proc/self/fd", kind = "path", access = "ro", how = "none", drivers = ["backends/linux-sys", "drivers/codec-jobs", "engine/abi", "shm/ring"], reason = "a descriptor's path, read (the daemon's own fds)"},
   {path = "/proc/*/ns/mnt", kind = "path", access = "ro", how = "none", drivers = ["backends/linux-sys"], reason = "a sandboxed child's mount namespace, read"},

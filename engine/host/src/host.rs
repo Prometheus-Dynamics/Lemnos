@@ -1683,7 +1683,7 @@ fn failed_job_words(written: &[u8]) -> Vec<u8> {
 }
 
 /// One warning, made only when a sink is set.
-fn warn(event: impl FnOnce() -> String) {
+pub(crate) fn warn(event: impl FnOnce() -> String) {
     if let Some(sink) = WARNING_SINK.get() {
         sink(&event());
     }

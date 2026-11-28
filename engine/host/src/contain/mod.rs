@@ -14,7 +14,8 @@ pub const MAX_RETRY_CAP: Duration = Duration::from_secs(8);
 /// How the host treats its drivers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// How long any one driver call may run.
+    /// How long any one driver call may run, not counting time its lane thread waited for a CPU,
+    /// up to 8 times this in wall time (a starved call is still reported then).
     pub call_deadline: Duration,
     /// The wait before the first retry. It doubles with each failure in a row, up to the cap.
     pub retry_first: Duration,
