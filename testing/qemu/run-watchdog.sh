@@ -81,9 +81,13 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+# Every mode, in order. `run-watchdog.sh --modes` prints them and exits: the lander runs exactly these
+# (scripts/land/watchdog-modes.sh), so a mode added here runs there with no other edit.
+ALL_MODES="slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop daemon-loop-bind pid1-hang pid1-hang-stop pid1-dead"
+if [ "${1:-}" = --modes ]; then echo "$ALL_MODES"; exit 0; fi
 KERNEL="${KERNEL:?set KERNEL to the bzImage of a kernel with CONFIG_I6300ESB_WDT=y}"
 CARGO="${CARGO:-cargo}"
-MODES="${MODES:-slot-init normal stall daemon daemon-late daemon-root daemon-hang daemon-stop daemon-loop daemon-loop-bind pid1-hang pid1-hang-stop pid1-dead}"
+MODES="${MODES:-$ALL_MODES}"
 LOGS="${LOGS:-${TMPDIR:-/tmp}/qemu-watchdog}"
 target=x86_64-unknown-linux-musl
 DOG_SECONDS=15
