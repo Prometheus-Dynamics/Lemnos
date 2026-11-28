@@ -62,14 +62,14 @@ fn frames_carry_their_descriptors_and_nothing_leaks() {
 
 fn a_frame_with_descriptors() {
     let (a, b) = UnixStream::pair().unwrap();
-    let (one, two) = (memfile(b"first"), memfile(b"second!"));
+    let (one, two) = (memfile(b"first"), memfile(b"second?"));
     send_on(&a, &[b"meta"], &[one.as_fd(), two.as_fd()]).unwrap();
     let mut buf = [0; 16];
     let mut got = recv(b.as_fd(), &mut buf, MAX_FDS, false).unwrap().unwrap();
     assert_eq!(&buf[..got.len], b"meta");
     assert_eq!(got.fds.len(), 2);
     assert_eq!(read_all(got.fds.take(0).unwrap()), b"first");
-    assert_eq!(read_all(got.fds.take(1).unwrap()), b"second!");
+    assert_eq!(read_all(got.fds.take(1).unwrap()), b"second?");
     assert!(got.fds.take(0).is_none());
 }
 
